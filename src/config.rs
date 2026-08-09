@@ -282,10 +282,12 @@ mod tests {
         // measured at seven minutes. Anything shorter turns a working setup
         // into an endless retry loop, so this number is load-bearing rather
         // than arbitrary.
-        assert!(
-            DEFAULT_TIMEOUT_SECS >= 600,
-            "the default must outlast a local reasoning model's slowest window"
-        );
+        const {
+            assert!(
+                DEFAULT_TIMEOUT_SECS >= 600,
+                "the default must outlast a local reasoning model's slowest window"
+            )
+        };
     }
 
     #[test]
