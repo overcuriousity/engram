@@ -3,12 +3,33 @@
 {% block content %}
 <form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if(event.detail.successful) this.reset()" class="stack">
+  <p class="muted" style="margin:0">
+    Paste a chapter at a time. Long text is split into windows and segmented one
+    window per model call, so a whole book works but takes a while — and a
+    chapter is what search results read best from.
+  </p>
   <input class="input" name="title" placeholder="Optional label">
   <textarea class="textarea" name="text" placeholder="Paste anything worth keeping." autofocus></textarea>
+  <p id="size-hint" class="muted" hidden></p>
   <div class="row">
     <button class="btn btn-accent" type="submit">Capture</button>
     <span class="spinner">saving…</span>
   </div>
 </form>
 <div id="capture-result" style="margin-top:1rem"></div>
+<script>
+  (function () {
+    var box = document.querySelector('textarea[name="text"]');
+    var hint = document.getElementById('size-hint');
+    if (!box || !hint) return;
+    // Rough stand-in for the tokeniser: enough to warn, never to block.
+    var CHARS_PER_WINDOW = 12000;
+    box.addEventListener('input', function () {
+      var windows = Math.ceil(box.value.length / CHARS_PER_WINDOW);
+      hint.hidden = windows < 2;
+      hint.textContent = 'About ' + windows + ' windows — roughly ' + windows +
+        ' model calls before this is searchable.';
+    });
+  })();
+</script>
 {% endblock %}

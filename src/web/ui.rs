@@ -35,6 +35,12 @@ pub struct BrowseRow {
     pub badge: &'static str,
     pub chunk_count: i64,
     pub created: String,
+    /// `3/9` while windows are still being segmented, `None` once every window
+    /// has resolved.
+    pub progress: Option<String>,
+    /// Percentage of the source that ended up inside some chunk.
+    pub coverage: Option<String>,
+    pub low_coverage: bool,
 }
 
 pub struct ChunkView {
@@ -296,7 +302,15 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
 async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
     for s in st.core.store.list_sources(200, 0).await? {
+        let (resolved, total) = st.core.store.window_progress(&s.id).await?;
+        let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
+        let low_coverage = s
+            .coverage
+            .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
         rows.push(BrowseRow {
+            progress,
+            coverage: s.coverage.map(|c| format!("{:.0}%", c * 100.0)),
+            low_coverage,
             label: s
                 .title_hint
                 .clone()

@@ -2,12 +2,19 @@
 {% block title %}Browse — engram{% endblock %}
 {% block content %}
 <table class="grid">
-  <thead><tr><th>Source</th><th>Status</th><th>Chunks</th><th>Captured</th></tr></thead>
+  <thead><tr><th>Source</th><th>Status</th><th>Progress</th><th>Chunks</th><th>Captured</th></tr></thead>
   <tbody>
   {% for s in sources %}
     <tr>
       <td><a href="/ui/sources/{{ s.id }}">{{ s.label }}</a></td>
       <td><span class="badge {{ s.badge }}">{{ s.status }}</span></td>
+      <td>
+        {% if let Some(p) = s.progress %}<span class="badge badge-accent">segmenting {{ p }}</span>{% endif %}
+        {% if let Some(c) = s.coverage %}
+          <span class="badge {% if s.low_coverage %}badge-warning{% else %}badge-muted{% endif %}"
+                title="fraction of this source that ended up inside a chunk">{{ c }} covered</span>
+        {% endif %}
+      </td>
       <td class="mono">{{ s.chunk_count }}</td>
       <td class="muted mono">{{ s.created }}</td>
     </tr>
