@@ -333,6 +333,53 @@ async fn reindex_copies_every_point_and_swaps_the_alias() {
 
 #[tokio::test]
 #[ignore]
+async fn reindex_renames_pre_taxonomy_payload_keys() {
+    // A generation written before chunk/source became artifact/corpus. Built
+    // through raw REST, because engram itself will no longer produce these keys.
+    let v = fresh("engram_it_taxonomy", 4).await;
+    raw(
+        reqwest::Method::PUT,
+        "/collections/engram_it_taxonomy_v1/points?wait=true",
+        Some(serde_json::json!({
+            "points": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "vector": { "dense": [1.0, 0.0, 0.0, 0.0] },
+                "payload": {
+                    "chunk_id": "c1",
+                    "source_id": "s1",
+                    "text": "ein cluster ist die kleinste einheit",
+                    "title": "Cluster",
+                    "tags": ["fat"],
+                    "created_at": 42
+                }
+            }]
+        })),
+    )
+    .await;
+
+    v.reindex(4, false).await.unwrap();
+
+    let hits = v
+        .search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &Default::default(),
+            5,
+            &SearchFilter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1, "the rebuild lost the point");
+    // The whole point: the vectors were never re-embedded, only the keys moved.
+    assert_eq!(hits[0].payload.artifact_id, "c1");
+    assert_eq!(hits[0].payload.corpus_id, "s1");
+    assert_eq!(hits[0].payload.title.as_deref(), Some("Cluster"));
+    assert_eq!(hits[0].payload.created_at, 42);
+
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn reindex_leaves_the_previous_generation_in_place() {
     // The old generation is the only rollback that exists. Deleting it is a
     // decision for whoever ran the rebuild, not a side effect of running it.

@@ -168,8 +168,29 @@ fn sparse_body(sparse: &SparseVector) -> Option<Value> {
     Some(json!({ "indices": sparse.indices, "values": sparse.values }))
 }
 
+/// Bring a payload written before the taxonomy rename up to the current key
+/// names.
+///
+/// This is what makes `--reindex` the migration for it: the vectors are already
+/// correct, and paying an embedding endpoint to change two key names would be
+/// absurd. A payload that already uses the new names passes through untouched,
+/// so running a rebuild twice is safe.
+fn renamed_payload(payload: &Value) -> Value {
+    let mut out = payload.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return out;
+    };
+    for (old, new) in [("chunk_id", "artifact_id"), ("source_id", "corpus_id")] {
+        if let Some(v) = obj.remove(old) {
+            obj.entry(new).or_insert(v);
+        }
+    }
+    out
+}
+
 /// Rebuild a point's terms from its payload. A rebuild has the text but not the
-/// chunk row, and this must match what the embed job indexed: title then body.
+/// artifact row, and this must match what the embed job indexed: title then
+/// body.
 fn sparse_of_payload(payload: &Value) -> SparseVector {
     let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
     match payload.get("title").and_then(Value::as_str) {
@@ -676,7 +697,7 @@ impl QdrantVectors {
                 batch.push(json!({
                     "id": p.id,
                     "vector": vector,
-                    "payload": p.payload,
+                    "payload": renamed_payload(&p.payload),
                 }));
             }
             copied += batch.len();
@@ -1066,6 +1087,29 @@ impl VectorStore for QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pre_taxonomy_payload_is_brought_up_to_the_current_key_names() {
+        let old = json!({
+            "chunk_id": "c1", "source_id": "s1", "text": "t", "created_at": 1
+        });
+        let new = renamed_payload(&old);
+        assert_eq!(new["artifact_id"], "c1");
+        assert_eq!(new["corpus_id"], "s1");
+        assert!(new.get("chunk_id").is_none());
+        assert!(new.get("source_id").is_none());
+        // Everything else survives: a rebuild copies payloads it does not
+        // understand, and dropping one would lose data no re-embed restores.
+        assert_eq!(new["text"], "t");
+        assert_eq!(new["created_at"], 1);
+    }
+
+    #[test]
+    fn renaming_a_current_payload_changes_nothing() {
+        // A rebuild run twice must not disturb what the first one produced.
+        let current = json!({ "artifact_id": "a1", "corpus_id": "c1", "text": "t" });
+        assert_eq!(renamed_payload(&current), current);
+    }
 
     #[test]
     fn dimension_mismatch_message_names_both_numbers() {
