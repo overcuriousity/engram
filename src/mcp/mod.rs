@@ -95,6 +95,8 @@ impl PkdbTools {
             limit: p.limit.unwrap_or(0) as usize,
             tags: p.tags.unwrap_or_default(),
             category: p.category,
+            // A tool call is one deliberate question, not a keystroke.
+            mark: true,
         };
         match self.core.search(&query).await {
             Ok(r) => format_search_results(&r),
@@ -216,6 +218,7 @@ mod tests {
                     limit: 5,
                     tags: vec![],
                     category: None,
+                    mark: true,
                 })
                 .await
                 .unwrap(),

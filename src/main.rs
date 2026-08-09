@@ -80,6 +80,9 @@ fn build_core(
             cfg.infer.chunk.tokenizer_path.as_deref(),
         )),
         background: Arc::new(engram::core::background::Background::default()),
+        query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
+            engram::core::QUERY_CACHE_CAPACITY,
+        ))),
     }
 }
 

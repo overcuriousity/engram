@@ -47,6 +47,8 @@ impl Core {
                     limit: req.limit.unwrap_or(8),
                     tags: req.tags.clone(),
                     category: req.category.clone(),
+                    // Asking a question is as deliberate as a search gets.
+                    mark: true,
                 },
                 None,
             )

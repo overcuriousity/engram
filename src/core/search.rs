@@ -20,6 +20,22 @@ pub struct SearchQuery {
     pub tags: Vec<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Whether this search counts as having *seen* its results.
+    ///
+    /// Incremental UI requests pass false. Every keystroke used to stamp
+    /// `last_seen_at` on whatever the prefix happened to match, which is the
+    /// same field `resurface` reads — so typing quietly drained the
+    /// forgotten-chunk feature. Opening, expanding and submitting pass true,
+    /// and so do the API and MCP paths, which are deliberate by construction.
+    #[serde(default)]
+    pub mark: bool,
+}
+
+/// What a search cost, for the faint line under the rail.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchTiming {
+    pub embed_ms: u128,
+    pub total_ms: u128,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -146,7 +162,17 @@ impl Core {
     ///
     /// Results are capped per source so one long document cannot fill the list.
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        self.search_capped(query, Some(MAX_PER_SOURCE)).await
+        Ok(self.search_inner(query, Some(MAX_PER_SOURCE)).await?.0)
+    }
+
+    /// The same search, plus what it cost. The UI shows these faintly, so a
+    /// sluggish box points at the embedder or the vector store without anyone
+    /// opening a log.
+    pub async fn search_timed(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        self.search_inner(query, Some(MAX_PER_SOURCE)).await
     }
 
     /// `cap` of `None` lets a single source supply every result. `ask` wants
@@ -157,6 +183,14 @@ impl Core {
         query: &SearchQuery,
         cap: Option<usize>,
     ) -> Result<Vec<SearchResult>> {
+        Ok(self.search_inner(query, cap).await?.0)
+    }
+
+    async fn search_inner(
+        &self,
+        query: &SearchQuery,
+        cap: Option<usize>,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
         }
@@ -166,7 +200,25 @@ impl Core {
         };
 
         let started = std::time::Instant::now();
-        let vectors = self.embedder.embed(&[query.q.trim().to_string()]).await?;
+        // Prefixes repeat constantly inside one search and whole queries repeat
+        // across sessions, so this is the difference between one embedding call
+        // per search and one per keystroke.
+        let key = query.q.split_whitespace().collect::<Vec<_>>().join(" ");
+        let cached = self.query_cache.lock().ok().and_then(|c| c.get(&key));
+        let vector = match cached {
+            Some(v) => v,
+            None => {
+                let v = self
+                    .embedder
+                    .embed(&[query.q.trim().to_string()])
+                    .await?
+                    .remove(0);
+                if let Ok(mut c) = self.query_cache.lock() {
+                    c.put(key, v.clone());
+                }
+                v
+            }
+        };
         let embed_ms = started.elapsed().as_millis();
 
         let filter = SearchFilter {
@@ -185,7 +237,7 @@ impl Core {
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
         let hits = self
             .vectors
-            .search(&vectors[0], &sparse, candidates, &filter)
+            .search(&vector, &sparse, candidates, &filter)
             .await?;
 
         // Cap before reranking, in vector order, so what leads per source is
@@ -230,7 +282,9 @@ impl Core {
         }
 
         results.truncate(limit);
-        self.mark_seen(&results);
+        if query.mark {
+            self.mark_seen(&results);
+        }
         tracing::info!(
             q = %query.q,
             results = results.len(),
@@ -238,7 +292,13 @@ impl Core {
             total_ms = started.elapsed().as_millis(),
             "search"
         );
-        Ok(results)
+        Ok((
+            results,
+            SearchTiming {
+                embed_ms,
+                total_ms: started.elapsed().as_millis(),
+            },
+        ))
     }
 }
 
@@ -294,7 +354,72 @@ mod tests {
             limit: 10,
             tags: vec![],
             category: None,
+            // The default for these tests is the deliberate search the API and
+            // MCP make; the incremental case is exercised explicitly below.
+            mark: true,
         }
+    }
+
+    #[tokio::test]
+    async fn an_identical_query_is_embedded_once() {
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        core.search(&q("dd write iso")).await.unwrap();
+        let after_first = embedder.calls();
+        core.search(&q("dd write iso")).await.unwrap();
+        // Whitespace differences are not a different question.
+        core.search(&q("  dd write iso  ")).await.unwrap();
+
+        assert_eq!(
+            embedder.calls(),
+            after_first,
+            "the query embedding must be cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmarked_search_does_not_stamp_last_seen() {
+        let core = test_core().await;
+        seed_from(&core, "raw", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha");
+        query.mark = false;
+        assert!(!core.search(&query).await.unwrap().is_empty());
+        core.background.wait_idle().await;
+
+        // Nothing was stamped, so the chunk is still eligible to resurface.
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert_eq!(stamped, 0, "typing must not stamp last_seen_at");
+    }
+
+    #[tokio::test]
+    async fn a_marked_search_records_what_it_showed() {
+        let core = test_core().await;
+        seed_from(&core, "raw", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        assert!(!core.search(&q("alpha")).await.unwrap().is_empty());
+        core.background.wait_idle().await;
+
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert!(stamped > 0, "a deliberate search still counts as seeing");
     }
 
     #[tokio::test]

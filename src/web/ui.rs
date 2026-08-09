@@ -181,6 +181,8 @@ struct ResultsTemplate {
     results: Vec<RenderedResult>,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
+    /// `embed 41ms · total 138ms`, swapped into the header out of band.
+    timing: String,
 }
 
 #[derive(Template)]
@@ -320,6 +322,7 @@ async fn search_results(
         return Ok(HtmlTemplate(ResultsTemplate {
             results: vec![],
             terms: String::new(),
+            timing: String::new(),
         })
         .into_response());
     }
@@ -327,13 +330,15 @@ async fn search_results(
     // The same terms the sparse branch derives, handed to the client so
     // highlighting never has to touch the sanitized HTML on this side.
     let terms = crate::vector::sparse::tokenize(p.q.trim()).join(" ");
-    let hits = st
+    let (hits, t) = st
         .core
-        .search(&SearchQuery {
+        .search_timed(&SearchQuery {
             q: p.q,
             limit: 0,
             tags: split_tags(p.tags),
             category: p.category.filter(|c| !c.is_empty()),
+            // Incremental: a prefix must not stamp what it happened to match.
+            mark: false,
         })
         .await?;
 
@@ -344,6 +349,7 @@ async fn search_results(
             .map(|(i, h)| render_hit(i, h))
             .collect(),
         terms,
+        timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
     .into_response())
 }
@@ -737,6 +743,7 @@ mod tests {
                 limit: 0,
                 tags: vec![],
                 category: None,
+                mark: false,
             })
             .await
             .unwrap();
