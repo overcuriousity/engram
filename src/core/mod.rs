@@ -43,6 +43,15 @@ pub mod test_support {
         .await
     }
 
+    /// A core plus a handle on its embedder, for asserting how many times the
+    /// endpoint was called rather than only what came back.
+    pub async fn test_core_counting_embed_calls() -> (Core, Arc<FakeEmbedder>) {
+        let embedder = Arc::new(FakeEmbedder::new(TEST_DIM));
+        let mut core = build(Arc::new(FakeChunker::default()), None).await;
+        core.embedder = embedder.clone();
+        (core, embedder)
+    }
+
     async fn build(chunker: Arc<dyn Chunker>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {

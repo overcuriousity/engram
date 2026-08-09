@@ -38,9 +38,55 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
+    async fn set_payload(&self, payload: &super::VectorPayload) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        if let Some(p) = w.get_mut(&payload.chunk_id) {
+            // A merge, matching Qdrant: an absent stamp means "unchanged", so
+            // a tag edit must not erase when the chunk was last shown.
+            let seen = payload.last_seen_at.or(p.payload.last_seen_at);
+            p.payload = payload.clone();
+            p.payload.last_seen_at = seen;
+        }
+        Ok(())
+    }
+
+    async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        for id in chunk_ids {
+            if let Some(p) = w.get_mut(id) {
+                p.payload.last_seen_at = Some(seen_at);
+            }
+        }
+        Ok(())
+    }
+
+    async fn resurface(
+        &self,
+        limit: usize,
+        older_than: i64,
+        unseen_since: i64,
+    ) -> Result<Vec<SearchHit>> {
+        let r = self.points.read().unwrap();
+        Ok(r.values()
+            .filter(|p| {
+                p.payload.created_at < older_than
+                    && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
+            })
+            .take(limit)
+            .map(|p| SearchHit {
+                payload: p.payload.clone(),
+                score: 0.0,
+            })
+            .collect())
+    }
+
+    /// Dense only. Hybrid fusion is a Qdrant feature; reimplementing BM25
+    /// scoring here would test this file rather than the real retrieval path,
+    /// which the integration suite covers instead.
     async fn search(
         &self,
         vector: &[f32],
+        _sparse: &super::sparse::SparseVector,
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
@@ -97,6 +143,7 @@ mod tests {
     fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPoint {
         VectorPoint {
             vector: v,
+            sparse: Default::default(),
             payload: VectorPayload {
                 chunk_id: id.into(),
                 source_id: src.into(),
@@ -105,6 +152,7 @@ mod tests {
                 category: Some(cat.into()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 created_at: 0,
+                last_seen_at: None,
             },
         }
     }
@@ -121,7 +169,12 @@ mod tests {
         .unwrap();
 
         let hits = v
-            .search(&[1.0, 0.0, 0.0], 10, &SearchFilter::default())
+            .search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+            )
             .await
             .unwrap();
         assert_eq!(hits[0].payload.chunk_id, "near");
@@ -140,10 +193,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            v.search(&[1.0, 0.0, 0.0], 2, &SearchFilter::default())
-                .await
-                .unwrap()
-                .len(),
+            v.search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                2,
+                &SearchFilter::default()
+            )
+            .await
+            .unwrap()
+            .len(),
             2
         );
     }
@@ -169,7 +227,10 @@ mod tests {
             tags: vec!["linux".into(), "forensics".into()],
             category: None,
         };
-        let hits = v.search(&[1.0, 0.0, 0.0], 10, &f).await.unwrap();
+        let hits = v
+            .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].payload.chunk_id, "both");
     }
@@ -188,7 +249,10 @@ mod tests {
             tags: vec![],
             category: Some("concept".into()),
         };
-        let hits = v.search(&[1.0, 0.0, 0.0], 10, &f).await.unwrap();
+        let hits = v
+            .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].payload.chunk_id, "c");
     }
@@ -209,7 +273,12 @@ mod tests {
             "re-embedding must not duplicate the point"
         );
         let hits = v
-            .search(&[0.0, 1.0, 0.0], 1, &SearchFilter::default())
+            .search(
+                &[0.0, 1.0, 0.0],
+                &Default::default(),
+                1,
+                &SearchFilter::default(),
+            )
             .await
             .unwrap();
         assert!(hits[0].score > 0.99);
@@ -238,7 +307,12 @@ mod tests {
             .await
             .unwrap();
         let hits = v
-            .search(&[1.0, 0.0, 0.0], 10, &SearchFilter::default())
+            .search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+            )
             .await
             .unwrap();
         assert!(hits[0].score.is_finite());
@@ -259,12 +333,22 @@ mod tests {
         .unwrap();
 
         let first = v
-            .search(&[1.0, 0.0, 0.0], 5, &SearchFilter::default())
+            .search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                5,
+                &SearchFilter::default(),
+            )
             .await
             .unwrap();
         for _ in 0..5 {
             let again = v
-                .search(&[1.0, 0.0, 0.0], 5, &SearchFilter::default())
+                .search(
+                    &[1.0, 0.0, 0.0],
+                    &Default::default(),
+                    5,
+                    &SearchFilter::default(),
+                )
                 .await
                 .unwrap();
             assert_eq!(

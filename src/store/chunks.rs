@@ -133,6 +133,69 @@ impl Store {
         Ok(rows.iter().map(row_to_chunk).collect())
     }
 
+    /// Chunks of a source still waiting for a vector. The embed job batches
+    /// these into one inference call, so it needs them as rows, not a count.
+    pub async fn pending_chunks_for_source(&self, source_id: &str) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM chunks WHERE source_id = ? AND embed_state = 'pending' ORDER BY ordinal",
+        )
+        .bind(source_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_chunk).collect())
+    }
+
+    /// Put every chunk of a source back in the embed queue's path. Re-embedding
+    /// only happens for rows that say they still need it, so asking for it has
+    /// to say so first.
+    pub async fn reset_embed_state(&self, source_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE chunks SET embed_state = 'pending', embed_model = NULL WHERE source_id = ?",
+        )
+        .bind(source_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Update the fields the embedding model never sees. Deliberately does not
+    /// touch `embed_state`: the stored vector is still correct.
+    pub async fn update_chunk_meta(
+        &self,
+        id: &str,
+        category: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<()> {
+        if let Some(c) = category {
+            sqlx::query("UPDATE chunks SET category = ? WHERE id = ?")
+                .bind(c)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(t) = tags {
+            sqlx::query("UPDATE chunks SET tags = ? WHERE id = ?")
+                .bind(serde_json::to_string(t).unwrap_or_else(|_| "[]".into()))
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The title is part of the text handed to the embedder, so changing it
+    /// invalidates the vector the same way changing the body does.
+    pub async fn update_chunk_title(&self, id: &str, title: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE chunks SET title = ?, embed_state = 'pending', embed_model = NULL WHERE id = ?",
+        )
+        .bind(title)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_chunk_text(&self, id: &str, text: &str) -> Result<()> {
         let res = sqlx::query(
             "UPDATE chunks SET text = ?, embed_state = 'pending', embed_model = NULL WHERE id = ?",

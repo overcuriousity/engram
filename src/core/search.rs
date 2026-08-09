@@ -4,9 +4,12 @@ use crate::vector::SearchFilter;
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
-/// Over-fetch before reranking. Reranking only reorders what it is given, so
-/// the candidate pool has to be wider than the answer.
+/// Over-fetch before reranking and grouping. Both only narrow what they are
+/// given, so the candidate pool has to be wider than the answer.
 pub const CANDIDATE_MULTIPLIER: usize = 3;
+/// Chunks one source may contribute to a result list. A forty-chunk document
+/// otherwise fills the whole answer and hides everything else in the corpus.
+pub const MAX_PER_SOURCE: usize = 3;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SearchQuery {
@@ -30,10 +33,100 @@ pub struct SearchResult {
     pub score: f32,
 }
 
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Keep at most `max` hits per source, preserving the order they arrived in.
+///
+/// Applied to a ranked list, this keeps each source's strongest chunks and
+/// drops the tail, which is what stops one long document from filling an answer
+/// with near-identical paragraphs.
+fn cap_per_source(
+    hits: Vec<crate::vector::SearchHit>,
+    max: usize,
+) -> Vec<crate::vector::SearchHit> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    hits.into_iter()
+        .filter(|h| {
+            let n = seen.entry(h.payload.source_id.clone()).or_insert(0);
+            *n += 1;
+            *n <= max
+        })
+        .collect()
+}
+
+/// Chunks older than this are candidates for resurfacing, and a chunk shown
+/// within this window counts as still remembered.
+pub const FORGOTTEN_AFTER_DAYS: i64 = 30;
+const SECONDS_PER_DAY: i64 = 86_400;
+
 impl Core {
+    /// Record that these results were shown, without making the caller wait.
+    ///
+    /// One request for the whole list, off the request path: a search must not
+    /// get slower, or fail, because a bookkeeping write did.
+    fn mark_seen(&self, results: &[SearchResult]) {
+        if results.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+        let vectors = self.vectors.clone();
+        let now = now_secs();
+        tokio::spawn(async move {
+            if let Err(e) = vectors.touch(&ids, now).await {
+                tracing::warn!(error = %e, "could not record which chunks were shown");
+            }
+        });
+    }
+
+    /// A random handful of chunks that have not surfaced in a month.
+    ///
+    /// Random rather than ranked, because there is no query: the question is
+    /// what has been forgotten, and ranking would keep returning the same
+    /// answer to it.
+    pub async fn resurface(&self, limit: usize) -> Result<Vec<SearchResult>> {
+        let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY;
+        let hits = self
+            .vectors
+            .resurface(limit.clamp(1, MAX_LIMIT), cutoff, cutoff)
+            .await?;
+        let results: Vec<SearchResult> = hits
+            .into_iter()
+            .map(|h| SearchResult {
+                chunk_id: h.payload.chunk_id,
+                source_id: h.payload.source_id,
+                title: h.payload.title,
+                text: h.payload.text,
+                category: h.payload.category,
+                tags: h.payload.tags,
+                score: h.score,
+            })
+            .collect();
+        // Surfacing counts as seeing, or the same chunks come back tomorrow.
+        self.mark_seen(&results);
+        Ok(results)
+    }
+
     /// The hot path. One embedding call, one vector search, and optionally one
     /// rerank call. No completion, ever.
+    ///
+    /// Results are capped per source so one long document cannot fill the list.
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        self.search_capped(query, Some(MAX_PER_SOURCE)).await
+    }
+
+    /// `cap` of `None` lets a single source supply every result. `ask` wants
+    /// that: a question is often answered by one document, and starving it of
+    /// its own paragraphs to make the list look varied helps nobody.
+    pub async fn search_capped(
+        &self,
+        query: &SearchQuery,
+        cap: Option<usize>,
+    ) -> Result<Vec<SearchResult>> {
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
         }
@@ -50,15 +143,27 @@ impl Core {
             tags: query.tags.clone(),
             category: query.category.clone(),
         };
-        let candidates = if self.reranker.is_some() {
+        // Over-fetch whenever something downstream narrows the list: both the
+        // per-source cap and the reranker can only discard what they are given.
+        let candidates = if cap.is_some() || self.reranker.is_some() {
             limit * CANDIDATE_MULTIPLIER
         } else {
             limit
         };
+        // The lexical half of the query. Computed locally and for free, so it
+        // costs nothing when the store ignores it.
+        let sparse = crate::vector::sparse::encode_query(query.q.trim());
         let hits = self
             .vectors
-            .search(&vectors[0], candidates, &filter)
+            .search(&vectors[0], &sparse, candidates, &filter)
             .await?;
+
+        // Cap before reranking, in vector order, so what survives per source is
+        // that source's best.
+        let hits = match cap {
+            Some(max) => cap_per_source(hits, max),
+            None => hits,
+        };
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
@@ -95,6 +200,7 @@ impl Core {
         }
 
         results.truncate(limit);
+        self.mark_seen(&results);
         tracing::info!(
             q = %query.q,
             results = results.len(),
@@ -113,7 +219,16 @@ mod tests {
     use crate::store::chunks::NewChunk;
 
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {
-        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        seed_from(core, "raw", texts).await
+    }
+
+    /// `raw` has to differ per source: sources are deduplicated by a hash of it.
+    async fn seed_from(
+        core: &crate::core::Core,
+        raw: &str,
+        texts: &[(&str, &str, &[&str])],
+    ) -> String {
+        let src = core.store.insert_source(raw, "web", None).await.unwrap();
         let new: Vec<NewChunk> = texts
             .iter()
             .enumerate()
@@ -131,6 +246,15 @@ mod tests {
             crate::jobs::embed::run(core, &c.id).await.unwrap();
         }
         src.id
+    }
+
+    /// Rewrite every vector payload from the current chunk rows.
+    async fn reembed_all(core: &crate::core::Core) {
+        for src in core.store.list_sources(100, 0).await.unwrap() {
+            for c in core.store.chunks_for_source(&src.id).await.unwrap() {
+                crate::jobs::embed::run(core, &c.id).await.unwrap();
+            }
+        }
     }
 
     fn q(text: &str) -> SearchQuery {
@@ -255,18 +379,154 @@ mod tests {
         // were not wider than the limit, a better match ranked 11th by vector
         // similarity could never be promoted into a top-10 answer.
         let core = test_core_with_rerank().await;
-        let many: Vec<(String, &str, Vec<&str>)> =
-            (0..30).map(|i| (format!("doc {i}"), "c", vec![])).collect();
-        let refs: Vec<(&str, &str, &[&str])> = many
-            .iter()
-            .map(|(t, c, g)| (t.as_str(), *c, g.as_slice()))
-            .collect();
-        seed(&core, &refs).await;
+        // Spread across sources so the per-source cap is not what narrows the
+        // list; this test is about the candidate pool, not about grouping.
+        for batch in 0..10 {
+            let texts: Vec<String> = (0..3).map(|i| format!("doc {batch}-{i}")).collect();
+            let refs: Vec<(&str, &str, &[&str])> =
+                texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+            seed_from(&core, &format!("raw {batch}"), &refs).await;
+        }
 
         let mut query = q("anything");
         query.limit = 5;
         let hits = core.search(&query).await.unwrap();
         assert_eq!(hits.len(), 5, "result count must still honour the limit");
+    }
+
+    #[tokio::test]
+    async fn one_source_cannot_fill_the_whole_result_list() {
+        // A forty-chunk document otherwise crowds out every other source and
+        // the answer becomes forty near-identical paragraphs.
+        let core = test_core().await;
+        let hog: Vec<String> = (0..12).map(|i| format!("alpha {i}")).collect();
+        let refs: Vec<(&str, &str, &[&str])> =
+            hog.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+        let big = seed_from(&core, "big", &refs).await;
+        let small = seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
+
+        let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
+        let from_big = hits.iter().filter(|h| h.source_id == big).count();
+        assert!(
+            from_big <= MAX_PER_SOURCE,
+            "one source contributed {from_big} of {} results",
+            hits.len()
+        );
+        assert!(
+            hits.iter().any(|h| h.source_id == small),
+            "the crowded-out source never appeared"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_may_draw_every_excerpt_from_one_source() {
+        // The cap exists to keep a browsable list varied. An answer is often
+        // found in a single document, and rationing its paragraphs would make
+        // the answer worse rather than the list fairer.
+        let core = test_core().await;
+        let texts: Vec<String> = (0..8).map(|i| format!("alpha {i}")).collect();
+        let refs: Vec<(&str, &str, &[&str])> =
+            texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+        seed_from(&core, "only", &refs).await;
+
+        let capped = core.search(&q("t0\nalpha 0")).await.unwrap();
+        let uncapped = core.search_capped(&q("t0\nalpha 0"), None).await.unwrap();
+        assert_eq!(capped.len(), MAX_PER_SOURCE);
+        assert!(
+            uncapped.len() > MAX_PER_SOURCE,
+            "an uncapped search returned {} results",
+            uncapped.len()
+        );
+    }
+
+    #[test]
+    fn the_cap_keeps_the_highest_ranked_chunk_of_each_source() {
+        // Applied to a ranked list, what survives per source must be its best,
+        // not whichever chunk happened to be enumerated first.
+        use crate::vector::{SearchHit, VectorPayload};
+        let hit = |chunk: &str, src: &str, score: f32| SearchHit {
+            payload: VectorPayload {
+                chunk_id: chunk.into(),
+                source_id: src.into(),
+                text: String::new(),
+                title: None,
+                category: None,
+                tags: vec![],
+                created_at: 0,
+                last_seen_at: None,
+            },
+            score,
+        };
+        let kept = cap_per_source(
+            vec![
+                hit("a1", "a", 0.9),
+                hit("a2", "a", 0.8),
+                hit("b1", "b", 0.7),
+                hit("a3", "a", 0.6),
+            ],
+            2,
+        );
+        let ids: Vec<&str> = kept.iter().map(|h| h.payload.chunk_id.as_str()).collect();
+        assert_eq!(ids, vec!["a1", "a2", "b1"]);
+    }
+
+    #[tokio::test]
+    async fn resurface_returns_only_what_has_been_forgotten() {
+        let core = test_core().await;
+        seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
+        seed_from(&core, "new", &[("captured just now", "c", &[])]).await;
+
+        // `created_at` is set by the store, so age the one that should surface.
+        let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
+        sqlx::query("UPDATE chunks SET created_at = ? WHERE text = ?")
+            .bind(cutoff)
+            .bind("long forgotten")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        // The vector payload carries its own copy, so re-embed to pick it up.
+        reembed_all(&core).await;
+
+        let out = core.resurface(10).await.unwrap();
+        assert_eq!(
+            out.len(),
+            1,
+            "got: {:?}",
+            out.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        assert_eq!(out[0].text, "long forgotten");
+    }
+
+    #[tokio::test]
+    async fn a_resurfaced_chunk_does_not_come_straight_back() {
+        // Showing something counts as seeing it, or the same handful returns
+        // every day and the feature is noise.
+        let core = test_core().await;
+        seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
+        let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
+        sqlx::query("UPDATE chunks SET created_at = ?")
+            .bind(old)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        reembed_all(&core).await;
+
+        assert_eq!(core.resurface(10).await.unwrap().len(), 1);
+        // mark_seen runs off the request path; let it land.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            core.resurface(10).await.unwrap().is_empty(),
+            "a chunk shown a moment ago is not forgotten"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_result_list_is_not_marked_seen() {
+        // Nothing was shown, so nothing should be recorded — and the empty
+        // case must not produce a pointless write.
+        let core = test_core().await;
+        assert!(core.search(&q("nothing here")).await.unwrap().is_empty());
     }
 
     #[tokio::test]

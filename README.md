@@ -2,181 +2,182 @@
 
 **A trace of everything worth keeping.**
 
-An *engram* is the physical trace a memory leaves in neural tissue — the
-hypothesised substrate of recall. This is one you own: a self-hosted store for
-discrete, reusable knowledge, retrieved by meaning rather than by keyword.
-
-Retrieval is a search problem, not a chat problem. The default path embeds your
-query, searches vectors, and returns ranked markdown chunks. No generation step,
-no waiting on a model to finish thinking. Synthesis is available when you
-actually want it, on a separate page, never by accident.
+A self-hosted knowledge base you search by meaning. Capture text, and engram
+splits it into self-contained markdown chunks, embeds them, and answers queries
+with ranked excerpts — no generation step in the way. Synthesis is a separate
+endpoint you ask for explicitly.
 
 Three front doors over one backend: a web UI, a REST API, and an MCP server, so
-Claude Code or Claude Desktop can read and write your knowledge base mid-session
-— turning "I just explained this to an AI" into something permanent.
+Claude Code or Claude Desktop can read and write it mid-session.
 
-See [the design](docs/superpowers/specs/2026-08-09-engram-design.md) for why it
-is built this way.
-
-## The mark
-
-The logo is the mechanism, drawn to scale: a query point in latent space, bound
-to its nearest neighbours, with more distant points present in the space but
-absent from the answer. Read another way, it is a neuron — soma, dendrites, and
-the field it listens to.
+Design notes: [docs/superpowers/specs/2026-08-09-engram-design.md](docs/superpowers/specs/2026-08-09-engram-design.md).
+Planned work: [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
-- Rust 1.94 or newer. The floor comes from sqlx 0.9; our own code needs
-  only 1.88 for let-chains.
-- Qdrant, reachable over **gRPC** (port 6334, not just the REST port 6333).
-- An OpenAI-compatible inference endpoint providing chat completions and
-  embeddings. One server can fill all roles, or you can point each role
-  somewhere different.
+- Rust 1.94+ (the floor comes from sqlx 0.9).
+- Qdrant over its REST API — 6333 locally, or whatever a proxy serves it on.
+  No gRPC port needed.
+- An OpenAI-compatible endpoint for chat completions and embeddings. One server
+  can fill all roles, or point each role somewhere different.
 
 ## Quick start
 
 ```bash
-docker compose up -d                  # starts Qdrant on 6333 (REST) and 6334 (gRPC)
+docker compose up -d                             # Qdrant on 6333
 cp config.example.toml config.toml
-cargo run -- --hash-password 'your password'   # paste the hash into config.toml
+cargo run -- --hash-password 'your password'     # paste the hash into config.toml
 cargo run
 ```
 
-Then open <http://127.0.0.1:8080/auth/login>.
-
-Capture something, and watch it move through `raw → segmenting → embedding →
-ready` on the Browse screen. A source whose chunks partly failed to embed shows
-as `partial`; the Ops screen lists the failed jobs with their errors and a retry
-button.
+Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
+through `raw → segmenting → embedding → ready` on Browse. `partial` means some
+chunks failed to embed; the Ops screen lists the failures with a retry button.
 
 ## Configuration
 
-Every key can be overridden by an environment variable using the `ENGRAM__`
-prefix and `__` as the nesting separator, e.g. `ENGRAM__INFER__EMBED__DIM=768`.
-Secrets belong in the environment; the loader warns at startup if it finds one
-in the file. `cargo run -- --print-config` prints the effective configuration
-with secrets redacted.
+Any key can be set by environment variable: prefix `ENGRAM__`, `__` between
+levels, e.g. `ENGRAM__INFER__EMBED__DIM=768`. Put secrets there rather than in
+the file — the loader warns if it finds one. `--print-config` prints the
+effective config with secrets redacted.
 
 | Key | Meaning |
 |---|---|
 | `server.bind` | Listen address. Default `127.0.0.1:8080`. |
-| `server.workers` | Background worker tasks draining the job queue. Default 2. |
-| `store.path` | SQLite file. Created on first run. **Back this up.** |
-| `vector.url` | Qdrant gRPC endpoint, e.g. `http://localhost:6334`. |
-| `vector.collection` | Collection name. |
-| `vector.api_key` | Optional; prefer `ENGRAM__VECTOR__API_KEY`. |
+| `server.workers` | Background job workers. Default 2. |
+| `store.path` | SQLite file. **Back this up.** |
+| `vector.url` | Qdrant base URL, e.g. `http://localhost:6333`. |
+| `vector.collection` | Alias name. Data lives in `{name}_v1`, `_v2`, … |
+| `vector.api_key` | Prefer `ENGRAM__VECTOR__API_KEY`. |
+| `vector.recency_weight` | How much age counts against a result. `0.0` disables. Default 0.05. |
+| `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
+| `vector.pinned_boost` | Extra score for a chunk tagged `pinned`. Default 0.15. |
 | `infer.chunk.*` | Segmentation model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, optional `tokenizer_path`. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`. |
-| `infer.ask.*` | Completion model used only by `ask`. |
-| `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Disabled by default. |
+| `infer.ask.*` | Completion model, used only by `ask`. |
+| `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
-| `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, and **`allowed_subs` / `allowed_emails`**. |
+| `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
 
-Two settings deserve attention.
+Two worth knowing:
 
-**`infer.chunk.output_ratio`** exists because the segmenter rewrites chunks to
-be self-contained rather than merely splitting them, so its output can be larger
-than its input. The ratio tells engram how much larger to assume when sizing input
-windows. Raise it if segmentation responses are being truncated.
+- **`infer.embed.dim`** must match the collection. If it does not, engram refuses
+  to start and names both numbers. Mismatched vectors corrupt search in a way you
+  would not notice for weeks.
+- **`infer.chunk.output_ratio`** — the segmenter rewrites chunks to be
+  self-contained, so its output can be larger than its input. Raise this if
+  segmentation responses get truncated.
 
-**`infer.embed.dim`** must match the Qdrant collection. If it does not, engram
-refuses to start and names both numbers, because writing mismatched vectors
-corrupts search results in a way you would not notice for weeks.
+## Inference roles
 
-## The three inference roles
-
-`chunk`, `embed` and `ask` are configured independently and can point at
-different servers. Swapping one does not affect the others. There is no
-OpenAI-standard rerank endpoint, so reranking is opt-in and its wire format is
-configured explicitly rather than guessed.
+`chunk`, `embed` and `ask` are configured separately and can point at different
+servers. Reranking is opt-in because there is no OpenAI-standard rerank endpoint,
+so its wire format is configured rather than guessed.
 
 Ingest never calls inference. Capture writes the text and returns; segmentation
-and embedding happen in the background and retry with exponential backoff. A
-dead inference endpoint slows processing but never loses a capture.
+and embedding run in the background with retries. A dead endpoint slows
+processing but never loses a capture.
+
+## How search works
+
+One embedding call, one hybrid query, and one rerank call if a reranker is
+configured. Never a completion.
+
+**Hybrid** = two branches fused inside Qdrant in a single round trip: the dense
+vector from the embedding model, and a BM25 sparse vector computed locally from
+the same text. Dense embeddings blur exact tokens, and this kind of knowledge
+base is full of `E01`, `--dry-run`, `/etc/fstab` and error strings. The two
+rankings are merged with reciprocal rank fusion, which needs no score
+calibration between a cosine similarity and a term weight.
+
+Tokenisation keeps `-`, `_`, `.` and `/` inside terms and also emits the pieces,
+so `--dry-run` matches `dry-run`, `dry` or `run`. Qdrant supplies the inverse
+document frequency. A query with no indexable term skips the lexical branch.
+
+**One source contributes at most three chunks** to a result list, so a
+forty-chunk document cannot crowd out the rest of the corpus. `ask` opts out —
+an answer often lives in one document.
+
+**Recency and pinning** are applied as a final scoring pass. The weights let
+recency break a near-tie but never overturn a clearly better match. Pinning is a
+tag: `PATCH /api/v1/chunks/{id}` with `{"tags": ["pinned"]}`.
+
+**`GET /api/v1/resurface`** returns a random handful of chunks older than a month
+that have not appeared in results since. Every search records what it showed, so
+surfacing something counts as remembering it.
+
+Editing a chunk's `tags` or `category` rewrites the Qdrant payload in place.
+Editing `text` or `title` queues a re-embed — those are what the model was shown.
+
+## Collection generations
+
+`vector.collection` is a Qdrant **alias**. The vectors live in `chunks_v1`,
+`chunks_v2`, … and the alias points at the current one, so a schema change is a
+background rebuild plus an atomic swap instead of an outage:
+
+```bash
+cargo run -- --reindex
+```
+
+Points are copied into the next generation and the alias moves onto it. Dense
+vectors are copied as-is, so this costs no embedding calls. The previous
+generation is left in place — it is the only rollback there is.
+
+A collection created before this layout shares its name with the alias, and
+Qdrant will not allow both. Freeing the name means deleting the source after its
+points are copied and counted, so that case needs `--reindex --replace-legacy`.
+
+A rebuild cannot change vector width. See below for that.
+
+## Changing the embedding model
+
+1. Update `infer.embed.model` and `infer.embed.dim`.
+2. Point `vector.collection` at a new alias name, or delete the existing
+   generations.
+3. Start engram; it creates a fresh generation at the new dimension.
+4. Re-embed: `POST /api/v1/sources/{id}/reprocess` with `{"stage":"embed"}`.
+
+Skipping step 2 is refused at startup rather than silently accepted.
 
 ## Connecting Claude Code
 
-Mint a token on the Ops screen (shown once, stored only as an argon2id hash),
-then:
+Mint a token on the Ops screen (shown once, stored as an argon2id hash), then:
 
 ```bash
 claude mcp add --transport http engram http://127.0.0.1:8080/mcp \
   --header "Authorization: Bearer engram_..."
 ```
 
-Three tools appear: `ingest`, `search` and `ask`. They return markdown, which is
-what an agent wants to read.
+Three tools appear: `ingest`, `search` and `ask`. They return markdown.
 
 ## Auth
 
-**OIDC** is the production mode: authorization code flow with PKCE, server-side
-sessions in SQLite so revocation works, and an allowlist. The allowlist is
-mandatory — leaving both `allowed_subs` and `allowed_emails` empty denies
-everyone rather than admitting every account your identity provider knows about.
+**OIDC** for production: authorization code flow with PKCE, server-side sessions
+in SQLite so sign-out actually revokes, and a mandatory allowlist — leaving both
+`allowed_subs` and `allowed_emails` empty denies everyone rather than admitting
+every account your provider knows.
 
-**Local mode** is a development shortcut with a single hardcoded credential. It
-refuses to bind to a non-loopback address unless you pass
-`--i-know-this-is-insecure`, because a dev shortcut reachable from the network
-is production auth by accident.
+**Local mode** is a single hardcoded credential for development. It refuses a
+non-loopback bind without `--i-know-this-is-insecure`.
 
 ## Backup
 
-The SQLite file is the source of truth: it holds every raw capture verbatim.
-Copy it and you can rebuild everything else.
+SQLite is the source of truth; it holds every raw capture verbatim.
 
-- **Full backup:** copy `engram.db` (plus `-wal`/`-shm` if present) and the Qdrant
-  volume.
-- **Minimal backup:** copy `engram.db` alone. Vectors can be regenerated by
+- **Full:** copy `engram.db` (plus `-wal`/`-shm`) and the Qdrant volume.
+- **Minimal:** copy `engram.db` alone. Vectors can be regenerated by
   reprocessing, at the cost of re-running embeddings.
-
-## Changing the embedding model
-
-Vector dimensions are model-specific, so old vectors become meaningless.
-
-1. Update `infer.embed.model` and `infer.embed.dim`.
-2. Delete the Qdrant collection (it is a cache, not the source of truth).
-3. Start engram; it recreates the collection at the new dimension.
-4. Re-embed every source:
-   `POST /api/v1/sources/{id}/reprocess` with `{"stage":"embed"}`.
-
-Skipping step 2 is refused at startup rather than silently accepted.
 
 ## Development
 
 ```bash
-cargo test                                       # unit and HTTP tests, no containers
+cargo test                                         # no containers needed
 cargo test --test integration_qdrant -- --ignored  # needs a running Qdrant
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-Set `ENGRAM_TEST_QDRANT` if Qdrant is not on `localhost:6334`.
-
-Everything except the Qdrant suite runs without infrastructure: the inference
-roles and the vector store sit behind traits, and the tests inject deterministic
-fakes plus an in-memory brute-force vector store.
-
-## Security posture
-
-- Chunk text is model output rendered into an authenticated session, so it is
-  treated as untrusted: rendered markdown is sanitized with `ammonia` and the
-  URL scheme allowlist is explicit. The one `|safe` interpolation in the
-  templates is the already-sanitized output.
-- API tokens are argon2id hashed and shown exactly once. Sessions are
-  server-side rows, so signing out actually revokes.
-- Local auth mode refuses a non-loopback bind without an explicit override
-  flag.
-- Internal errors (SQL, prompt fragments) never reach clients; they go to the
-  log and the client sees a generic message.
-- CI runs `cargo audit` on every push. Advisories are ignored one id at a time
-  in `.cargo/audit.toml`, each with a written reachability argument — currently
-  one entry, RUSTSEC-2023-0071 in `rsa` via `openidconnect`, which concerns
-  private-key operations that engram never performs.
-
-## Not built (yet)
-
-Hybrid keyword + vector search (the FTS5 index and its triggers exist and are
-tested, but the retrieval path does not use them), reranking on by default, a
-CLI, retrieval-quality evaluation, OAuth 2.1 for `/mcp`, and file upload.
+Set `ENGRAM_TEST_QDRANT` if Qdrant is not on `localhost:6333`. Everything except
+the Qdrant suite runs without infrastructure: inference and the vector store sit
+behind traits, and the tests inject fakes plus an in-memory vector store.

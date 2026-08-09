@@ -17,9 +17,21 @@ workers = 2
 path = "engram.db"
 
 [vector]
-url = "http://localhost:6334"
+# Qdrant base URL. Its REST API, not the gRPC port: 6333 locally, or whatever
+# a reverse proxy serves it on (commonly plain https:// with no port).
+url = "http://localhost:6333"
+# Alias name. The vectors live in chunks_v1, chunks_v2, … behind it.
 collection = "chunks"
 # api_key = "..."   # prefer ENGRAM__VECTOR__API_KEY
+
+# How much age counts against a result. Fused ranks land between roughly 0.1
+# and 1.0, so this breaks near-ties in favour of the newer note without
+# overturning a clearly better match. Set to 0.0 to turn recency off.
+recency_weight = 0.05
+recency_half_life_days = 180
+# Extra score for a chunk tagged `pinned`, so a decision you made beats the
+# decay curve.
+pinned_boost = 0.15
 
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three

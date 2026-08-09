@@ -122,9 +122,11 @@ async fn write_chunks(
     }
 
     let inserted = core.store.insert_chunks(source_id, &new).await?;
-    for c in &inserted {
-        core.store.enqueue(Stage::Embed, "chunk", &c.id).await?;
-    }
+    // One job for the whole source: every chunk was just written, and embedding
+    // them together is one inference call instead of `inserted.len()`.
+    core.store
+        .enqueue(Stage::Embed, "source", source_id)
+        .await?;
     core.store.set_source_status(source_id, status).await?;
     tracing::info!(source_id, chunks = inserted.len(), "segmented");
     Ok(())
@@ -173,14 +175,18 @@ mod tests {
             SourceStatus::Embedding
         );
 
+        // One embed job for the whole source, not one per chunk: the point of
+        // batching is a single inference call.
         core.store.claim_job().await.unwrap(); // segment
-        let mut embed_jobs = 0;
+        let mut embed_jobs = Vec::new();
         while let Some(j) = core.store.claim_job().await.unwrap() {
             if j.stage == Stage::Embed {
-                embed_jobs += 1;
+                embed_jobs.push(j);
             }
         }
-        assert_eq!(embed_jobs, 2);
+        assert_eq!(embed_jobs.len(), 1, "expected one batched embed job");
+        assert_eq!(embed_jobs[0].target_kind, "source");
+        assert_eq!(embed_jobs[0].target_id, out.id);
     }
 
     #[tokio::test]

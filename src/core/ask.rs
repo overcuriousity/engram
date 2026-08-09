@@ -37,13 +37,19 @@ impl Core {
             return Err(Error::Validation("question is empty".into()));
         }
 
+        // No per-source cap: an answer often lives in one document, and
+        // withholding its paragraphs to keep the citation list varied would
+        // make the answer worse, not fairer.
         let hits = self
-            .search(&SearchQuery {
-                q: req.q.clone(),
-                limit: req.limit.unwrap_or(8),
-                tags: req.tags.clone(),
-                category: req.category.clone(),
-            })
+            .search_capped(
+                &SearchQuery {
+                    q: req.q.clone(),
+                    limit: req.limit.unwrap_or(8),
+                    tags: req.tags.clone(),
+                    category: req.category.clone(),
+                },
+                None,
+            )
             .await?;
 
         if hits.is_empty() {
