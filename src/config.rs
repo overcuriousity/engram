@@ -260,7 +260,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(cfg.infer.embed.dim, 1024);
         assert_eq!(cfg.vector.collection, "chunks");
-        assert!(cfg.infer.rerank.is_none(), "rerank must default to disabled");
+        assert!(
+            cfg.infer.rerank.is_none(),
+            "rerank must default to disabled"
+        );
     }
 
     #[test]

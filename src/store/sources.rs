@@ -178,7 +178,12 @@ mod tests {
         let a = s.insert_source("same text", "web", None).await.unwrap();
         let found = s.find_by_hash(&content_hash("same text")).await.unwrap();
         assert_eq!(found.unwrap().id, a.id);
-        assert!(s.find_by_hash(&content_hash("other")).await.unwrap().is_none());
+        assert!(
+            s.find_by_hash(&content_hash("other"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

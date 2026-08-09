@@ -82,7 +82,11 @@ impl IntoResponse for Error {
         } else {
             tracing::debug!(error = %self, "request rejected");
         }
-        (self.status(), Json(json!({ "error": self.client_message() }))).into_response()
+        (
+            self.status(),
+            Json(json!({ "error": self.client_message() })),
+        )
+            .into_response()
     }
 }
 
