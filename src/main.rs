@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod infer;
 mod store;
+mod vector;
 
 use axum::{Router, routing::get};
 use clap::Parser;
