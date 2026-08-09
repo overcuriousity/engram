@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod core;
 pub mod error;
+pub mod eval;
 pub mod infer;
 pub mod jobs;
 pub mod mcp;

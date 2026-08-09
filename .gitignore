@@ -3,3 +3,8 @@
 *.db
 *.db-wal
 *.db-shm
+
+# Evaluation corpus. Whatever documents the operator actually wants to search,
+# and never publishable by default — the harness reads it from ENGRAM_EVAL_DIR,
+# and this only guards the in-repo default path.
+/eval-data/
