@@ -1,5 +1,7 @@
 pub mod budget;
 pub mod fake;
+pub mod openai;
+pub mod prompt;
 pub mod split;
 
 use crate::error::Result;
