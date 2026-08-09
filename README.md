@@ -219,6 +219,77 @@ that vector-invalidating edits bump, and the in-flight job's "indexed" mark only
 applies while the revision still matches. A losing job leaves the chunk pending,
 which is what gets it embedded again from the text that is actually there.
 
+## Is the ranking any good?
+
+The settings above — fusion, the per-source cap, recency weight, reranking on or
+off, which embedding model — are guesses until something measures them. Typing a
+few searches does not: you phrase the query with words you remember from the
+passage you want, so it comes back first and everything looks fine. The case
+that actually fails is the one where you half-remember something and describe it
+in words the document never uses.
+
+The evaluation harness answers that with two numbers over pairs you write once:
+**recall@10**, whether the right chunk was on the page at all, and **MRR**, how
+far down it was.
+
+The corpus is whatever documents you actually want to search, and it stays on
+your machine — nothing about it is in this repository:
+
+```
+$ENGRAM_EVAL_DIR/corpus/*.txt   your documents
+$ENGRAM_EVAL_DIR/chunks.json    written by eval-prepare
+$ENGRAM_EVAL_DIR/pairs.json     written by hand
+```
+
+Freeze the chunks once, so a benchmark run costs no completions and two runs
+rank exactly the same text:
+
+```bash
+ENGRAM_EVAL_DIR=~/engram-eval cargo run --bin eval-prepare
+```
+
+Then write pairs: a query phrased the way you would really type it, and the id
+of the chunk that should answer it. Pairs that reuse the chunk's own vocabulary
+measure nothing, because every retrieval system passes them. The useful ones
+share almost no words with their answer.
+
+```json
+[
+  { "query": "handy war aus als die polizei kam",
+    "expect": "01J8ZK…",
+    "note": "BFU vs AFU" }
+]
+```
+
+Running it needs a live Qdrant and embedding endpoint, so it is ignored by
+default:
+
+```bash
+ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval -- --ignored --nocapture
+```
+
+```
+20 queries over 143 chunks   (embed bge-m3, rerank off, recency 0.05, cap 3)
+recall@10   0.75   (15/20)
+MRR         0.52
+
+missed:
+  handy war aus als die polizei kam                  not returned
+  wie finde ich raus wann die datei geschrieben      rank 8
+```
+
+Settings come from configuration, so comparing two of anything is a loop rather
+than a rebuild:
+
+```bash
+ENGRAM__VECTOR__RECENCY_WEIGHT=0.0 ENGRAM_EVAL_CAP=none \
+  ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval -- --ignored --nocapture
+```
+
+Re-running `eval-prepare` mints new chunk ids, so the pairs have to be
+re-checked afterwards. The harness refuses to score a pair whose expected chunk
+no longer exists rather than counting it as a ranking failure forever.
+
 ## Collection generations
 
 `vector.collection` is a Qdrant **alias**. The vectors live in `chunks_v1`,
@@ -304,7 +375,8 @@ SQLite is the source of truth; it holds every raw capture verbatim.
 ```bash
 cargo test                                         # no containers needed
 cargo test --test integration_qdrant -- --ignored  # needs a running Qdrant
-cargo fmt --check
+cargo test --test eval -- --ignored --nocapture    # needs Qdrant, an embedder
+cargo fmt --check                                  #   and a corpus; see above
 cargo clippy --all-targets -- -D warnings
 ```
 
