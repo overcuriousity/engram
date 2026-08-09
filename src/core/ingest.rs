@@ -87,7 +87,6 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::core::test_support::{test_core, test_core_with_failing_chunker};
     use crate::store::jobs::Stage;
     use crate::store::sources::SourceStatus;

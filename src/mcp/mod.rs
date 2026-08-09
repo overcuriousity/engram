@@ -1,0 +1,236 @@
+use crate::core::Core;
+use crate::core::search::{SearchQuery, SearchResult};
+use crate::web::state::AppState;
+use axum::Router;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{tool, tool_router};
+
+/// Results go straight into an agent's context, so they stay markdown: the
+/// chunk text is already markdown, and the surrounding structure has to be
+/// readable rather than JSON-shaped.
+pub fn format_search_results(results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return "No matches in the knowledge base.".to_string();
+    }
+    results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let title = r.title.clone().unwrap_or_else(|| "Untitled".into());
+            let tags = if r.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", r.tags.join(", "))
+            };
+            format!(
+                "### {}. {title}\n_score {:.3}{tags} · source: {}_\n\n{}",
+                i + 1,
+                r.score,
+                r.source_id,
+                r.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+#[derive(Clone)]
+pub struct PkdbTools {
+    pub core: Core,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct IngestParams {
+    /// The text to store verbatim.
+    pub text: String,
+    /// Optional short label for the source.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchParams {
+    /// What to look for, in natural language.
+    pub q: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AskParams {
+    /// A question to answer from the knowledge base.
+    pub q: String,
+}
+
+#[tool_router(server_handler)]
+impl PkdbTools {
+    #[tool(
+        name = "ingest",
+        description = "Store text in the personal knowledge base. Returns immediately; \
+                       segmentation and embedding happen in the background."
+    )]
+    async fn ingest(&self, Parameters(p): Parameters<IngestParams>) -> String {
+        match self.core.ingest(&p.text, "mcp", p.title.as_deref()).await {
+            Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
+            Ok(o) => format!(
+                "Stored as `{}`. Segmentation and embedding run in the background.",
+                o.id
+            ),
+            Err(e) => format!("Ingest failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "search",
+        description = "Search the personal knowledge base by meaning. Returns ranked \
+                       markdown chunks, not a generated answer."
+    )]
+    async fn search(&self, Parameters(p): Parameters<SearchParams>) -> String {
+        let query = SearchQuery {
+            q: p.q,
+            limit: p.limit.unwrap_or(0) as usize,
+            tags: p.tags.unwrap_or_default(),
+            category: p.category,
+        };
+        match self.core.search(&query).await {
+            Ok(r) => format_search_results(&r),
+            Err(e) => format!("Search failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "ask",
+        description = "Answer a question by synthesising across knowledge-base chunks. \
+                       Slower than search; prefer search unless synthesis is needed."
+    )]
+    async fn ask(&self, Parameters(p): Parameters<AskParams>) -> String {
+        match self
+            .core
+            .ask(&crate::core::ask::AskRequest {
+                q: p.q,
+                limit: None,
+                tags: vec![],
+                category: None,
+            })
+            .await
+        {
+            Ok(a) => {
+                let mut out = a.answer;
+                if !a.citations.is_empty() {
+                    out.push_str("\n\n---\n\n**Sources**\n\n");
+                    out.push_str(&format_search_results(&a.citations));
+                }
+                if a.dropped > 0 {
+                    out.push_str(&format!(
+                        "\n\n_{} further excerpt(s) omitted for context budget._",
+                        a.dropped
+                    ));
+                }
+                out
+            }
+            Err(e) => format!("Ask failed: {e}"),
+        }
+    }
+}
+
+/// Guard in front of the MCP service. Extracting `Identity` here means an
+/// unauthenticated request is rejected before any tool can run.
+async fn mcp_guard(
+    _id: crate::auth::Identity,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    next.run(req).await
+}
+
+pub fn mcp_router(state: AppState) -> Router<AppState> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let core = state.core.clone();
+    let service = StreamableHttpService::new(
+        move || Ok(PkdbTools { core: core.clone() }),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        Default::default(),
+    );
+
+    Router::new()
+        .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(state, mcp_guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn mcp_requires_a_bearer_token() {
+        let core = crate::core::test_support::test_core().await;
+        let state = crate::web::state::AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+        };
+        let res = crate::web::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn search_results_are_formatted_as_markdown_for_an_agent() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest("## Mounting\nRun `mount /dev/sda1 /mnt`.", "mcp", None)
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        let text = format_search_results(
+            &core
+                .search(&SearchQuery {
+                    q: "mounting".into(),
+                    limit: 5,
+                    tags: vec![],
+                    category: None,
+                })
+                .await
+                .unwrap(),
+        );
+
+        // An agent consumes this directly, so it must stay markdown and keep
+        // the source id for follow-up lookups.
+        assert!(text.contains("mount /dev/sda1"), "{text}");
+        assert!(text.contains("source:"), "{text}");
+    }
+
+    #[test]
+    fn empty_results_produce_a_clear_message_not_an_empty_string() {
+        let text = format_search_results(&[]);
+        assert!(!text.trim().is_empty());
+        assert!(text.to_lowercase().contains("no match"));
+    }
+}

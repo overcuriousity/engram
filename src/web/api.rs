@@ -189,7 +189,10 @@ async fn delete_chunk(
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
     st.core.store.get_chunk(&cid).await?;
-    st.core.vectors.delete_chunks(&[cid.clone()]).await?;
+    st.core
+        .vectors
+        .delete_chunks(std::slice::from_ref(&cid))
+        .await?;
     st.core.store.delete_chunk(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }

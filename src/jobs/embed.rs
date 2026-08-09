@@ -54,7 +54,10 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
 
     if paragraphs.len() < 2 {
         tracing::warn!(chunk_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
-        let vectors = core.embedder.embed(&[chunk.text.clone()]).await?;
+        let vectors = core
+            .embedder
+            .embed(std::slice::from_ref(&chunk.text))
+            .await?;
         core.vectors
             .upsert(vec![VectorPoint {
                 vector: vectors.into_iter().next().unwrap(),
@@ -106,7 +109,9 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
 
     let inserted = core.store.insert_chunks(&chunk.source_id, &new).await?;
     core.store.delete_chunk(&chunk.id).await?;
-    core.vectors.delete_chunks(&[chunk.id.clone()]).await?;
+    core.vectors
+        .delete_chunks(std::slice::from_ref(&chunk.id))
+        .await?;
 
     for c in &inserted {
         core.store.enqueue(Stage::Embed, "chunk", &c.id).await?;

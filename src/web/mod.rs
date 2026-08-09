@@ -15,6 +15,7 @@ pub fn router(state: AppState) -> Router {
         .merge(assets::assets_router())
         .merge(auth_routes::auth_router())
         .merge(ui::ui_router())
+        .merge(crate::mcp::mcp_router(state.clone()))
         .nest("/api/v1", api::api_router())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)

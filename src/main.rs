@@ -1,19 +1,9 @@
-mod auth;
-mod config;
-mod core;
-mod error;
-mod infer;
-mod jobs;
-mod store;
-mod vector;
-mod web;
-
-use crate::config::{AuthMode, Config};
-use crate::core::Core;
-use crate::error::{Error, Result};
-use crate::infer::budget::TokenCounter;
-use crate::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
 use clap::Parser;
+use pkdb::config::{AuthMode, Config};
+use pkdb::core::Core;
+use pkdb::error::{Error, Result};
+use pkdb::infer::budget::TokenCounter;
+use pkdb::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -48,13 +38,17 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
                     "auth.mode = \"local\" but no [auth.local] block".into(),
                 ));
             }
-            auth::local::assert_bind_is_safe(&cfg.server.bind, insecure_ok)?;
+            pkdb::auth::local::assert_bind_is_safe(&cfg.server.bind, insecure_ok)?;
         }
     }
     Ok(())
 }
 
-fn build_core(cfg: &Config, vectors: Arc<dyn vector::VectorStore>, store: store::Store) -> Core {
+fn build_core(
+    cfg: &Config,
+    vectors: Arc<dyn pkdb::vector::VectorStore>,
+    store: pkdb::store::Store,
+) -> Core {
     // Chunk size is capped by what the embedder accepts, with headroom for
     // token-count estimation error.
     let max_chunk_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
@@ -70,7 +64,7 @@ fn build_core(cfg: &Config, vectors: Arc<dyn vector::VectorStore>, store: store:
             .infer
             .rerank
             .as_ref()
-            .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn infer::Reranker>),
+            .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn pkdb::infer::Reranker>),
         completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
         counter: Arc::new(TokenCounter::load(
             cfg.infer.chunk.tokenizer_path.as_deref(),
@@ -84,7 +78,10 @@ fn build_core(cfg: &Config, vectors: Arc<dyn vector::VectorStore>, store: store:
 async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     core.vectors.ensure_collection(cfg.infer.embed.dim).await?;
 
-    let reclaimed = core.store.reclaim_stuck(jobs::STUCK_AFTER_SECS).await?;
+    let reclaimed = core
+        .store
+        .reclaim_stuck(pkdb::jobs::STUCK_AFTER_SECS)
+        .await?;
     if reclaimed > 0 {
         tracing::info!(
             reclaimed,
@@ -96,20 +93,20 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         tracing::info!(purged, "removed expired sessions");
     }
 
-    infer::openai::probe(
+    pkdb::infer::openai::probe(
         "chunk",
         &cfg.infer.chunk.base_url,
         cfg.infer.chunk.api_key.as_deref(),
     )
     .await;
-    infer::openai::probe(
+    pkdb::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
     if let Some(r) = &cfg.infer.rerank {
-        infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
+        pkdb::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
     } else {
         tracing::info!("rerank not configured; search returns vector order");
     }
@@ -128,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if let Some(pw) = &args.hash_password {
-        println!("{}", auth::local::hash_password(pw)?);
+        println!("{}", pkdb::auth::local::hash_password(pw)?);
         return Ok(());
     }
 
@@ -140,15 +137,15 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    let store = store::Store::connect(&cfg.store).await?;
-    let vectors: Arc<dyn vector::VectorStore> =
-        Arc::new(vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
+    let store = pkdb::store::Store::connect(&cfg.store).await?;
+    let vectors: Arc<dyn pkdb::vector::VectorStore> =
+        Arc::new(pkdb::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
     let core = build_core(&cfg, vectors, store);
     startup_checks(&core, &cfg).await?;
 
     let oidc = match cfg.auth.mode {
         AuthMode::Oidc => {
-            Some(auth::oidc::OidcClient::discover(cfg.auth.oidc.as_ref().unwrap()).await?)
+            Some(pkdb::auth::oidc::OidcClient::discover(cfg.auth.oidc.as_ref().unwrap()).await?)
         }
         AuthMode::Local => None,
     };
@@ -159,24 +156,24 @@ async fn main() -> anyhow::Result<()> {
         .map(|o| o.redirect_url.starts_with("https://"))
         .unwrap_or(false);
 
-    let state = web::state::AppState {
+    let state = pkdb::web::state::AppState {
         core: core.clone(),
-        auth: Arc::new(web::state::AuthContext {
+        auth: Arc::new(pkdb::web::state::AuthContext {
             mode: cfg.auth.mode,
             local: cfg.auth.local.clone(),
             oidc,
-            pending: auth::oidc::PendingStore::new(),
+            pending: pkdb::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let handles = jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let handles = pkdb::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "pkdb listening");
 
-    axum::serve(listener, web::router(state))
+    axum::serve(listener, pkdb::web::router(state))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
@@ -194,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
-    use crate::config::*;
+    use pkdb::config::*;
 
     fn test_config() -> Config {
         Config {
