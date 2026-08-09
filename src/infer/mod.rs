@@ -3,6 +3,7 @@ pub mod fake;
 pub mod openai;
 pub mod prompt;
 pub mod split;
+pub mod verify;
 
 use crate::error::Result;
 use async_trait::async_trait;

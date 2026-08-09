@@ -122,6 +122,66 @@ impl Chunker for FakeChunker {
     }
 }
 
+/// Drops a token from the first window it sees and reproduces it faithfully
+/// afterwards. Models the case the retry exists for: a one-off paraphrase that
+/// a second attempt gets right.
+pub struct ParaphrasingChunker {
+    drop_token: String,
+    calls: std::sync::atomic::AtomicUsize,
+    /// Keep paraphrasing forever rather than recovering on the retry.
+    persistent: bool,
+}
+
+impl ParaphrasingChunker {
+    pub fn recovering(drop_token: &str) -> Self {
+        Self {
+            drop_token: drop_token.to_string(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            persistent: false,
+        }
+    }
+
+    pub fn persistent(drop_token: &str) -> Self {
+        Self {
+            drop_token: drop_token.to_string(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            persistent: true,
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Chunker for ParaphrasingChunker {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+        let n = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let body = if self.persistent || n == 0 {
+            text.replace(&self.drop_token, "")
+        } else {
+            text.to_string()
+        };
+        Ok(vec![ProposedChunk {
+            text: body,
+            title: Some("paraphrased".into()),
+            category: Some("note".into()),
+            tags: vec![],
+            source_lines: None,
+        }])
+    }
+    fn budget(&self) -> ChunkBudget {
+        ChunkBudget {
+            context_tokens: 4096,
+            max_output_tokens: 1024,
+            output_ratio: 1.4,
+        }
+    }
+}
+
 /// Reverses the candidate order. Deliberately not identity: a test asserting
 /// rerank ran can only tell the difference if the order actually changes.
 #[derive(Default)]

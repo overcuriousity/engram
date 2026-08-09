@@ -45,7 +45,21 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
     for w in core.store.pending_windows(source_id).await? {
         core.store.bump_window_attempts(source_id, w.idx).await?;
         let text = window_text(&src.raw_text, w.start_line, w.end_line);
+
         let mut chunks = core.chunker.segment(&text).await?;
+        // The model was told to keep commands, paths and flags verbatim. If it
+        // did not, one more attempt usually gets it right; a second failure is
+        // stored with a flag rather than dropped, because a visible warning
+        // beats losing the chapter.
+        if paraphrased(&chunks, &text) {
+            tracing::warn!(
+                source_id,
+                window = w.idx,
+                "literals missing; re-segmenting once"
+            );
+            chunks = core.chunker.segment(&text).await?;
+        }
+
         // Line numbers come back relative to the window, so shift them into
         // the coordinates of the original document.
         for c in &mut chunks {
@@ -54,7 +68,10 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
                 .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
                 .or(Some((w.start_line, w.end_line)));
         }
-        write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
+
+        let written =
+            write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
+        flag_unverified_literals(core, &written, &text).await?;
         core.store
             .set_window_state(source_id, w.idx, WindowState::Done, None)
             .await?;
@@ -71,7 +88,7 @@ async fn write_window_chunks(
     source_id: &str,
     window_idx: i64,
     new: Vec<NewChunk>,
-) -> Result<()> {
+) -> Result<Vec<crate::store::chunks::Chunk>> {
     let old = core
         .store
         .chunk_ids_for_window(source_id, window_idx)
@@ -82,7 +99,36 @@ async fn write_window_chunks(
             core.store.delete_chunk(id).await?;
         }
     }
-    core.store.insert_chunks(source_id, &new).await?;
+    core.store.insert_chunks(source_id, &new).await
+}
+
+/// Did any proposed chunk lose a literal its window contains?
+fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
+    chunks
+        .iter()
+        .any(|c| !crate::infer::verify::missing_literals(&c.text, window).is_empty())
+}
+
+/// Mark what the retry could not fix. The chunk is kept — a warning the reader
+/// can see beats a chapter silently missing from the base.
+async fn flag_unverified_literals(
+    core: &Core,
+    written: &[crate::store::chunks::Chunk],
+    window: &str,
+) -> Result<()> {
+    for c in written {
+        let missing = crate::infer::verify::missing_literals(&c.text, window);
+        if let Some(first) = missing.first() {
+            core.store
+                .set_chunk_flags(
+                    &c.id,
+                    &[crate::infer::verify::FLAG_LITERALS.to_string()],
+                    Some(&format!("missing literal: {first}")),
+                )
+                .await?;
+            tracing::warn!(chunk_id = %c.id, literal = %first, "literal not found in source window");
+        }
+    }
     Ok(())
 }
 
@@ -294,6 +340,63 @@ mod tests {
             core.store.chunks_for_source(&out.id).await.unwrap().len(),
             2,
             "a retried segment job must not double the chunks"
+        );
+    }
+
+    const COMMAND_BODY: &str = "\
+Unmount the device first.
+
+    dd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress
+
+Then run sync.";
+
+    #[tokio::test]
+    async fn a_paraphrased_literal_is_re_segmented_once_and_then_accepted() {
+        let mut core = test_core().await;
+        let chunker = std::sync::Arc::new(crate::infer::fake::ParaphrasingChunker::recovering(
+            "oflag=sync ",
+        ));
+        core.chunker = chunker.clone();
+        let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        assert_eq!(chunker.calls(), 2, "exactly one re-segmentation");
+        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        assert!(
+            chunks.iter().all(|c| c.flags.is_empty()),
+            "a clean retry must leave no flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_literal_the_retry_also_drops_is_stored_flagged() {
+        let mut core = test_core().await;
+        core.chunker = std::sync::Arc::new(crate::infer::fake::ParaphrasingChunker::persistent(
+            "oflag=sync ",
+        ));
+        let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        assert!(!chunks.is_empty(), "flagged chunks are still stored");
+        let flagged: Vec<_> = chunks
+            .iter()
+            .filter(|c| {
+                c.flags
+                    .iter()
+                    .any(|f| f == crate::infer::verify::FLAG_LITERALS)
+            })
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert!(
+            flagged[0]
+                .flag_detail
+                .as_deref()
+                .unwrap()
+                .contains("dd if="),
+            "the detail must name the literal that went missing"
         );
     }
 
