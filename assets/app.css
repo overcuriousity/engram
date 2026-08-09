@@ -253,3 +253,30 @@ nav.top a.brand img { display: block; }
 .flag b { color: var(--color-warning); }
 
 .crumb { font-size: 0.8125rem; color: var(--color-fg-muted); margin-bottom: 0.75rem; }
+
+/* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
+
+.workspace { display: grid; grid-template-columns: 20rem 1fr; gap: 1rem; align-items: start; }
+@media (max-width: 60rem) {
+  .workspace { grid-template-columns: 1fr; }
+  /* One region at a time on a narrow screen: the rail is the list, and
+     opening a chunk replaces it. */
+  .workspace.has-selection .rail { display: none; }
+}
+
+.rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
+.rail-item {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+}
+.rail-item:hover { background: var(--color-bg-hover); }
+.rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
+.rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
+.rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
+.rail-title { font-weight: 600; font-size: 0.875rem; }
+.rail-snippet {
+  font-size: 0.8125rem; color: var(--color-fg-secondary); margin-top: 0.25rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pane { min-width: 0; }

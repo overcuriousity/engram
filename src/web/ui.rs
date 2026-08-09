@@ -13,9 +13,13 @@ use axum::routing::{get, post};
 // ── View models ─────────────────────────────────────────────────────────────
 
 pub struct RenderedResult {
+    /// What the rail entry links to: the detail pane for this chunk.
+    pub chunk_id: String,
     pub title: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
+    /// Markup-free preview for the rail, where rendered HTML would not fit.
+    pub snippet: String,
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub source_id: String,
@@ -167,12 +171,16 @@ struct CapturedTemplate {
 #[template(path = "search.html")]
 struct SearchTemplate {
     theme: String,
+    /// Kept so a reload or a deep link restores the box with its results.
+    q: String,
 }
 
 #[derive(Template)]
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// The query's indexable terms, for client-side highlighting.
+    terms: String,
 }
 
 #[derive(Template)]
@@ -274,9 +282,10 @@ async fn capture_submit(
     .into_response())
 }
 
-async fn search_page(_id: Identity) -> impl IntoResponse {
+async fn search_page(_id: Identity, Query(p): Query<UiSearchParams>) -> impl IntoResponse {
     HtmlTemplate(SearchTemplate {
         theme: "light".into(),
+        q: p.q,
     })
 }
 
@@ -308,9 +317,16 @@ async fn search_results(
     // Clearing the box fires a request with an empty query. That is not an
     // error; it just means there is nothing to show.
     if p.q.trim().is_empty() {
-        return Ok(HtmlTemplate(ResultsTemplate { results: vec![] }).into_response());
+        return Ok(HtmlTemplate(ResultsTemplate {
+            results: vec![],
+            terms: String::new(),
+        })
+        .into_response());
     }
 
+    // The same terms the sparse branch derives, handed to the client so
+    // highlighting never has to touch the sanitized HTML on this side.
+    let terms = crate::vector::sparse::tokenize(p.q.trim()).join(" ");
     let hits = st
         .core
         .search(&SearchQuery {
@@ -327,14 +343,17 @@ async fn search_results(
             .enumerate()
             .map(|(i, h)| render_hit(i, h))
             .collect(),
+        terms,
     })
     .into_response())
 }
 
 fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
     RenderedResult {
+        chunk_id: h.chunk_id,
         title: h.title.unwrap_or_else(|| "Untitled".into()),
         html: markdown::render(&h.text),
+        snippet: markdown::snippet(&h.text, 140),
         category: h.category,
         tags: h.tags,
         source_id: h.source_id,
@@ -699,6 +718,40 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_rail_entry_carries_the_chunk_id_it_links_to() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_source(&core, &out.id)
+            .await
+            .unwrap();
+
+        let hits = core
+            .search(&crate::core::search::SearchQuery {
+                q: "alpha".into(),
+                limit: 0,
+                tags: vec![],
+                category: None,
+            })
+            .await
+            .unwrap();
+        let r = super::render_hit(0, hits[0].clone());
+
+        assert!(
+            !r.chunk_id.is_empty(),
+            "the rail needs a chunk id to link to"
+        );
+        assert!(!r.snippet.is_empty(), "the rail shows a plain-text snippet");
+        assert!(
+            !r.snippet.contains('<'),
+            "the snippet must not carry markup"
+        );
+    }
 
     #[tokio::test]
     async fn the_detail_view_pairs_a_chunk_with_the_lines_it_claims() {
