@@ -59,7 +59,9 @@ pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result
     let text = embed_text(&chunk);
 
     if core.counter.count(&text) > limit {
-        return split_oversize(core, &chunk, limit).await;
+        // Our own estimate, which can be wrong in either direction. Do not
+        // shred the chunk on a guess.
+        return split_oversize(core, &chunk, limit, false).await;
     }
 
     match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
@@ -78,7 +80,9 @@ pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result
                 error = %e,
                 "endpoint refused the chunk as too large; splitting instead of retrying"
             );
-            return split_oversize(core, &chunk, smaller).await;
+            // The server said no. That is a fact rather than an estimate, so
+            // this split has to succeed whatever the text looks like.
+            return split_oversize(core, &chunk, smaller, true).await;
         }
         Err(e) => return Err(e),
     }
@@ -104,7 +108,7 @@ pub async fn run_source_with_limit(core: &Core, source_id: &str, limit: usize) -
     for chunk in pending {
         let text = embed_text(&chunk);
         if core.counter.count(&text) > limit {
-            split_oversize(core, &chunk, limit).await?;
+            split_oversize(core, &chunk, limit, false).await?;
         } else {
             texts.push(text);
             batch.push(chunk);
@@ -204,7 +208,7 @@ pub async fn split_into_chunk_jobs(core: &Core, source_id: &str) -> Result<()> {
 /// A chunk larger than the embedder accepts becomes several sibling chunks
 /// split at a paragraph boundary. Truncating would silently discard knowledge,
 /// and one vector per fragment keeps the data model unchanged.
-async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
+async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) -> Result<()> {
     let paragraphs: Vec<&str> = chunk
         .text
         .split("\n\n")
@@ -212,6 +216,16 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
         .collect();
 
     if paragraphs.len() < 2 {
+        // No blank line to cut on. Code, tables and reference entries look like
+        // this, and they are exactly what a local embedding server refuses for
+        // exceeding its physical batch — so when the refusal is real, cut on
+        // lines and then on characters rather than trying the same thing again.
+        if hard {
+            let parts = split_by_lines(&chunk.text, limit, &core.counter);
+            if parts.len() > 1 {
+                return replace_with_siblings(core, chunk, parts).await;
+            }
+        }
         tracing::warn!(chunk_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
         let vectors = core
             .embedder
@@ -247,6 +261,56 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
         parts.push(current);
     }
 
+    replace_with_siblings(core, chunk, parts).await
+}
+
+/// Cut text that has no paragraph breaks. Lines first, and a single line that
+/// still will not fit is cut on character count — the point is that this always
+/// returns something smaller than it was given.
+fn split_by_lines(
+    text: &str,
+    limit: usize,
+    counter: &crate::infer::budget::TokenCounter,
+) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let candidate = if current.is_empty() {
+            line.to_string()
+        } else {
+            format!("{current}\n{line}")
+        };
+        if counter.count(&candidate) > limit && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+            current = line.to_string();
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    // One line longer than the limit on its own: a minified blob or a very long
+    // command. Characters are the last resort, and four per token is the same
+    // conservative ratio the budget estimate uses.
+    let max_chars = limit.saturating_mul(4).max(64);
+    parts
+        .into_iter()
+        .flat_map(|p| {
+            if counter.count(&p) <= limit {
+                return vec![p];
+            }
+            p.chars()
+                .collect::<Vec<_>>()
+                .chunks(max_chars)
+                .map(|c| c.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -> Result<()> {
     tracing::info!(chunk_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
@@ -366,6 +430,63 @@ mod tests {
             chunks.iter().all(|c| c.window_idx == Some(0)),
             "siblings must stay attached to the window that produced them"
         );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_with_no_paragraph_breaks_is_still_split() {
+        // Code, tables and reference entries have no blank lines, and they are
+        // exactly what a local embedding server refuses for exceeding its
+        // physical batch. Giving up on them meant retrying forever.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            120,
+        ));
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let body = (0..60)
+            .map(|i| format!("    command --flag-{i} /path/to/thing-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !body.contains("\n\n"),
+            "the point is that there are no paragraphs"
+        );
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[test]
+    fn splitting_by_lines_always_returns_something_smaller() {
+        let counter = crate::infer::budget::TokenCounter::Estimate;
+        // A single line far over the limit, with no whitespace to cut on.
+        let blob = "x".repeat(4000);
+        let parts = split_by_lines(&blob, 100, &counter);
+        assert!(parts.len() > 1, "a long single line must still be cut");
+        assert!(
+            parts.iter().all(|p| counter.count(p) <= 100 * 2),
+            "each part must be near the limit rather than the original size"
+        );
+        assert_eq!(parts.concat(), blob, "cutting must not lose text");
     }
 
     #[test]
