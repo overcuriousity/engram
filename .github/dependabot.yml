@@ -38,6 +38,11 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # The msrv job pins this to the floor README and Cargo.toml promise, so
+      # dependabot reads the pin as an outdated version. Bumping it to the
+      # latest Rust would silently erase the promise the job exists to check.
+      - dependency-name: dtolnay/rust-toolchain
     labels:
       - dependencies
       - ci

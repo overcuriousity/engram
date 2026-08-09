@@ -43,7 +43,7 @@ jobs:
       # Pinned to the version README and Cargo.toml promise. The floor is set
       # by sqlx 0.9, which requires 1.94 — higher than the 1.88 our own
       # let-chains need. This job is what stops that promise drifting silently.
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
