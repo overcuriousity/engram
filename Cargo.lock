@@ -1145,6 +1145,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "argon2",
+ "askama",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "config",
+ "hex",
+ "mime_guess",
+ "openidconnect",
+ "pulldown-cmark",
+ "qdrant-client",
+ "reqwest 0.13.4",
+ "rmcp",
+ "rust-embed",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokenizers",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2583,45 +2622,6 @@ checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
  "spki",
-]
-
-[[package]]
-name = "pkdb"
-version = "0.1.0"
-dependencies = [
- "ammonia",
- "anyhow",
- "argon2",
- "askama",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "clap",
- "config",
- "hex",
- "mime_guess",
- "openidconnect",
- "pulldown-cmark",
- "qdrant-client",
- "reqwest 0.13.4",
- "rmcp",
- "rust-embed",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "temp-env",
- "tempfile",
- "thiserror 2.0.20",
- "tokenizers",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wiremock",
 ]
 
 [[package]]

@@ -1,14 +1,14 @@
 use clap::Parser;
-use pkdb::config::{AuthMode, Config};
-use pkdb::core::Core;
-use pkdb::error::{Error, Result};
-use pkdb::infer::budget::TokenCounter;
-use pkdb::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
+use engram::config::{AuthMode, Config};
+use engram::core::Core;
+use engram::error::{Error, Result};
+use engram::infer::budget::TokenCounter;
+use engram::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "pkdb")]
+#[command(name = "engram")]
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -38,7 +38,7 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
                     "auth.mode = \"local\" but no [auth.local] block".into(),
                 ));
             }
-            pkdb::auth::local::assert_bind_is_safe(&cfg.server.bind, insecure_ok)?;
+            engram::auth::local::assert_bind_is_safe(&cfg.server.bind, insecure_ok)?;
         }
     }
     Ok(())
@@ -46,8 +46,8 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
 
 fn build_core(
     cfg: &Config,
-    vectors: Arc<dyn pkdb::vector::VectorStore>,
-    store: pkdb::store::Store,
+    vectors: Arc<dyn engram::vector::VectorStore>,
+    store: engram::store::Store,
 ) -> Core {
     // Chunk size is capped by what the embedder accepts, with headroom for
     // token-count estimation error.
@@ -64,7 +64,7 @@ fn build_core(
             .infer
             .rerank
             .as_ref()
-            .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn pkdb::infer::Reranker>),
+            .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn engram::infer::Reranker>),
         completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
         counter: Arc::new(TokenCounter::load(
             cfg.infer.chunk.tokenizer_path.as_deref(),
@@ -80,7 +80,7 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
 
     let reclaimed = core
         .store
-        .reclaim_stuck(pkdb::jobs::STUCK_AFTER_SECS)
+        .reclaim_stuck(engram::jobs::STUCK_AFTER_SECS)
         .await?;
     if reclaimed > 0 {
         tracing::info!(
@@ -93,20 +93,20 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         tracing::info!(purged, "removed expired sessions");
     }
 
-    pkdb::infer::openai::probe(
+    engram::infer::openai::probe(
         "chunk",
         &cfg.infer.chunk.base_url,
         cfg.infer.chunk.api_key.as_deref(),
     )
     .await;
-    pkdb::infer::openai::probe(
+    engram::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
     if let Some(r) = &cfg.infer.rerank {
-        pkdb::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
+        engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
     } else {
         tracing::info!("rerank not configured; search returns vector order");
     }
@@ -118,14 +118,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "pkdb=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "engram=info,tower_http=info".into()),
         )
         .init();
 
     let args = Args::parse();
 
     if let Some(pw) = &args.hash_password {
-        println!("{}", pkdb::auth::local::hash_password(pw)?);
+        println!("{}", engram::auth::local::hash_password(pw)?);
         return Ok(());
     }
 
@@ -137,15 +137,15 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    let store = pkdb::store::Store::connect(&cfg.store).await?;
-    let vectors: Arc<dyn pkdb::vector::VectorStore> =
-        Arc::new(pkdb::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
+    let store = engram::store::Store::connect(&cfg.store).await?;
+    let vectors: Arc<dyn engram::vector::VectorStore> =
+        Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
     let core = build_core(&cfg, vectors, store);
     startup_checks(&core, &cfg).await?;
 
     let oidc = match cfg.auth.mode {
         AuthMode::Oidc => {
-            Some(pkdb::auth::oidc::OidcClient::discover(cfg.auth.oidc.as_ref().unwrap()).await?)
+            Some(engram::auth::oidc::OidcClient::discover(cfg.auth.oidc.as_ref().unwrap()).await?)
         }
         AuthMode::Local => None,
     };
@@ -156,24 +156,24 @@ async fn main() -> anyhow::Result<()> {
         .map(|o| o.redirect_url.starts_with("https://"))
         .unwrap_or(false);
 
-    let state = pkdb::web::state::AppState {
+    let state = engram::web::state::AppState {
         core: core.clone(),
-        auth: Arc::new(pkdb::web::state::AuthContext {
+        auth: Arc::new(engram::web::state::AuthContext {
             mode: cfg.auth.mode,
             local: cfg.auth.local.clone(),
             oidc,
-            pending: pkdb::auth::oidc::PendingStore::new(),
+            pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let handles = pkdb::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
-    tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "pkdb listening");
+    tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
 
-    axum::serve(listener, pkdb::web::router(state))
+    axum::serve(listener, engram::web::router(state))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
-    use pkdb::config::*;
+    use engram::config::*;
 
     fn test_config() -> Config {
         Config {
@@ -200,7 +200,7 @@ mod startup_tests {
                 workers: 2,
             },
             store: StoreConfig {
-                path: "pkdb.db".into(),
+                path: "engram.db".into(),
             },
             vector: VectorConfig {
                 url: "http://localhost:6334".into(),

@@ -1,4 +1,4 @@
-# pkdb — Design
+# engram — Design
 
 Date: 2026-08-09
 Status: approved
@@ -6,7 +6,7 @@ Supersedes nothing. Implements the concept in `spec.md`.
 
 ## 1. Scope
 
-pkdb is a self-hosted personal knowledge base. It stores discrete, reusable
+engram is a self-hosted personal knowledge base. It stores discrete, reusable
 pieces of knowledge and retrieves them by meaning. Retrieval is a search
 problem; generation is an optional layer, never the default path.
 
@@ -35,7 +35,7 @@ purpose and principles and does not repeat them.
 ## 2. Architecture
 
 ```
-                    pkdb (single binary, tokio)
+                    engram (single binary, tokio)
   ┌──────────────────────────────────────────────────────┐
   │  axum HTTP server                                    │
   │   ├─ /ui/*      htmx + Askama templates (session)    │
@@ -295,9 +295,9 @@ mode = "oidc"
 
 [auth.oidc]
 issuer_url    = "https://idp.example/realms/main"
-client_id     = "pkdb"
+client_id     = "engram"
 client_secret = "..."            # supplied via environment, not this file
-redirect_url  = "https://pkdb.example/auth/callback"
+redirect_url  = "https://engram.example/auth/callback"
 scopes        = ["openid", "profile", "email"]
 allowed_subs  = ["sub-abc123"]   # or allowed_emails
 ```
@@ -329,10 +329,10 @@ prevents a development shortcut from silently becoming production auth.
 MCP clients and the future CLI cannot run a browser flow. After signing in
 through the web UI, the operator mints a token at `/ui/tokens`.
 
-- Format `pkdb_<43 characters base64url>`, from 32 bytes of CSPRNG entropy.
+- Format `engram_<43 characters base64url>`, from 32 bytes of CSPRNG entropy.
 - Stored as an argon2id hash. Displayed once and never retrievable afterwards.
 - Named, revocable, and tracked with `last_used_at`.
-- Presented as `Authorization: Bearer pkdb_...`.
+- Presented as `Authorization: Bearer engram_...`.
 
 Both paths converge on one axum extractor that produces an `Identity`. `core`
 never sees cookies or tokens.
@@ -419,7 +419,7 @@ separately per theme.
 
 ### Deviations from Vestigo
 
-1. **No Tailwind.** The UI is server-rendered with no node toolchain, and pkdb
+1. **No Tailwind.** The UI is server-rendered with no node toolchain, and engram
    has roughly ten component types against Vestigo's twenty-four. Instead,
    one hand-written `app.css` holds the token blocks as plain CSS followed by
    semantic classes — `.btn`, `.btn-accent`, `.input`, `.badge`, `.card` —
@@ -428,7 +428,7 @@ separately per theme.
    adopted later on top of unchanged tokens if the UI outgrows this.
 2. **Visualization palette dropped.** The eight-slot categorical series, the
    sequential and diverging ramps, and the chart chrome tokens serve Vestigo's
-   charts. pkdb has none. The block can be restored if the Ops screen ever
+   charts. engram has none. The block can be restored if the Ops screen ever
    grows a graph.
 3. **No density toggle.** `data-density="compact"` pays off in dense forensic
    grids, not in a reading-oriented search UI.
@@ -441,7 +441,7 @@ Inter and JetBrains Mono `woff2` files are vendored into `assets/fonts/`,
 embedded with `rust-embed`, and declared with `@font-face` using
 `font-display: swap`. Roughly 200KB in the binary.
 
-### Mapping to pkdb screens
+### Mapping to engram screens
 
 Search results and chunk previews are `--color-bg-elevated` cards with
 `--color-border` at `--radius-md`. Category and tag chips are badges in the
@@ -486,7 +486,7 @@ These fail fast and loudly:
 
 ## 12. Configuration
 
-`config.toml` with `PKDB__`-prefixed environment overrides, loaded through the
+`config.toml` with `ENGRAM__`-prefixed environment overrides, loaded through the
 `config` crate. Secrets — the OIDC client secret and inference API keys — come
 from the environment only; the loader warns if it finds a secret in the file.
 `--print-config` prints the effective configuration with secrets redacted.
@@ -532,7 +532,7 @@ Layered so that nearly everything runs under `cargo test` without containers.
    existing id and search filter passthrough.
 
 Retrieval *quality* is not tested. That requires a labeled evaluation set that
-does not exist yet. A `pkdb eval` subcommand running a YAML file of query and
+does not exist yet. A `engram eval` subcommand running a YAML file of query and
 expected-chunk pairs is noted as post-v1 work and is not built now.
 
 ## 15. Build order
@@ -554,6 +554,6 @@ Each step ends with something runnable. The first real search works at step 5.
 - Hybrid search combining FTS5 and vectors (the schema supports it).
 - Rerank enabled by default (configuration supports it).
 - CLI.
-- `pkdb eval` and retrieval quality measurement.
+- `engram eval` and retrieval quality measurement.
 - OAuth 2.1 resource-server flow for `/mcp`.
 - File upload and non-text ingestion.

@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% block title %}Capture — pkdb{% endblock %}
+{% block title %}Capture — engram{% endblock %}
 {% block content %}
 <form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if(event.detail.successful) this.reset()" class="stack">

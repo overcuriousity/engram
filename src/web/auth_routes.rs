@@ -240,7 +240,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         let cookie = res.headers()["set-cookie"].to_str().unwrap();
-        assert!(cookie.contains("pkdb_session="));
+        assert!(cookie.contains("engram_session="));
         assert!(cookie.contains("HttpOnly"));
         assert_eq!(res.headers()["location"], "/ui/search");
     }

@@ -1,9 +1,13 @@
 {% extends "layout.html" %}
-{% block title %}Sign in — pkdb{% endblock %}
+{% block title %}Sign in — engram{% endblock %}
 {% block nav %}{% endblock %}
 {% block content %}
 <div class="card" style="max-width:22rem;margin:6rem auto">
-  <div class="card-head"><span class="card-title">Sign in to pkdb</span></div>
+  <div class="brand-lockup">
+    <img src="/assets/logo.svg" alt="" width="40" height="40">
+    <span class="brand-name">engram</span>
+  </div>
+  <p class="muted brand-tag">A trace of everything worth keeping.</p>
   {% if oidc %}
     <p class="muted">Authentication is handled by your identity provider.</p>
     <a class="btn btn-accent" href="/auth/login?go=1" style="width:100%">Continue</a>

@@ -15,7 +15,7 @@ pub struct Identity {
 
 /// Sliding session lifetime, 30 days.
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
-pub const SESSION_COOKIE: &str = "pkdb_session";
+pub const SESSION_COOKIE: &str = "engram_session";
 
 pub fn set_session_cookie(id: &str, secure: bool) -> String {
     let mut c = format!(
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn session_cookie_carries_the_required_flags() {
         let c = set_session_cookie("abc123", true);
-        assert!(c.contains("pkdb_session=abc123"));
+        assert!(c.contains("engram_session=abc123"));
         assert!(c.contains("HttpOnly"), "{c}"); // no JS access
         assert!(c.contains("SameSite=Lax"), "{c}"); // CSRF mitigation
         assert!(c.contains("Secure"), "{c}"); // HTTPS only
@@ -113,13 +113,13 @@ mod tests {
     #[test]
     fn clearing_expires_the_cookie_immediately() {
         let c = clear_session_cookie();
-        assert!(c.contains("pkdb_session="));
+        assert!(c.contains("engram_session="));
         assert!(c.contains("Max-Age=0"), "{c}");
     }
 
     #[test]
     fn cookie_value_is_read_from_a_multi_cookie_header() {
-        let header = "theme=dark; pkdb_session=wanted; other=1";
+        let header = "theme=dark; engram_session=wanted; other=1";
         assert_eq!(
             cookie_value(header, SESSION_COOKIE).as_deref(),
             Some("wanted")
@@ -130,15 +130,18 @@ mod tests {
 
     #[test]
     fn a_similarly_named_cookie_is_not_mistaken_for_the_session() {
-        assert_eq!(cookie_value("xpkdb_session=nope", SESSION_COOKIE), None);
-        assert_eq!(cookie_value("pkdb_session_old=nope", SESSION_COOKIE), None);
+        assert_eq!(cookie_value("xengram_session=nope", SESSION_COOKIE), None);
+        assert_eq!(
+            cookie_value("engram_session_old=nope", SESSION_COOKIE),
+            None
+        );
     }
 
     #[test]
     fn bearer_header_is_parsed_case_insensitively() {
-        assert_eq!(bearer("Bearer pkdb_x").as_deref(), Some("pkdb_x"));
-        assert_eq!(bearer("bearer pkdb_x").as_deref(), Some("pkdb_x"));
+        assert_eq!(bearer("Bearer engram_x").as_deref(), Some("engram_x"));
+        assert_eq!(bearer("bearer engram_x").as_deref(), Some("engram_x"));
         assert_eq!(bearer("Basic abc"), None);
-        assert_eq!(bearer("pkdb_x"), None);
+        assert_eq!(bearer("engram_x"), None);
     }
 }

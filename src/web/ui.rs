@@ -533,7 +533,7 @@ mod tests {
                 secure_cookies: false,
             }),
         };
-        (crate::web::router(state), format!("pkdb_session={sid}"))
+        (crate::web::router(state), format!("engram_session={sid}"))
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -835,7 +835,7 @@ mod tests {
             .unwrap();
         let html = body_of(res).await;
         assert!(
-            html.contains("pkdb_"),
+            html.contains("engram_"),
             "the token must be shown once: {html}"
         );
 
@@ -853,7 +853,7 @@ mod tests {
         )
         .await;
         assert!(
-            !page.contains("pkdb_"),
+            !page.contains("engram_"),
             "a stored token leaked into the ops page"
         );
     }

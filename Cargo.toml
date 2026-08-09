@@ -1,15 +1,15 @@
 [package]
-name = "pkdb"
+name = "engram"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 
 [lib]
-name = "pkdb"
+name = "engram"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pkdb"
+name = "engram"
 path = "src/main.rs"
 
 [dependencies]

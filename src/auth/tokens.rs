@@ -7,7 +7,7 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use base64::Engine;
 
-pub const TOKEN_PREFIX: &str = "pkdb_";
+pub const TOKEN_PREFIX: &str = "engram_";
 
 fn hash_secret(secret: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -108,7 +108,7 @@ mod tests {
         let s = Store::memory().await.unwrap();
         mint(&s, "laptop", "user-1").await.unwrap();
         for bad in [
-            "pkdb_wrongwrongwrongwrongwrongwrongwrongwrong",
+            "engram_wrongwrongwrongwrongwrongwrongwrongwrong",
             "garbage",
             "",
         ] {

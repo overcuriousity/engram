@@ -331,7 +331,7 @@ mod tests {
     async fn a_bad_token_is_rejected() {
         let (app, _) = app_and_token().await;
         let res = app
-            .oneshot(get("/api/v1/search?q=x", Some("pkdb_not_a_real_token")))
+            .oneshot(get("/api/v1/search?q=x", Some("engram_not_a_real_token")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);

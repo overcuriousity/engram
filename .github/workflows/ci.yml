@@ -34,4 +34,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --test integration_qdrant -- --ignored
         env:
-          PKDB_TEST_QDRANT: http://localhost:6334
+          ENGRAM_TEST_QDRANT: http://localhost:6334

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="Engram">
+  <title>Engram</title>
+  <!--
+    The mark is the mechanism: a query point in latent space with its nearest
+    neighbours bound to it, and more distant points left unconnected.
+
+    The geometry is not decorative. The three bound nodes sit ~16 units from
+    centre; the three loose ones sit ~26-30 away. Retrieval is drawn to scale.
+
+    Read a second way it is a neuron: soma, dendrites, and the field it
+    listens to.
+  -->
+  <g fill="none" stroke="currentColor" stroke-linecap="round">
+    <!-- Retrieved: bound to the query. -->
+    <g stroke="var(--color-accent, #3b6e91)" stroke-width="2.25" opacity="0.9">
+      <line x1="32" y1="32" x2="18" y2="24"/>
+      <line x1="32" y1="32" x2="46" y2="26"/>
+      <line x1="32" y1="32" x2="28" y2="48"/>
+    </g>
+  </g>
+
+  <!-- Beyond the neighbourhood: present in the space, not in the answer. -->
+  <g fill="currentColor" opacity="0.28">
+    <circle cx="55" cy="52" r="2.5"/>
+    <circle cx="40" cy="7"  r="2.5"/>
+    <circle cx="7"  cy="45" r="2.5"/>
+  </g>
+
+  <!-- The neighbourhood. -->
+  <g fill="var(--color-accent, #3b6e91)">
+    <circle cx="18" cy="24" r="4"/>
+    <circle cx="46" cy="26" r="4"/>
+    <circle cx="28" cy="48" r="4"/>
+  </g>
+
+  <!-- The query. Largest, so the glyph still reads at 16px. -->
+  <circle cx="32" cy="32" r="7.5" fill="var(--color-accent, #3b6e91)"/>
+  <circle cx="32" cy="32" r="3.25" fill="var(--color-bg-elevated, #ffffff)"/>
+</svg>

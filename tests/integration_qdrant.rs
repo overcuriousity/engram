@@ -1,19 +1,21 @@
 //! Integration tests against a real Qdrant.
 //!
 //! Requires a running server: `docker compose up -d` (or `podman run -d --name
-//! pkdb-qdrant -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 qdrant/qdrant`).
+//! engram-qdrant -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 qdrant/qdrant`).
 //!
 //! Run with: `cargo test --test integration_qdrant -- --ignored`
 //!
-//! Override the endpoint with `PKDB_TEST_QDRANT`, e.g.
-//! `PKDB_TEST_QDRANT=http://localhost:16334`.
+//! Override the endpoint with `ENGRAM_TEST_QDRANT`, e.g.
+//! `ENGRAM_TEST_QDRANT=http://localhost:16334`.
 
-use pkdb::config::VectorConfig;
-use pkdb::vector::{SearchFilter, VectorPayload, VectorPoint, VectorStore, qdrant::QdrantVectors};
+use engram::config::VectorConfig;
+use engram::vector::{
+    SearchFilter, VectorPayload, VectorPoint, VectorStore, qdrant::QdrantVectors,
+};
 
 fn cfg(collection: &str) -> VectorConfig {
     VectorConfig {
-        url: std::env::var("PKDB_TEST_QDRANT").unwrap_or_else(|_| "http://localhost:6334".into()),
+        url: std::env::var("ENGRAM_TEST_QDRANT").unwrap_or_else(|_| "http://localhost:6334".into()),
         collection: collection.to_string(),
         api_key: None,
     }
@@ -46,7 +48,7 @@ async fn fresh(name: &str, dim: usize) -> QdrantVectors {
 #[tokio::test]
 #[ignore]
 async fn upsert_search_and_payload_roundtrip() {
-    let v = fresh("pkdb_it_roundtrip", 4).await;
+    let v = fresh("engram_it_roundtrip", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
         point("b", "s1", vec![0.0, 1.0, 0.0, 0.0], &["windows"], "concept"),
@@ -71,7 +73,7 @@ async fn upsert_search_and_payload_roundtrip() {
 #[tokio::test]
 #[ignore]
 async fn filtered_search_uses_payload_indexes() {
-    let v = fresh("pkdb_it_filter", 4).await;
+    let v = fresh("engram_it_filter", 4).await;
     v.upsert(vec![
         point(
             "a",
@@ -111,7 +113,7 @@ async fn filtered_search_uses_payload_indexes() {
 async fn multiple_tags_are_an_and_not_an_or() {
     // The in-memory implementation requires every listed tag. Qdrant must
     // agree, or filtered search means different things in tests and production.
-    let v = fresh("pkdb_it_tags_and", 4).await;
+    let v = fresh("engram_it_tags_and", 4).await;
     v.upsert(vec![
         point(
             "both",
@@ -144,7 +146,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
 #[tokio::test]
 #[ignore]
 async fn upsert_is_idempotent_per_chunk_id() {
-    let v = fresh("pkdb_it_idempotent", 4).await;
+    let v = fresh("engram_it_idempotent", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
         .unwrap();
@@ -164,7 +166,7 @@ async fn upsert_is_idempotent_per_chunk_id() {
 #[tokio::test]
 #[ignore]
 async fn delete_by_source_removes_only_that_source() {
-    let v = fresh("pkdb_it_delete", 4).await;
+    let v = fresh("engram_it_delete", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
         point("b", "s2", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -185,7 +187,7 @@ async fn delete_by_source_removes_only_that_source() {
 #[tokio::test]
 #[ignore]
 async fn delete_chunks_removes_exactly_the_listed_ids() {
-    let v = fresh("pkdb_it_delete_chunks", 4).await;
+    let v = fresh("engram_it_delete_chunks", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
         point("b", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -206,7 +208,7 @@ async fn delete_chunks_removes_exactly_the_listed_ids() {
 #[tokio::test]
 #[ignore]
 async fn a_dimension_change_is_refused_rather_than_silently_accepted() {
-    let v = QdrantVectors::connect(&cfg("pkdb_it_dim")).await.unwrap();
+    let v = QdrantVectors::connect(&cfg("engram_it_dim")).await.unwrap();
     v.drop_collection().await.unwrap();
     v.ensure_collection(4).await.unwrap();
 
@@ -220,7 +222,7 @@ async fn a_dimension_change_is_refused_rather_than_silently_accepted() {
 #[ignore]
 async fn ensure_collection_is_idempotent_at_the_same_dimension() {
     // Every restart calls this; it must not fail or recreate the collection.
-    let v = fresh("pkdb_it_idem_ensure", 4).await;
+    let v = fresh("engram_it_idem_ensure", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
         .unwrap();

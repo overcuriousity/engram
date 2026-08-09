@@ -1,4 +1,4 @@
-//! pkdb: a self-hosted personal knowledge base.
+//! engram: a self-hosted personal knowledge base.
 //!
 //! Exposed as a library so the integration suite can drive the same code the
 //! binary runs.

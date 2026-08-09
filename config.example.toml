@@ -1,8 +1,8 @@
-# pkdb configuration.
+# engram configuration.
 #
-# Every key can be overridden by an environment variable using the PKDB__
+# Every key can be overridden by an environment variable using the ENGRAM__
 # prefix and __ as the nesting separator, e.g.
-#   PKDB__INFER__EMBED__DIM=768
+#   ENGRAM__INFER__EMBED__DIM=768
 #
 # Secrets (client_secret, api_key) belong in the environment, NOT in this file.
 # The loader warns at startup if it finds one here.
@@ -14,12 +14,12 @@ workers = 2
 
 [store]
 # SQLite file. Created on first run. Back this up.
-path = "pkdb.db"
+path = "engram.db"
 
 [vector]
 url = "http://localhost:6334"
 collection = "chunks"
-# api_key = "..."   # prefer PKDB__VECTOR__API_KEY
+# api_key = "..."   # prefer ENGRAM__VECTOR__API_KEY
 
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three
@@ -78,9 +78,9 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 # everyone rather than admitting every account your identity provider knows.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
-# client_id = "pkdb"
-# client_secret = "..."          # prefer PKDB__AUTH__OIDC__CLIENT_SECRET
-# redirect_url = "https://pkdb.example/auth/callback"
+# client_id = "engram"
+# client_secret = "..."          # prefer ENGRAM__AUTH__OIDC__CLIENT_SECRET
+# redirect_url = "https://engram.example/auth/callback"
 # scopes = ["openid", "profile", "email"]
 # allowed_subs = ["sub-abc123"]
 # allowed_emails = ["you@example.com"]

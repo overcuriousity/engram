@@ -227,9 +227,9 @@ mod tests {
     fn cfg(subs: &[&str], emails: &[&str]) -> OidcConfig {
         OidcConfig {
             issuer_url: "https://idp.example".into(),
-            client_id: "pkdb".into(),
+            client_id: "engram".into(),
             client_secret: Some("s".into()),
-            redirect_url: "https://pkdb.example/auth/callback".into(),
+            redirect_url: "https://engram.example/auth/callback".into(),
             scopes: vec!["openid".into()],
             allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),

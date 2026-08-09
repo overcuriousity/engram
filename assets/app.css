@@ -204,3 +204,18 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
 .stack { display: flex; flex-direction: column; gap: 0.75rem; }
 .spinner { visibility: hidden; color: var(--color-fg-muted); font-size: 0.75rem; }
 .htmx-request .spinner, .htmx-request.spinner { visibility: visible; }
+
+/* ── Brand ───────────────────────────────────────────────────────────────── */
+/* The logo inherits the theme: its accent comes from --color-accent and its
+   faint nodes from currentColor, so it recolours with the rest of the UI. */
+nav.top a.brand {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-weight: 600; color: var(--color-fg-primary);
+  padding-left: 0; margin-right: 0.5rem;
+}
+nav.top a.brand:hover { background: transparent; }
+nav.top a.brand img { display: block; }
+
+.brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
+.brand-name { font-size: 1.375rem; font-weight: 600; letter-spacing: -0.02em; }
+.brand-tag { margin-top: 0; margin-bottom: 1rem; }

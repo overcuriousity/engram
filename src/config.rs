@@ -147,7 +147,7 @@ impl Config {
         }
         let raw = builder
             .add_source(
-                config::Environment::with_prefix("PKDB")
+                config::Environment::with_prefix("ENGRAM")
                     .separator("__")
                     .list_separator(","),
             )
@@ -170,7 +170,7 @@ impl Config {
                 tracing::warn!(
                     key,
                     file = %p.display(),
-                    "secret found in config file; prefer the PKDB__ environment variable"
+                    "secret found in config file; prefer the ENGRAM__ environment variable"
                 );
             }
         }
@@ -201,7 +201,7 @@ mod tests {
     use super::*;
 
     /// Environment variables are process-global, but `cargo test` runs tests on
-    /// parallel threads. Without this, the env-override test mutates `PKDB__*`
+    /// parallel threads. Without this, the env-override test mutates `ENGRAM__*`
     /// while another test is deserializing config and the two race.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -220,7 +220,7 @@ mod tests {
 bind = "127.0.0.1:8080"
 
 [store]
-path = "pkdb.db"
+path = "engram.db"
 
 [vector]
 url = "http://localhost:6334"
@@ -271,7 +271,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
-        temp_env::with_var("PKDB__INFER__EMBED__DIM", Some("768"), || {
+        temp_env::with_var("ENGRAM__INFER__EMBED__DIM", Some("768"), || {
             let cfg = Config::load(Some(&p)).unwrap();
             assert_eq!(cfg.infer.embed.dim, 768);
         });

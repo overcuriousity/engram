@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}pkdb{% endblock %}</title>
+  <title>{% block title %}engram{% endblock %}</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/htmx.min.js" defer></script>
 </head>
@@ -11,6 +12,10 @@
   <div class="shell">
     {% block nav %}
     <nav class="top">
+      <a href="/ui/search" class="brand" aria-label="engram">
+        <img src="/assets/logo.svg" alt="" width="22" height="22">
+        <span>engram</span>
+      </a>
       <a href="/ui/capture">Capture</a>
       <a href="/ui/search">Search</a>
       <a href="/ui/browse">Browse</a>
