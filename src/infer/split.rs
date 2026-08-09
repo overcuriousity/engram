@@ -111,9 +111,6 @@ fn flush(
     buf.clear();
 }
 
-/// Deterministic paragraph split with no rewriting. Used when the chunker's
-/// output cannot be parsed twice in a row: a source must never end up with
-/// zero chunks just because a model returned bad JSON.
 /// The exact lines of a stored window, one-based and inclusive.
 ///
 /// Takes line numbers rather than a `Window` because windows live in the
@@ -130,6 +127,9 @@ pub fn window_text(text: &str, start_line: i64, end_line: i64) -> String {
         .join("\n")
 }
 
+/// Deterministic paragraph split with no rewriting. Used when the chunker's
+/// output cannot be parsed twice in a row: a source must never end up with
+/// zero chunks just because a model returned bad JSON.
 pub fn structural_chunks(text: &str) -> Vec<(String, i64, i64)> {
     let mut out = Vec::new();
     let mut buf: Vec<&str> = Vec::new();

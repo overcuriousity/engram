@@ -315,7 +315,18 @@ impl Embedder for StrictEmbedder {
 }
 
 #[derive(Default)]
-pub struct FakeReranker;
+pub struct FakeReranker {
+    /// How many documents the last call was handed. A reranker can only promote
+    /// what it is given, so a test about over-fetching has to look at this
+    /// rather than at the answer.
+    saw: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeReranker {
+    pub fn docs_seen(&self) -> usize {
+        self.saw.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 impl Reranker for FakeReranker {
@@ -325,6 +336,8 @@ impl Reranker for FakeReranker {
         docs: &[String],
         top_n: usize,
     ) -> Result<Vec<(usize, f32)>> {
+        self.saw
+            .store(docs.len(), std::sync::atomic::Ordering::SeqCst);
         let mut out: Vec<(usize, f32)> = (0..docs.len()).map(|i| (i, i as f32)).collect();
         out.reverse();
         out.truncate(top_n);
@@ -412,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_reranker_reverses_order_so_tests_can_observe_it() {
-        let r = FakeReranker;
+        let r = FakeReranker::default();
         let out = r
             .rerank("q", &["a".into(), "b".into(), "c".into()], 2)
             .await

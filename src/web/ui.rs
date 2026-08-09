@@ -1019,6 +1019,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deep_link_runs_its_query_instead_of_only_filling_the_box() {
+        // `/ui/search?q=dd` restored the text but not the results, so the page
+        // opened as a filled box over an empty rail until someone typed.
+        let (app, cookie) = app_with_session().await;
+        let page = |uri: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                let res = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header("cookie", cookie)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::OK);
+                body_of(res).await
+            }
+        };
+
+        let linked = page("/ui/search?q=mounting").await;
+        assert!(
+            linked.contains("load"),
+            "the deep link never asks for its own results"
+        );
+        assert!(
+            !page("/ui/search").await.contains("load"),
+            "an empty box has nothing to search for"
+        );
+    }
+
+    #[tokio::test]
     async fn search_results_are_a_fragment_not_a_page() {
         let (app, cookie) = app_with_session().await;
         app.clone()

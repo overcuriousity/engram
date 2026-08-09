@@ -4,7 +4,9 @@
 <input class="input" type="search" name="q" placeholder="Search by meaning…" autofocus
        value="{{ q }}"
        hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
-       hx-trigger="keyup changed delay:250ms, search"
+       {# `load` runs the query a deep link arrived with, so the box and the
+          rail agree. Guarded: an empty box has nothing to search for. #}
+       hx-trigger="keyup changed delay:250ms, search{% if !q.is_empty() %}, load{% endif %}"
        hx-indicator="#search-spinner">
 <div class="row" style="margin:0.5rem 0 1rem">
   <span id="search-spinner" class="spinner">searching…</span>

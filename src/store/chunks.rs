@@ -294,19 +294,40 @@ impl Store {
         Ok(())
     }
 
+    /// The chunks a window's next write replaces.
+    ///
+    /// Chunks with no window at all are included, because a source segmented
+    /// before windows existed has nothing else to key on: leaving them out
+    /// would append the new segmentation beside the old one instead of
+    /// replacing it. They are swept by whichever window writes first, and there
+    /// are none left by the second.
     pub async fn chunk_ids_for_window(
         &self,
         source_id: &str,
         window_idx: i64,
     ) -> Result<Vec<String>> {
         let rows = sqlx::query(
-            "SELECT id FROM chunks WHERE source_id = ? AND window_idx = ? ORDER BY ordinal",
+            "SELECT id FROM chunks WHERE source_id = ?
+               AND (window_idx = ? OR window_idx IS NULL)
+             ORDER BY ordinal",
         )
         .bind(source_id)
         .bind(window_idx)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
+    /// Open a gap of `by` ordinals after `ordinal`, so chunks inserted into it
+    /// keep reading order without renumbering the whole source.
+    pub async fn make_room_after(&self, source_id: &str, ordinal: i64, by: i64) -> Result<()> {
+        sqlx::query("UPDATE chunks SET ordinal = ordinal + ? WHERE source_id = ? AND ordinal > ?")
+            .bind(by)
+            .bind(source_id)
+            .bind(ordinal)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Give a source one continuous ordinal sequence again.

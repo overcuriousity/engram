@@ -289,11 +289,18 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
 /// Scoped to the windows that never finished: a structural split is worse than
 /// an LLM split, and applying it to windows that already succeeded would throw
 /// away good work to punish one bad one.
-pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<()> {
+///
+/// Returns whether windows are still waiting for the model, which the caller
+/// answers with a fresh job. It cannot be enqueued here: the caller's own job
+/// row is keyed `(stage, target_id)`, so enqueuing the same source would reuse
+/// that row and the `complete_job` that follows would close it again — the
+/// untried windows would be left with nothing to come back to.
+pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<bool> {
     let src = core.store.get_source(source_id).await?;
     let pending = core.store.pending_windows(source_id).await?;
     if pending.is_empty() {
-        return finish(core, source_id).await;
+        finish(core, source_id).await?;
+        return Ok(false);
     }
 
     // Only demote windows that have actually spent their attempts. A local
@@ -312,14 +319,11 @@ pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str
             windows = untried.len(),
             "leaving untried windows queued rather than splitting them structurally"
         );
-        core.store
-            .enqueue(Stage::Segment, "source", source_id)
-            .await?;
     }
 
     if tried.is_empty() {
-        // Nothing has earned a fallback yet, and a job is queued to try again.
-        return Ok(());
+        // Nothing has earned a fallback yet; the caller queues another attempt.
+        return Ok(true);
     }
 
     for w in tried {
@@ -356,9 +360,10 @@ pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str
     // Windows still waiting for their own attempts mean the source is not
     // settled yet; finishing here would enqueue embedding for half a document.
     if core.store.pending_windows(source_id).await?.is_empty() {
-        return finish(core, source_id).await;
+        finish(core, source_id).await?;
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
 
 fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
@@ -631,7 +636,7 @@ Then run sync.";
         // The endpoint refuses while the first window is running; the rest of
         // the source never gets a call at all.
         assert!(run(&core, &out.id).await.is_err());
-        fallback_pending_windows(&core, &out.id, "502 Bad Gateway")
+        let requeue = fallback_pending_windows(&core, &out.id, "502 Bad Gateway")
             .await
             .unwrap();
 
@@ -653,13 +658,48 @@ Then run sync.";
             "untried windows must stay queued for the model"
         );
 
-        let mut requeued = false;
-        while let Some(j) = core.store.claim_job().await.unwrap() {
-            if j.stage == Stage::Segment && j.target_id == out.id {
-                requeued = true;
-            }
+        assert!(
+            requeue,
+            "the untried windows need a job to come back to, and only the \
+             caller can enqueue it without its own row being closed underneath"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_with_untried_windows_still_has_a_job_after_the_fallback() {
+        // The fallback used to enqueue the retry itself. The queue is keyed by
+        // (stage, target), so that reused the very row the worker was running,
+        // and the `complete_job` that followed closed it again: the untried
+        // windows were abandoned and the source sat in `segmenting` forever.
+        let mut core = test_core().await;
+        let body = multi_window_body();
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        assert!(window_count(&core, &body) > 2);
+        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing("502"));
+
+        for _ in 0..=crate::store::jobs::MAX_ATTEMPTS {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            let _ = crate::jobs::run_one(&core).await;
         }
-        assert!(requeued, "the untried windows need a job to come back to");
+
+        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        assert!(
+            windows.iter().any(|w| w.state == WindowState::Pending),
+            "this test only proves anything while windows are still untried"
+        );
+        // Past the backoff the last failure set, which is a delay rather than
+        // the question here.
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap();
+        let job = job.expect("the untried windows were left with no job at all");
+        assert_eq!(job.stage, Stage::Segment);
+        assert_eq!(job.target_id, out.id);
     }
 
     #[tokio::test]
@@ -719,6 +759,41 @@ Then run sync.";
         assert!(
             started.elapsed() >= pause * (windows as u32 - 1),
             "each window but the last should have been followed by a pause"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_segmenting_replaces_chunks_written_before_windows_existed() {
+        // Chunks from before the window column was added carry no window, so
+        // the per-window delete could not see them and a re-segmentation
+        // appended a second copy of the whole source beside the first.
+        let core = test_core().await;
+        let out = core
+            .ingest("one para\n\ntwo para", "web", None)
+            .await
+            .unwrap();
+        run(&core, &out.id).await.unwrap();
+        let before = core.store.chunks_for_source(&out.id).await.unwrap().len();
+
+        // What an older database holds: chunks with no window, and no window
+        // rows to resume from.
+        sqlx::query("UPDATE chunks SET window_idx = NULL WHERE source_id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM segment_windows WHERE source_id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        assert_eq!(
+            core.store.chunks_for_source(&out.id).await.unwrap().len(),
+            before,
+            "the pre-window chunks were left in place and duplicated"
         );
     }
 

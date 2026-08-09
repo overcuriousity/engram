@@ -32,7 +32,15 @@ impl VectorStore for MemoryVectors {
 
     async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        for p in points {
+        for mut p in points {
+            // Matching the Qdrant path: a re-embed rebuilds the payload without
+            // knowing when the chunk was last shown, and clearing the stamp
+            // would make a chunk read yesterday look forgotten.
+            if p.payload.last_seen_at.is_none() {
+                p.payload.last_seen_at = w
+                    .get(&p.payload.chunk_id)
+                    .and_then(|old| old.payload.last_seen_at);
+            }
             w.insert(p.payload.chunk_id.clone(), p);
         }
         Ok(())

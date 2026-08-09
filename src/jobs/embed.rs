@@ -325,13 +325,20 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     tracing::info!(chunk_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
+    // Make the siblings' room before numbering them. Numbering them apart from
+    // their neighbours instead — `base * 1000 + i` — sorts chunk 2's siblings
+    // after chunks 3 onward rather than before them, and the next segmentation
+    // pass renumbers that wrong order into place permanently.
+    core.store
+        .make_room_after(&chunk.source_id, base, parts.len() as i64 - 1)
+        .await?;
     let new: Vec<NewChunk> = parts
         .iter()
         .enumerate()
         .map(|(i, text)| NewChunk {
             // Siblings sort after the original position and before the next
             // original chunk, which keeps reading order intact.
-            ordinal: base * 1000 + i as i64,
+            ordinal: base + i as i64,
             text: text.clone(),
             source_span: chunk.source_span.clone(),
             title: chunk.title.clone(),
@@ -364,7 +371,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         category: chunk.category.clone(),
         tags: chunk.tags.clone(),
         created_at: chunk.created_at,
-        // Left unset so re-embedding does not make a chunk look forgotten.
+        // Unset means "whatever is already stored": the vector store carries
+        // the existing stamp forward rather than letting a re-embed make a
+        // chunk look forgotten.
         last_seen_at: None,
     }
 }
@@ -833,6 +842,59 @@ mod tests {
             core.store.pending_embed_count(&src_id).await.unwrap(),
             ids.len() as i64,
             "the reprocess was silently cancelled by the job it interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_embedding_does_not_make_a_chunk_look_forgotten() {
+        // A point write replaces the payload rather than merging it, so a
+        // re-embed built from the chunk row used to clear `last_seen_at` — and
+        // `resurface` would offer a chunk read yesterday as forgotten.
+        let core = test_core().await;
+        let (_src, ids) = seed(&core, &["text"]).await;
+        run(&core, &ids[0]).await.unwrap();
+        core.vectors.touch(&ids[0..1], 1_700_000_000).await.unwrap();
+
+        core.store
+            .update_chunk_text(&ids[0], "edited text")
+            .await
+            .unwrap();
+        run(&core, &ids[0]).await.unwrap();
+
+        let forgotten = core
+            .vectors
+            .resurface(10, i64::MAX, 1_700_000_000)
+            .await
+            .unwrap();
+        assert!(
+            forgotten.is_empty(),
+            "the re-embed dropped the stamp and the chunk now reads as unseen"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_siblings_keep_the_reading_order_of_the_chunk_they_replace() {
+        // `base * 1000 + i` put chunk 1's siblings after chunks 2 onward, and
+        // the next segmentation pass renumbered that order into place for good.
+        let core = test_core().await;
+        let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
+        let (src_id, ids) = seed(&core, &["first", &big, "last"]).await;
+
+        run_with_limit(&core, &ids[1], 200).await.unwrap();
+
+        let texts: Vec<String> = core
+            .store
+            .chunks_for_source(&src_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("first"));
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("last"),
+            "the siblings sorted past the chunk that follows them: {texts:?}"
         );
     }
 

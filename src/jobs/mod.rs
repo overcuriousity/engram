@@ -57,8 +57,17 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                     match segment::fallback_pending_windows(core, &job.target_id, &e.to_string())
                         .await
                     {
-                        Ok(()) => {
+                        Ok(requeue) => {
                             core.store.complete_job(job.id).await?;
+                            // After closing this job, never before: the queue is
+                            // keyed by (stage, target), so an earlier enqueue
+                            // would be the very row `complete_job` then marks
+                            // done, and the untried windows would be abandoned.
+                            if requeue {
+                                core.store
+                                    .enqueue(Stage::Segment, "source", &job.target_id)
+                                    .await?;
+                            }
                         }
                         Err(fe) => {
                             core.store

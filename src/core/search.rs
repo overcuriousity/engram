@@ -57,7 +57,7 @@ fn now_secs() -> i64 {
 }
 
 /// Promote at most `max` hits per source to the front of the list, then refill
-/// from what that displaced until `limit` is reached.
+/// from what that displaced until `target` is reached.
 ///
 /// The cap is a diversity rule, not a ceiling. Capping alone would mean a base
 /// holding two sources could never answer with more than `2 * max` results
@@ -68,7 +68,7 @@ fn now_secs() -> i64 {
 fn cap_per_source(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
-    limit: usize,
+    target: usize,
 ) -> Vec<crate::vector::SearchHit> {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut kept = Vec::with_capacity(hits.len());
@@ -82,8 +82,8 @@ fn cap_per_source(
             displaced.push(h);
         }
     }
-    if kept.len() < limit {
-        let room = limit - kept.len();
+    if kept.len() < target {
+        let room = target - kept.len();
         kept.extend(displaced.into_iter().take(room));
     }
     kept
@@ -241,9 +241,12 @@ impl Core {
             .await?;
 
         // Cap before reranking, in vector order, so what leads per source is
-        // that source's best.
+        // that source's best. The refill target is the candidate pool rather
+        // than the answer: refilling only to `limit` would hand the reranker
+        // exactly `limit` hits whenever a few sources dominate, which is the
+        // case over-fetching exists for. The final truncate still cuts to size.
         let hits = match cap {
-            Some(max) => cap_per_source(hits, max, limit),
+            Some(max) => cap_per_source(hits, max, candidates),
             None => hits,
         };
 
@@ -548,6 +551,37 @@ mod tests {
         query.limit = 5;
         let hits = core.search(&query).await.unwrap();
         assert_eq!(hits.len(), 5, "result count must still honour the limit");
+    }
+
+    #[tokio::test]
+    async fn the_per_source_cap_does_not_starve_the_reranker() {
+        // The cap runs first, and it used to refill only up to the limit: on a
+        // corpus of a few long documents that handed the reranker exactly the
+        // answer it was meant to choose from, so over-fetching bought nothing.
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        // Two long documents: the cap keeps three from each, so the refill is
+        // what has to reach the candidate pool rather than only the answer.
+        for name in ["one", "two"] {
+            let texts: Vec<String> = (0..20).map(|i| format!("{name} chunk {i}")).collect();
+            let refs: Vec<(&str, &str, &[&str])> =
+                texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+            seed_from(&core, name, &refs).await;
+        }
+
+        let query = q("anything");
+        let hits = core.search(&query).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            query.limit,
+            "the limit still decides the length"
+        );
+        assert!(
+            reranker.docs_seen() > query.limit,
+            "the reranker was handed {} candidates for a limit of {}, so it \
+             could only reorder the answer it was already given",
+            reranker.docs_seen(),
+            query.limit
+        );
     }
 
     #[tokio::test]

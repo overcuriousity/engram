@@ -83,11 +83,15 @@ pub mod test_support {
     }
 
     pub async fn test_core_with_rerank() -> Core {
-        build(
-            Arc::new(FakeChunker::default()),
-            Some(Arc::new(FakeReranker)),
-        )
-        .await
+        test_core_counting_reranked_docs().await.0
+    }
+
+    /// A core plus a handle on its reranker, for asserting how wide the
+    /// candidate pool it was handed actually was.
+    pub async fn test_core_counting_reranked_docs() -> (Core, Arc<FakeReranker>) {
+        let reranker = Arc::new(FakeReranker::default());
+        let core = build(Arc::new(FakeChunker::default()), Some(reranker.clone())).await;
+        (core, reranker)
     }
 
     /// A core plus a handle on its embedder, for asserting how many times the
