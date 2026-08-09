@@ -158,6 +158,23 @@ Everything except the Qdrant suite runs without infrastructure: the inference
 roles and the vector store sit behind traits, and the tests inject deterministic
 fakes plus an in-memory brute-force vector store.
 
+## Security posture
+
+- Chunk text is model output rendered into an authenticated session, so it is
+  treated as untrusted: rendered markdown is sanitized with `ammonia` and the
+  URL scheme allowlist is explicit. The one `|safe` interpolation in the
+  templates is the already-sanitized output.
+- API tokens are argon2id hashed and shown exactly once. Sessions are
+  server-side rows, so signing out actually revokes.
+- Local auth mode refuses a non-loopback bind without an explicit override
+  flag.
+- Internal errors (SQL, prompt fragments) never reach clients; they go to the
+  log and the client sees a generic message.
+- CI runs `cargo audit` on every push. Advisories are ignored one id at a time
+  in `.cargo/audit.toml`, each with a written reachability argument — currently
+  one entry, RUSTSEC-2023-0071 in `rsa` via `openidconnect`, which concerns
+  private-key operations that engram never performs.
+
 ## Not built (yet)
 
 Hybrid keyword + vector search (the FTS5 index and its triggers exist and are

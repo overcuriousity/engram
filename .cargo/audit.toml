@@ -1,0 +1,35 @@
+# cargo-audit configuration.
+#
+# Advisories are ignored one id at a time, never by package or wholesale, and
+# every entry carries the reachability argument that justifies it. If you cannot
+# write that argument, fix the dependency instead of adding a line here.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071 — "Marvin Attack" timing sidechannel in `rsa` 0.9.x.
+  # Reached via: engram -> openidconnect 4.0.1 -> rsa 0.9.10.
+  # No patched release exists upstream.
+  #
+  # Not reachable in this codebase. The attack recovers an RSA *private* key by
+  # observing timing during decryption or signing. engram performs neither:
+  #
+  #   * ID tokens are *verified* using the identity provider's public key
+  #     (src/auth/oidc.rs, `id_token.claims(&client.id_token_verifier(), ...)`).
+  #     Verification is a public-key operation; there is no private key held by
+  #     this process for an attacker to recover.
+  #   * Client authentication uses `client_secret`, not `private_key_jwt`, so no
+  #     RSA private key is configured or used anywhere in the OIDC flow.
+  #   * TLS is handled by rustls (aws-lc-rs), not by this crate.
+  #
+  # Re-review if any of the following becomes true:
+  #   * openidconnect ships a release depending on a fixed `rsa`, at which point
+  #     this entry should be deleted rather than carried forward.
+  #   * engram starts using `private_key_jwt` client authentication, or signs
+  #     anything with RSA. Then the advisory becomes live and must be fixed.
+  "RUSTSEC-2023-0071",
+]
+
+# Informational advisories still surface in the log. `paste` (via tokenizers) is
+# currently flagged unmaintained; that is worth seeing, not worth failing on,
+# and it is not silenced here.
+informational_warnings = ["unmaintained", "unsound", "notice"]
