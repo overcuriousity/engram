@@ -1,6 +1,8 @@
 mod config;
+mod core;
 mod error;
 mod infer;
+mod jobs;
 mod store;
 mod vector;
 
