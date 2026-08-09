@@ -1,0 +1,86 @@
+# pkdb configuration.
+#
+# Every key can be overridden by an environment variable using the PKDB__
+# prefix and __ as the nesting separator, e.g.
+#   PKDB__INFER__EMBED__DIM=768
+#
+# Secrets (client_secret, api_key) belong in the environment, NOT in this file.
+# The loader warns at startup if it finds one here.
+
+[server]
+bind = "127.0.0.1:8080"
+# Number of background worker tasks draining the job queue.
+workers = 2
+
+[store]
+# SQLite file. Created on first run. Back this up.
+path = "pkdb.db"
+
+[vector]
+url = "http://localhost:6334"
+collection = "chunks"
+# api_key = "..."   # prefer PKDB__VECTOR__API_KEY
+
+# ── Inference roles ─────────────────────────────────────────────────────────
+# Three independent roles. They may all point at one server, or at three
+# different ones — swapping any single role does not affect the others.
+
+[infer.chunk]
+base_url = "http://localhost:8000/v1"
+model = "qwen"
+# The model's real context window.
+context_tokens = 32768
+# Hard cap on output tokens per segmentation call.
+max_output_tokens = 8192
+# The chunker rewrites rather than splits, so output can exceed input. This is
+# how much larger to assume it can get when sizing input windows.
+output_ratio = 1.4
+# Optional path to a tokenizer.json for exact token counting. Without it,
+# budgets fall back to a conservative characters/3.5 estimate.
+# tokenizer_path = "/models/qwen/tokenizer.json"
+
+[infer.embed]
+base_url = "http://localhost:8000/v1"
+model = "bge-m3"
+# MUST match the vector dimension of the Qdrant collection. Changing this
+# against an existing collection is refused at startup.
+dim = 1024
+# Many embedding models cap at 512; check yours.
+max_input_tokens = 8192
+
+[infer.ask]
+base_url = "http://localhost:8000/v1"
+model = "qwen"
+context_tokens = 32768
+
+# Reranking is optional and disabled by default. There is no OpenAI-standard
+# rerank endpoint, so the wire format is configured explicitly.
+# style = "tei" | "cohere" | "vllm"
+# [infer.rerank]
+# base_url = "http://localhost:8001"
+# model = "bge-reranker-v2-m3"
+# style = "tei"
+
+# ── Authentication ──────────────────────────────────────────────────────────
+# Exactly one mode is active.
+
+[auth]
+mode = "local"
+
+# Development only. Refuses to bind to a non-loopback address unless
+# --i-know-this-is-insecure is passed. Generate the hash with:
+#   cargo run -- --hash-password 'your password'
+[auth.local]
+username = "dev"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
+
+# Production. The allowlist is mandatory: leaving both lists empty denies
+# everyone rather than admitting every account your identity provider knows.
+# [auth.oidc]
+# issuer_url = "https://idp.example/realms/main"
+# client_id = "pkdb"
+# client_secret = "..."          # prefer PKDB__AUTH__OIDC__CLIENT_SECRET
+# redirect_url = "https://pkdb.example/auth/callback"
+# scopes = ["openid", "profile", "email"]
+# allowed_subs = ["sub-abc123"]
+# allowed_emails = ["you@example.com"]
