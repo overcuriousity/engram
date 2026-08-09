@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}engram{% endblock %}</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  {# Installable as an app. iOS reads the touch icon and its own meta tags
+     rather than the manifest, so both are declared. #}
+  <link rel="manifest" href="/assets/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="engram">
+  <meta name="mobile-web-app-capable" content="yes">
+  {# The colour behind the status bar, per theme, so an installed window does
+     not frame a light page in a dark bar or the reverse. #}
+  <meta name="theme-color" content="#f8f6f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1015" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/htmx.min.js" defer></script>
   <script src="/assets/app.js" defer></script>

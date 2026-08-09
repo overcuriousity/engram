@@ -4,6 +4,17 @@
 (function () {
   'use strict';
 
+  // Registering the worker is what makes the browser offer to install engram
+  // rather than bookmark it. Guarded on both the API and a secure context,
+  // because plain HTTP on a LAN address has neither and must still work.
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js').catch(function (e) {
+        console.warn('service worker registration failed', e);
+      });
+    });
+  }
+
   function terms(root) {
     var host = root.closest ? (root.closest('[data-terms]') || root.querySelector('[data-terms]')) : null;
     if (!host && root.getAttribute && root.getAttribute('data-terms') !== null) host = root;

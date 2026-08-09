@@ -1,0 +1,23 @@
+{
+  "name": "engram",
+  "short_name": "engram",
+  "description": "Paste a document once; find the paragraph that answers you a year later.",
+  "id": "/ui/search",
+  "start_url": "/ui/search",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0e1015",
+  "theme_color": "#0e1015",
+  "icons": [
+    { "src": "/assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Capture", "url": "/ui/capture" },
+    { "name": "Search", "url": "/ui/search" },
+    { "name": "Ask", "url": "/ui/ask" }
+  ]
+}
