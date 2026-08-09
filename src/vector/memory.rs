@@ -1,4 +1,4 @@
-use super::{SearchFilter, SearchHit, VectorPoint, VectorStore, cosine};
+use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPoint, VectorStore, cosine};
 use crate::error::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -22,6 +22,21 @@ impl Default for MemoryVectors {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Counts into chips, most frequent first. Ties break on the value so a
+/// HashMap's iteration order never leaks into what the page renders.
+fn ranked(counts: HashMap<&str, u64>, limit: usize) -> Vec<FacetCount> {
+    let mut out: Vec<FacetCount> = counts
+        .into_iter()
+        .map(|(value, count)| FacetCount {
+            value: value.to_string(),
+            count,
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    out.truncate(limit);
+    out
 }
 
 #[async_trait]
@@ -115,6 +130,46 @@ impl VectorStore for MemoryVectors {
             .collect();
         // Tie-break on artifact_id so equal scores produce a stable order rather
         // than whatever the HashMap iterated this time.
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.payload.artifact_id.cmp(&b.payload.artifact_id))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    async fn facets(&self, limit: usize) -> Result<Facets> {
+        let r = self.points.read().unwrap();
+        let mut categories: HashMap<&str, u64> = HashMap::new();
+        let mut tags: HashMap<&str, u64> = HashMap::new();
+        for p in r.values() {
+            if let Some(c) = &p.payload.category {
+                *categories.entry(c.as_str()).or_default() += 1;
+            }
+            for t in &p.payload.tags {
+                *tags.entry(t.as_str()).or_default() += 1;
+            }
+        }
+        Ok(Facets {
+            categories: ranked(categories, limit),
+            tags: ranked(tags, limit),
+        })
+    }
+
+    async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let r = self.points.read().unwrap();
+        let Some(seed) = r.get(artifact_id) else {
+            return Ok(vec![]);
+        };
+        let mut hits: Vec<SearchHit> = r
+            .values()
+            .filter(|p| p.payload.artifact_id != artifact_id)
+            .map(|p| SearchHit {
+                payload: p.payload.clone(),
+                score: cosine(&seed.vector, &p.vector),
+            })
+            .collect();
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -371,5 +426,105 @@ mod tests {
                 "identical scores produced an unstable ordering"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn facets_count_every_value_and_sort_by_frequency() {
+        let v = MemoryVectors::new();
+        v.ensure_collection(3).await.unwrap();
+        v.upsert(vec![
+            point(
+                "a",
+                "s",
+                vec![1.0, 0.0, 0.0],
+                &["linux", "shared"],
+                "procedure",
+            ),
+            point("b", "s", vec![1.0, 0.0, 0.0], &["shared"], "procedure"),
+            point("c", "s", vec![1.0, 0.0, 0.0], &["shared"], "concept"),
+        ])
+        .await
+        .unwrap();
+
+        let f = v.facets(10).await.unwrap();
+        assert_eq!(
+            f.categories,
+            vec![
+                FacetCount {
+                    value: "procedure".into(),
+                    count: 2
+                },
+                FacetCount {
+                    value: "concept".into(),
+                    count: 1
+                },
+            ]
+        );
+        assert_eq!(
+            f.tags,
+            vec![
+                FacetCount {
+                    value: "shared".into(),
+                    count: 3
+                },
+                FacetCount {
+                    value: "linux".into(),
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn facets_cap_each_list_at_the_limit() {
+        let v = MemoryVectors::new();
+        v.ensure_collection(3).await.unwrap();
+        v.upsert(
+            (0..10)
+                .map(|i| {
+                    point(
+                        &format!("a{i}"),
+                        "s",
+                        vec![1.0, 0.0, 0.0],
+                        &[],
+                        &format!("cat{i}"),
+                    )
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.facets(3).await.unwrap().categories.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn neighbours_rank_by_similarity_and_exclude_the_artifact_itself() {
+        let v = MemoryVectors::new();
+        v.ensure_collection(3).await.unwrap();
+        v.upsert(vec![
+            point("seed", "s", vec![1.0, 0.0, 0.0], &[], "c"),
+            point("close", "s", vec![0.9, 0.1, 0.0], &[], "c"),
+            point("distant", "s", vec![0.0, 0.0, 1.0], &[], "c"),
+        ])
+        .await
+        .unwrap();
+
+        let n = v.neighbours("seed", 10).await.unwrap();
+        assert_eq!(
+            n.iter()
+                .map(|h| h.payload.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["close", "distant"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_artifact_has_no_neighbours() {
+        let v = MemoryVectors::new();
+        v.ensure_collection(3).await.unwrap();
+        v.upsert(vec![point("a", "s", vec![1.0, 0.0, 0.0], &[], "c")])
+            .await
+            .unwrap();
+        assert!(v.neighbours("missing", 5).await.unwrap().is_empty());
     }
 }

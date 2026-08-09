@@ -11,7 +11,7 @@
 //! background rebuild followed by an atomic swap, rather than an outage.
 
 use super::sparse::SparseVector;
-use super::{SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore};
+use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore};
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -275,6 +275,21 @@ struct ScoredPoint {
     score: f32,
     #[serde(default)]
     payload: Value,
+}
+
+#[derive(Deserialize)]
+struct FacetResult {
+    #[serde(default)]
+    hits: Vec<FacetHit>,
+}
+
+/// Qdrant reports a facet value as whatever type the field holds. Only keyword
+/// fields are facetted here, so anything that is not a string is not a value
+/// this collection can be filtered by and is dropped.
+#[derive(Deserialize)]
+struct FacetHit {
+    value: Value,
+    count: u64,
 }
 
 #[derive(Deserialize)]
@@ -608,6 +623,22 @@ impl QdrantVectors {
         Ok(out)
     }
 
+    /// Counts for one keyword field, straight from its payload index. Approximate
+    /// by default in Qdrant, which is the right trade for a row of chips: an
+    /// exact count would scan the collection to change a number nobody reads as
+    /// a total.
+    async fn facet(&self, key: &str, limit: usize) -> Result<Vec<FacetCount>> {
+        let res: FacetResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/facet", self.alias),
+                Some(json!({ "key": key, "limit": limit })),
+            )
+            .await
+            .map_err(|e| Error::Vector(format!("facet on {key}: {e}")))?;
+        Ok(facet_counts(res))
+    }
+
     async fn put_points(&self, collection: &str, points: Vec<Value>) -> Result<()> {
         let _: Value = self
             .call(
@@ -769,6 +800,24 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
             ),
         }
     }
+    out
+}
+
+/// Facet hits as chips, most frequent first. Qdrant already sorts by count, but
+/// the order is restated here so ties do not depend on it, and non-string values
+/// are dropped: only a keyword field can be filtered by what the chip carries.
+fn facet_counts(res: FacetResult) -> Vec<FacetCount> {
+    let mut out: Vec<FacetCount> = res
+        .hits
+        .into_iter()
+        .filter_map(|h| {
+            h.value.as_str().map(|v| FacetCount {
+                value: v.to_string(),
+                count: h.count,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
     out
 }
 
@@ -1079,6 +1128,47 @@ impl VectorStore for QdrantVectors {
         Ok(())
     }
 
+    async fn facets(&self, limit: usize) -> Result<Facets> {
+        Ok(Facets {
+            categories: self.facet("category", limit).await?,
+            tags: self.facet("tags", limit).await?,
+        })
+    }
+
+    async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        // The query is a point that is already in the index, so Qdrant looks
+        // its vector up itself and this costs no embedding call. It may return
+        // the reference point, hence one extra result and the filter below.
+        let body = json!({
+            "query": point_uuid(artifact_id),
+            "using": DENSE,
+            "limit": limit + 1,
+            "with_payload": true,
+        });
+        let res: QueryResult = match self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/query", self.alias),
+                Some(body),
+            )
+            .await
+        {
+            Ok(r) => r,
+            // An artifact whose embedding job has not run yet is not in the
+            // collection, and Qdrant answers that with an error. It is an
+            // ordinary state for a freshly captured artifact, so the detail
+            // pane loses its related list rather than failing to open.
+            Err(e) => {
+                tracing::warn!(artifact_id, error = %e, "no neighbours for this artifact");
+                return Ok(vec![]);
+            }
+        };
+        let mut hits = hits_of(res);
+        hits.retain(|h| h.payload.artifact_id != artifact_id);
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
     }
@@ -1087,6 +1177,48 @@ impl VectorStore for QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facet_hits_become_chips_ordered_by_count() {
+        let res: FacetResult = serde_json::from_value(json!({
+            "hits": [
+                { "value": "concept", "count": 1 },
+                { "value": "procedure", "count": 4 },
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            facet_counts(res),
+            vec![
+                FacetCount {
+                    value: "procedure".into(),
+                    count: 4
+                },
+                FacetCount {
+                    value: "concept".into(),
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_facet_value_that_is_not_a_keyword_is_not_a_chip() {
+        // Nothing can be filtered by a number the chip cannot put in a URL, so
+        // a non-string value is dropped rather than stringified into a filter
+        // that would match nothing.
+        let res: FacetResult = serde_json::from_value(json!({
+            "hits": [{ "value": 7, "count": 3 }, { "value": "procedure", "count": 1 }]
+        }))
+        .unwrap();
+        assert_eq!(
+            facet_counts(res),
+            vec![FacetCount {
+                value: "procedure".into(),
+                count: 1
+            }]
+        );
+    }
 
     #[test]
     fn a_pre_taxonomy_payload_is_brought_up_to_the_current_key_names() {

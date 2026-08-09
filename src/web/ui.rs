@@ -76,6 +76,17 @@ pub struct ArtifactDetail {
     /// Query terms to highlight, space separated. Empty when the pane was
     /// opened outside a search.
     pub terms: String,
+    /// The nearest artifacts to this one. Free in the sense that matters: the
+    /// vector is already stored, so this costs no embedding call and no
+    /// completion. Empty while the artifact is still waiting to be embedded.
+    pub related: Vec<RelatedArtifact>,
+}
+
+/// A neighbour, as one line in the pane.
+pub struct RelatedArtifact {
+    pub id: String,
+    pub title: String,
+    pub snippet: String,
 }
 
 /// A chunk verification could not vouch for, and the window that produced it.
@@ -173,6 +184,13 @@ struct SearchTemplate {
     theme: String,
     /// Kept so a reload or a deep link restores the box with its results.
     q: String,
+    /// What this collection can actually be narrowed by. Rendered as chips, so
+    /// choosing a category never means knowing in advance that it exists.
+    facets: crate::vector::Facets,
+    /// The chips a deep link arrived with, so the form comes back selected
+    /// rather than reset to "all".
+    category: String,
+    tag: String,
 }
 
 #[derive(Template)]
@@ -284,11 +302,37 @@ async fn capture_submit(
     .into_response())
 }
 
-async fn search_page(_id: Identity, Query(p): Query<UiSearchParams>) -> impl IntoResponse {
-    HtmlTemplate(SearchTemplate {
+/// Chips per row. Long enough to cover a real vocabulary, short enough that the
+/// row stays a row.
+const FACET_LIMIT: usize = 12;
+
+async fn search_page(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<UiSearchParams>,
+) -> Result<Response> {
+    // A vector store that cannot answer must not take the search page down with
+    // it: without chips the page is what it was yesterday, with them it is
+    // better, and neither is worth a 500.
+    let facets = st
+        .core
+        .vectors
+        .facets(FACET_LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
+            Default::default()
+        });
+    Ok(HtmlTemplate(SearchTemplate {
         theme: "light".into(),
         q: p.q,
+        facets,
+        // The form is single-select, so only the first tag of a multi-tag deep
+        // link can be shown as chosen. The query still runs with all of them.
+        tag: split_tags(p.tags).first().cloned().unwrap_or_default(),
+        category: p.category.unwrap_or_default(),
     })
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -629,6 +673,10 @@ async fn ask_submit(
     .into_response())
 }
 
+/// Neighbours shown beside an artifact. A short list, because this is a way
+/// out of the pane rather than a second result rail.
+const RELATED_LIMIT: usize = 5;
+
 /// Everything the pane needs, in one place, so the handler is only routing.
 pub(crate) async fn build_artifact_detail(
     core: &crate::core::Core,
@@ -638,7 +686,29 @@ pub(crate) async fn build_artifact_detail(
     let c = core.store.get_artifact(artifact_id).await?;
     let src = core.store.get_corpus(&c.corpus_id).await?;
     let slice = crate::web::corpus_view::for_corpus(&src).slice(&src, c.corpus_span.as_ref(), 3);
+    // A missing neighbour list is not a missing pane. The vector store may be
+    // down, or this artifact may simply not be embedded yet, and neither is a
+    // reason to refuse to show the artifact beside its source.
+    let related = core
+        .vectors
+        .neighbours(artifact_id, RELATED_LIMIT)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(artifact_id, error = %e, "no related artifacts for this pane");
+            vec![]
+        })
+        .into_iter()
+        .map(|h| RelatedArtifact {
+            title: h
+                .payload
+                .title
+                .unwrap_or_else(|| markdown::snippet(&h.payload.text, 40)),
+            snippet: markdown::snippet(&h.payload.text, 90),
+            id: h.payload.artifact_id,
+        })
+        .collect();
     Ok(ArtifactDetail {
+        related,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
         html: markdown::render(&c.text),
@@ -921,6 +991,182 @@ mod tests {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// A session plus a corpus that has been through synthesis and embedding,
+    /// which is the only state in which there is anything to facet or to find a
+    /// neighbour among.
+    async fn app_with_embedded_corpus() -> (axum::Router, String) {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let cid = crate::store::new_id();
+        core.store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        let state = crate::web::state::AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+        };
+        (crate::web::router(state), format!("engram_session={cid}"))
+    }
+
+    /// Markup with every run of whitespace collapsed, so an assertion about an
+    /// attribute pair does not also assert where the template wrapped a line.
+    fn flat(html: &str) -> String {
+        html.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        body_of(res).await
+    }
+
+    #[tokio::test]
+    async fn every_page_declares_itself_installable() {
+        // The manifest link is what a phone looks for before offering to
+        // install the app; the touch icon is what iOS uses instead.
+        let (app, cookie) = app_with_session().await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+        assert!(html.contains(r#"rel="manifest" href="/assets/manifest.webmanifest""#));
+        assert!(html.contains(r#"rel="apple-touch-icon""#));
+        assert!(
+            html.contains(r#"name="theme-color""#),
+            "an installed window frames the page in this colour"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_search_page_offers_a_chip_for_what_the_collection_contains() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+
+        // The fake synthesizer files everything under `note` and tags it
+        // `fake`, so those are exactly the values the payload index holds.
+        assert!(
+            html.contains(r#"name="category" value="note""#),
+            "no category chip was rendered"
+        );
+        assert!(
+            html.contains(r#"name="tags" value="fake""#),
+            "no tag chip was rendered"
+        );
+        assert!(
+            html.contains(r#"name="category" value="" checked"#),
+            "there must be a selected way back to every category"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deep_linked_filter_comes_back_selected() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let html = flat(&get(&app, "/ui/search?q=alpha&category=note", &cookie).await);
+        assert!(
+            html.contains(r#"name="category" value="note" checked"#),
+            "the chip a link arrived with must render selected"
+        );
+        assert!(
+            !html.contains(r#"name="category" value="" checked"#),
+            "picking a category must deselect `all`"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_search_page_renders_without_chips_when_there_is_nothing_to_narrow() {
+        let (app, cookie) = app_with_session().await;
+        let html = get(&app, "/ui/search", &cookie).await;
+        assert!(html.contains(r#"name="q""#), "the search box must remain");
+        assert!(
+            !html.contains(r#"name="category""#),
+            "an empty collection offers nothing to filter by"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chip_narrows_the_result_list() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let matching = get(&app, "/ui/search/results?q=alpha&category=note", &cookie).await;
+        let missing = get(&app, "/ui/search/results?q=alpha&category=recipe", &cookie).await;
+
+        assert!(matching.contains("rail-item"), "the filter matched nothing");
+        assert!(
+            !missing.contains("rail-item"),
+            "a category no artifact carries must return no results"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pane_lists_the_nearest_other_artifacts() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let artifacts = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(
+            artifacts.len() > 1,
+            "a neighbour list needs something to be a neighbour of"
+        );
+
+        let d = super::build_artifact_detail(&core, &artifacts[0].id, "")
+            .await
+            .unwrap();
+        assert!(!d.related.is_empty(), "the pane listed no neighbours");
+        assert!(
+            d.related.iter().all(|r| r.id != artifacts[0].id),
+            "an artifact must not be listed as its own neighbour"
+        );
+        assert!(d.related.len() <= RELATED_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn an_artifact_that_is_not_embedded_yet_still_opens() {
+        // Synthesis without the embed job: the pane has to show the artifact
+        // beside its source and simply offer no neighbours.
+        let core = crate::core::test_support::test_core().await;
+        let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        let c = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+
+        let d = super::build_artifact_detail(&core, &c.id, "")
+            .await
+            .unwrap();
+        assert!(d.related.is_empty());
+        assert!(!d.html.is_empty(), "the artifact itself must still render");
     }
 
     #[test]

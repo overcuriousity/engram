@@ -33,6 +33,22 @@
           {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}
         </div>
       </div>
+
+      {% if !d.related.is_empty() %}
+      {# Nearest by the vector already stored for this artifact: no embedding
+         call, no completion. Targets the pane, exactly as a rail entry does. #}
+      <div class="pane-label">Related</div>
+      <div class="related">
+        {% for r in d.related %}
+        <a class="rail-item" href="/ui/artifacts/{{ r.id }}"
+           hx-get="/ui/artifacts/{{ r.id }}" hx-target="#pane" hx-swap="innerHTML"
+           hx-push-url="true">
+          <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+          <div class="rail-snippet">{{ r.snippet }}</div>
+        </a>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
     <div>
       <div class="pane-label">

@@ -1,13 +1,55 @@
 {% extends "layout.html" %}
 {% block title %}Search — engram{% endblock %}
 {% block content %}
-<input class="input" type="search" name="q" placeholder="Search by meaning…" autofocus
-       value="{{ q }}"
-       hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
-       {# `load` runs the query a deep link arrived with, so the box and the
-          rail agree. Guarded: an empty box has nothing to search for. #}
-       hx-trigger="keyup changed delay:250ms, search{% if !q.is_empty() %}, load{% endif %}"
-       hx-indicator="#search-spinner">
+{# One form around the box and the chips, so a chip carries the query with it
+   and the query carries the chips. `change` fires for the chips, `keyup` only
+   for the box: a radio does not need a debounce and the box does. #}
+<form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
+      hx-trigger="change,
+                  keyup changed delay:250ms from:input[name=q],
+                  search from:input[name=q]{% if !q.is_empty() %},
+                  load{% endif %}"
+      hx-indicator="#search-spinner">
+  <input class="input" type="search" name="q" placeholder="Search by meaning…" autofocus
+         value="{{ q }}">
+
+  {% if !facets.categories.is_empty() || !facets.tags.is_empty() %}
+  <div class="facets">
+    {% if !facets.categories.is_empty() %}
+    <div class="chips" role="group" aria-label="Category">
+      <label class="chip">
+        <input type="radio" name="category" value="" {% if category.is_empty() %}checked{% endif %}>
+        <span>All</span>
+      </label>
+      {% for f in facets.categories %}
+      <label class="chip">
+        <input type="radio" name="category" value="{{ f.value }}"
+               {% if category == f.value %}checked{% endif %}>
+        <span>{{ f.value }} <span class="muted mono">{{ f.count }}</span></span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if !facets.tags.is_empty() %}
+    <div class="chips" role="group" aria-label="Tag">
+      <label class="chip">
+        <input type="radio" name="tags" value="" {% if tag.is_empty() %}checked{% endif %}>
+        <span>All</span>
+      </label>
+      {% for f in facets.tags %}
+      <label class="chip">
+        <input type="radio" name="tags" value="{{ f.value }}"
+               {% if tag == f.value %}checked{% endif %}>
+        <span>{{ f.value }} <span class="muted mono">{{ f.count }}</span></span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</form>
+
 <div class="row" style="margin:0.5rem 0 1rem">
   <span id="search-spinner" class="spinner">searching…</span>
   <span class="spacer"></span>
