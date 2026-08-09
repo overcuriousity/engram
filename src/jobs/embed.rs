@@ -210,6 +210,9 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
             title: chunk.title.clone(),
             category: chunk.category.clone(),
             tags: chunk.tags.clone(),
+            // Siblings belong to the window their parent came from, or a
+            // re-segmentation of that window would leave them behind.
+            window_idx: chunk.window_idx,
         })
         .collect();
 
@@ -278,6 +281,7 @@ mod tests {
                 title: Some(format!("t{i}")),
                 category: Some("note".into()),
                 tags: vec!["x".into()],
+                window_idx: None,
             })
             .collect();
         let made = core.store.insert_chunks(&src.id, &new).await.unwrap();

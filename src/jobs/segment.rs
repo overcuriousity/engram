@@ -74,6 +74,7 @@ pub async fn run_with_fallback(core: &Core, source_id: &str) -> Result<()> {
             title: None,
             category: None,
             tags: vec![],
+            window_idx: None,
         })
         .collect();
 
@@ -105,6 +106,7 @@ fn proposed_to_new(proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> 
             title: p.title,
             category: p.category,
             tags: p.tags,
+            window_idx: None,
         })
         .collect()
 }

@@ -151,6 +151,7 @@ mod tests {
                     title: None,
                     category: None,
                     tags: vec![],
+                    window_idx: None,
                 }],
             )
             .await

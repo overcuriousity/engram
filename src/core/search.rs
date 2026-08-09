@@ -255,6 +255,7 @@ mod tests {
                 title: Some(format!("t{i}")),
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
+                window_idx: None,
             })
             .collect();
         let made = core.store.insert_chunks(&src.id, &new).await.unwrap();

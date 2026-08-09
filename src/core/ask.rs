@@ -129,6 +129,7 @@ mod tests {
                 title: Some(format!("t{i}")),
                 category: Some("note".into()),
                 tags: vec![],
+                window_idx: None,
             })
             .collect();
         let made = core.store.insert_chunks(&src.id, &new).await.unwrap();

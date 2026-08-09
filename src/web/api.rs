@@ -694,6 +694,7 @@ mod patch_tests {
                     title: Some("a title".into()),
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
+                    window_idx: None,
                 }],
             )
             .await
