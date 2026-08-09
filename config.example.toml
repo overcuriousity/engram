@@ -9,8 +9,12 @@
 
 [server]
 bind = "127.0.0.1:8080"
-# Number of background worker tasks draining the job queue.
-workers = 2
+# Background worker tasks draining the job queue. One is right when every role
+# points at a single local GPU: a second worker does not double throughput,
+# because the inference server serialises the calls anyway — it only makes two
+# things slow at once. Raise it when segmentation and embedding live on
+# different machines.
+workers = 1
 
 [store]
 # SQLite file. Created on first run. Back this up.
@@ -37,16 +41,39 @@ pinned_boost = 0.15
 # Three independent roles. They may all point at one server, or at three
 # different ones — swapping any single role does not affect the others.
 
+# Defaults here assume the case engram is built for: a small model on one
+# consumer GPU, answering in minutes rather than seconds. Against a hosted API
+# you can raise output_ratio's window and lower timeout_secs considerably.
 [infer.chunk]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 # The model's real context window.
 context_tokens = 32768
-# Hard cap on output tokens per segmentation call.
-max_output_tokens = 8192
-# The chunker rewrites rather than splits, so output can exceed input. This is
-# how much larger to assume it can get when sizing input windows.
-output_ratio = 1.4
+# Hard cap on output tokens per segmentation call. Generous on purpose: a
+# reasoning model spends part of this thinking before it writes any JSON, and
+# whatever it spends there is taken from the chunk list.
+max_output_tokens = 16384
+# The chunker rewrites rather than splits, so its output can exceed its input.
+# This is how much larger to assume it gets, and it is what sizes the input
+# window: window = min(context / (1 + ratio), max_output / ratio). At 8.0 that
+# is ~2000 tokens of input per call — small enough that a 9B model can rewrite
+# it without running out of room, which is the failure that costs a whole
+# window. Lower it (1.5-2.0) for a large hosted model.
+output_ratio = 8.0
+# Seconds before the client gives up on one call. Defaults to 900. A timeout
+# looks exactly like a dead endpoint to the job runner: the job retries and
+# fails at the same wall, so this must exceed the model's real worst case.
+# timeout_secs = 900
+# Sent as `reasoning_effort` when set. On a reasoning model the thinking comes
+# out of max_output_tokens, so suppressing it is what stops the chunk list from
+# being cut off. Unset by default: models that do not reason reject the field.
+# reasoning_effort = "none"
+# Seconds to idle between segmentation windows. Segmenting a long source is
+# otherwise minutes of unbroken generation, which is a sustained thermal load
+# on a desktop card rather than a burst. It does not save energy — the same
+# tokens are generated either way — so it is off by default and exists for the
+# machine sitting next to you.
+# cooldown_secs = 15
 # Optional path to a tokenizer.json for exact token counting. Without it,
 # budgets fall back to a conservative characters/3.5 estimate.
 # tokenizer_path = "/models/qwen/tokenizer.json"
@@ -54,16 +81,25 @@ output_ratio = 1.4
 [infer.embed]
 base_url = "http://localhost:8000/v1"
 model = "bge-m3"
+# Embedding is fast even locally; a shorter ceiling surfaces a wedged endpoint
+# instead of holding a worker for a quarter of an hour.
+timeout_secs = 120
 # MUST match the vector dimension of the Qdrant collection. Changing this
 # against an existing collection is refused at startup.
 dim = 1024
-# Many embedding models cap at 512; check yours.
-max_input_tokens = 8192
+# The server's real ceiling, not the model's nominal one. llama.cpp refuses any
+# input above its physical batch size (often 1024) with a 500, and no retry can
+# fix that — engram splits the chunk instead, but it splits sooner and cheaper
+# if this number is honest. Many embedding models cap at 512; check yours.
+max_input_tokens = 1024
 
 [infer.ask]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768
+# ask is the one interactive inference call, so someone is watching it happen.
+# timeout_secs = 900
+# reasoning_effort = "none"
 
 # Reranking is optional and disabled by default. There is no OpenAI-standard
 # rerank endpoint, so the wire format is configured explicitly.

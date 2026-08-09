@@ -537,6 +537,51 @@ impl QdrantVectors {
         Ok(res.count)
     }
 
+    /// The `last_seen_at` already stored for these chunks, for the points that
+    /// have one. Only asked for when a caller is about to overwrite payloads it
+    /// built without the stamp, and only for the one key, so this is a small
+    /// read next to the write it protects.
+    async fn stored_last_seen(
+        &self,
+        points: &[VectorPoint],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        let wanted: Vec<&VectorPoint> = points
+            .iter()
+            .filter(|p| p.payload.last_seen_at.is_none())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(Default::default());
+        }
+        let by_uuid: std::collections::HashMap<String, &str> = wanted
+            .iter()
+            .map(|p| (point_uuid(&p.payload.chunk_id), p.payload.chunk_id.as_str()))
+            .collect();
+        let ids: Vec<&String> = by_uuid.keys().collect();
+        let found: Vec<ScrolledPoint> = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points", self.alias),
+                Some(json!({
+                    "ids": ids,
+                    "with_payload": ["last_seen_at"],
+                    "with_vector": false,
+                })),
+            )
+            .await?;
+
+        let mut out = std::collections::HashMap::new();
+        for p in found {
+            let Some(uuid) = p.id.as_str() else { continue };
+            let Some(chunk_id) = by_uuid.get(uuid) else {
+                continue;
+            };
+            if let Some(seen) = p.payload.get("last_seen_at").and_then(Value::as_i64) {
+                out.insert((*chunk_id).to_string(), seen);
+            }
+        }
+        Ok(out)
+    }
+
     async fn put_points(&self, collection: &str, points: Vec<Value>) -> Result<()> {
         let _: Value = self
             .call(
@@ -808,10 +853,20 @@ impl VectorStore for QdrantVectors {
         if points.is_empty() {
             return Ok(());
         }
+        // A point write replaces the whole payload, unlike `set_payload` and
+        // `touch`, which merge. A writer that does not know when the chunk was
+        // last shown would therefore clear the stamp, and `resurface` would
+        // offer a chunk read yesterday as forgotten — so carry the stored one
+        // forward for every point that arrives without it.
+        let stored = self.stored_last_seen(&points).await?;
         let mut body = Vec::with_capacity(points.len());
         for p in points {
+            let mut payload = p.payload.clone();
+            if payload.last_seen_at.is_none() {
+                payload.last_seen_at = stored.get(&payload.chunk_id).copied();
+            }
             let payload =
-                serde_json::to_value(&p.payload).map_err(|e| Error::Vector(e.to_string()))?;
+                serde_json::to_value(&payload).map_err(|e| Error::Vector(e.to_string()))?;
             let mut vector = json!({ DENSE: p.vector });
             if let Some(sp) = sparse_body(&p.sparse) {
                 vector[SPARSE] = sp;
@@ -927,11 +982,13 @@ impl VectorStore for QdrantVectors {
         let ids: Vec<String> = chunk_ids.iter().map(|c| point_uuid(c)).collect();
         // One request for the whole result list, and only the one key: this
         // runs on every search, so it must not be a write per hit nor a
-        // read-modify-write of the full payload.
+        // read-modify-write of the full payload. It still waits: the shutdown
+        // drain exists to keep these stamps, and an acknowledged-but-unapplied
+        // write is exactly the loss it is meant to prevent.
         let _: Value = self
             .call(
                 Method::POST,
-                &format!("/collections/{}/points/payload", self.alias),
+                &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({ "payload": { "last_seen_at": seen_at }, "points": ids })),
             )
             .await?;

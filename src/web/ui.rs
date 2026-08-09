@@ -8,14 +8,18 @@ use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 
 // ── View models ─────────────────────────────────────────────────────────────
 
 pub struct RenderedResult {
+    /// What the rail entry links to: the detail pane for this chunk.
+    pub chunk_id: String,
     pub title: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
+    /// Markup-free preview for the rail, where rendered HTML would not fit.
+    pub snippet: String,
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub source_id: String,
@@ -35,6 +39,12 @@ pub struct BrowseRow {
     pub badge: &'static str,
     pub chunk_count: i64,
     pub created: String,
+    /// `3/9` while windows are still being segmented, `None` once every window
+    /// has resolved.
+    pub progress: Option<String>,
+    /// Percentage of the source that ended up inside some chunk.
+    pub coverage: Option<String>,
+    pub low_coverage: bool,
 }
 
 pub struct ChunkView {
@@ -46,6 +56,35 @@ pub struct ChunkView {
     pub tags: Vec<String>,
     pub embed_state: String,
     pub embed_badge: &'static str,
+}
+
+/// A chunk beside the source lines it claims — the search pane, and the
+/// review surface for anything verification flagged.
+pub struct ChunkDetail {
+    pub id: String,
+    pub title: String,
+    /// Sanitized by `markdown::render`. Rendered with `|safe`.
+    pub html: String,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub flags: Vec<String>,
+    pub flag_detail: Option<String>,
+    pub source_id: String,
+    pub window_idx: Option<i64>,
+    pub slice_label: String,
+    pub slice_lines: Vec<crate::web::source_view::SourceLine>,
+    /// Query terms to highlight, space separated. Empty when the pane was
+    /// opened outside a search.
+    pub terms: String,
+}
+
+/// A chunk verification could not vouch for, and the window that produced it.
+pub struct FlaggedRow {
+    pub chunk_id: String,
+    pub source_id: String,
+    pub title: String,
+    pub detail: String,
+    pub window_idx: Option<i64>,
 }
 
 pub struct TokenRow {
@@ -132,12 +171,18 @@ struct CapturedTemplate {
 #[template(path = "search.html")]
 struct SearchTemplate {
     theme: String,
+    /// Kept so a reload or a deep link restores the box with its results.
+    q: String,
 }
 
 #[derive(Template)]
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// The query's indexable terms, for client-side highlighting.
+    terms: String,
+    /// `embed 41ms · total 138ms`, swapped into the header out of band.
+    timing: String,
 }
 
 #[derive(Template)]
@@ -165,6 +210,19 @@ struct ChunkFragment {
 }
 
 #[derive(Template)]
+#[template(path = "_chunk_detail.html")]
+struct ChunkDetailFragment {
+    d: ChunkDetail,
+}
+
+#[derive(Template)]
+#[template(path = "chunk_detail.html")]
+struct ChunkDetailPage {
+    theme: String,
+    d: ChunkDetail,
+}
+
+#[derive(Template)]
 #[template(path = "ops.html")]
 struct OpsTemplate {
     theme: String,
@@ -173,6 +231,7 @@ struct OpsTemplate {
     chunk_count: i64,
     vector_count: u64,
     failed: Vec<crate::store::jobs::FailedJob>,
+    flagged: Vec<FlaggedRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -225,9 +284,10 @@ async fn capture_submit(
     .into_response())
 }
 
-async fn search_page(_id: Identity) -> impl IntoResponse {
+async fn search_page(_id: Identity, Query(p): Query<UiSearchParams>) -> impl IntoResponse {
     HtmlTemplate(SearchTemplate {
         theme: "light".into(),
+        q: p.q,
     })
 }
 
@@ -239,6 +299,23 @@ struct UiSearchParams {
     tags: Option<String>,
     #[serde(default)]
     category: Option<String>,
+}
+
+/// Function words carry no signal and appear in every chunk, so highlighting
+/// them marks the whole card and hides the terms that actually matched.
+const STOPWORDS: [&str; 40] = [
+    "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by", "for", "with",
+    "from", "into", "is", "are", "was", "were", "be", "been", "do", "does", "did", "how", "what",
+    "when", "where", "why", "which", "that", "this", "it", "its", "my", "i", "you", "can",
+];
+
+/// Query terms worth marking in a result, space separated for the client.
+fn highlightable_terms(query: &str) -> String {
+    crate::vector::sparse::tokenize(query)
+        .into_iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn split_tags(t: Option<String>) -> Vec<String> {
@@ -259,16 +336,28 @@ async fn search_results(
     // Clearing the box fires a request with an empty query. That is not an
     // error; it just means there is nothing to show.
     if p.q.trim().is_empty() {
-        return Ok(HtmlTemplate(ResultsTemplate { results: vec![] }).into_response());
+        return Ok(HtmlTemplate(ResultsTemplate {
+            results: vec![],
+            terms: String::new(),
+            timing: String::new(),
+        })
+        .into_response());
     }
 
-    let hits = st
+    // The same terms the sparse branch derives, handed to the client so
+    // highlighting never has to touch the sanitized HTML on this side.
+    // Function words are dropped: a query phrased as a situation is mostly
+    // stopwords, and highlighting every "to" marks the whole card.
+    let terms = highlightable_terms(p.q.trim());
+    let (hits, t) = st
         .core
-        .search(&SearchQuery {
+        .search_timed(&SearchQuery {
             q: p.q,
             limit: 0,
             tags: split_tags(p.tags),
             category: p.category.filter(|c| !c.is_empty()),
+            // Incremental: a prefix must not stamp what it happened to match.
+            mark: false,
         })
         .await?;
 
@@ -278,14 +367,18 @@ async fn search_results(
             .enumerate()
             .map(|(i, h)| render_hit(i, h))
             .collect(),
+        terms,
+        timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
     .into_response())
 }
 
 fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
     RenderedResult {
+        chunk_id: h.chunk_id,
         title: h.title.unwrap_or_else(|| "Untitled".into()),
         html: markdown::render(&h.text),
+        snippet: markdown::snippet(&h.text, 140),
         category: h.category,
         tags: h.tags,
         source_id: h.source_id,
@@ -296,7 +389,15 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
 async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
     for s in st.core.store.list_sources(200, 0).await? {
+        let (resolved, total) = st.core.store.window_progress(&s.id).await?;
+        let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
+        let low_coverage = s
+            .coverage
+            .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
         rows.push(BrowseRow {
+            progress,
+            coverage: s.coverage.map(|c| format!("{:.0}%", c * 100.0)),
+            low_coverage,
             label: s
                 .title_hint
                 .clone()
@@ -409,8 +510,27 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         })
         .collect();
 
+    let flagged = st
+        .core
+        .store
+        .flagged_chunks(50)
+        .await?
+        .into_iter()
+        .map(|c| FlaggedRow {
+            title: c
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+            detail: c.flag_detail.clone().unwrap_or_else(|| c.flags.join(", ")),
+            window_idx: c.window_idx,
+            chunk_id: c.id,
+            source_id: c.source_id,
+        })
+        .collect();
+
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
+        flagged,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         chunk_count,
@@ -506,6 +626,94 @@ async fn ask_submit(
     .into_response())
 }
 
+/// Everything the pane needs, in one place, so the handler is only routing.
+pub(crate) async fn build_chunk_detail(
+    core: &crate::core::Core,
+    chunk_id: &str,
+    terms: &str,
+) -> Result<ChunkDetail> {
+    let c = core.store.get_chunk(chunk_id).await?;
+    let src = core.store.get_source(&c.source_id).await?;
+    let slice = crate::web::source_view::for_source(&src).slice(&src, c.source_span.as_ref(), 3);
+    Ok(ChunkDetail {
+        id: c.id,
+        title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+        html: markdown::render(&c.text),
+        category: c.category,
+        tags: c.tags,
+        flags: c.flags,
+        flag_detail: c.flag_detail,
+        source_id: c.source_id,
+        window_idx: c.window_idx,
+        slice_label: slice.label,
+        slice_lines: slice.lines,
+        terms: terms.to_string(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ChunkViewParams {
+    #[serde(default)]
+    terms: String,
+}
+
+/// One route, two shapes. An htmx swap wants the pane's body; a pasted link
+/// wants a page with navigation around it.
+async fn chunk_detail(
+    State(st): State<AppState>,
+    _id: Identity,
+    headers: axum::http::HeaderMap,
+    Path(cid): Path<String>,
+    Query(p): Query<ChunkViewParams>,
+) -> Result<Response> {
+    let d = build_chunk_detail(&st.core, &cid, &p.terms).await?;
+    // Opening a chunk is the deliberate act that counts as remembering it.
+    st.core.mark_chunk_seen(&cid);
+    if headers.contains_key("hx-request") {
+        return Ok(HtmlTemplate(ChunkDetailFragment { d }).into_response());
+    }
+    Ok(HtmlTemplate(ChunkDetailPage {
+        theme: "light".into(),
+        d,
+    })
+    .into_response())
+}
+
+/// The action behind "re-segment this window": put the window back in the
+/// queue's path and make sure something will pick it up. Split out from the
+/// handler so it can be tested without a request.
+pub(crate) async fn resegment_window_inner(
+    core: &crate::core::Core,
+    source_id: &str,
+    idx: i64,
+) -> Result<()> {
+    core.store.reset_window(source_id, idx).await?;
+    core.store
+        .enqueue(crate::store::jobs::Stage::Segment, "source", source_id)
+        .await?;
+    Ok(())
+}
+
+async fn resegment_window(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((sid, idx)): Path<(String, i64)>,
+) -> Result<Response> {
+    resegment_window_inner(&st.core, &sid, idx).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+/// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
+/// beside its source lines and decided the warning was noise.
+async fn mark_chunk_reviewed(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+) -> Result<Response> {
+    st.core.store.clear_chunk_flags(&cid).await?;
+    Ok(axum::response::Html(String::new()).into_response())
+}
+
 pub fn ui_router() -> Router<AppState> {
     Router::new()
         .route("/ui", get(|| async { Redirect::to("/ui/search") }))
@@ -516,7 +724,12 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/sources/{id}", get(source_detail))
         .route("/ui/sources/{id}/delete", post(delete_source_ui))
         .route("/ui/sources/{id}/reprocess", post(reprocess_ui))
-        .route("/ui/chunks/{id}", put(put_chunk))
+        .route(
+            "/ui/sources/{sid}/windows/{idx}/resegment",
+            post(resegment_window),
+        )
+        .route("/ui/chunks/{id}", get(chunk_detail).put(put_chunk))
+        .route("/ui/chunks/{cid}/reviewed", post(mark_chunk_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
@@ -530,6 +743,145 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn highlighting_skips_function_words_but_keeps_short_technical_terms() {
+        // A query phrased as a situation is mostly stopwords; marking every
+        // "to" and "how" highlights the entire card and hides the real hits.
+        let terms = super::highlightable_terms("how do i write an iso to a usb stick with dd");
+        assert!(terms.contains("iso"));
+        assert!(terms.contains("usb"));
+        assert!(terms.contains("dd"), "short technical terms must survive");
+        for noise in ["how", "the", " to ", " an ", " with "] {
+            assert!(
+                !format!(" {terms} ").contains(noise),
+                "{noise} should not be highlighted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rail_entry_carries_the_chunk_id_it_links_to() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_source(&core, &out.id)
+            .await
+            .unwrap();
+
+        let hits = core
+            .search(&crate::core::search::SearchQuery {
+                q: "alpha".into(),
+                limit: 0,
+                tags: vec![],
+                category: None,
+                mark: false,
+            })
+            .await
+            .unwrap();
+        let r = super::render_hit(0, hits[0].clone());
+
+        assert!(
+            !r.chunk_id.is_empty(),
+            "the rail needs a chunk id to link to"
+        );
+        assert!(!r.snippet.is_empty(), "the rail shows a plain-text snippet");
+        assert!(
+            !r.snippet.contains('<'),
+            "the snippet must not carry markup"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_detail_view_pairs_a_chunk_with_the_lines_it_claims() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        let c = core
+            .store
+            .chunks_for_source(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+
+        let d = match super::build_chunk_detail(&core, &c.id, "").await {
+            Ok(d) => d,
+            Err(e) => panic!("detail view failed: {e}"),
+        };
+
+        assert_eq!(d.source_id, out.id);
+        assert!(d.html.contains("alpha"), "the chunk body must be rendered");
+        assert!(
+            !d.slice_lines.is_empty(),
+            "the source slice must not be empty"
+        );
+        assert!(
+            d.slice_lines.iter().any(|l| l.in_span),
+            "at least one line must be marked as the span"
+        );
+        assert!(d.slice_label.starts_with("lines "));
+    }
+
+    #[tokio::test]
+    async fn a_chunk_whose_source_vanished_is_not_a_500() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        let c = core
+            .store
+            .chunks_for_source(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+        core.delete_source(&out.id).await.unwrap();
+
+        match super::build_chunk_detail(&core, &c.id, "").await {
+            Err(crate::error::Error::NotFound) => {}
+            Err(e) => panic!("expected a not-found, got {e}"),
+            Ok(_) => panic!("a chunk whose source was deleted must not resolve"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resegmenting_a_window_makes_it_pending_and_queues_the_job() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("first para\n\nsecond para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        core.store
+            .set_window_state(
+                &out.id,
+                0,
+                crate::store::windows::WindowState::Fallback,
+                Some("boom"),
+            )
+            .await
+            .unwrap();
+
+        super::resegment_window_inner(&core, &out.id, 0)
+            .await
+            .unwrap();
+
+        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, crate::store::windows::WindowState::Pending);
+        assert_eq!(w.attempts, 0);
+
+        let mut found = false;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            if j.stage == crate::store::jobs::Stage::Segment && j.target_id == out.id {
+                found = true;
+            }
+        }
+        assert!(found, "a segment job must be queued for the source");
+    }
 
     async fn app_with_session() -> (axum::Router, String) {
         let core = crate::core::test_support::test_core().await;
@@ -664,6 +1016,41 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(body_of(res).await.to_lowercase().contains("captured"));
+    }
+
+    #[tokio::test]
+    async fn a_deep_link_runs_its_query_instead_of_only_filling_the_box() {
+        // `/ui/search?q=dd` restored the text but not the results, so the page
+        // opened as a filled box over an empty rail until someone typed.
+        let (app, cookie) = app_with_session().await;
+        let page = |uri: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                let res = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header("cookie", cookie)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::OK);
+                body_of(res).await
+            }
+        };
+
+        let linked = page("/ui/search?q=mounting").await;
+        assert!(
+            linked.contains("load"),
+            "the deep link never asks for its own results"
+        );
+        assert!(
+            !page("/ui/search").await.contains("load"),
+            "an empty box has nothing to search for"
+        );
     }
 
     #[tokio::test]

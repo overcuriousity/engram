@@ -2,11 +2,22 @@
 {% block title %}Search — engram{% endblock %}
 {% block content %}
 <input class="input" type="search" name="q" placeholder="Search by meaning…" autofocus
-       hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
-       hx-trigger="keyup changed delay:250ms, search"
+       value="{{ q }}"
+       hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
+       {# `load` runs the query a deep link arrived with, so the box and the
+          rail agree. Guarded: an empty box has nothing to search for. #}
+       hx-trigger="keyup changed delay:250ms, search{% if !q.is_empty() %}, load{% endif %}"
        hx-indicator="#search-spinner">
 <div class="row" style="margin:0.5rem 0 1rem">
   <span id="search-spinner" class="spinner">searching…</span>
+  <span class="spacer"></span>
+  <span id="timing" class="muted mono"></span>
 </div>
-<div id="results"></div>
+
+<div class="workspace">
+  <div id="rail" class="rail" role="listbox" aria-label="Results"></div>
+  <div id="pane" class="pane">
+    <p class="muted">Pick a result to see it beside the lines it came from.</p>
+  </div>
+</div>
 {% endblock %}

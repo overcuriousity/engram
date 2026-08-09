@@ -219,3 +219,85 @@ nav.top a.brand img { display: block; }
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
 .brand-name { font-size: 1.375rem; font-weight: 600; letter-spacing: -0.02em; }
 .brand-tag { margin-top: 0; margin-bottom: 1rem; }
+
+/* ── Chunk detail: the chunk beside the lines it claims ──────────────────── */
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+@media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
+
+.pane-label {
+  display: flex; gap: 0.5rem; align-items: baseline;
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted); margin-bottom: 0.375rem;
+}
+
+.raw {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); overflow: auto; max-height: 30rem;
+}
+.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8125rem; }
+.raw td { padding: 1px 0.5rem; vertical-align: top; white-space: pre-wrap; }
+.raw td.ln {
+  width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
+  border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
+}
+.raw tr.in td { background: var(--color-accent-dim); }
+.raw tr.in td.ln { color: var(--color-accent); }
+
+.flag {
+  display: flex; gap: 0.625rem; align-items: flex-start;
+  border: 1px solid var(--color-warning); background: var(--color-warning-dim);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+  font-size: 0.8125rem; margin-bottom: 0.75rem;
+}
+.flag b { color: var(--color-warning); }
+
+.crumb { font-size: 0.8125rem; color: var(--color-fg-muted); margin-bottom: 0.75rem; }
+
+/* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
+
+.workspace { display: grid; grid-template-columns: 20rem 1fr; gap: 1rem; align-items: start; }
+@media (max-width: 60rem) {
+  .workspace { grid-template-columns: 1fr; }
+  /* One region at a time on a narrow screen: the rail is the list, and
+     opening a chunk replaces it. */
+  .workspace.has-selection .rail { display: none; }
+}
+
+.rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
+.rail-item {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+}
+.rail-item:hover { background: var(--color-bg-hover); }
+.rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
+.rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
+.rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
+.rail-title { font-weight: 600; font-size: 0.875rem; }
+.rail-snippet {
+  font-size: 0.8125rem; color: var(--color-fg-secondary); margin-top: 0.25rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pane { min-width: 0; }
+
+/* ── Reading aids: highlighting, clamping, copying ───────────────────────── */
+
+mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; padding: 0 1px; }
+[data-theme="dark"] mark { background: var(--color-warning-dim); }
+
+.clampable.is-clamped { max-height: 14rem; overflow: hidden; position: relative; }
+.clampable.is-clamped::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3rem;
+  background: linear-gradient(to bottom, transparent, var(--color-bg-elevated));
+}
+
+.codewrap { position: relative; }
+.copy {
+  position: absolute; top: 6px; right: 6px;
+  font-family: var(--font-mono); font-size: 0.6875rem; cursor: pointer;
+  padding: 3px 7px; border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); color: var(--color-fg-secondary);
+  border: 1px solid var(--color-border-strong);
+}
+.copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }

@@ -1006,6 +1006,33 @@ async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
 
 #[tokio::test]
 #[ignore]
+async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
+    // Unlike `set_payload` and `touch`, a point write replaces the payload
+    // whole. A re-embed builds it from the chunk row, which knows nothing about
+    // the stamp, so the store has to carry the stored one forward — otherwise
+    // editing a chunk makes `resurface` call it forgotten.
+    let v = fresh("engram_it_upsert_survives", 4).await;
+    v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 60, &["t"])])
+        .await
+        .unwrap();
+    v.touch(&["a".to_string()], now_secs()).await.unwrap();
+
+    // The same chunk, embedded again after an edit.
+    let mut again = aged("a", vec![0.0, 1.0, 0.0, 0.0], 60, &["t"]);
+    again.payload.text = "edited text".into();
+    v.upsert(vec![again]).await.unwrap();
+
+    let cutoff = now_secs() - 31 * 86_400;
+    assert!(
+        v.resurface(10, cutoff, cutoff).await.unwrap().is_empty(),
+        "the re-embed dropped the stamp and the chunk now reads as forgotten"
+    );
+
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn a_point_written_by_something_else_does_not_take_search_down() {
     // A rebuild copies payloads verbatim, and nothing stops an operator from
     // inserting their own point. Two things would otherwise turn one foreign

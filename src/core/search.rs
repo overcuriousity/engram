@@ -20,6 +20,22 @@ pub struct SearchQuery {
     pub tags: Vec<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Whether this search counts as having *seen* its results.
+    ///
+    /// Incremental UI requests pass false. Every keystroke used to stamp
+    /// `last_seen_at` on whatever the prefix happened to match, which is the
+    /// same field `resurface` reads — so typing quietly drained the
+    /// forgotten-chunk feature. Opening, expanding and submitting pass true,
+    /// and so do the API and MCP paths, which are deliberate by construction.
+    #[serde(default)]
+    pub mark: bool,
+}
+
+/// What a search cost, for the faint line under the rail.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchTiming {
+    pub embed_ms: u128,
+    pub total_ms: u128,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -41,7 +57,7 @@ fn now_secs() -> i64 {
 }
 
 /// Promote at most `max` hits per source to the front of the list, then refill
-/// from what that displaced until `limit` is reached.
+/// from what that displaced until `target` is reached.
 ///
 /// The cap is a diversity rule, not a ceiling. Capping alone would mean a base
 /// holding two sources could never answer with more than `2 * max` results
@@ -52,7 +68,7 @@ fn now_secs() -> i64 {
 fn cap_per_source(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
-    limit: usize,
+    target: usize,
 ) -> Vec<crate::vector::SearchHit> {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut kept = Vec::with_capacity(hits.len());
@@ -66,8 +82,8 @@ fn cap_per_source(
             displaced.push(h);
         }
     }
-    if kept.len() < limit {
-        let room = limit - kept.len();
+    if kept.len() < target {
+        let room = target - kept.len();
         kept.extend(displaced.into_iter().take(room));
     }
     kept
@@ -95,6 +111,20 @@ impl Core {
         self.background.spawn(async move {
             if let Err(e) = vectors.touch(&ids, now).await {
                 tracing::warn!(error = %e, "could not record which chunks were shown");
+            }
+        });
+    }
+
+    /// Opening a chunk is the deliberate act that counts as remembering it,
+    /// which is why the detail pane records it and an incremental search does
+    /// not.
+    pub fn mark_chunk_seen(&self, chunk_id: &str) {
+        let ids = vec![chunk_id.to_string()];
+        let vectors = self.vectors.clone();
+        let now = now_secs();
+        self.background.spawn(async move {
+            if let Err(e) = vectors.touch(&ids, now).await {
+                tracing::warn!(error = %e, "could not record that a chunk was opened");
             }
         });
     }
@@ -132,7 +162,17 @@ impl Core {
     ///
     /// Results are capped per source so one long document cannot fill the list.
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        self.search_capped(query, Some(MAX_PER_SOURCE)).await
+        Ok(self.search_inner(query, Some(MAX_PER_SOURCE)).await?.0)
+    }
+
+    /// The same search, plus what it cost. The UI shows these faintly, so a
+    /// sluggish box points at the embedder or the vector store without anyone
+    /// opening a log.
+    pub async fn search_timed(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        self.search_inner(query, Some(MAX_PER_SOURCE)).await
     }
 
     /// `cap` of `None` lets a single source supply every result. `ask` wants
@@ -143,6 +183,14 @@ impl Core {
         query: &SearchQuery,
         cap: Option<usize>,
     ) -> Result<Vec<SearchResult>> {
+        Ok(self.search_inner(query, cap).await?.0)
+    }
+
+    async fn search_inner(
+        &self,
+        query: &SearchQuery,
+        cap: Option<usize>,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
         }
@@ -152,7 +200,25 @@ impl Core {
         };
 
         let started = std::time::Instant::now();
-        let vectors = self.embedder.embed(&[query.q.trim().to_string()]).await?;
+        // Prefixes repeat constantly inside one search and whole queries repeat
+        // across sessions, so this is the difference between one embedding call
+        // per search and one per keystroke.
+        let key = query.q.split_whitespace().collect::<Vec<_>>().join(" ");
+        let cached = self.query_cache.lock().ok().and_then(|c| c.get(&key));
+        let vector = match cached {
+            Some(v) => v,
+            None => {
+                let v = self
+                    .embedder
+                    .embed(&[query.q.trim().to_string()])
+                    .await?
+                    .remove(0);
+                if let Ok(mut c) = self.query_cache.lock() {
+                    c.put(key, v.clone());
+                }
+                v
+            }
+        };
         let embed_ms = started.elapsed().as_millis();
 
         let filter = SearchFilter {
@@ -171,13 +237,16 @@ impl Core {
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
         let hits = self
             .vectors
-            .search(&vectors[0], &sparse, candidates, &filter)
+            .search(&vector, &sparse, candidates, &filter)
             .await?;
 
         // Cap before reranking, in vector order, so what leads per source is
-        // that source's best.
+        // that source's best. The refill target is the candidate pool rather
+        // than the answer: refilling only to `limit` would hand the reranker
+        // exactly `limit` hits whenever a few sources dominate, which is the
+        // case over-fetching exists for. The final truncate still cuts to size.
         let hits = match cap {
-            Some(max) => cap_per_source(hits, max, limit),
+            Some(max) => cap_per_source(hits, max, candidates),
             None => hits,
         };
 
@@ -216,7 +285,9 @@ impl Core {
         }
 
         results.truncate(limit);
-        self.mark_seen(&results);
+        if query.mark {
+            self.mark_seen(&results);
+        }
         tracing::info!(
             q = %query.q,
             results = results.len(),
@@ -224,7 +295,13 @@ impl Core {
             total_ms = started.elapsed().as_millis(),
             "search"
         );
-        Ok(results)
+        Ok((
+            results,
+            SearchTiming {
+                embed_ms,
+                total_ms: started.elapsed().as_millis(),
+            },
+        ))
     }
 }
 
@@ -255,6 +332,7 @@ mod tests {
                 title: Some(format!("t{i}")),
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
+                window_idx: None,
             })
             .collect();
         let made = core.store.insert_chunks(&src.id, &new).await.unwrap();
@@ -279,7 +357,72 @@ mod tests {
             limit: 10,
             tags: vec![],
             category: None,
+            // The default for these tests is the deliberate search the API and
+            // MCP make; the incremental case is exercised explicitly below.
+            mark: true,
         }
+    }
+
+    #[tokio::test]
+    async fn an_identical_query_is_embedded_once() {
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        core.search(&q("dd write iso")).await.unwrap();
+        let after_first = embedder.calls();
+        core.search(&q("dd write iso")).await.unwrap();
+        // Whitespace differences are not a different question.
+        core.search(&q("  dd write iso  ")).await.unwrap();
+
+        assert_eq!(
+            embedder.calls(),
+            after_first,
+            "the query embedding must be cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmarked_search_does_not_stamp_last_seen() {
+        let core = test_core().await;
+        seed_from(&core, "raw", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha");
+        query.mark = false;
+        assert!(!core.search(&query).await.unwrap().is_empty());
+        core.background.wait_idle().await;
+
+        // Nothing was stamped, so the chunk is still eligible to resurface.
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert_eq!(stamped, 0, "typing must not stamp last_seen_at");
+    }
+
+    #[tokio::test]
+    async fn a_marked_search_records_what_it_showed() {
+        let core = test_core().await;
+        seed_from(&core, "raw", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        assert!(!core.search(&q("alpha")).await.unwrap().is_empty());
+        core.background.wait_idle().await;
+
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert!(stamped > 0, "a deliberate search still counts as seeing");
     }
 
     #[tokio::test]
@@ -408,6 +551,37 @@ mod tests {
         query.limit = 5;
         let hits = core.search(&query).await.unwrap();
         assert_eq!(hits.len(), 5, "result count must still honour the limit");
+    }
+
+    #[tokio::test]
+    async fn the_per_source_cap_does_not_starve_the_reranker() {
+        // The cap runs first, and it used to refill only up to the limit: on a
+        // corpus of a few long documents that handed the reranker exactly the
+        // answer it was meant to choose from, so over-fetching bought nothing.
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        // Two long documents: the cap keeps three from each, so the refill is
+        // what has to reach the candidate pool rather than only the answer.
+        for name in ["one", "two"] {
+            let texts: Vec<String> = (0..20).map(|i| format!("{name} chunk {i}")).collect();
+            let refs: Vec<(&str, &str, &[&str])> =
+                texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+            seed_from(&core, name, &refs).await;
+        }
+
+        let query = q("anything");
+        let hits = core.search(&query).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            query.limit,
+            "the limit still decides the length"
+        );
+        assert!(
+            reranker.docs_seen() > query.limit,
+            "the reranker was handed {} candidates for a limit of {}, so it \
+             could only reorder the answer it was already given",
+            reranker.docs_seen(),
+            query.limit
+        );
     }
 
     #[tokio::test]

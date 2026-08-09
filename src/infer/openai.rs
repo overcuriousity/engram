@@ -4,9 +4,15 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
 
-fn client() -> reqwest::Client {
+/// One client per role, so a slow model only widens its own patience.
+///
+/// A timeout here looks exactly like a dead endpoint to the job runner: the
+/// call fails, the job retries, and it fails again at the same wall. A local
+/// reasoning model can spend well over three minutes on one segmentation
+/// window, so the ceiling is configurable per role.
+fn client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .expect("http client")
 }
@@ -63,12 +69,14 @@ pub struct HttpChunker {
     api_key: Option<String>,
     budget: ChunkBudget,
     max_chunk_tokens: usize,
+    reasoning_effort: Option<String>,
+    cooldown: std::time::Duration,
 }
 
 impl HttpChunker {
     pub fn new(cfg: &ChunkRole) -> Self {
         Self {
-            client: client(),
+            client: client(cfg.timeout_secs),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
@@ -78,6 +86,8 @@ impl HttpChunker {
                 output_ratio: cfg.output_ratio,
             },
             max_chunk_tokens: 1024,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+            cooldown: std::time::Duration::from_secs(cfg.cooldown_secs),
         }
     }
 
@@ -89,12 +99,19 @@ impl HttpChunker {
     }
 
     async fn chat(&self, messages: serde_json::Value) -> Result<String> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
             "max_tokens": self.budget.max_output_tokens,
             "temperature": 0.2,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
+        // Segmentation is the slow half of ingest on local hardware — minutes
+        // per window, not seconds. Logging the cost of each call is what makes
+        // a long wait distinguishable from a hang.
+        let started = std::time::Instant::now();
         let v = post_json(
             "chunk",
             &self.client,
@@ -103,6 +120,11 @@ impl HttpChunker {
             body,
         )
         .await?;
+        tracing::info!(
+            ms = started.elapsed().as_millis(),
+            tokens = v["usage"]["completion_tokens"].as_u64(),
+            "chunker call finished"
+        );
         v["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
@@ -147,6 +169,10 @@ impl Chunker for HttpChunker {
     fn budget(&self) -> ChunkBudget {
         self.budget
     }
+
+    fn cooldown(&self) -> std::time::Duration {
+        self.cooldown
+    }
 }
 
 // ── Embedder ─────────────────────────────────────────────────────────────────
@@ -163,7 +189,7 @@ pub struct HttpEmbedder {
 impl HttpEmbedder {
     pub fn new(cfg: &EmbedRole) -> Self {
         Self {
-            client: client(),
+            client: client(cfg.timeout_secs),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
@@ -179,7 +205,15 @@ impl Embedder for HttpEmbedder {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        let body = json!({ "model": self.model, "input": texts });
+        // `encoding_format` is optional in OpenAI's own API and defaults to
+        // float there, but proxies in front of llama.cpp-style servers pass the
+        // absent field through as null and the backend rejects it. Sending it
+        // explicitly costs nothing and keeps those endpoints usable.
+        let body = json!({
+            "model": self.model,
+            "input": texts,
+            "encoding_format": "float",
+        });
         let v = post_json(
             "embed",
             &self.client,
@@ -258,7 +292,7 @@ pub struct HttpReranker {
 impl HttpReranker {
     pub fn new(cfg: &RerankRole) -> Self {
         Self {
-            client: client(),
+            client: client(cfg.timeout_secs),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
@@ -339,7 +373,7 @@ pub struct HttpCompleter {
 impl HttpCompleter {
     pub fn new(cfg: &AskRole) -> Self {
         Self {
-            client: client(),
+            client: client(cfg.timeout_secs),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
@@ -384,7 +418,7 @@ impl Completer for HttpCompleter {
 /// One cheap reachability check per role at startup. Failure is a warning, not
 /// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
-    let c = client();
+    let c = client(crate::config::DEFAULT_TIMEOUT_SECS);
     let mut req = c.get(url(base_url, "models"));
     if let Some(k) = api_key {
         req = req.bearer_auth(k);
@@ -422,6 +456,9 @@ mod tests {
             max_output_tokens: 2048,
             output_ratio: 1.4,
             tokenizer_path: None,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            reasoning_effort: None,
+            cooldown_secs: 0,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {
@@ -431,6 +468,7 @@ mod tests {
             api_key: None,
             dim: 4,
             max_input_tokens: 512,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
         }
     }
 
@@ -533,6 +571,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embedder_asks_for_float_encoding_explicitly() {
+        // A litellm proxy in front of a llama.cpp-style server forwards the
+        // absent field as null, and the backend answers 500 with
+        // "type must be string, but is null". Every embed call fails against
+        // such an endpoint unless the field is sent.
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(body_partial_json(
+                serde_json::json!({"encoding_format": "float"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]}),
+            ))
+            .mount(&server)
+            .await;
+
+        let out = HttpEmbedder::new(&embed_cfg(server.uri()))
+            .embed(&["x".into()])
+            .await
+            .unwrap();
+        assert_eq!(out[0], vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[tokio::test]
     async fn embedder_sends_a_batch_and_orders_results_by_index() {
         let server = MockServer::start().await;
         // Deliberately out of order: the API contract is that `index` is
@@ -604,6 +668,7 @@ mod tests {
             model: "r".into(),
             api_key: None,
             style: RerankStyle::Tei,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
         };
         let out = HttpReranker::new(&cfg)
             .rerank("q", &["a".into(), "b".into(), "c".into()], 2)
@@ -631,6 +696,7 @@ mod tests {
             model: "r".into(),
             api_key: None,
             style: RerankStyle::Cohere,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
         };
         let out = HttpReranker::new(&cfg)
             .rerank("q", &["a".into(), "b".into()], 5)
@@ -656,6 +722,7 @@ mod tests {
             model: "r".into(),
             api_key: None,
             style: RerankStyle::Tei,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
         };
         let out = HttpReranker::new(&cfg)
             .rerank("q", &["a".into()], 5)
@@ -679,6 +746,8 @@ mod tests {
             model: "m".into(),
             api_key: None,
             context_tokens: 4096,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            reasoning_effort: None,
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
@@ -701,6 +770,8 @@ mod tests {
             model: "m".into(),
             api_key: None,
             context_tokens: 4096,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            reasoning_effort: None,
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),

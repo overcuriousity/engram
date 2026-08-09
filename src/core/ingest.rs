@@ -65,6 +65,12 @@ impl Core {
                 for c in self.store.chunks_for_source(&src.id).await? {
                     self.store.delete_chunk(&c.id).await?;
                 }
+                // The window rows are the segment job's memory of what it has
+                // already done. Leaving them behind means the rerun finds every
+                // window `done`, segments nothing, and lands on a source with
+                // no chunks at all. Re-windowing is also the point of a
+                // reprocess after a model or budget change.
+                self.store.clear_windows(&src.id).await?;
                 self.store
                     .set_source_status(&src.id, SourceStatus::Raw)
                     .await?;
@@ -151,6 +157,7 @@ mod tests {
                     title: None,
                     category: None,
                     tags: vec![],
+                    window_idx: None,
                 }],
             )
             .await
@@ -205,6 +212,42 @@ mod tests {
         assert_eq!(
             j.attempts, 1,
             "reprocess must start from a clean attempt count"
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocessing_re_segments_instead_of_finding_every_window_done() {
+        // The window rows say what the segment job has already finished.
+        // Keeping them across a reprocess left the rerun with nothing pending,
+        // no chunks, and a source marked failed.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        let first = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        assert!(first > 0);
+
+        core.reprocess(&out.id, Stage::Segment).await.unwrap();
+        assert!(
+            core.store
+                .windows_for_source(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "reprocess must forget the windowing so it can be redone"
+        );
+
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        assert_eq!(
+            core.store.chunks_for_source(&out.id).await.unwrap().len(),
+            first,
+            "the rerun must produce the chunks again, not an empty source"
+        );
+        assert_ne!(
+            core.store.get_source(&out.id).await.unwrap().status,
+            SourceStatus::Failed
         );
     }
 }

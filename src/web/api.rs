@@ -230,6 +230,8 @@ async fn search(
             })
             .unwrap_or_default(),
         category: q.category.filter(|c| !c.is_empty()),
+        // An API call is one deliberate question; only the typing UI opts out.
+        mark: true,
     };
     Ok(Json(st.core.search(&query).await?))
 }
@@ -694,6 +696,7 @@ mod patch_tests {
                     title: Some("a title".into()),
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
+                    window_idx: None,
                 }],
             )
             .await

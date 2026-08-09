@@ -36,6 +36,30 @@
 </table>
 {% endif %}
 
+<h3>Needs review</h3>
+{% if flagged.is_empty() %}
+  <p class="muted">Nothing flagged. Every chunk reproduced its source.</p>
+{% else %}
+<table class="grid">
+  <thead><tr><th>Chunk</th><th>Problem</th><th></th></tr></thead>
+  <tbody>
+  {% for f in flagged %}
+    <tr>
+      <td><a href="/ui/chunks/{{ f.chunk_id }}">{{ f.title }}</a></td>
+      <td class="mono muted">{{ f.detail }}</td>
+      <td>
+        {% if let Some(w) = f.window_idx %}
+        <form method="post" action="/ui/sources/{{ f.source_id }}/windows/{{ w }}/resegment">
+          <button class="btn btn-sm" type="submit">Re-segment window</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h3>API tokens</h3>
 <div id="token-result"></div>
 <form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"

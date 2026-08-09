@@ -111,6 +111,22 @@ fn flush(
     buf.clear();
 }
 
+/// The exact lines of a stored window, one-based and inclusive.
+///
+/// Takes line numbers rather than a `Window` because windows live in the
+/// database between job runs: the row may be stale, and clamping beats
+/// panicking on data.
+pub fn window_text(text: &str, start_line: i64, end_line: i64) -> String {
+    if start_line < 1 || end_line < start_line {
+        return String::new();
+    }
+    text.lines()
+        .skip((start_line - 1) as usize)
+        .take((end_line - start_line + 1) as usize)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Deterministic paragraph split with no rewriting. Used when the chunker's
 /// output cannot be parsed twice in a row: a source must never end up with
 /// zero chunks just because a model returned bad JSON.
@@ -250,6 +266,16 @@ mod tests {
         assert_eq!(out[0].1, 1);
         assert_eq!(out[0].2, 2);
         assert_eq!(out[1].1, 4);
+    }
+
+    #[test]
+    fn window_text_returns_exactly_the_lines_a_window_claims() {
+        let src = "one\ntwo\nthree\nfour\nfive";
+        assert_eq!(window_text(src, 2, 4), "two\nthree\nfour");
+        // Out-of-range ends clamp rather than panic: the stored window is data,
+        // and data can be stale.
+        assert_eq!(window_text(src, 4, 99), "four\nfive");
+        assert_eq!(window_text(src, 99, 120), "");
     }
 
     #[test]

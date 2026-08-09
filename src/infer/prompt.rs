@@ -74,10 +74,69 @@ fn extract_json(body: &str) -> &str {
     }
 }
 
+/// Recover the chunk objects a truncated response did finish.
+///
+/// A small local model told to rewrite a window routinely runs out of output
+/// budget mid-list, and the window it was working on is otherwise lost: the
+/// parse fails, a repair call costs another minute or more on consumer
+/// hardware, and that reply is just as likely to be cut off. The objects
+/// before the cut are complete and correct, so scan the array and keep every
+/// one that closed.
+///
+/// Returns `None` when nothing complete can be salvaged.
+fn salvage_truncated(json: &str) -> Option<String> {
+    let start = json.find("\"chunks\"")?;
+    let open = json[start..].find('[')? + start;
+
+    let bytes = json.as_bytes();
+    let (mut depth, mut in_string, mut escaped) = (0i32, false, false);
+    let mut last_complete: Option<usize> = None;
+    for (i, &b) in bytes.iter().enumerate().skip(open + 1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    last_complete = Some(i);
+                }
+            }
+            b']' if !in_string && depth == 0 => break,
+            _ => {}
+        }
+    }
+
+    let end = last_complete?;
+    Some(format!("{}]}}", &json[..=end]))
+}
+
 pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
     let json = extract_json(body);
-    let env: Envelope =
-        serde_json::from_str(json).map_err(|e| Error::MalformedLlmOutput(e.to_string()))?;
+    let env: Envelope = match serde_json::from_str(json) {
+        Ok(env) => env,
+        Err(e) => {
+            // Salvage before giving up: a truncated list still holds whole
+            // chunks, and asking a slow model to try again is expensive.
+            let salvaged = salvage_truncated(json)
+                .and_then(|repaired| serde_json::from_str::<Envelope>(&repaired).ok());
+            match salvaged {
+                Some(env) => {
+                    tracing::warn!(
+                        error = %e,
+                        chunks = env.chunks.len(),
+                        "chunker output was cut off; keeping the chunks it finished"
+                    );
+                    env
+                }
+                None => return Err(Error::MalformedLlmOutput(e.to_string())),
+            }
+        }
+    };
 
     let chunks: Vec<ProposedChunk> = env
         .chunks
@@ -110,6 +169,36 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_truncated_list_keeps_the_chunks_that_finished() {
+        // Exactly what a small local model emits when it runs out of output
+        // budget: two complete objects, then a third cut mid-string.
+        let cut = r###"{"chunks":[
+          {"text":"first complete","title":"one","tags":[],"source_lines":[1,2]},
+          {"text":"second complete","title":"two","tags":[]},
+          {"text":"third was cut off here"###;
+        let out = parse_response(cut).expect("the finished chunks must survive");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "first complete");
+        assert_eq!(out[1].text, "second complete");
+    }
+
+    #[test]
+    fn a_brace_inside_a_string_does_not_end_a_chunk_early() {
+        let cut = r###"{"chunks":[
+          {"text":"awk '{print $1}' file.txt","title":"awk","tags":[]},
+          {"text":"cut off"###;
+        let out = parse_response(cut).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "awk '{print $1}' file.txt");
+    }
+
+    #[test]
+    fn a_response_cut_before_any_chunk_closed_is_still_an_error() {
+        let cut = r###"{"chunks":[{"text":"nothing finished"###;
+        assert!(parse_response(cut).is_err());
+    }
 
     // r###: the JSON contains the sequence `"##` (a quoted markdown H2),
     // which would terminate both an r#"..."# and an r##"..."## literal.

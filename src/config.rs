@@ -64,6 +64,25 @@ pub struct InferConfig {
     pub rerank: Option<RerankRole>,
 }
 
+/// Seconds an inference request may take before the client gives up.
+///
+/// Fifteen minutes, which is absurd for a hosted API and about right for the
+/// case engram is built for: a small reasoning model on one consumer GPU,
+/// where a single segmentation window has been measured at seven minutes and
+/// 8000 output tokens. A timeout there is indistinguishable from a dead
+/// endpoint to the job runner — the call fails, the job retries, and it fails
+/// again at the same wall, forever.
+///
+/// The cost of setting it too high is a stuck job holding a worker until it
+/// gives up. The cost of setting it too low is a corpus that never finishes
+/// segmenting, which is worse, so the default errs long. Hosted endpoints
+/// should lower it per role.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 900;
+
+fn default_timeout_secs() -> u64 {
+    DEFAULT_TIMEOUT_SECS
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChunkRole {
     pub base_url: String,
@@ -75,6 +94,23 @@ pub struct ChunkRole {
     pub output_ratio: f32,
     #[serde(default)]
     pub tokenizer_path: Option<String>,
+    /// Sent as `reasoning_effort` when set. A reasoning model spends output
+    /// budget thinking before it writes any JSON, and that budget is the same
+    /// one the chunk list has to fit in — on a small local model the thinking
+    /// is what truncates the answer.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Seconds to idle between segmentation calls.
+    ///
+    /// Segmenting a long source is minutes of uninterrupted generation, which
+    /// on a desktop GPU is a sustained thermal load rather than a burst. This
+    /// buys the card time to settle between windows. It does not save energy —
+    /// the same tokens are generated either way — so it is off by default and
+    /// exists for the machine sitting next to someone.
+    #[serde(default)]
+    pub cooldown_secs: u64,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +121,8 @@ pub struct EmbedRole {
     pub api_key: Option<String>,
     pub dim: usize,
     pub max_input_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -94,6 +132,11 @@ pub struct AskRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub context_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// See `ChunkRole::reasoning_effort`.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +146,8 @@ pub struct RerankRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub style: RerankStyle,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +274,29 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn the_default_timeout_survives_a_slow_local_model() {
+        // A segmentation window against a 9B model on one consumer GPU has been
+        // measured at seven minutes. Anything shorter turns a working setup
+        // into an endless retry loop, so this number is load-bearing rather
+        // than arbitrary.
+        assert!(
+            DEFAULT_TIMEOUT_SECS >= 600,
+            "the default must outlast a local reasoning model's slowest window"
+        );
+    }
+
+    #[test]
+    fn a_config_without_timeouts_still_gets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.infer.chunk.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(cfg.infer.chunk.reasoning_effort, None);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {

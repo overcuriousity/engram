@@ -3,6 +3,7 @@ pub mod fake;
 pub mod openai;
 pub mod prompt;
 pub mod split;
+pub mod verify;
 
 use crate::error::Result;
 use async_trait::async_trait;
@@ -28,6 +29,11 @@ pub trait Chunker: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
     async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>>;
     fn budget(&self) -> ChunkBudget;
+    /// How long to idle between windows, so a long source is not one
+    /// unbroken thermal load on a desktop GPU. Zero for anything remote.
+    fn cooldown(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 }
 
 #[async_trait]

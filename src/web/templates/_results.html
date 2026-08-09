@@ -1,18 +1,23 @@
+<span id="timing-value" hx-swap-oob="innerHTML:#timing">{{ timing }}</span>
 {% if results.is_empty() %}
   <p class="muted">No matches.</p>
 {% else %}
+<div data-terms="{{ terms }}">
   {% for r in results %}
-  <div class="card">
-    <div class="card-head">
-      <span class="card-title">{{ r.title }}</span>
-      <span class="card-meta">{{ r.rank }}</span>
+  <a class="rail-item" role="option" aria-selected="false"
+     href="/ui/chunks/{{ r.chunk_id }}"
+     hx-get="/ui/chunks/{{ r.chunk_id }}?terms={{ terms|urlencode }}"
+     hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
+    <div class="rail-head">
+      <span class="rail-rank mono">{{ r.rank }}</span>
+      <span class="rail-title">{{ r.title }}</span>
     </div>
-    <div class="md">{{ r.html|safe }}</div>
+    <div class="rail-snippet">{{ r.snippet }}</div>
     <div class="chips">
       {% if let Some(c) = r.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
       {% for t in r.tags %}<span class="badge">{{ t }}</span>{% endfor %}
-      <a class="btn btn-ghost btn-sm" href="/ui/sources/{{ r.source_id }}">source</a>
     </div>
-  </div>
+  </a>
   {% endfor %}
+</div>
 {% endif %}

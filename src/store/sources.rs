@@ -50,6 +50,9 @@ pub struct Source {
     pub status: SourceStatus,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Fraction of this source's non-blank lines that ended up inside some
+    /// chunk. `None` for sources segmented before the check existed.
+    pub coverage: Option<f64>,
 }
 
 pub fn content_hash(text: &str) -> String {
@@ -66,6 +69,7 @@ fn row_to_source(r: &sqlx::sqlite::SqliteRow) -> Source {
         status: SourceStatus::parse(r.get::<String, _>("status").as_str()),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
+        coverage: r.get("coverage"),
     }
 }
 
@@ -85,6 +89,7 @@ impl Store {
             status: SourceStatus::Raw,
             created_at: now(),
             updated_at: now(),
+            coverage: None,
         };
         sqlx::query(
             "INSERT INTO sources (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at)
@@ -125,6 +130,19 @@ impl Store {
             .bind(status.as_str())
             .bind(now())
             .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// How much of this source ended up inside a chunk. Written once every
+    /// window has resolved; a low number means the segmenter dropped part of
+    /// the document, which nothing used to notice.
+    pub async fn set_source_coverage(&self, source_id: &str, coverage: f64) -> Result<()> {
+        sqlx::query("UPDATE sources SET coverage = ?, updated_at = ? WHERE id = ?")
+            .bind(coverage)
+            .bind(now())
+            .bind(source_id)
             .execute(&self.pool)
             .await?;
         Ok(())

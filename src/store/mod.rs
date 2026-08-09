@@ -2,6 +2,7 @@ pub mod auth;
 pub mod chunks;
 pub mod jobs;
 pub mod sources;
+pub mod windows;
 
 use crate::config::StoreConfig;
 use crate::error::Result;

@@ -30,15 +30,62 @@ fn default_limit(core: &Core) -> usize {
     (core.embedder.max_input_tokens() as f32 * SAFETY) as usize
 }
 
+/// Does this error mean the input itself is too big, rather than the endpoint
+/// being unwell?
+///
+/// A local inference server has a hard physical batch size — llama.cpp answers
+/// `input (1030 tokens) is too large to process` — and no amount of retrying
+/// changes that. Configuration is meant to keep chunks under it, but the
+/// configured ceiling is a claim about the model while this is the server's
+/// real limit, and the two disagree more often than not.
+fn input_too_large(e: &Error) -> bool {
+    let Error::Inference {
+        role: "embed",
+        detail,
+    } = e
+    else {
+        return false;
+    };
+    let d = detail.to_ascii_lowercase();
+    d.contains("too large")
+        || d.contains("too long")
+        || d.contains("exceeds")
+        || d.contains("413")
+        || d.contains("batch size")
+}
+
 pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result<()> {
     let chunk = core.store.get_chunk(chunk_id).await?;
     let text = embed_text(&chunk);
 
     if core.counter.count(&text) > limit {
-        return split_oversize(core, &chunk, limit).await;
+        // Our own estimate, which can be wrong in either direction. Do not
+        // shred the chunk on a guess.
+        return split_oversize(core, &chunk, limit, false).await;
     }
 
-    embed_batch(core, std::slice::from_ref(&chunk), vec![text]).await?;
+    match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
+        Ok(()) => {}
+        Err(e) if input_too_large(&e) => {
+            // The endpoint's real ceiling is lower than the configured one, so
+            // halving the configured limit would change nothing. Halve what the
+            // chunk actually measures instead: that shrinks on every refusal
+            // and converges on whatever the server will take.
+            let measured = core.counter.count(&text);
+            let smaller = (measured / 2).max(crate::infer::budget::MIN_WINDOW_TOKENS);
+            tracing::warn!(
+                chunk_id,
+                measured,
+                smaller,
+                error = %e,
+                "endpoint refused the chunk as too large; splitting instead of retrying"
+            );
+            // The server said no. That is a fact rather than an estimate, so
+            // this split has to succeed whatever the text looks like.
+            return split_oversize(core, &chunk, smaller, true).await;
+        }
+        Err(e) => return Err(e),
+    }
     settle_source(core, &chunk.source_id).await
 }
 
@@ -61,7 +108,7 @@ pub async fn run_source_with_limit(core: &Core, source_id: &str, limit: usize) -
     for chunk in pending {
         let text = embed_text(&chunk);
         if core.counter.count(&text) > limit {
-            split_oversize(core, &chunk, limit).await?;
+            split_oversize(core, &chunk, limit, false).await?;
         } else {
             texts.push(text);
             batch.push(chunk);
@@ -69,7 +116,16 @@ pub async fn run_source_with_limit(core: &Core, source_id: &str, limit: usize) -
     }
 
     for (chunks, texts) in batch.chunks(BATCH).zip(texts.chunks(BATCH)) {
-        embed_batch(core, chunks, texts.to_vec()).await?;
+        match embed_batch(core, chunks, texts.to_vec()).await {
+            Ok(()) => {}
+            // One oversize chunk fails the whole batch, and the batch cannot
+            // say which. Per-chunk jobs isolate it, and that path splits it.
+            Err(e) if input_too_large(&e) => {
+                tracing::warn!(source_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
+                return split_into_chunk_jobs(core, source_id).await;
+            }
+            Err(e) => return Err(e),
+        }
     }
     settle_source(core, source_id).await
 }
@@ -152,7 +208,7 @@ pub async fn split_into_chunk_jobs(core: &Core, source_id: &str) -> Result<()> {
 /// A chunk larger than the embedder accepts becomes several sibling chunks
 /// split at a paragraph boundary. Truncating would silently discard knowledge,
 /// and one vector per fragment keeps the data model unchanged.
-async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
+async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) -> Result<()> {
     let paragraphs: Vec<&str> = chunk
         .text
         .split("\n\n")
@@ -160,11 +216,32 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
         .collect();
 
     if paragraphs.len() < 2 {
+        // No blank line to cut on. Code, tables and reference entries look like
+        // this, and they are exactly what a local embedding server refuses for
+        // exceeding its physical batch — so when the refusal is real, cut on
+        // lines and then on characters rather than trying the same thing again.
+        if hard {
+            let parts = split_by_lines(&chunk.text, limit, &core.counter);
+            if parts.len() > 1 {
+                return replace_with_siblings(core, chunk, parts).await;
+            }
+        }
+        // Optimism, once: our token estimate may simply be wrong, and one
+        // over-long vector beats shredding a chunk on a guess. But if the
+        // server refuses it, the guess is settled and the text has to be cut.
         tracing::warn!(chunk_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
-        let vectors = core
-            .embedder
-            .embed(std::slice::from_ref(&chunk.text))
-            .await?;
+        let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
+            Ok(v) => v,
+            Err(e) if input_too_large(&e) => {
+                let parts = split_by_lines(&chunk.text, limit, &core.counter);
+                if parts.len() > 1 {
+                    tracing::warn!(chunk_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
+                    return replace_with_siblings(core, chunk, parts).await;
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         core.vectors
             .upsert(vec![VectorPoint {
                 vector: vectors.into_iter().next().unwrap(),
@@ -195,21 +272,81 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
         parts.push(current);
     }
 
+    replace_with_siblings(core, chunk, parts).await
+}
+
+/// Cut text that has no paragraph breaks. Lines first, and a single line that
+/// still will not fit is cut on character count — the point is that this always
+/// returns something smaller than it was given.
+fn split_by_lines(
+    text: &str,
+    limit: usize,
+    counter: &crate::infer::budget::TokenCounter,
+) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let candidate = if current.is_empty() {
+            line.to_string()
+        } else {
+            format!("{current}\n{line}")
+        };
+        if counter.count(&candidate) > limit && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+            current = line.to_string();
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    // One line longer than the limit on its own: a minified blob or a very long
+    // command. Characters are the last resort, and four per token is the same
+    // conservative ratio the budget estimate uses.
+    let max_chars = limit.saturating_mul(4).max(64);
+    parts
+        .into_iter()
+        .flat_map(|p| {
+            if counter.count(&p) <= limit {
+                return vec![p];
+            }
+            p.chars()
+                .collect::<Vec<_>>()
+                .chunks(max_chars)
+                .map(|c| c.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -> Result<()> {
     tracing::info!(chunk_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
+    // Make the siblings' room before numbering them. Numbering them apart from
+    // their neighbours instead — `base * 1000 + i` — sorts chunk 2's siblings
+    // after chunks 3 onward rather than before them, and the next segmentation
+    // pass renumbers that wrong order into place permanently.
+    core.store
+        .make_room_after(&chunk.source_id, base, parts.len() as i64 - 1)
+        .await?;
     let new: Vec<NewChunk> = parts
         .iter()
         .enumerate()
         .map(|(i, text)| NewChunk {
             // Siblings sort after the original position and before the next
             // original chunk, which keeps reading order intact.
-            ordinal: base * 1000 + i as i64,
+            ordinal: base + i as i64,
             text: text.clone(),
             source_span: chunk.source_span.clone(),
             title: chunk.title.clone(),
             category: chunk.category.clone(),
             tags: chunk.tags.clone(),
+            // Siblings belong to the window their parent came from, or a
+            // re-segmentation of that window would leave them behind.
+            window_idx: chunk.window_idx,
         })
         .collect();
 
@@ -234,7 +371,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         category: chunk.category.clone(),
         tags: chunk.tags.clone(),
         created_at: chunk.created_at,
-        // Left unset so re-embedding does not make a chunk look forgotten.
+        // Unset means "whatever is already stored": the vector store carries
+        // the existing stamp forward rather than letting a re-embed make a
+        // chunk look forgotten.
         last_seen_at: None,
     }
 }
@@ -262,6 +401,178 @@ pub async fn settle_source(core: &Core, source_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_chunk_the_endpoint_refuses_is_split_rather_than_retried() {
+        // The deployment that produced this: config claimed 8192 input tokens,
+        // llama.cpp's physical batch was 1024, and the chunk in between failed
+        // five identical times before anyone looked.
+        let mut core = crate::core::test_support::test_core().await;
+        let strict = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            200,
+        ));
+        core.embedder = strict.clone();
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        // Several paragraphs, comfortably over the endpoint's real ceiling.
+        let body = (0..40)
+            .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        // The configured limit is the lie; the endpoint's is what bites.
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(
+            chunks.len() > 1,
+            "the refused chunk should have become siblings, got {}",
+            chunks.len()
+        );
+        assert!(
+            chunks.iter().all(|c| c.window_idx == Some(0)),
+            "siblings must stay attached to the window that produced them"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_with_no_paragraph_breaks_is_still_split() {
+        // Code, tables and reference entries have no blank lines, and they are
+        // exactly what a local embedding server refuses for exceeding its
+        // physical batch. Giving up on them meant retrying forever.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            120,
+        ));
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let body = (0..60)
+            .map(|i| format!("    command --flag-{i} /path/to/thing-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !body.contains("\n\n"),
+            "the point is that there are no paragraphs"
+        );
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_during_the_as_is_attempt_still_ends_in_a_split() {
+        // The trap this closes: the estimate says the chunk is oversize, there
+        // is no paragraph to cut on, so it is embedded whole — and the server
+        // refuses it, forever, because nothing along that path can shrink it.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            120,
+        ));
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let body = (0..60)
+            .map(|i| format!("    command --flag-{i} /path/to/thing-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        // A limit low enough that the proactive path runs, which is the path
+        // that used to dead-end.
+        run_with_limit(&core, &made[0].id, 100).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[test]
+    fn splitting_by_lines_always_returns_something_smaller() {
+        let counter = crate::infer::budget::TokenCounter::Estimate;
+        // A single line far over the limit, with no whitespace to cut on.
+        let blob = "x".repeat(4000);
+        let parts = split_by_lines(&blob, 100, &counter);
+        assert!(parts.len() > 1, "a long single line must still be cut");
+        assert!(
+            parts.iter().all(|p| counter.count(p) <= 100 * 2),
+            "each part must be near the limit rather than the original size"
+        );
+        assert_eq!(parts.concat(), blob, "cutting must not lose text");
+    }
+
+    #[test]
+    fn an_endpoint_size_refusal_is_told_apart_from_a_sick_endpoint() {
+        let too_big = Error::Inference {
+            role: "embed",
+            detail: "input (1030 tokens) is too large to process. increase the physical \
+                     batch size (current batch size: 1024)"
+                .into(),
+        };
+        assert!(input_too_large(&too_big));
+
+        // A transient failure must stay retryable, or a flaky local server
+        // would start shredding chunks instead of waiting for it to recover.
+        let flaky = Error::Inference {
+            role: "embed",
+            detail: "error sending request".into(),
+        };
+        assert!(!input_too_large(&flaky));
+        let wrong_role = Error::Inference {
+            role: "chunk",
+            detail: "context too large".into(),
+        };
+        assert!(!input_too_large(&wrong_role));
+    }
     use crate::core::test_support::test_core;
     use crate::store::chunks::{EmbedState, NewChunk};
     use crate::store::sources::SourceStatus;
@@ -278,6 +589,7 @@ mod tests {
                 title: Some(format!("t{i}")),
                 category: Some("note".into()),
                 tags: vec!["x".into()],
+                window_idx: None,
             })
             .collect();
         let made = core.store.insert_chunks(&src.id, &new).await.unwrap();
@@ -530,6 +842,59 @@ mod tests {
             core.store.pending_embed_count(&src_id).await.unwrap(),
             ids.len() as i64,
             "the reprocess was silently cancelled by the job it interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_embedding_does_not_make_a_chunk_look_forgotten() {
+        // A point write replaces the payload rather than merging it, so a
+        // re-embed built from the chunk row used to clear `last_seen_at` — and
+        // `resurface` would offer a chunk read yesterday as forgotten.
+        let core = test_core().await;
+        let (_src, ids) = seed(&core, &["text"]).await;
+        run(&core, &ids[0]).await.unwrap();
+        core.vectors.touch(&ids[0..1], 1_700_000_000).await.unwrap();
+
+        core.store
+            .update_chunk_text(&ids[0], "edited text")
+            .await
+            .unwrap();
+        run(&core, &ids[0]).await.unwrap();
+
+        let forgotten = core
+            .vectors
+            .resurface(10, i64::MAX, 1_700_000_000)
+            .await
+            .unwrap();
+        assert!(
+            forgotten.is_empty(),
+            "the re-embed dropped the stamp and the chunk now reads as unseen"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_siblings_keep_the_reading_order_of_the_chunk_they_replace() {
+        // `base * 1000 + i` put chunk 1's siblings after chunks 2 onward, and
+        // the next segmentation pass renumbered that order into place for good.
+        let core = test_core().await;
+        let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
+        let (src_id, ids) = seed(&core, &["first", &big, "last"]).await;
+
+        run_with_limit(&core, &ids[1], 200).await.unwrap();
+
+        let texts: Vec<String> = core
+            .store
+            .chunks_for_source(&src_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("first"));
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("last"),
+            "the siblings sorted past the chunk that follows them: {texts:?}"
         );
     }
 

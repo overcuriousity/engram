@@ -51,6 +51,12 @@ pub struct Chunk {
     /// what the API hands out.
     #[serde(skip)]
     pub embed_rev: i64,
+    /// Which segmentation window produced this chunk. `None` for chunks
+    /// written before per-window segmentation existed.
+    pub window_idx: Option<i64>,
+    /// Verification failures. Empty means every check passed.
+    pub flags: Vec<String>,
+    pub flag_detail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,11 +67,13 @@ pub struct NewChunk {
     pub title: Option<String>,
     pub category: Option<String>,
     pub tags: Vec<String>,
+    pub window_idx: Option<i64>,
 }
 
 fn row_to_chunk(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     let tags_json: String = r.get("tags");
     let span_json: Option<String> = r.get("source_span");
+    let flags_json: Option<String> = r.get("flags");
     Chunk {
         id: r.get("id"),
         source_id: r.get("source_id"),
@@ -79,6 +87,11 @@ fn row_to_chunk(r: &sqlx::sqlite::SqliteRow) -> Chunk {
         embed_model: r.get("embed_model"),
         created_at: r.get("created_at"),
         embed_rev: r.get("embed_rev"),
+        window_idx: r.get("window_idx"),
+        flags: flags_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        flag_detail: r.get("flag_detail"),
     }
 }
 
@@ -100,10 +113,13 @@ impl Store {
                 embed_model: None,
                 created_at: now(),
                 embed_rev: 0,
+                window_idx: nc.window_idx,
+                flags: vec![],
+                flag_detail: None,
             };
             sqlx::query(
-                "INSERT INTO chunks (id, source_id, ordinal, text, source_span, title, category, tags, embed_state, embed_model, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                "INSERT INTO chunks (id, source_id, ordinal, text, source_span, title, category, tags, embed_state, embed_model, created_at, window_idx)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.source_id)
@@ -115,6 +131,7 @@ impl Store {
             .bind(serde_json::to_string(&c.tags).unwrap())
             .bind(c.embed_state.as_str())
             .bind(c.created_at)
+            .bind(c.window_idx)
             .execute(&mut *tx)
             .await?;
             out.push(c);
@@ -277,6 +294,103 @@ impl Store {
         Ok(())
     }
 
+    /// The chunks a window's next write replaces.
+    ///
+    /// Chunks with no window at all are included, because a source segmented
+    /// before windows existed has nothing else to key on: leaving them out
+    /// would append the new segmentation beside the old one instead of
+    /// replacing it. They are swept by whichever window writes first, and there
+    /// are none left by the second.
+    pub async fn chunk_ids_for_window(
+        &self,
+        source_id: &str,
+        window_idx: i64,
+    ) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT id FROM chunks WHERE source_id = ?
+               AND (window_idx = ? OR window_idx IS NULL)
+             ORDER BY ordinal",
+        )
+        .bind(source_id)
+        .bind(window_idx)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
+    /// Open a gap of `by` ordinals after `ordinal`, so chunks inserted into it
+    /// keep reading order without renumbering the whole source.
+    pub async fn make_room_after(&self, source_id: &str, ordinal: i64, by: i64) -> Result<()> {
+        sqlx::query("UPDATE chunks SET ordinal = ordinal + ? WHERE source_id = ? AND ordinal > ?")
+            .bind(by)
+            .bind(source_id)
+            .bind(ordinal)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Give a source one continuous ordinal sequence again.
+    ///
+    /// Chunks are inserted per window and numbered within it, so until this
+    /// runs a source has three chunks numbered 0. Ordering by window and then
+    /// by the within-window number reproduces reading order.
+    pub async fn renumber_chunks(&self, source_id: &str) -> Result<()> {
+        let rows = sqlx::query(
+            "SELECT id FROM chunks WHERE source_id = ?
+             ORDER BY COALESCE(window_idx, 0), ordinal, rowid",
+        )
+        .bind(source_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut tx = self.pool.begin().await?;
+        for (n, r) in rows.iter().enumerate() {
+            sqlx::query("UPDATE chunks SET ordinal = ? WHERE id = ?")
+                .bind(n as i64)
+                .bind(r.get::<String, _>("id"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Record what verification found. An empty list clears the flags, so a
+    /// re-checked chunk does not keep a warning it no longer earns.
+    pub async fn set_chunk_flags(
+        &self,
+        id: &str,
+        flags: &[String],
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let json = if flags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()))
+        };
+        sqlx::query("UPDATE chunks SET flags = ?, flag_detail = ? WHERE id = ?")
+            .bind(json)
+            .bind(detail)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_chunk_flags(&self, id: &str) -> Result<()> {
+        self.set_chunk_flags(id, &[], None).await
+    }
+
+    pub async fn flagged_chunks(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM chunks WHERE flags IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_chunk).collect())
+    }
+
     async fn count_by_embed_state(&self, source_id: &str, state: &str) -> Result<i64> {
         let row =
             sqlx::query("SELECT COUNT(*) AS n FROM chunks WHERE source_id = ? AND embed_state = ?")
@@ -346,7 +460,90 @@ mod tests {
             title: Some(format!("title {ord}")),
             category: Some("procedure".into()),
             tags: vec!["forensics".into(), "windows".into()],
+            window_idx: None,
         }
+    }
+
+    #[tokio::test]
+    async fn chunks_are_replaced_per_window_not_per_source() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_source("raw", "web", None).await.unwrap();
+        let mut a = nc(0, "window zero");
+        a.window_idx = Some(0);
+        let mut b = nc(0, "window one");
+        b.window_idx = Some(1);
+        s.insert_chunks(&src.id, &[a, b]).await.unwrap();
+
+        let ids = s.chunk_ids_for_window(&src.id, 1).await.unwrap();
+        assert_eq!(ids.len(), 1);
+        for id in &ids {
+            s.delete_chunk(id).await.unwrap();
+        }
+
+        let left = s.chunks_for_source(&src.id).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].text, "window zero");
+    }
+
+    #[tokio::test]
+    async fn renumbering_orders_by_window_then_position() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_source("raw", "web", None).await.unwrap();
+        let mut second = nc(1, "second of window one");
+        second.window_idx = Some(1);
+        let mut first = nc(0, "first of window one");
+        first.window_idx = Some(1);
+        let mut zero = nc(0, "only of window zero");
+        zero.window_idx = Some(0);
+        s.insert_chunks(&src.id, &[second, first, zero])
+            .await
+            .unwrap();
+
+        s.renumber_chunks(&src.id).await.unwrap();
+        let got = s.chunks_for_source(&src.id).await.unwrap();
+        assert_eq!(got[0].text, "only of window zero");
+        assert_eq!(got[0].ordinal, 0);
+        assert_eq!(got[1].text, "first of window one");
+        assert_eq!(got[1].ordinal, 1);
+        assert_eq!(got[2].ordinal, 2);
+    }
+
+    #[tokio::test]
+    async fn flags_round_trip_and_list_only_flagged_chunks() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_source("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_chunks(&src.id, &[nc(0, "clean"), nc(1, "suspect")])
+            .await
+            .unwrap();
+
+        s.set_chunk_flags(
+            &made[1].id,
+            &["literals_unverified".to_string()],
+            Some("missing literal: --dry-run"),
+        )
+        .await
+        .unwrap();
+
+        let flagged = s.flagged_chunks(10).await.unwrap();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].flags, vec!["literals_unverified".to_string()]);
+        assert_eq!(
+            flagged[0].flag_detail.as_deref(),
+            Some("missing literal: --dry-run")
+        );
+
+        s.clear_chunk_flags(&made[1].id).await.unwrap();
+        assert!(s.flagged_chunks(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn coverage_is_stored_on_the_source() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_source("raw", "web", None).await.unwrap();
+        s.set_source_coverage(&src.id, 0.42).await.unwrap();
+        let got = s.get_source(&src.id).await.unwrap();
+        assert!((got.coverage.unwrap() - 0.42).abs() < 1e-6);
     }
 
     #[tokio::test]

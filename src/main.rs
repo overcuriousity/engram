@@ -80,6 +80,9 @@ fn build_core(
             cfg.infer.chunk.tokenizer_path.as_deref(),
         )),
         background: Arc::new(engram::core::background::Background::default()),
+        query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
+            engram::core::QUERY_CACHE_CAPACITY,
+        ))),
     }
 }
 
@@ -258,6 +261,9 @@ mod startup_tests {
                     max_output_tokens: 8192,
                     output_ratio: 1.4,
                     tokenizer_path: None,
+                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
+                    reasoning_effort: None,
+                    cooldown_secs: 0,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
@@ -265,12 +271,15 @@ mod startup_tests {
                     api_key: None,
                     dim: 1024,
                     max_input_tokens: 8192,
+                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                 },
                 ask: AskRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
                     context_tokens: 32768,
+                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
+                    reasoning_effort: None,
                 },
                 rerank: None,
             },
