@@ -64,6 +64,18 @@ pub struct InferConfig {
     pub rerank: Option<RerankRole>,
 }
 
+/// Seconds an inference request may take before the client gives up.
+///
+/// Three minutes suits a hosted endpoint. A local reasoning model on modest
+/// hardware routinely spends longer than that on one segmentation window, and
+/// a timeout there is indistinguishable from a dead endpoint: the job retries,
+/// times out again, and the source never finishes.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 180;
+
+fn default_timeout_secs() -> u64 {
+    DEFAULT_TIMEOUT_SECS
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChunkRole {
     pub base_url: String,
@@ -75,6 +87,14 @@ pub struct ChunkRole {
     pub output_ratio: f32,
     #[serde(default)]
     pub tokenizer_path: Option<String>,
+    /// Sent as `reasoning_effort` when set. A reasoning model spends output
+    /// budget thinking before it writes any JSON, and that budget is the same
+    /// one the chunk list has to fit in — on a small local model the thinking
+    /// is what truncates the answer.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +105,8 @@ pub struct EmbedRole {
     pub api_key: Option<String>,
     pub dim: usize,
     pub max_input_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -94,6 +116,11 @@ pub struct AskRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub context_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// See `ChunkRole::reasoning_effort`.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +130,8 @@ pub struct RerankRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub style: RerankStyle,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]

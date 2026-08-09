@@ -22,7 +22,13 @@ fn looks_like_a_path_or_flag(token: &str) -> bool {
     if t.len() < 3 {
         return false;
     }
-    t.starts_with("--") || t.starts_with('/') || t.starts_with("~/") || t.contains('/')
+    if t.starts_with("--") || t.starts_with('/') || t.starts_with("~/") || t.starts_with("./") {
+        return true;
+    }
+    // A slash alone is not a path: ordinary prose is full of "enables/disables"
+    // and "and/or", and flagging those buries the real misses under noise. A
+    // relative path carries something else machine-shaped as well.
+    t.contains('/') && t.contains(['.', '-', '_', '=', '$', '*'])
 }
 
 /// Every string in a chunk that must have come from the source verbatim:
@@ -229,6 +235,20 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         let chunk = "Write it:\n\n    dd if=archlinux.iso of=/dev/sdX bs=4M status=progress\n";
         let missing = missing_literals(chunk, WINDOW);
         assert_eq!(missing.len(), 1, "the rewritten command must be caught");
+    }
+
+    #[test]
+    fn a_slash_between_two_words_is_prose_not_a_path() {
+        // Real capture: "enables/disables Nextcloud maintenance mode" was
+        // flagged as a missing path, which is the kind of noise that trains a
+        // reader to ignore the warning.
+        let chunk = "Function that enables/disables maintenance mode and starts/stops nginx.";
+        assert!(extract_literals(chunk).is_empty());
+        // Genuine relative paths still count.
+        let real = "See src/web/ui.rs and config/app.toml for the wiring.";
+        let lits = extract_literals(real);
+        assert!(lits.iter().any(|l| l == "src/web/ui.rs"));
+        assert!(lits.iter().any(|l| l == "config/app.toml"));
     }
 
     #[test]
