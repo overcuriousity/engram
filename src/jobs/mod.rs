@@ -49,11 +49,14 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // Out of attempts against the chunker. A structural split is
-                // worse than an LLM split, and far better than losing the source.
+                // Out of attempts against the chunker. Only the windows that
+                // never finished are split structurally; the rest keep the
+                // segmentation they already earned.
                 (Stage::Segment, _) if exhausted => {
-                    tracing::warn!(error = %e, "segmentation exhausted retries; using structural fallback");
-                    match segment::run_with_fallback(core, &job.target_id).await {
+                    tracing::warn!(error = %e, "segmentation exhausted retries; falling back per window");
+                    match segment::fallback_pending_windows(core, &job.target_id, &e.to_string())
+                        .await
+                    {
                         Ok(()) => {
                             core.store.complete_job(job.id).await?;
                         }

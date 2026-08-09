@@ -115,39 +115,50 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// No-LLM fallback used once the chunker has exhausted its retries. Splits on
-/// paragraphs without rewriting; a source is never left with zero chunks.
-pub async fn run_with_fallback(core: &Core, source_id: &str) -> Result<()> {
+/// No-LLM fallback, used once a window has exhausted its retries.
+///
+/// Scoped to the windows that never finished: a structural split is worse than
+/// an LLM split, and applying it to windows that already succeeded would throw
+/// away good work to punish one bad one.
+pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<()> {
     let src = core.store.get_source(source_id).await?;
-    let new: Vec<NewChunk> = structural_chunks(&src.raw_text)
-        .into_iter()
-        .enumerate()
-        .map(|(i, (text, start, end))| NewChunk {
-            ordinal: i as i64,
-            text,
-            source_span: Some(SourceSpan {
-                start_line: start,
-                end_line: end,
-            }),
-            title: None,
-            category: None,
-            tags: vec![],
-            window_idx: None,
-        })
-        .collect();
-
-    if new.is_empty() {
-        core.store
-            .set_source_status(source_id, SourceStatus::Failed)
-            .await?;
-        return Ok(());
+    let pending = core.store.pending_windows(source_id).await?;
+    if pending.is_empty() {
+        return finish(core, source_id).await;
     }
-    tracing::warn!(
-        source_id,
-        chunks = new.len(),
-        "segmentation fell back to a structural split"
-    );
-    write_chunks(core, source_id, new, SourceStatus::Partial).await
+
+    for w in pending {
+        let text = window_text(&src.raw_text, w.start_line, w.end_line);
+        let new: Vec<NewChunk> = structural_chunks(&text)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (text, start, end))| NewChunk {
+                ordinal: i as i64,
+                text,
+                // `structural_chunks` numbers from the window's first line, so
+                // the offset is the same shift the LLM path applies.
+                source_span: Some(SourceSpan {
+                    start_line: start + w.start_line - 1,
+                    end_line: end + w.start_line - 1,
+                }),
+                title: None,
+                category: None,
+                tags: vec![],
+                window_idx: Some(w.idx),
+            })
+            .collect();
+        write_window_chunks(core, source_id, w.idx, new).await?;
+        core.store
+            .set_window_state(source_id, w.idx, WindowState::Fallback, Some(reason))
+            .await?;
+        tracing::warn!(
+            source_id,
+            window = w.idx,
+            lines = format!("{}-{}", w.start_line, w.end_line),
+            "window fell back to a structural split"
+        );
+    }
+    finish(core, source_id).await
 }
 
 fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
@@ -167,29 +178,6 @@ fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) 
             window_idx: Some(window_idx),
         })
         .collect()
-}
-
-async fn write_chunks(
-    core: &Core,
-    source_id: &str,
-    new: Vec<NewChunk>,
-    status: SourceStatus,
-) -> Result<()> {
-    // Replace, never append: a retried job must not double the chunk count.
-    core.vectors.delete_by_source(source_id).await?;
-    for old in core.store.chunks_for_source(source_id).await? {
-        core.store.delete_chunk(&old.id).await?;
-    }
-
-    let inserted = core.store.insert_chunks(source_id, &new).await?;
-    // One job for the whole source: every chunk was just written, and embedding
-    // them together is one inference call instead of `inserted.len()`.
-    core.store
-        .enqueue(Stage::Embed, "source", source_id)
-        .await?;
-    core.store.set_source_status(source_id, status).await?;
-    tracing::info!(source_id, chunks = inserted.len(), "segmented");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -284,7 +272,9 @@ mod tests {
             "a dead endpoint deserves a retry, not a fallback"
         );
 
-        run_with_fallback(&core, &out.id).await.unwrap();
+        fallback_pending_windows(&core, &out.id, "endpoint down")
+            .await
+            .unwrap();
         let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "alpha para");
@@ -304,6 +294,47 @@ mod tests {
             core.store.chunks_for_source(&out.id).await.unwrap().len(),
             2,
             "a retried segment job must not double the chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_unfinished_window_falls_back_to_a_structural_split() {
+        let mut core = test_core().await;
+        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_window_body());
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing_on("STOPHERE"));
+
+        // First pass records the good windows and raises on the bad one.
+        assert!(run(&core, &out.id).await.is_err());
+        let llm_chunks = core.store.chunks_for_source(&out.id).await.unwrap().len();
+
+        fallback_pending_windows(&core, &out.id, "endpoint refused the window")
+            .await
+            .unwrap();
+
+        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        assert!(
+            windows.iter().any(|w| w.state == WindowState::Done),
+            "successful windows must stay done"
+        );
+        let fell_back: Vec<_> = windows
+            .iter()
+            .filter(|w| w.state == WindowState::Fallback)
+            .collect();
+        assert_eq!(fell_back.len(), 1);
+        assert_eq!(
+            fell_back[0].last_error.as_deref(),
+            Some("endpoint refused the window")
+        );
+
+        assert!(
+            core.store.chunks_for_source(&out.id).await.unwrap().len() > llm_chunks,
+            "the fallback window must contribute its own chunks"
+        );
+        assert_eq!(
+            core.store.get_source(&out.id).await.unwrap().status,
+            SourceStatus::Partial,
+            "a degraded window makes the source partial, not ready"
         );
     }
 
