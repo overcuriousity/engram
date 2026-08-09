@@ -9,14 +9,21 @@ query. The pipeline from capture to ranked artifact is built, as is the last hop
 from a ranked artifact back to where it came from: the search page pairs a ranked
 rail with the artifact beside its corpus lines, and synthesis now verifies that
 the details it must not alter — names, dates, figures, quoted wording — survived
-the rewrite. What remains is mostly the means to tell whether the ranking is
-any good.
+the rewrite.
 
 It also assumes the thesis: inference happens at write time, not read time. A
 question costs one embedding and one vector search, never a generation. So the
 way to make retrieval better is to make the background job do more, not to add
-a model call to the query path — which is what the write-time section below is
-for, and why the evaluation harness comes before any of it.
+a model call to the query path, which is what the write-time section below is
+for.
+
+The evaluation harness is built and is not on this list: `cargo test --test
+eval` scores hand-written query/artifact pairs against a corpus that stays on
+the operator's own machine. It is unpopulated by design — writing pairs and
+freezing a corpus costs real GPU time, and it is worth spending only when a
+decision actually turns on the answer. The items under *Write-time inference*
+are exactly such decisions: both add vectors to the index, and adding vectors
+always looks like it is helping.
 
 ## Recall surface
 
@@ -30,17 +37,6 @@ way to narrow the list without editing a URL.
 
 ## Retrieval
 
-- **Evaluation on a real corpus.** Ranking now has several knobs — fusion,
-  per-corpus cap, recency weight, pinned boost — and no way to measure whether a
-  change helped. A fixed set of query/expected-artifact pairs would make that
-  falsifiable. Everything below this line is guesswork until it exists. The
-  pairs worth writing first are the hard case: a query phrased as a situation
-  in loose prose, against an artifact written in the vocabulary of its own field
-  and sharing few of the words the reader reached for. Cheapest useful form: pairs checked into `tests/eval/`, recall@10 and
-  MRR printed by an `#[ignore]`d test, so a knob change is a number that moved
-  rather than an impression. Everything in *Write-time inference* is
-  unfalsifiable without it — a speculative index that adds vectors always looks
-  like it is doing something.
 - **Reranking on by default**, once there is a default endpoint worth assuming.
 - **Late-interaction reranking** (ColBERT-style multivectors) as a prefetch stage
   inside Qdrant, replacing the external reranker hop. Needs a model dependency.
@@ -73,8 +69,8 @@ anything to the query path.
   score an artifact by its best-matching point. Costs vectors and one longer
   synthesis reply; costs the query path nothing. Needs the per-corpus cap
   and `cap_per_corpus` to work on artifact identity rather than point identity,
-  and needs the eval harness first — this is the change most likely to look
-  good and rank worse.
+  and wants pairs written before it is built — this is the change most likely
+  to look good and rank worse.
 - **Precomputed answer cards.** A question asked twice should not be
   synthesised twice. Cluster neighbouring artifacts in the background, run one
   `ask`-shaped completion per cluster offline, and store the result as an
@@ -145,8 +141,8 @@ anything to the query path.
   them, so a large enough vocabulary conflates two terms into one dimension and
   a document matches a word it does not contain. `sparse::term_id` is the only
   place ids are derived, so replacing it with a vocabulary table is a contained
-  change plus a `--reindex`. Nothing measures the effect yet, which is the
-  evaluation gap above.
+  change plus a `--reindex`. Whether it is worth the reindex is a question the
+  eval harness answers and nothing else does.
 - Ingest is bounded by axum's default 2MB body limit rather than a deliberate
   one. Fine for pasted prose, wrong the moment file upload lands; set the limit
   explicitly and reject oversize captures with a message rather than a

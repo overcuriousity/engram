@@ -475,13 +475,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunker_posts_chat_completions_and_parses_chunks() {
+    async fn synthesizer_posts_chat_completions_and_parses_artifacts() {
         let server = MockServer::start().await;
         let reply = serde_json::json!({
             // r###: the payload contains `"##` (a quoted markdown H2), which
             // terminates both r#"..."# and r##"..."## literals.
             "choices":[{"message":{"content":
-                r###"{"chunks":[{"text":"## A\nbody","title":"A","category":"note","tags":["t"]}]}"###}}]
+                r###"{"artifacts":[{"text":"## A\nbody","title":"A","category":"note","tags":["t"]}]}"###}}]
         });
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunker_retries_once_with_a_repair_prompt() {
+    async fn synthesizer_retries_once_with_a_repair_prompt() {
         let server = MockServer::start().await;
         // First call garbage, second valid. `up_to_n_times` makes the first
         // mock retire after one hit so the second takes over.
@@ -512,7 +512,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices":[{"message":{"content":r#"{"chunks":[{"text":"ok"}]}"#}}]
+                "choices":[{"message":{"content":r#"{"artifacts":[{"text":"ok"}]}"#}}]
             })))
             .mount(&server)
             .await;
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunker_gives_up_after_the_repair_attempt() {
+    async fn synthesizer_gives_up_after_the_repair_attempt() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
