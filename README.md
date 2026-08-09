@@ -71,6 +71,11 @@ Three worth knowing:
   Raise it if segmentation responses get truncated; the default of 8.0 gives
   ~2000 tokens of input per call, which a 9B model can rewrite without running
   out of room.
+- **`infer.embed.max_input_tokens`** must be the *server's* ceiling, not the
+  model's nominal one. llama.cpp refuses any input above its physical batch
+  size — often 1024 — with a 500 that no retry can fix. engram splits a refused
+  chunk rather than retrying it, but it splits sooner and cheaper when this
+  number is honest.
 - **`timeout_secs`** defaults to 900. That is absurd for a hosted API and about
   right for a local model — see below.
 

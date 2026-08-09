@@ -30,6 +30,30 @@ fn default_limit(core: &Core) -> usize {
     (core.embedder.max_input_tokens() as f32 * SAFETY) as usize
 }
 
+/// Does this error mean the input itself is too big, rather than the endpoint
+/// being unwell?
+///
+/// A local inference server has a hard physical batch size — llama.cpp answers
+/// `input (1030 tokens) is too large to process` — and no amount of retrying
+/// changes that. Configuration is meant to keep chunks under it, but the
+/// configured ceiling is a claim about the model while this is the server's
+/// real limit, and the two disagree more often than not.
+fn input_too_large(e: &Error) -> bool {
+    let Error::Inference {
+        role: "embed",
+        detail,
+    } = e
+    else {
+        return false;
+    };
+    let d = detail.to_ascii_lowercase();
+    d.contains("too large")
+        || d.contains("too long")
+        || d.contains("exceeds")
+        || d.contains("413")
+        || d.contains("batch size")
+}
+
 pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result<()> {
     let chunk = core.store.get_chunk(chunk_id).await?;
     let text = embed_text(&chunk);
@@ -38,7 +62,26 @@ pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result
         return split_oversize(core, &chunk, limit).await;
     }
 
-    embed_batch(core, std::slice::from_ref(&chunk), vec![text]).await?;
+    match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
+        Ok(()) => {}
+        Err(e) if input_too_large(&e) => {
+            // The endpoint's real ceiling is lower than the configured one, so
+            // halving the configured limit would change nothing. Halve what the
+            // chunk actually measures instead: that shrinks on every refusal
+            // and converges on whatever the server will take.
+            let measured = core.counter.count(&text);
+            let smaller = (measured / 2).max(crate::infer::budget::MIN_WINDOW_TOKENS);
+            tracing::warn!(
+                chunk_id,
+                measured,
+                smaller,
+                error = %e,
+                "endpoint refused the chunk as too large; splitting instead of retrying"
+            );
+            return split_oversize(core, &chunk, smaller).await;
+        }
+        Err(e) => return Err(e),
+    }
     settle_source(core, &chunk.source_id).await
 }
 
@@ -69,7 +112,16 @@ pub async fn run_source_with_limit(core: &Core, source_id: &str, limit: usize) -
     }
 
     for (chunks, texts) in batch.chunks(BATCH).zip(texts.chunks(BATCH)) {
-        embed_batch(core, chunks, texts.to_vec()).await?;
+        match embed_batch(core, chunks, texts.to_vec()).await {
+            Ok(()) => {}
+            // One oversize chunk fails the whole batch, and the batch cannot
+            // say which. Per-chunk jobs isolate it, and that path splits it.
+            Err(e) if input_too_large(&e) => {
+                tracing::warn!(source_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
+                return split_into_chunk_jobs(core, source_id).await;
+            }
+            Err(e) => return Err(e),
+        }
     }
     settle_source(core, source_id).await
 }
@@ -265,6 +317,80 @@ pub async fn settle_source(core: &Core, source_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_chunk_the_endpoint_refuses_is_split_rather_than_retried() {
+        // The deployment that produced this: config claimed 8192 input tokens,
+        // llama.cpp's physical batch was 1024, and the chunk in between failed
+        // five identical times before anyone looked.
+        let mut core = crate::core::test_support::test_core().await;
+        let strict = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            200,
+        ));
+        core.embedder = strict.clone();
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        // Several paragraphs, comfortably over the endpoint's real ceiling.
+        let body = (0..40)
+            .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        // The configured limit is the lie; the endpoint's is what bites.
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(
+            chunks.len() > 1,
+            "the refused chunk should have become siblings, got {}",
+            chunks.len()
+        );
+        assert!(
+            chunks.iter().all(|c| c.window_idx == Some(0)),
+            "siblings must stay attached to the window that produced them"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_size_refusal_is_told_apart_from_a_sick_endpoint() {
+        let too_big = Error::Inference {
+            role: "embed",
+            detail: "input (1030 tokens) is too large to process. increase the physical \
+                     batch size (current batch size: 1024)"
+                .into(),
+        };
+        assert!(input_too_large(&too_big));
+
+        // A transient failure must stay retryable, or a flaky local server
+        // would start shredding chunks instead of waiting for it to recover.
+        let flaky = Error::Inference {
+            role: "embed",
+            detail: "error sending request".into(),
+        };
+        assert!(!input_too_large(&flaky));
+        let wrong_role = Error::Inference {
+            role: "chunk",
+            detail: "context too large".into(),
+        };
+        assert!(!input_too_large(&wrong_role));
+    }
     use crate::core::test_support::test_core;
     use crate::store::chunks::{EmbedState, NewChunk};
     use crate::store::sources::SourceStatus;

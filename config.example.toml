@@ -87,8 +87,11 @@ timeout_secs = 120
 # MUST match the vector dimension of the Qdrant collection. Changing this
 # against an existing collection is refused at startup.
 dim = 1024
-# Many embedding models cap at 512; check yours.
-max_input_tokens = 8192
+# The server's real ceiling, not the model's nominal one. llama.cpp refuses any
+# input above its physical batch size (often 1024) with a 500, and no retry can
+# fix that — engram splits the chunk instead, but it splits sooner and cheaper
+# if this number is honest. Many embedding models cap at 512; check yours.
+max_input_tokens = 1024
 
 [infer.ask]
 base_url = "http://localhost:8000/v1"

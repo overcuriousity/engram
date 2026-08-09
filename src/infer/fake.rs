@@ -263,6 +263,57 @@ impl Chunker for HallucinatingChunker {
 
 /// Reverses the candidate order. Deliberately not identity: a test asserting
 /// rerank ran can only tell the difference if the order actually changes.
+/// Refuses any single input over `limit` tokens the way llama.cpp does, with
+/// its physical-batch message. The configured ceiling cannot see this limit.
+pub struct StrictEmbedder {
+    inner: FakeEmbedder,
+    limit: usize,
+}
+
+impl StrictEmbedder {
+    pub fn new(dim: usize, limit: usize) -> Self {
+        Self {
+            inner: FakeEmbedder::new(dim),
+            limit,
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.inner.calls()
+    }
+}
+
+#[async_trait]
+impl Embedder for StrictEmbedder {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        for t in texts {
+            // The same crude estimate the budget code uses, so the test does
+            // not depend on a tokenizer.
+            let tokens = t.len() / 4;
+            if tokens > self.limit {
+                return Err(Error::Inference {
+                    role: "embed",
+                    detail: format!(
+                        "input ({tokens} tokens) is too large to process. increase the \
+                         physical batch size (current batch size: {})",
+                        self.limit
+                    ),
+                });
+            }
+        }
+        self.inner.embed(texts).await
+    }
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn model(&self) -> &str {
+        "strict-embed"
+    }
+    fn max_input_tokens(&self) -> usize {
+        // Deliberately a lie, as a misconfigured deployment is.
+        8192
+    }
+}
+
 #[derive(Default)]
 pub struct FakeReranker;
 
