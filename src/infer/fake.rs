@@ -182,6 +182,35 @@ impl Chunker for ParaphrasingChunker {
     }
 }
 
+/// Segments like `FakeChunker` but reports a cooldown, so a test can assert
+/// the job actually paces itself instead of running flat out.
+pub struct PacedChunker {
+    inner: FakeChunker,
+    cooldown: std::time::Duration,
+}
+
+impl PacedChunker {
+    pub fn new(cooldown: std::time::Duration) -> Self {
+        Self {
+            inner: FakeChunker::default(),
+            cooldown,
+        }
+    }
+}
+
+#[async_trait]
+impl Chunker for PacedChunker {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+        self.inner.segment(text).await
+    }
+    fn budget(&self) -> ChunkBudget {
+        self.inner.budget()
+    }
+    fn cooldown(&self) -> std::time::Duration {
+        self.cooldown
+    }
+}
+
 /// Claims every chunk came from lines far outside its window. The span check
 /// exists because the model's line numbers are taken on trust.
 #[derive(Default)]
@@ -193,6 +222,31 @@ impl Chunker for LyingSpanChunker {
         Ok(vec![ProposedChunk {
             text: text.to_string(),
             title: Some("mislabelled".into()),
+            category: None,
+            tags: vec![],
+            source_lines: Some((9_000, 9_100)),
+        }])
+    }
+    fn budget(&self) -> ChunkBudget {
+        ChunkBudget {
+            context_tokens: 4096,
+            max_output_tokens: 1024,
+            output_ratio: 1.4,
+        }
+    }
+}
+
+/// Returns text that appears nowhere in its window, with a bogus span. The
+/// case where nothing can be recovered and the reader has to be told.
+#[derive(Default)]
+pub struct HallucinatingChunker;
+
+#[async_trait]
+impl Chunker for HallucinatingChunker {
+    async fn segment(&self, _text: &str) -> Result<Vec<ProposedChunk>> {
+        Ok(vec![ProposedChunk {
+            text: "Entirely invented material about unrelated subjects".into(),
+            title: Some("invented".into()),
             category: None,
             tags: vec![],
             source_lines: Some((9_000, 9_100)),

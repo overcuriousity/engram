@@ -70,18 +70,36 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         // either against the chunk's own text just invents warnings.
         let mut spans = Vec::with_capacity(chunks.len());
         for c in &mut chunks {
-            let (shifted, origin) = match c.source_lines {
-                Some((a, b)) => (
-                    (a + w.start_line - 1, b + w.start_line - 1),
-                    SpanOrigin::Model,
-                ),
-                // The model omits `source_lines` more often than not. The whole
-                // window is an honest answer and a useless one — the pane would
-                // mark every line as the span — so look for the chunk's own
-                // lines in the window first.
+            let claimed = c
+                .source_lines
+                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
+                .filter(|(a, b)| {
+                    // A span the model asserted is only worth keeping if the
+                    // lines it names look like the lines the chunk describes.
+                    // On a reference document full of short entries the model
+                    // miscounts freely, and a confidently wrong span is worse
+                    // than none: the pane renders the wrong text.
+                    let lines = window_text(&src.raw_text, *a, *b);
+                    crate::infer::verify::span_is_plausible(&c.text, &lines)
+                });
+
+            let (shifted, origin) = match claimed {
+                Some(span) => (span, SpanOrigin::Model),
+                // Either the model omitted `source_lines` — which it does more
+                // often than not — or what it claimed did not survive the check
+                // above. Both are better answered by finding the chunk's own
+                // lines in the window than by pointing at the whole of it.
                 None => match crate::infer::verify::locate_span(&c.text, &text, w.start_line) {
                     Some(found) => (found, SpanOrigin::Derived),
-                    None => ((w.start_line, w.end_line), SpanOrigin::Window),
+                    None => match c.source_lines {
+                        // Nothing to derive and a span that failed the check:
+                        // keep it, and say it is not to be trusted.
+                        Some((a, b)) => (
+                            (a + w.start_line - 1, b + w.start_line - 1),
+                            SpanOrigin::Implausible,
+                        ),
+                        None => ((w.start_line, w.end_line), SpanOrigin::Window),
+                    },
                 },
             };
             let clamped = (
@@ -103,10 +121,23 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
 
         let written =
             write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
-        flag_unverified(core, &written, &spans, &text, &src.raw_text).await?;
+        flag_unverified(core, &written, &spans, &text).await?;
         core.store
             .set_window_state(source_id, w.idx, WindowState::Done, None)
             .await?;
+
+        // Idle between windows if asked to. A long source is otherwise minutes
+        // of unbroken generation, which on a desktop GPU is a sustained load
+        // rather than a burst. The window is already committed, so a pause here
+        // costs nothing if the process dies during it.
+        let cooldown = core.chunker.cooldown();
+        if !cooldown.is_zero() {
+            tracing::debug!(
+                secs = cooldown.as_secs(),
+                "cooling down before the next window"
+            );
+            tokio::time::sleep(cooldown).await;
+        }
     }
 
     finish(core, source_id).await
@@ -142,6 +173,9 @@ enum SpanOrigin {
     Model,
     /// The model said so and named lines outside its own window.
     Clamped,
+    /// The model said so, the lines do not match the chunk, and nothing better
+    /// could be derived.
+    Implausible,
     /// Recovered here by matching the chunk's lines against the window.
     Derived,
     /// Nothing to go on; the span is the window itself.
@@ -163,7 +197,6 @@ async fn flag_unverified(
     // Per chunk, where its stored span came from.
     spans: &[SpanOrigin],
     window_body: &str,
-    raw_text: &str,
 ) -> Result<()> {
     use crate::infer::verify;
 
@@ -178,23 +211,21 @@ async fn flag_unverified(
             tracing::warn!(chunk_id = %c.id, literal = %first, "literal not found in source window");
         }
 
-        // A derived span matched by construction and a window span claims
-        // nothing in particular; only what the model asserted can be wrong.
+        // A derived span matched by construction, a window span claims nothing
+        // in particular, and a model span that survived the check is fine. What
+        // is left is a span that had to be corrected or could not be.
         let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Window);
         if let Some(span) = &c.source_span
-            && matches!(origin, SpanOrigin::Model | SpanOrigin::Clamped)
+            && matches!(origin, SpanOrigin::Clamped | SpanOrigin::Implausible)
         {
-            let claimed = window_text(raw_text, span.start_line, span.end_line);
-            if origin == SpanOrigin::Clamped || !verify::span_is_plausible(&c.text, &claimed) {
-                flags.push(verify::FLAG_SPAN.to_string());
-                detail.get_or_insert_with(|| {
-                    format!(
-                        "span {}–{} does not match the chunk",
-                        span.start_line, span.end_line
-                    )
-                });
-                tracing::warn!(chunk_id = %c.id, "chunk span does not match the lines it claims");
-            }
+            flags.push(verify::FLAG_SPAN.to_string());
+            detail.get_or_insert_with(|| {
+                format!(
+                    "span {}–{} does not match the chunk",
+                    span.start_line, span.end_line
+                )
+            });
+            tracing::warn!(chunk_id = %c.id, "chunk span does not match the lines it claims");
         }
 
         if !flags.is_empty() {
@@ -265,7 +296,33 @@ pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str
         return finish(core, source_id).await;
     }
 
-    for w in pending {
+    // Only demote windows that have actually spent their attempts. A local
+    // endpoint fails in bursts — the model is loading, or something else took
+    // the VRAM — and the job's attempt count is shared by every window, so an
+    // outage during window 1 used to condemn windows 2 onward that had never
+    // been tried at all. Those go back in the queue instead.
+    // "Tried at least once" is the line, not "spent every attempt": the
+    // attempt count belongs to the job, which covers the whole source, so a
+    // window that has run even once is one the model has actually refused.
+    let (tried, untried): (Vec<_>, Vec<_>) = pending.into_iter().partition(|w| w.attempts > 0);
+
+    if !untried.is_empty() {
+        tracing::info!(
+            source_id,
+            windows = untried.len(),
+            "leaving untried windows queued rather than splitting them structurally"
+        );
+        core.store
+            .enqueue(Stage::Segment, "source", source_id)
+            .await?;
+    }
+
+    if tried.is_empty() {
+        // Nothing has earned a fallback yet, and a job is queued to try again.
+        return Ok(());
+    }
+
+    for w in tried {
         let text = window_text(&src.raw_text, w.start_line, w.end_line);
         let new: Vec<NewChunk> = structural_chunks(&text)
             .into_iter()
@@ -296,7 +353,12 @@ pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str
             "window fell back to a structural split"
         );
     }
-    finish(core, source_id).await
+    // Windows still waiting for their own attempts mean the source is not
+    // settled yet; finishing here would enqueue embedding for half a document.
+    if core.store.pending_windows(source_id).await?.is_empty() {
+        return finish(core, source_id).await;
+    }
+    Ok(())
 }
 
 fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
@@ -493,11 +555,14 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn a_span_outside_its_window_is_clamped_and_flagged() {
+    async fn a_wrong_span_is_replaced_by_one_recovered_from_the_text() {
+        // The model's line numbers are routinely wrong on reference documents.
+        // Where the chunk still reproduces its source, the real span can be
+        // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
         core.chunker = std::sync::Arc::new(crate::infer::fake::LyingSpanChunker);
         let out = core
-            .ingest("first para\n\nsecond para", "web", None)
+            .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
             .unwrap();
 
@@ -507,9 +572,30 @@ Then run sync.";
         let span = c.source_span.as_ref().unwrap();
         assert!(
             span.start_line >= 1 && span.end_line <= 3,
-            "span must be clamped to the window"
+            "the recovered span must lie inside the window"
         );
-        assert!(c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN));
+        assert!(
+            c.flags.is_empty(),
+            "a span we corrected ourselves is not a warning for the reader"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_span_that_cannot_be_recovered_is_flagged() {
+        let mut core = test_core().await;
+        core.chunker = std::sync::Arc::new(crate::infer::fake::HallucinatingChunker);
+        let out = core
+            .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let c = &core.store.chunks_for_source(&out.id).await.unwrap()[0];
+        assert!(
+            c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN),
+            "a chunk that matches nothing in its window must say so"
+        );
     }
 
     #[tokio::test]
@@ -528,6 +614,52 @@ Then run sync.";
             .coverage
             .unwrap();
         assert!(cov > 0.0 && cov <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_endpoint_failures_does_not_condemn_untried_windows() {
+        // The job's attempt count is shared by every window of a source, so an
+        // outage while window 0 is running used to send the whole rest of the
+        // document through a structural split without ever calling the model
+        // for it. Locally that outage is usually the model still loading.
+        let mut core = test_core().await;
+        let body = multi_window_body();
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        assert!(window_count(&core, &body) > 2);
+        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing("502"));
+
+        // The endpoint refuses while the first window is running; the rest of
+        // the source never gets a call at all.
+        assert!(run(&core, &out.id).await.is_err());
+        fallback_pending_windows(&core, &out.id, "502 Bad Gateway")
+            .await
+            .unwrap();
+
+        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        assert_eq!(
+            windows
+                .iter()
+                .filter(|w| w.state == WindowState::Fallback)
+                .count(),
+            1,
+            "only the window that spent its attempts may be demoted"
+        );
+        assert!(
+            windows
+                .iter()
+                .filter(|w| w.state == WindowState::Pending)
+                .count()
+                > 1,
+            "untried windows must stay queued for the model"
+        );
+
+        let mut requeued = false;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            if j.stage == Stage::Segment && j.target_id == out.id {
+                requeued = true;
+            }
+        }
+        assert!(requeued, "the untried windows need a job to come back to");
     }
 
     #[tokio::test]
@@ -568,6 +700,25 @@ Then run sync.";
             core.store.get_source(&out.id).await.unwrap().status,
             SourceStatus::Partial,
             "a degraded window makes the source partial, not ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cooldown_paces_the_windows_it_segments() {
+        let mut core = test_core().await;
+        let body = multi_window_body();
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        let windows = window_count(&core, &body);
+        assert!(windows > 1);
+
+        let pause = std::time::Duration::from_millis(40);
+        core.chunker = std::sync::Arc::new(crate::infer::fake::PacedChunker::new(pause));
+
+        let started = std::time::Instant::now();
+        run(&core, &out.id).await.unwrap();
+        assert!(
+            started.elapsed() >= pause * (windows as u32 - 1),
+            "each window but the last should have been followed by a pause"
         );
     }
 

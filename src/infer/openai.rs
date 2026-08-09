@@ -70,6 +70,7 @@ pub struct HttpChunker {
     budget: ChunkBudget,
     max_chunk_tokens: usize,
     reasoning_effort: Option<String>,
+    cooldown: std::time::Duration,
 }
 
 impl HttpChunker {
@@ -86,6 +87,7 @@ impl HttpChunker {
             },
             max_chunk_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
+            cooldown: std::time::Duration::from_secs(cfg.cooldown_secs),
         }
     }
 
@@ -166,6 +168,10 @@ impl Chunker for HttpChunker {
 
     fn budget(&self) -> ChunkBudget {
         self.budget
+    }
+
+    fn cooldown(&self) -> std::time::Duration {
+        self.cooldown
     }
 }
 
@@ -452,6 +458,7 @@ mod tests {
             tokenizer_path: None,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
+            cooldown_secs: 0,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {

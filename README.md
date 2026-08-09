@@ -44,7 +44,7 @@ effective config with secrets redacted.
 | Key | Meaning |
 |---|---|
 | `server.bind` | Listen address. Default `127.0.0.1:8080`. |
-| `server.workers` | Background job workers. Default 2. |
+| `server.workers` | Background job workers. One is right for a single local GPU. |
 | `store.path` | SQLite file. **Back this up.** |
 | `vector.url` | Qdrant base URL, e.g. `http://localhost:6333`. |
 | `vector.collection` | Alias name. Data lives in `{name}_v1`, `_v2`, … |
@@ -52,22 +52,65 @@ effective config with secrets redacted.
 | `vector.recency_weight` | How much age counts against a result. `0.0` disables. Default 0.05. |
 | `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
 | `vector.pinned_boost` | Extra score for a chunk tagged `pinned`. Default 0.15. |
-| `infer.chunk.*` | Segmentation model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, optional `tokenizer_path`. |
-| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`. |
-| `infer.ask.*` | Completion model, used only by `ask`. |
+| `infer.chunk.*` | Segmentation model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, optional `tokenizer_path`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
+| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
+| `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
 
-Two worth knowing:
+Three worth knowing:
 
 - **`infer.embed.dim`** must match the collection. If it does not, engram refuses
   to start and names both numbers. Mismatched vectors corrupt search in a way you
   would not notice for weeks.
 - **`infer.chunk.output_ratio`** — the segmenter rewrites chunks to be
-  self-contained, so its output can be larger than its input. Raise this if
-  segmentation responses get truncated.
+  self-contained, so its output can be larger than its input. It is also what
+  sizes the input window: `min(context / (1 + ratio), max_output / ratio)`.
+  Raise it if segmentation responses get truncated; the default of 8.0 gives
+  ~2000 tokens of input per call, which a 9B model can rewrite without running
+  out of room.
+- **`timeout_secs`** defaults to 900. That is absurd for a hosted API and about
+  right for a local model — see below.
+
+## Running against a small local model
+
+This is the case engram is built for, and it behaves differently enough from a
+hosted API to be worth stating.
+
+A segmentation window against a 9B model on one consumer GPU has been measured
+at seven minutes and 8000 output tokens. Three consequences shape the defaults:
+
+- **Timeouts must outlast the model.** A timeout is indistinguishable from a
+  dead endpoint to the job runner: the call fails, the job retries, and it
+  fails again at the same wall. Hence 900 seconds by default, and per role so a
+  fast embedder is not held to the segmenter's patience.
+- **Reasoning tokens come out of the output budget.** A reasoning model thinks
+  before it writes any JSON, and that spending is taken from the same
+  `max_output_tokens` the chunk list has to fit in. Set
+  `reasoning_effort = "none"` if your endpoint honours it, and keep
+  `max_output_tokens` generous. The field is unset by default because models
+  that do not reason reject it.
+- **A truncated answer is normal, not exceptional.** When the chunk list is cut
+  off mid-object, the chunks that did finish are kept rather than the window
+  being retried — asking a slow model to do it again is the most expensive
+  thing engram can do.
+
+Two knobs exist for the hardware rather than the output. `cooldown_secs` idles
+between windows so a long source is not one unbroken thermal load — it saves no
+energy, since the same tokens are generated either way, but it lets the card
+settle. And `workers = 1` is right when every role points at one GPU: a second
+worker does not double throughput, because the inference server serialises the
+calls regardless.
+
+What does save energy is generating fewer tokens: `reasoning_effort = "none"`
+where the endpoint honours it, and not re-segmenting work that already
+succeeded — which is what the per-window resume is for.
+
+Segmentation logs each call's duration and token count, because minutes of
+silence otherwise looks exactly like a hang. Browse shows `segmenting 3/9`
+for the same reason.
 
 ## Inference roles
 

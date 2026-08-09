@@ -263,6 +263,7 @@ mod startup_tests {
                     tokenizer_path: None,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
+                    cooldown_secs: 0,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
