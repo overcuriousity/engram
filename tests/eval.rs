@@ -1,4 +1,4 @@
-//! Retrieval evaluation over hand-written query/chunk pairs.
+//! Retrieval evaluation over hand-written query/artifact pairs.
 //!
 //! Requires a running Qdrant and a real embedding endpoint, which is why it is
 //! `#[ignore]`d — the fake embedder produces meaningless vectors, so a
@@ -13,7 +13,7 @@
 //!   ENGRAM_EVAL_CAP=none              (let one document fill the whole list)
 //!
 //! The corpus it reads is whatever the operator actually wants to search, and
-//! is not in this repository. Nothing here prints chunk text; a miss is named
+//! is not in this repository. Nothing here prints artifact text; a miss is named
 //! by the leading characters of its own query.
 
 use engram::config::Config;
@@ -49,7 +49,7 @@ fn cap_from_env() -> Option<usize> {
 #[ignore]
 async fn evaluate_retrieval() {
     let dir = eval_dir();
-    let (chunks, pairs) = match (load_artifacts(&dir), load_pairs(&dir)) {
+    let (artifacts, pairs) = match (load_artifacts(&dir), load_pairs(&dir)) {
         (Ok(c), Ok(p)) => (c, p),
         (c, p) => {
             // Not a failure: most people running the suite have no corpus, and
@@ -66,17 +66,17 @@ async fn evaluate_retrieval() {
             return;
         }
     };
-    assert!(!chunks.is_empty(), "chunks.json is empty");
+    assert!(!artifacts.is_empty(), "artifacts.json is empty");
     assert!(!pairs.is_empty(), "pairs.json is empty");
 
-    let known: std::collections::HashSet<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
-    // A pair naming an id no chunk has is not a hard case, it is a stale pair
+    let known: std::collections::HashSet<&str> = artifacts.iter().map(|c| c.id.as_str()).collect();
+    // A pair naming an id no artifact has is not a hard case, it is a stale pair
     // left behind by a re-run of eval-prepare. Scored as a miss it would look
     // like a ranking problem forever.
     for p in &pairs {
         assert!(
             known.contains(p.expect.as_str()),
-            "pair {:?} expects chunk {} which is not in chunks.json; \
+            "pair {:?} expects artifact {} which is not in artifacts.json; \
              re-check the pairs after re-running eval-prepare",
             p.query,
             p.expect
@@ -96,7 +96,7 @@ async fn evaluate_retrieval() {
     let store = Store::memory().await.unwrap();
     let core = Core::from_config(&cfg, vectors.clone(), store);
 
-    index(&core, &chunks).await;
+    index(&core, &artifacts).await;
 
     let cap = cap_from_env();
     let mut ranks: Vec<Option<usize>> = Vec::with_capacity(pairs.len());
@@ -120,19 +120,19 @@ async fn evaluate_retrieval() {
         ranks.push(rank);
     }
 
-    report(&cfg, &chunks, &pairs, &ranks, &misses, cap);
+    report(&cfg, &artifacts, &pairs, &ranks, &misses, cap);
     vectors.drop_collection().await.unwrap();
 }
 
-/// Load the frozen chunks and embed them.
+/// Load the frozen artifacts and embed them.
 ///
 /// One store source per corpus file, because `corpus_id` is what the
 /// per-source cap groups by — collapsing the corpus into a single source would
 /// silently disable the cap and measure a different program from the one that
 /// serves the search page.
-async fn index(core: &Core, chunks: &[FrozenArtifact]) {
+async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
     let mut by_corpus: std::collections::BTreeMap<&str, Vec<&FrozenArtifact>> = Default::default();
-    for c in chunks {
+    for c in artifacts {
         by_corpus.entry(c.source.as_str()).or_default().push(c);
     }
 
@@ -166,7 +166,7 @@ async fn index(core: &Core, chunks: &[FrozenArtifact]) {
 
 fn report(
     cfg: &Config,
-    chunks: &[FrozenArtifact],
+    artifacts: &[FrozenArtifact],
     pairs: &[EvalPair],
     ranks: &[Option<usize>],
     misses: &[(&EvalPair, Option<usize>)],
@@ -179,9 +179,9 @@ fn report(
     // The settings line is part of the result. A number recorded without the
     // configuration that produced it cannot be compared against anything.
     println!(
-        "\n{} queries over {} chunks   (embed {}, rerank {}, recency {}, cap {})",
+        "\n{} queries over {} artifacts   (embed {}, rerank {}, recency {}, cap {})",
         pairs.len(),
-        chunks.len(),
+        artifacts.len(),
         cfg.infer.embed.model,
         if cfg.infer.rerank.is_some() {
             "on"

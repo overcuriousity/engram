@@ -75,8 +75,8 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
 
     engram::infer::openai::probe(
         "chunk",
-        &cfg.infer.chunk.base_url,
-        cfg.infer.chunk.api_key.as_deref(),
+        &cfg.infer.synthesize.base_url,
+        cfg.infer.synthesize.api_key.as_deref(),
     )
     .await;
     engram::infer::openai::probe(
@@ -219,7 +219,7 @@ mod startup_tests {
                 pinned_boost: 0.15,
             },
             infer: InferConfig {
-                chunk: SynthesizeRole {
+                synthesize: SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,

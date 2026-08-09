@@ -1,9 +1,9 @@
-//! Freeze the evaluation corpus: segment every `corpus/*.txt` once with the
-//! real synthesizer and write the result to `chunks.json`.
+//! Freeze the evaluation corpus: synthesise every `corpus/*.txt` once with the
+//! real model and write the result to `artifacts.json`.
 //!
-//! Run deliberately, not per benchmark. Segmenting on every run would cost a
-//! completion per window and return slightly different chunks each time, so a
-//! two percent ranking change would be indistinguishable from segmenter noise.
+//! Run deliberately, not per benchmark. Synthesising on every run would cost a
+//! completion per segment and return slightly different artifacts each time, so
+//! a two percent ranking change would be indistinguishable from model noise.
 //!
 //! Chunk ids change on every run, so re-running invalidates `pairs.json` and
 //! the pairs have to be re-checked against the new ids. That is the reason
@@ -19,9 +19,9 @@ use engram::store::Store;
 use engram::vector::memory::MemoryVectors;
 use std::sync::Arc;
 
-/// How many times the whole source is driven before its remaining windows are
-/// called hopeless. `segment::run` resumes from the first pending window, so a
-/// pass is one attempt at each window still outstanding — this stands in for
+/// How many times the whole corpus is driven before its remaining segments are
+/// called hopeless. `synthesize::run` resumes from the first pending segment, so
+/// a pass is one attempt at each segment still outstanding — this stands in for
 /// the job runner's own attempt budget.
 const MAX_PASSES: usize = 4;
 
@@ -69,16 +69,16 @@ async fn main() -> Result<()> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
-        tracing::info!(file = %name, bytes = text.len(), "segmenting");
+        tracing::info!(file = %name, bytes = text.len(), "synthesising");
         let out = core.ingest(&text, "eval", Some(&name)).await?;
 
-        // Stand in for the job runner: `segment::run` resumes from the first
-        // pending window, so repeating it is what drives a multi-window source
+        // Stand in for the job runner: `synthesize::run` resumes from the first
+        // pending segment, so repeating it is what drives a multi-segment corpus
         // to completion.
         let mut passes = 0;
         loop {
             if let Err(e) = engram::jobs::synthesize::run(&core, &out.id).await {
-                tracing::warn!(error = %e, file = %name, "segmentation pass failed");
+                tracing::warn!(error = %e, file = %name, "synthesis pass failed");
             }
             passes += 1;
             let pending = core.store.pending_segments(&out.id).await?;
@@ -87,8 +87,8 @@ async fn main() -> Result<()> {
             }
             if passes >= MAX_PASSES {
                 bail!(
-                    "{name}: {} window(s) still unsegmented after {MAX_PASSES} passes. \
-                     The corpus has to be segmented in full, or the benchmark ranks a \
+                    "{name}: {} segment(s) still unsynthesised after {MAX_PASSES} passes. \
+                     The corpus has to be synthesised in full, or the benchmark ranks a \
                      document with holes in it and the numbers mean something different \
                      from one run to the next.",
                     pending.len()
@@ -96,9 +96,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        let chunks = core.store.artifacts_for_corpus(&out.id).await?;
-        tracing::info!(file = %name, chunks = chunks.len(), "segmented");
-        for c in chunks {
+        let artifacts = core.store.artifacts_for_corpus(&out.id).await?;
+        tracing::info!(file = %name, artifacts = artifacts.len(), "synthesised");
+        for c in artifacts {
             frozen.push(FrozenArtifact {
                 id: c.id,
                 source: name.clone(),
@@ -112,10 +112,10 @@ async fn main() -> Result<()> {
 
     save_artifacts(&dir, &frozen)?;
     println!(
-        "froze {} chunks from {} documents into {}",
+        "froze {} artifacts from {} documents into {}",
         frozen.len(),
         files.len(),
-        dir.join("chunks.json").display()
+        dir.join("artifacts.json").display()
     );
     Ok(())
 }

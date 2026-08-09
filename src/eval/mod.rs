@@ -15,7 +15,7 @@ pub mod metrics;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the corpus, the frozen chunks and the pairs live. Outside the
+/// Where the corpus, the frozen artifacts and the pairs live. Outside the
 /// repository by default; the in-repo fallback exists so an error message can
 /// name a concrete path, and it is gitignored.
 pub fn eval_dir() -> PathBuf {
@@ -24,7 +24,7 @@ pub fn eval_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("eval-data"))
 }
 
-/// One chunk as the segmenter produced it, frozen so a benchmark run costs no
+/// One artifact as the segmenter produced it, frozen so a benchmark run costs no
 /// completions and two runs rank exactly the same text.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrozenArtifact {
@@ -39,11 +39,11 @@ pub struct FrozenArtifact {
     pub tags: Vec<String>,
 }
 
-/// A query and the chunk that should answer it.
+/// A query and the artifact that should answer it.
 ///
 /// The query is meant to be phrased as a situation, in the words a reader
-/// happens to have — not in the vocabulary of the chunk. A pair that shares the
-/// chunk's terminology measures nothing: every retrieval system passes it.
+/// happens to have — not in the vocabulary of the artifact. A pair that shares the
+/// artifact's terminology measures nothing: every retrieval system passes it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvalPair {
     pub query: String,
@@ -54,7 +54,7 @@ pub struct EvalPair {
 }
 
 pub fn artifacts_path(dir: &Path) -> PathBuf {
-    dir.join("chunks.json")
+    dir.join("artifacts.json")
 }
 
 pub fn pairs_path(dir: &Path) -> PathBuf {
@@ -68,10 +68,10 @@ pub fn load_artifacts(dir: &Path) -> Result<Vec<FrozenArtifact>> {
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-pub fn save_artifacts(dir: &Path, chunks: &[FrozenArtifact]) -> Result<()> {
+pub fn save_artifacts(dir: &Path, artifacts: &[FrozenArtifact]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = artifacts_path(dir);
-    let json = serde_json::to_string_pretty(chunks)?;
+    let json = serde_json::to_string_pretty(artifacts)?;
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
 }
 
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn chunks_survive_a_round_trip_through_the_frozen_file() {
         let dir = tempfile::tempdir().unwrap();
-        let chunks = vec![FrozenArtifact {
+        let artifacts = vec![FrozenArtifact {
             id: "01J8".into(),
             source: "dateisysteme-fat.txt".into(),
             text: "Ein Cluster ist die kleinste adressierbare Einheit.".into(),
@@ -98,8 +98,8 @@ mod tests {
             tags: vec!["fat".into()],
         }];
 
-        save_artifacts(dir.path(), &chunks).unwrap();
-        assert_eq!(load_artifacts(dir.path()).unwrap(), chunks);
+        save_artifacts(dir.path(), &artifacts).unwrap();
+        assert_eq!(load_artifacts(dir.path()).unwrap(), artifacts);
     }
 
     #[test]

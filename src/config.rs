@@ -57,7 +57,7 @@ fn default_pinned_boost() -> f32 {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InferConfig {
-    pub chunk: SynthesizeRole,
+    pub synthesize: SynthesizeRole,
     pub embed: EmbedRole,
     pub ask: AskRole,
     #[serde(default)]
@@ -247,7 +247,7 @@ impl Config {
         let mut c = self.clone();
         const R: &str = "REDACTED";
         c.vector.api_key = c.vector.api_key.map(|_| R.into());
-        c.infer.chunk.api_key = c.infer.chunk.api_key.map(|_| R.into());
+        c.infer.synthesize.api_key = c.infer.synthesize.api_key.map(|_| R.into());
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
         c.infer.ask.api_key = c.infer.ask.api_key.map(|_| R.into());
         if let Some(r) = c.infer.rerank.as_mut() {
@@ -295,10 +295,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(cfg.infer.chunk.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(cfg.infer.synthesize.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
-        assert_eq!(cfg.infer.chunk.reasoning_effort, None);
+        assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
@@ -318,7 +318,7 @@ path = "engram.db"
 url = "http://localhost:6334"
 collection = "chunks"
 
-[infer.chunk]
+[infer.synthesize]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768

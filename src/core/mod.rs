@@ -82,7 +82,7 @@ impl Core {
             store,
             vectors,
             synthesizer: Arc::new(
-                HttpSynthesizer::new(&cfg.infer.chunk)
+                HttpSynthesizer::new(&cfg.infer.synthesize)
                     .with_max_artifact_tokens(max_artifact_tokens),
             ),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
@@ -93,7 +93,7 @@ impl Core {
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
             counter: Arc::new(TokenCounter::load(
-                cfg.infer.chunk.tokenizer_path.as_deref(),
+                cfg.infer.synthesize.tokenizer_path.as_deref(),
             )),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
