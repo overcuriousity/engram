@@ -280,3 +280,24 @@ nav.top a.brand img { display: block; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .pane { min-width: 0; }
+
+/* ── Reading aids: highlighting, clamping, copying ───────────────────────── */
+
+mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; padding: 0 1px; }
+[data-theme="dark"] mark { background: var(--color-warning-dim); }
+
+.clampable.is-clamped { max-height: 14rem; overflow: hidden; position: relative; }
+.clampable.is-clamped::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3rem;
+  background: linear-gradient(to bottom, transparent, var(--color-bg-elevated));
+}
+
+.codewrap { position: relative; }
+.copy {
+  position: absolute; top: 6px; right: 6px;
+  font-family: var(--font-mono); font-size: 0.6875rem; cursor: pointer;
+  padding: 3px 7px; border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); color: var(--color-fg-secondary);
+  border: 1px solid var(--color-border-strong);
+}
+.copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }

@@ -159,6 +159,21 @@ mod tests {
     }
 
     #[test]
+    fn the_script_is_embedded_and_makes_no_external_requests() {
+        let js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
+        assert!(!js.contains("https://"), "external url in script");
+        assert!(
+            js.contains("data-terms"),
+            "highlighting reads the terms attribute"
+        );
+        assert!(
+            js.contains("clipboard"),
+            "copy buttons need the clipboard API"
+        );
+    }
+
+    #[test]
     fn the_stylesheet_makes_no_external_requests() {
         // A CDN url here would defeat embedding the fonts.
         let css = Assets::get("app.css").unwrap();
