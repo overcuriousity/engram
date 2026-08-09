@@ -61,12 +61,23 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 pub struct FakeChunker {
     fail_with: Option<String>,
+    /// Fail only on windows containing this marker. Lets a test model the
+    /// realistic case — some windows succeed, one does not.
+    fail_on_marker: Option<String>,
 }
 
 impl FakeChunker {
     pub fn failing(msg: &str) -> Self {
         Self {
             fail_with: Some(msg.to_string()),
+            fail_on_marker: None,
+        }
+    }
+
+    pub fn failing_on(marker: &str) -> Self {
+        Self {
+            fail_with: None,
+            fail_on_marker: Some(marker.to_string()),
         }
     }
 }
@@ -74,6 +85,14 @@ impl FakeChunker {
 #[async_trait]
 impl Chunker for FakeChunker {
     async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+        if let Some(marker) = &self.fail_on_marker
+            && text.contains(marker.as_str())
+        {
+            return Err(Error::Inference {
+                role: "chunk",
+                detail: format!("refusing window containing {marker}"),
+            });
+        }
         if let Some(m) = &self.fail_with {
             return Err(Error::Inference {
                 role: "chunk",

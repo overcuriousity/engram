@@ -1,10 +1,11 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::window_tokens;
-use crate::infer::split::{split_into_windows, structural_chunks};
+use crate::infer::split::{split_into_windows, structural_chunks, window_text};
 use crate::store::chunks::{NewChunk, SourceSpan};
 use crate::store::jobs::Stage;
 use crate::store::sources::SourceStatus;
+use crate::store::windows::WindowState;
 
 /// Tokens consumed by the system prompt and scaffolding. Measured from the
 /// real prompt rather than guessed.
@@ -12,8 +13,12 @@ fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::CHUNKER_SYSTEM) + 200
 }
 
-/// LLM-assisted segmentation. Windows the raw text, calls the chunker per
-/// window, and replaces the source's chunks with the result.
+/// LLM-assisted segmentation, one window at a time.
+///
+/// The window rows are the job's memory. A window that succeeds is written and
+/// marked `done` before the next is attempted, so an error here costs the
+/// windows that had not started yet and nothing else — the job retries and
+/// resumes from the first pending window.
 pub async fn run(core: &Core, source_id: &str) -> Result<()> {
     let src = core.store.get_source(source_id).await?;
     core.store
@@ -34,9 +39,13 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let mut proposed = Vec::new();
-    for w in &windows {
-        let mut chunks = core.chunker.segment(&w.text).await?;
+    let spans: Vec<(i64, i64)> = windows.iter().map(|w| (w.start_line, w.end_line)).collect();
+    core.store.upsert_windows(source_id, &spans).await?;
+
+    for w in core.store.pending_windows(source_id).await? {
+        core.store.bump_window_attempts(source_id, w.idx).await?;
+        let text = window_text(&src.raw_text, w.start_line, w.end_line);
+        let mut chunks = core.chunker.segment(&text).await?;
         // Line numbers come back relative to the window, so shift them into
         // the coordinates of the original document.
         for c in &mut chunks {
@@ -45,16 +54,65 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
                 .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
                 .or(Some((w.start_line, w.end_line)));
         }
-        proposed.extend(chunks);
+        write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
+        core.store
+            .set_window_state(source_id, w.idx, WindowState::Done, None)
+            .await?;
     }
 
-    write_chunks(
-        core,
-        source_id,
-        proposed_to_new(proposed),
-        SourceStatus::Embedding,
-    )
-    .await
+    finish(core, source_id).await
+}
+
+/// Replace the chunks of one window. Same "replace, never append" guarantee as
+/// before; the key is the window rather than the whole source, so a retry of
+/// window 4 cannot disturb windows 0 to 3.
+async fn write_window_chunks(
+    core: &Core,
+    source_id: &str,
+    window_idx: i64,
+    new: Vec<NewChunk>,
+) -> Result<()> {
+    let old = core
+        .store
+        .chunk_ids_for_window(source_id, window_idx)
+        .await?;
+    if !old.is_empty() {
+        core.vectors.delete_chunks(&old).await?;
+        for id in &old {
+            core.store.delete_chunk(id).await?;
+        }
+    }
+    core.store.insert_chunks(source_id, &new).await?;
+    Ok(())
+}
+
+/// Everything that can only be decided once every window has resolved:
+/// continuous ordinals, the source's status, and the single batched embed job.
+pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
+    core.store.renumber_chunks(source_id).await?;
+    let windows = core.store.windows_for_source(source_id).await?;
+    let degraded = windows.iter().any(|w| w.state == WindowState::Fallback);
+    let chunks = core.store.chunks_for_source(source_id).await?;
+    if chunks.is_empty() {
+        core.store
+            .set_source_status(source_id, SourceStatus::Failed)
+            .await?;
+        return Ok(());
+    }
+
+    // One job for the whole source: every chunk was just written, and embedding
+    // them together is one inference call instead of `chunks.len()`.
+    core.store
+        .enqueue(Stage::Embed, "source", source_id)
+        .await?;
+    let status = if degraded {
+        SourceStatus::Partial
+    } else {
+        SourceStatus::Embedding
+    };
+    core.store.set_source_status(source_id, status).await?;
+    tracing::info!(source_id, chunks = chunks.len(), degraded, "segmented");
+    Ok(())
 }
 
 /// No-LLM fallback used once the chunker has exhausted its retries. Splits on
@@ -92,7 +150,7 @@ pub async fn run_with_fallback(core: &Core, source_id: &str) -> Result<()> {
     write_chunks(core, source_id, new, SourceStatus::Partial).await
 }
 
-fn proposed_to_new(proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
+fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
     proposed
         .into_iter()
         .enumerate()
@@ -106,7 +164,7 @@ fn proposed_to_new(proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> 
             title: p.title,
             category: p.category,
             tags: p.tags,
-            window_idx: None,
+            window_idx: Some(window_idx),
         })
         .collect()
 }
@@ -246,6 +304,51 @@ mod tests {
             core.store.chunks_for_source(&out.id).await.unwrap().len(),
             2,
             "a retried segment job must not double the chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_run_does_not_re_segment_windows_that_finished() {
+        let core = test_core().await;
+        let body = multi_window_body();
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        assert!(window_count(&core, &body) > 1);
+
+        run(&core, &out.id).await.unwrap();
+        let (resolved, total) = core.store.window_progress(&out.id).await.unwrap();
+        assert_eq!(resolved, total, "every window should have resolved");
+
+        let before = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        // Nothing is pending, so a second run must be a no-op rather than a
+        // second full pass that doubles the chunk count.
+        run(&core, &out.id).await.unwrap();
+        let after = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn a_failing_window_leaves_earlier_windows_intact() {
+        // Fails only on the window containing the marker, so window 0 succeeds
+        // and a later one raises — the shape a flaky endpoint produces.
+        let mut core = test_core().await;
+        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_window_body());
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing_on("STOPHERE"));
+
+        let err = run(&core, &out.id).await.unwrap_err();
+        assert!(err.retryable(), "a chunker error must stay retryable");
+
+        let (resolved, total) = core.store.window_progress(&out.id).await.unwrap();
+        assert!(resolved > 0, "windows before the failure must be recorded");
+        assert!(resolved < total, "the failing window must stay pending");
+        assert!(
+            !core
+                .store
+                .chunks_for_source(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "chunks from the successful windows must survive the error"
         );
     }
 
