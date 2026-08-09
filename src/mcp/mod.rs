@@ -6,7 +6,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 /// Results go straight into an agent's context, so they stay markdown: the
-/// chunk text is already markdown, and the surrounding structure has to be
+/// artifact text is already markdown, and the surrounding structure has to be
 /// readable rather than JSON-shaped.
 pub fn format_search_results(results: &[SearchResult]) -> String {
     if results.is_empty() {
@@ -23,7 +23,7 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
                 format!(" · {}", r.tags.join(", "))
             };
             format!(
-                "### {}. {title}\n_score {:.3}{tags} · source: {}_\n\n{}",
+                "### {}. {title}\n_score {:.3}{tags} · corpus: {}_\n\n{}",
                 i + 1,
                 r.score,
                 r.corpus_id,
@@ -43,7 +43,7 @@ pub struct PkdbTools {
 pub struct IngestParams {
     /// The text to store verbatim.
     pub text: String,
-    /// Optional short label for the source.
+    /// Optional short label for the corpus.
     #[serde(default)]
     pub title: Option<String>,
 }
@@ -87,7 +87,7 @@ impl PkdbTools {
     #[tool(
         name = "search",
         description = "Search the personal knowledge base by meaning. Returns ranked \
-                       markdown chunks, not a generated answer."
+                       markdown artifacts, not a generated answer."
     )]
     async fn search(&self, Parameters(p): Parameters<SearchParams>) -> String {
         let query = SearchQuery {
@@ -106,7 +106,7 @@ impl PkdbTools {
 
     #[tool(
         name = "ask",
-        description = "Answer a question by synthesising across knowledge-base chunks. \
+        description = "Answer a question by synthesising across knowledge-base artifacts. \
                        Slower than search; prefer search unless synthesis is needed."
     )]
     async fn ask(&self, Parameters(p): Parameters<AskParams>) -> String {
@@ -225,9 +225,9 @@ mod tests {
         );
 
         // An agent consumes this directly, so it must stay markdown and keep
-        // the source id for follow-up lookups.
+        // the corpus id for follow-up lookups.
         assert!(text.contains("mount /dev/sda1"), "{text}");
-        assert!(text.contains("source:"), "{text}");
+        assert!(text.contains("corpus:"), "{text}");
     }
 
     #[test]

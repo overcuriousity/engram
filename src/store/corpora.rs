@@ -41,7 +41,7 @@ impl CorpusStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Source {
+pub struct Corpus {
     pub id: String,
     pub raw_text: String,
     pub origin: String,
@@ -59,8 +59,8 @@ pub fn content_hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Source {
-    Source {
+fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
+    Corpus {
         id: r.get("id"),
         raw_text: r.get("raw_text"),
         origin: r.get("origin"),
@@ -79,8 +79,8 @@ impl Store {
         raw_text: &str,
         origin: &str,
         title_hint: Option<&str>,
-    ) -> Result<Source> {
-        let src = Source {
+    ) -> Result<Corpus> {
+        let src = Corpus {
             id: new_id(),
             raw_text: raw_text.to_string(),
             origin: origin.to_string(),
@@ -108,7 +108,7 @@ impl Store {
         Ok(src)
     }
 
-    pub async fn get_corpus(&self, id: &str) -> Result<Source> {
+    pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {
         let row = sqlx::query("SELECT * FROM corpora WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -117,7 +117,7 @@ impl Store {
         Ok(row_to_corpus(&row))
     }
 
-    pub async fn find_by_hash(&self, hash: &str) -> Result<Option<Source>> {
+    pub async fn find_by_hash(&self, hash: &str) -> Result<Option<Corpus>> {
         let row = sqlx::query("SELECT * FROM corpora WHERE content_hash = ?")
             .bind(hash)
             .fetch_optional(&self.pool)
@@ -148,7 +148,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Source>> {
+    pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Corpus>> {
         let rows =
             sqlx::query("SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
                 .bind(limit)

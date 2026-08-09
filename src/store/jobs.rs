@@ -6,7 +6,7 @@ pub const MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    Segment,
+    Synthesize,
     Enrich,
     Embed,
 }
@@ -14,14 +14,14 @@ pub enum Stage {
 impl Stage {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Stage::Segment => "segment",
+            Stage::Synthesize => "synthesize",
             Stage::Enrich => "enrich",
             Stage::Embed => "embed",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
-            "segment" => Some(Stage::Segment),
+            "synthesize" => Some(Stage::Synthesize),
             "enrich" => Some(Stage::Enrich),
             "embed" => Some(Stage::Embed),
             _ => None,
@@ -97,7 +97,7 @@ impl Store {
 
         Ok(row.map(|r| Job {
             id: r.get("id"),
-            stage: Stage::parse(r.get::<String, _>("stage").as_str()).unwrap_or(Stage::Segment),
+            stage: Stage::parse(r.get::<String, _>("stage").as_str()).unwrap_or(Stage::Synthesize),
             target_kind: r.get("target_kind"),
             target_id: r.get("target_id"),
             attempts: r.get("attempts"),
@@ -206,8 +206,12 @@ mod tests {
     #[tokio::test]
     async fn enqueue_is_idempotent_per_stage_and_target() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Segment, "source", "src-1").await.unwrap();
-        s.enqueue(Stage::Segment, "source", "src-1").await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
         assert!(s.claim_job().await.unwrap().is_some());
         assert!(
             s.claim_job().await.unwrap().is_none(),
@@ -218,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_is_claimed_exactly_once() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Embed, "chunk", "c-1").await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
 
         let a = s.claim_job().await.unwrap();
         let b = s.claim_job().await.unwrap();
@@ -248,7 +252,7 @@ mod tests {
         const WORKERS: usize = 8;
         for i in 0..JOBS {
             store
-                .enqueue(Stage::Embed, "chunk", &format!("c-{i}"))
+                .enqueue(Stage::Embed, "artifact", &format!("c-{i}"))
                 .await
                 .unwrap();
         }
@@ -284,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn failure_reschedules_with_backoff_then_gives_up() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Embed, "chunk", "c-1").await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
 
         let j = s.claim_job().await.unwrap().unwrap();
         s.fail_job(j.id, j.attempts, "endpoint down").await.unwrap();
@@ -318,7 +322,9 @@ mod tests {
     #[tokio::test]
     async fn stuck_running_jobs_are_reclaimed_after_a_crash() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Segment, "source", "src-1").await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
         // Simulate the process dying mid-job: row left 'running'.
         sqlx::query("UPDATE jobs SET claimed_at = ? WHERE id = ?")
@@ -340,7 +346,9 @@ mod tests {
         let s = Store::memory().await.unwrap();
         assert_eq!(s.oldest_pending_age().await.unwrap(), None);
 
-        s.enqueue(Stage::Segment, "source", "src-1").await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
         let age = s.oldest_pending_age().await.unwrap().unwrap();
         assert!(age < 5, "a just-enqueued job reported an age of {age}s");
 
@@ -357,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn requeue_revives_a_failed_job() {
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Embed, "chunk", "c-1").await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
         sqlx::query("UPDATE jobs SET state='failed' WHERE id = ?")
             .bind(j.id)
@@ -365,7 +373,7 @@ mod tests {
             .await
             .unwrap();
 
-        s.enqueue(Stage::Embed, "chunk", "c-1").await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
         let again = s.claim_job().await.unwrap().unwrap();
         assert_eq!(again.attempts, 1, "requeue must reset the attempt counter");
     }

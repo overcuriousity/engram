@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block title %}Ask — engram{% endblock %}
 {% block content %}
-<p class="muted">Synthesis across several chunks. Slower than search, and never the default path.</p>
+<p class="muted">Synthesis across several artifacts. Slower than search, and never the default path.</p>
 <form hx-post="/ui/ask" hx-target="#ask-result" hx-swap="innerHTML" class="row" style="margin-bottom:1rem">
   <input class="input" name="q" placeholder="Ask a question…" autofocus>
   <button class="btn btn-accent" type="submit">Ask</button>

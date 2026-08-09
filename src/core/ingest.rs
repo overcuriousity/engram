@@ -35,7 +35,7 @@ impl Core {
 
         let src = self.store.insert_corpus(text, origin, title_hint).await?;
         self.store
-            .enqueue(Stage::Segment, "source", &src.id)
+            .enqueue(Stage::Synthesize, "corpus", &src.id)
             .await?;
         tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested");
         Ok(IngestOutcome {
@@ -58,7 +58,7 @@ impl Core {
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
         let src = self.store.get_corpus(id).await?;
         match stage {
-            Stage::Segment | Stage::Enrich => {
+            Stage::Synthesize | Stage::Enrich => {
                 // Re-segmenting replaces every chunk, so the old vectors and
                 // rows go first.
                 self.vectors.delete_by_corpus(&src.id).await?;
@@ -75,12 +75,12 @@ impl Core {
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
                 self.store
-                    .enqueue(Stage::Segment, "source", &src.id)
+                    .enqueue(Stage::Synthesize, "corpus", &src.id)
                     .await?;
             }
             Stage::Embed => {
                 self.store.reset_embed_state(&src.id).await?;
-                self.store.enqueue(Stage::Embed, "source", &src.id).await?;
+                self.store.enqueue(Stage::Embed, "corpus", &src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Embedding)
                     .await?;
@@ -206,7 +206,7 @@ mod tests {
         let core = test_core().await;
         let out = core.ingest("text", "web", None).await.unwrap();
         core.store.claim_job().await.unwrap(); // drain the initial segment job
-        core.reprocess(&out.id, Stage::Segment).await.unwrap();
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
         let j = core.store.claim_job().await.unwrap().unwrap();
         assert_eq!(j.target_id, out.id);
         assert_eq!(
@@ -234,7 +234,7 @@ mod tests {
             .len();
         assert!(first > 0);
 
-        core.reprocess(&out.id, Stage::Segment).await.unwrap();
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
         assert!(
             core.store
                 .segments_for_corpus(&out.id)

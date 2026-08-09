@@ -1,6 +1,6 @@
 <div data-terms="{{ d.terms }}">
   <div class="crumb">
-    <a href="/ui/sources/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
+    <a href="/ui/corpora/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
   </div>
 
   {% if !d.flags.is_empty() %}
@@ -11,11 +11,11 @@
       {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
       <div class="chips">
         {% if let Some(w) = d.segment_idx %}
-        <form method="post" action="/ui/sources/{{ d.corpus_id }}/windows/{{ w }}/resegment">
-          <button class="btn btn-sm" type="submit">Re-segment window</button>
+        <form method="post" action="/ui/corpora/{{ d.corpus_id }}/segments/{{ w }}/resynthesize">
+          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
         </form>
         {% endif %}
-        <button class="btn btn-sm" hx-post="/ui/chunks/{{ d.id }}/reviewed"
+        <button class="btn btn-sm" hx-post="/ui/artifacts/{{ d.id }}/reviewed"
                 hx-target="closest .flag" hx-swap="outerHTML">Mark reviewed</button>
       </div>
     </div>
@@ -24,7 +24,7 @@
 
   <div class="split">
     <div>
-      <div class="pane-label">Chunk</div>
+      <div class="pane-label">Artifact</div>
       <div class="card">
         <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
@@ -38,7 +38,7 @@
       <div class="pane-label">
         {{ d.slice_label }}
         <span class="spacer"></span>
-        <a href="/ui/sources/{{ d.corpus_id }}">open full source</a>
+        <a href="/ui/corpora/{{ d.corpus_id }}">open full source</a>
       </div>
       <div class="raw">
         <table>

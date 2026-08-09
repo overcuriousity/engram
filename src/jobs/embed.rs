@@ -195,7 +195,7 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
 pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()> {
     let pending = core.store.pending_artifacts_for_corpus(corpus_id).await?;
     for c in &pending {
-        core.store.enqueue(Stage::Embed, "chunk", &c.id).await?;
+        core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;
     }
     tracing::info!(
         corpus_id,
@@ -357,7 +357,7 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         .await?;
 
     for c in &inserted {
-        core.store.enqueue(Stage::Embed, "chunk", &c.id).await?;
+        core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;
     }
     Ok(())
 }

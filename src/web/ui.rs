@@ -189,7 +189,7 @@ struct ResultsTemplate {
 #[template(path = "browse.html")]
 struct BrowseTemplate {
     theme: String,
-    sources: Vec<BrowseRow>,
+    corpora: Vec<BrowseRow>,
 }
 
 #[derive(Template)]
@@ -200,7 +200,7 @@ struct CorpusTemplate {
     raw_text: String,
     status: String,
     badge: &'static str,
-    chunks: Vec<ArtifactView>,
+    artifacts: Vec<ArtifactView>,
 }
 
 #[derive(Template)]
@@ -411,7 +411,7 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
     Ok(HtmlTemplate(BrowseTemplate {
         theme: "light".into(),
-        sources: rows,
+        corpora: rows,
     })
     .into_response())
 }
@@ -419,13 +419,13 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
 ) -> Result<Response> {
-    let s = st.core.store.get_corpus(&sid).await?;
-    let chunks = st
+    let s = st.core.store.get_corpus(&cid).await?;
+    let artifacts = st
         .core
         .store
-        .artifacts_for_corpus(&sid)
+        .artifacts_for_corpus(&cid)
         .await?
         .iter()
         .map(artifact_view)
@@ -436,7 +436,7 @@ async fn corpus_detail(
         raw_text: s.raw_text,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
-        chunks,
+        artifacts,
     })
     .into_response())
 }
@@ -459,7 +459,7 @@ async fn put_artifact(
     // The stored vector describes wording that no longer exists.
     st.core
         .store
-        .enqueue(crate::store::jobs::Stage::Embed, "chunk", &cid)
+        .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
     let c = st.core.store.get_artifact(&cid).await?;
     Ok(HtmlTemplate(ArtifactFragment {
@@ -471,21 +471,21 @@ async fn put_artifact(
 async fn delete_corpus_ui(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
 ) -> Result<Response> {
-    st.core.delete_corpus(&sid).await?;
+    st.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/browse").into_response())
 }
 
 async fn reprocess_ui(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
 ) -> Result<Response> {
     st.core
-        .reprocess(&sid, crate::store::jobs::Stage::Segment)
+        .reprocess(&cid, crate::store::jobs::Stage::Synthesize)
         .await?;
-    Ok(Redirect::to(&format!("/ui/sources/{sid}")).into_response())
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
@@ -692,7 +692,7 @@ pub(crate) async fn resynthesize_segment_inner(
 ) -> Result<()> {
     core.store.reset_segment(corpus_id, idx).await?;
     core.store
-        .enqueue(crate::store::jobs::Stage::Segment, "source", corpus_id)
+        .enqueue(crate::store::jobs::Stage::Synthesize, "corpus", corpus_id)
         .await?;
     Ok(())
 }
@@ -700,9 +700,9 @@ pub(crate) async fn resynthesize_segment_inner(
 async fn resynthesize_segment(
     State(st): State<AppState>,
     _id: Identity,
-    Path((sid, idx)): Path<(String, i64)>,
+    Path((cid, idx)): Path<(String, i64)>,
 ) -> Result<Response> {
-    resynthesize_segment_inner(&st.core, &sid, idx).await?;
+    resynthesize_segment_inner(&st.core, &cid, idx).await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -724,15 +724,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
         .route("/ui/browse", get(browse))
-        .route("/ui/sources/{id}", get(corpus_detail))
-        .route("/ui/sources/{id}/delete", post(delete_corpus_ui))
-        .route("/ui/sources/{id}/reprocess", post(reprocess_ui))
+        .route("/ui/corpora/{id}", get(corpus_detail))
+        .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
+        .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route(
-            "/ui/sources/{sid}/windows/{idx}/resegment",
+            "/ui/corpora/{cid}/segments/{idx}/resynthesize",
             post(resynthesize_segment),
         )
-        .route("/ui/chunks/{id}", get(artifact_detail).put(put_artifact))
-        .route("/ui/chunks/{cid}/reviewed", post(mark_artifact_reviewed))
+        .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
+        .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
@@ -879,7 +879,7 @@ mod tests {
 
         let mut found = false;
         while let Some(j) = core.store.claim_job().await.unwrap() {
-            if j.stage == crate::store::jobs::Stage::Segment && j.target_id == out.id {
+            if j.stage == crate::store::jobs::Stage::Synthesize && j.target_id == out.id {
                 found = true;
             }
         }
@@ -888,9 +888,9 @@ mod tests {
 
     async fn app_with_session() -> (axum::Router, String) {
         let core = crate::core::test_support::test_core().await;
-        let sid = crate::store::new_id();
+        let cid = crate::store::new_id();
         core.store
-            .insert_session(&sid, "user-1", None, 3600)
+            .insert_session(&cid, "user-1", None, 3600)
             .await
             .unwrap();
         let state = crate::web::state::AppState {
@@ -903,7 +903,7 @@ mod tests {
                 secure_cookies: false,
             }),
         };
-        (crate::web::router(state), format!("engram_session={sid}"))
+        (crate::web::router(state), format!("engram_session={cid}"))
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -948,7 +948,7 @@ mod tests {
             "/ui/search",
             "/ui/search/results?q=x",
             "/ui/browse",
-            "/ui/sources/abc",
+            "/ui/corpora/abc",
             "/ui/ask",
             "/ui/ops",
         ] {
@@ -966,8 +966,8 @@ mod tests {
         for uri in [
             "/ui/capture",
             "/ui/ops/tokens",
-            "/ui/sources/abc/delete",
-            "/ui/sources/abc/reprocess",
+            "/ui/corpora/abc/delete",
+            "/ui/corpora/abc/reprocess",
             "/ui/ops/jobs/1/retry",
             "/ui/ask",
         ] {
@@ -1171,7 +1171,7 @@ mod tests {
             .unwrap();
         let html = body_of(res).await;
         let id = html
-            .split("/ui/sources/")
+            .split("/ui/corpora/")
             .nth(1)
             .unwrap()
             .split('"')
@@ -1182,7 +1182,7 @@ mod tests {
         let res = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/ui/sources/{id}"))
+                    .uri(format!("/ui/corpora/{id}"))
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -1199,7 +1199,7 @@ mod tests {
         let res = app
             .oneshot(
                 Request::builder()
-                    .uri("/ui/chunks/missing")
+                    .uri("/ui/artifacts/missing")
                     .method("PUT")
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")

@@ -7,7 +7,7 @@
 //! needs to know which implementation answered.
 
 use crate::store::artifacts::CorpusSpan;
-use crate::store::corpora::Source;
+use crate::store::corpora::Corpus;
 
 /// Lines shown without a span are context, not the claim itself.
 const HEADLESS_PREVIEW_LINES: usize = 40;
@@ -26,13 +26,13 @@ pub struct CorpusSlice {
 }
 
 pub trait CorpusView {
-    fn slice(&self, source: &Source, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice;
+    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice;
 }
 
 pub struct TextLines;
 
 impl CorpusView for TextLines {
-    fn slice(&self, source: &Source, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
+    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
         let all: Vec<&str> = source.raw_text.lines().collect();
         let total = all.len() as i64;
 
@@ -48,7 +48,7 @@ impl CorpusView for TextLines {
                         in_span: false,
                     })
                     .collect(),
-                label: "source".into(),
+                label: "corpus".into(),
             };
         };
 
@@ -73,7 +73,7 @@ impl CorpusView for TextLines {
 
 /// The view for a source. One implementation today; this is where a PDF source
 /// will branch.
-pub fn for_corpus(_source: &Source) -> Box<dyn CorpusView> {
+pub fn for_corpus(_source: &Corpus) -> Box<dyn CorpusView> {
     Box::new(TextLines)
 }
 
@@ -82,14 +82,14 @@ mod tests {
     use super::*;
     use crate::store::artifacts::CorpusSpan;
 
-    async fn a_source(raw: &str) -> Source {
+    async fn a_corpus(raw: &str) -> Corpus {
         let s = crate::store::Store::memory().await.unwrap();
         s.insert_corpus(raw, "web", None).await.unwrap()
     }
 
     #[tokio::test]
     async fn the_slice_marks_the_span_and_carries_context_around_it() {
-        let src = a_source("l1\nl2\nl3\nl4\nl5\nl6").await;
+        let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6").await;
         let slice = TextLines.slice(
             &src,
             Some(&CorpusSpan {
@@ -113,16 +113,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_without_a_span_gets_the_head_of_the_source() {
-        let src = a_source("l1\nl2\nl3").await;
+        let src = a_corpus("l1\nl2\nl3").await;
         let slice = TextLines.slice(&src, None, 1);
-        assert_eq!(slice.label, "source");
+        assert_eq!(slice.label, "corpus");
         assert!(slice.lines.iter().all(|l| !l.in_span));
         assert_eq!(slice.lines.len(), 3);
     }
 
     #[tokio::test]
     async fn a_span_past_the_end_clamps_instead_of_panicking() {
-        let src = a_source("l1\nl2").await;
+        let src = a_corpus("l1\nl2").await;
         let slice = TextLines.slice(
             &src,
             Some(&CorpusSpan {

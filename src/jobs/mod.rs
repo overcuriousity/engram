@@ -27,10 +27,10 @@ pub async fn run_one(core: &Core) -> Result<bool> {
     let _guard = span.enter();
 
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Segment | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
+        (Stage::Synthesize | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
-        (Stage::Embed, "source") => embed::run_corpus(core, &job.target_id).await,
+        (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
     };
 
@@ -52,7 +52,7 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                 // Out of attempts against the synthesizer. The windows that were
                 // actually tried are recorded as failed; the ones that never
                 // ran go back in the queue.
-                (Stage::Segment, _) if exhausted => {
+                (Stage::Synthesize, _) if exhausted => {
                     tracing::warn!(error = %e, "segmentation exhausted retries; failing the windows it tried");
                     match synthesize::fail_pending_segments(core, &job.target_id, &e.to_string())
                         .await
@@ -65,7 +65,7 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                             // done, and the untried windows would be abandoned.
                             if requeue {
                                 core.store
-                                    .enqueue(Stage::Segment, "source", &job.target_id)
+                                    .enqueue(Stage::Synthesize, "corpus", &job.target_id)
                                     .await?;
                             }
                         }
@@ -79,7 +79,7 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                 // A whole source failing together usually means the endpoint is
                 // down, but it can also be one chunk the embedder rejects.
                 // Retrying chunk by chunk isolates the culprit either way.
-                (Stage::Embed, "source") if exhausted => {
+                (Stage::Embed, "corpus") if exhausted => {
                     tracing::warn!(error = %e, "batch embedding exhausted retries; retrying chunk by chunk");
                     match embed::split_into_artifact_jobs(core, &job.target_id).await {
                         Ok(()) => {
@@ -229,7 +229,11 @@ mod tests {
     async fn a_job_for_a_deleted_target_is_completed_not_retried_forever() {
         let core = test_core().await;
         core.store
-            .enqueue(crate::store::jobs::Stage::Embed, "chunk", "does-not-exist")
+            .enqueue(
+                crate::store::jobs::Stage::Embed,
+                "artifact",
+                "does-not-exist",
+            )
             .await
             .unwrap();
         run_one(&core).await.unwrap();

@@ -44,7 +44,7 @@ const READY_ATTEMPTS: u32 = 5;
 const READY_BACKOFF: Duration = Duration::from_millis(200);
 
 /// A chunk carrying this tag is boosted past the decay curve. A tag rather than
-/// a column: `PATCH /api/v1/chunks/{id}` already edits tags without
+/// a column: `PATCH /api/v1/artifacts/{id}` already edits tags without
 /// re-embedding, and the payload index that makes it filterable already exists.
 pub const PINNED_TAG: &str = "pinned";
 

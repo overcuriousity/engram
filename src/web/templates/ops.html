@@ -8,7 +8,7 @@
   {% if let Some(age) = oldest_pending_secs %}
     <span class="badge badge-muted">oldest pending: {{ age }}s</span>
   {% endif %}
-  <span class="badge badge-muted">chunks: {{ artifact_count }}</span>
+  <span class="badge badge-muted">artifacts: {{ artifact_count }}</span>
   <span class="badge badge-muted">vectors: {{ vector_count }}</span>
 </div>
 
@@ -38,19 +38,19 @@
 
 <h3>Needs review</h3>
 {% if flagged.is_empty() %}
-  <p class="muted">Nothing flagged. Every chunk reproduced its source.</p>
+  <p class="muted">Nothing flagged. Every artifact reproduced its corpus.</p>
 {% else %}
 <table class="grid">
-  <thead><tr><th>Chunk</th><th>Problem</th><th></th></tr></thead>
+  <thead><tr><th>Artifact</th><th>Problem</th><th></th></tr></thead>
   <tbody>
   {% for f in flagged %}
     <tr>
-      <td><a href="/ui/chunks/{{ f.artifact_id }}">{{ f.title }}</a></td>
+      <td><a href="/ui/artifacts/{{ f.artifact_id }}">{{ f.title }}</a></td>
       <td class="mono muted">{{ f.detail }}</td>
       <td>
         {% if let Some(w) = f.segment_idx %}
-        <form method="post" action="/ui/sources/{{ f.corpus_id }}/windows/{{ w }}/resegment">
-          <button class="btn btn-sm" type="submit">Re-segment window</button>
+        <form method="post" action="/ui/corpora/{{ f.corpus_id }}/segments/{{ w }}/resynthesize">
+          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
         </form>
         {% endif %}
       </td>

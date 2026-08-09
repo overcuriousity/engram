@@ -272,7 +272,7 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // One job for the whole source: every chunk was just written, and embedding
     // them together is one inference call instead of `chunks.len()`.
     core.store
-        .enqueue(Stage::Embed, "source", corpus_id)
+        .enqueue(Stage::Embed, "corpus", corpus_id)
         .await?;
     let status = if degraded {
         CorpusStatus::Partial
@@ -423,7 +423,7 @@ mod tests {
             }
         }
         assert_eq!(embed_jobs.len(), 1, "expected one batched embed job");
-        assert_eq!(embed_jobs[0].target_kind, "source");
+        assert_eq!(embed_jobs[0].target_kind, "corpus");
         assert_eq!(embed_jobs[0].target_id, out.id);
     }
 
@@ -700,7 +700,7 @@ Then run sync.";
             .unwrap();
         let job = core.store.claim_job().await.unwrap();
         let job = job.expect("the untried windows were left with no job at all");
-        assert_eq!(job.stage, Stage::Segment);
+        assert_eq!(job.stage, Stage::Synthesize);
         assert_eq!(job.target_id, out.id);
     }
 

@@ -155,7 +155,7 @@ async fn list_corpora(
     State(st): State<AppState>,
     _id: Identity,
     Query(p): Query<ListParams>,
-) -> Result<Json<Vec<crate::store::corpora::Source>>> {
+) -> Result<Json<Vec<crate::store::corpora::Corpus>>> {
     Ok(Json(
         st.core
             .store
@@ -167,38 +167,38 @@ async fn list_corpora(
 #[derive(serde::Serialize)]
 pub struct CorpusDetail {
     #[serde(flatten)]
-    pub source: crate::store::corpora::Source,
+    pub source: crate::store::corpora::Corpus,
     pub chunks: Vec<crate::store::artifacts::Chunk>,
 }
 
 async fn get_corpus(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
 ) -> Result<Json<CorpusDetail>> {
-    let source = st.core.store.get_corpus(&sid).await?;
-    let chunks = st.core.store.artifacts_for_corpus(&sid).await?;
+    let source = st.core.store.get_corpus(&cid).await?;
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
     Ok(Json(CorpusDetail { source, chunks }))
 }
 
 async fn delete_corpus(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
 ) -> Result<StatusCode> {
-    st.core.delete_corpus(&sid).await?;
+    st.core.delete_corpus(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn reprocess(
     State(st): State<AppState>,
     _id: Identity,
-    Path(sid): Path<String>,
+    Path(cid): Path<String>,
     Json(req): Json<ReprocessRequest>,
 ) -> Result<StatusCode> {
     let stage = Stage::parse(&req.stage)
         .ok_or_else(|| Error::Validation(format!("unknown stage `{}`", req.stage)))?;
-    st.core.reprocess(&sid, stage).await?;
+    st.core.reprocess(&cid, stage).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -321,7 +321,10 @@ async fn patch_artifact(
 
     let chunk = st.core.store.get_artifact(&cid).await?;
     if revectorize {
-        st.core.store.enqueue(Stage::Embed, "chunk", &cid).await?;
+        st.core
+            .store
+            .enqueue(Stage::Embed, "artifact", &cid)
+            .await?;
     } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
         // Nothing the model saw has changed, so rewrite the payload in place
         // rather than spending an inference call to recompute the same vector.
@@ -387,14 +390,14 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
-        .route("/sources", post(ingest).get(list_corpora))
-        .route("/sources/{id}", get(get_corpus).delete(delete_corpus))
-        .route("/sources/{id}/reprocess", post(reprocess))
+        .route("/corpora", post(ingest).get(list_corpora))
+        .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
+        .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/search", get(search))
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
         .route(
-            "/chunks/{id}",
+            "/artifacts/{id}",
             get(get_artifact)
                 .patch(patch_artifact)
                 .delete(delete_artifact),
@@ -475,15 +478,15 @@ mod tests {
         for (method, uri) in [
             ("GET", "/api/v1/search?q=x"),
             ("GET", "/api/v1/resurface"),
-            ("GET", "/api/v1/sources"),
-            ("POST", "/api/v1/sources"),
-            ("GET", "/api/v1/sources/abc"),
-            ("DELETE", "/api/v1/sources/abc"),
-            ("POST", "/api/v1/sources/abc/reprocess"),
+            ("GET", "/api/v1/corpora"),
+            ("POST", "/api/v1/corpora"),
+            ("GET", "/api/v1/corpora/abc"),
+            ("DELETE", "/api/v1/corpora/abc"),
+            ("POST", "/api/v1/corpora/abc/reprocess"),
             ("POST", "/api/v1/ask"),
-            ("GET", "/api/v1/chunks/abc"),
-            ("PATCH", "/api/v1/chunks/abc"),
-            ("DELETE", "/api/v1/chunks/abc"),
+            ("GET", "/api/v1/artifacts/abc"),
+            ("PATCH", "/api/v1/artifacts/abc"),
+            ("DELETE", "/api/v1/artifacts/abc"),
             ("GET", "/api/v1/status"),
         ] {
             let req = Request::builder()
@@ -525,7 +528,7 @@ mod tests {
         let (app, token) = app_and_token().await;
         let res = app
             .oneshot(post_json(
-                "/api/v1/sources",
+                "/api/v1/corpora",
                 &token,
                 serde_json::json!({"text":"a procedure","title":"t"}),
             ))
@@ -544,13 +547,13 @@ mod tests {
         let body = serde_json::json!({"text":"identical"});
         let first = json_of(
             app.clone()
-                .oneshot(post_json("/api/v1/sources", &token, body.clone()))
+                .oneshot(post_json("/api/v1/corpora", &token, body.clone()))
                 .await
                 .unwrap(),
         )
         .await;
         let res = app
-            .oneshot(post_json("/api/v1/sources", &token, body))
+            .oneshot(post_json("/api/v1/corpora", &token, body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -564,7 +567,7 @@ mod tests {
         let (app, token) = app_and_token().await;
         let res = app
             .oneshot(post_json(
-                "/api/v1/sources",
+                "/api/v1/corpora",
                 &token,
                 serde_json::json!({"text":"   "}),
             ))
@@ -578,7 +581,7 @@ mod tests {
         let (app, token) = app_and_token().await;
         app.clone()
             .oneshot(post_json(
-                "/api/v1/sources",
+                "/api/v1/corpora",
                 &token,
                 serde_json::json!({"text":"mounting an image"}),
             ))
@@ -611,7 +614,7 @@ mod tests {
     async fn a_missing_source_is_a_404() {
         let (app, token) = app_and_token().await;
         let res = app
-            .oneshot(get("/api/v1/sources/nope", Some(&token)))
+            .oneshot(get("/api/v1/corpora/nope", Some(&token)))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -623,7 +626,7 @@ mod tests {
         let created = json_of(
             app.clone()
                 .oneshot(post_json(
-                    "/api/v1/sources",
+                    "/api/v1/corpora",
                     &token,
                     serde_json::json!({"text":"something"}),
                 ))
@@ -634,7 +637,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
         let res = app
             .oneshot(post_json(
-                &format!("/api/v1/sources/{id}/reprocess"),
+                &format!("/api/v1/corpora/{id}/reprocess"),
                 &token,
                 serde_json::json!({"stage":"nonsense"}),
             ))
@@ -647,7 +650,7 @@ mod tests {
     async fn internal_errors_do_not_leak_sql_to_the_client() {
         let (app, token) = app_and_token().await;
         let res = app
-            .oneshot(get("/api/v1/sources/nope", Some(&token)))
+            .oneshot(get("/api/v1/corpora/nope", Some(&token)))
             .await
             .unwrap();
         let body = json_of(res).await.to_string();
@@ -660,7 +663,7 @@ mod tests {
         let (app, token) = app_and_token().await;
         app.clone()
             .oneshot(post_json(
-                "/api/v1/sources",
+                "/api/v1/corpora",
                 &token,
                 serde_json::json!({"text":"something"}),
             ))
@@ -720,7 +723,7 @@ mod patch_tests {
 
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "tags": ["fresh"] }),
             ))
@@ -762,7 +765,7 @@ mod patch_tests {
         let (app, token, core, cid) = one_artifact().await;
 
         app.oneshot(patch_json(
-            &format!("/api/v1/chunks/{cid}"),
+            &format!("/api/v1/artifacts/{cid}"),
             &token,
             serde_json::json!({ "title": "a better title" }),
         ))
@@ -783,7 +786,7 @@ mod patch_tests {
     async fn editing_the_text_still_queues_a_re_embed() {
         let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
-            &format!("/api/v1/chunks/{cid}"),
+            &format!("/api/v1/artifacts/{cid}"),
             &token,
             serde_json::json!({ "text": "different body" }),
         ))
@@ -797,7 +800,7 @@ mod patch_tests {
         let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({}),
             ))
@@ -823,7 +826,7 @@ mod patch_tests {
 
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "category": null }),
             ))
@@ -837,7 +840,7 @@ mod patch_tests {
     async fn an_untouched_field_keeps_its_value() {
         let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
-            &format!("/api/v1/chunks/{cid}"),
+            &format!("/api/v1/artifacts/{cid}"),
             &token,
             serde_json::json!({ "tags": ["fresh"] }),
         ))
@@ -857,7 +860,7 @@ mod patch_tests {
     async fn tags_are_trimmed_deduplicated_and_bounded() {
         let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
-            &format!("/api/v1/chunks/{cid}"),
+            &format!("/api/v1/artifacts/{cid}"),
             &token,
             serde_json::json!({ "tags": ["  linux ", "linux", "", "   ", "forensics"] }),
         ))
@@ -877,7 +880,7 @@ mod patch_tests {
         let many: Vec<String> = (0..500).map(|i| format!("t{i}")).collect();
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "tags": many }),
             ))
@@ -891,7 +894,7 @@ mod patch_tests {
         let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "tags": ["x".repeat(500)] }),
             ))
@@ -907,7 +910,7 @@ mod patch_tests {
         let (app, token, core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "title": "a new title", "tags": ["x".repeat(500)] }),
             ))
@@ -924,7 +927,7 @@ mod patch_tests {
     async fn a_blank_title_clears_it_rather_than_storing_whitespace() {
         let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
-            &format!("/api/v1/chunks/{cid}"),
+            &format!("/api/v1/artifacts/{cid}"),
             &token,
             serde_json::json!({ "title": "   " }),
         ))
@@ -938,7 +941,7 @@ mod patch_tests {
         let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
-                &format!("/api/v1/chunks/{cid}"),
+                &format!("/api/v1/artifacts/{cid}"),
                 &token,
                 serde_json::json!({ "text": "   " }),
             ))

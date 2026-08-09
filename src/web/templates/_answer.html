@@ -7,7 +7,7 @@
   </div>
   <div class="md">{{ answer|safe }}</div>
 </div>
-<h3>Sources</h3>
+<h3>Artifacts used</h3>
 {% for r in citations %}
 <div class="card">
   <div class="card-head">
@@ -16,7 +16,7 @@
   </div>
   <div class="md">{{ r.html|safe }}</div>
   <div class="chips">
-    <a class="btn btn-ghost btn-sm" href="/ui/sources/{{ r.corpus_id }}">source</a>
+    <a class="btn btn-ghost btn-sm" href="/ui/corpora/{{ r.corpus_id }}">source</a>
   </div>
 </div>
 {% endfor %}

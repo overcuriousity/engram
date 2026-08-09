@@ -4,8 +4,8 @@
 <form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if(event.detail.successful) this.reset()" class="stack">
   <p class="muted" style="margin:0">
-    Paste a chapter at a time. Long text is split into windows and segmented one
-    window per model call, so a whole book works but takes a while — and a
+    Paste a chapter at a time. Long text is split into segments and synthesised one
+    segment per model call, so a whole book works but takes a while — and a
     chapter is what search results read best from.
   </p>
   <input class="input" name="title" placeholder="Optional label">
@@ -23,11 +23,11 @@
     var hint = document.getElementById('size-hint');
     if (!box || !hint) return;
     // Rough stand-in for the tokeniser: enough to warn, never to block.
-    var CHARS_PER_WINDOW = 12000;
+    var CHARS_PER_SEGMENT = 12000;
     box.addEventListener('input', function () {
-      var windows = Math.ceil(box.value.length / CHARS_PER_WINDOW);
-      hint.hidden = windows < 2;
-      hint.textContent = 'About ' + windows + ' windows — roughly ' + windows +
+      var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
+      hint.hidden = segments < 2;
+      hint.textContent = 'About ' + segments + ' segments — roughly ' + segments +
         ' model calls before this is searchable.';
     });
   })();
