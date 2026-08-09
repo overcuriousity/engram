@@ -2,6 +2,7 @@ pub mod api;
 pub mod assets;
 pub mod auth_routes;
 pub mod markdown;
+pub mod source_view;
 pub mod state;
 pub mod ui;
 
