@@ -73,9 +73,8 @@ impl Core {
                     .await?;
             }
             Stage::Embed => {
-                for c in self.store.chunks_for_source(&src.id).await? {
-                    self.store.enqueue(Stage::Embed, "chunk", &c.id).await?;
-                }
+                self.store.reset_embed_state(&src.id).await?;
+                self.store.enqueue(Stage::Embed, "source", &src.id).await?;
                 self.store
                     .set_source_status(&src.id, SourceStatus::Embedding)
                     .await?;
@@ -158,6 +157,7 @@ mod tests {
             .unwrap();
         core.vectors
             .upsert(vec![crate::vector::VectorPoint {
+                sparse: Default::default(),
                 vector: vec![0.1; 8],
                 payload: crate::vector::VectorPayload {
                     chunk_id: chunks[0].id.clone(),
@@ -167,6 +167,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     created_at: 0,
+                    last_seen_at: None,
                 },
             }])
             .await

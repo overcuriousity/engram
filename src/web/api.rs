@@ -24,9 +24,18 @@ fn default_stage() -> String {
     "segment".into()
 }
 
+/// Every field is optional so a caller can correct a tag without resending —
+/// and without re-embedding — the body text.
 #[derive(serde::Deserialize)]
 pub struct PatchChunkRequest {
-    pub text: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -159,6 +168,19 @@ async fn ask(
     Ok(Json(st.core.ask(&req).await?))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ResurfaceParams {
+    pub limit: Option<usize>,
+}
+
+async fn resurface(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<ResurfaceParams>,
+) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+    Ok(Json(st.core.resurface(p.limit.unwrap_or(5)).await?))
+}
+
 async fn get_chunk(
     State(st): State<AppState>,
     _id: Identity,
@@ -173,14 +195,55 @@ async fn patch_chunk(
     Path(cid): Path<String>,
     Json(req): Json<PatchChunkRequest>,
 ) -> Result<Json<crate::store::chunks::Chunk>> {
-    if req.text.trim().is_empty() {
+    if req.text.is_none() && req.title.is_none() && req.category.is_none() && req.tags.is_none() {
+        return Err(Error::Validation("no fields to update".into()));
+    }
+    if let Some(t) = &req.text
+        && t.trim().is_empty()
+    {
         return Err(Error::Validation("chunk text is empty".into()));
     }
-    st.core.store.update_chunk_text(&cid, &req.text).await?;
-    // The stored vector now describes text that no longer exists, so queue a
-    // re-embed rather than leaving search pointing at the old wording.
-    st.core.store.enqueue(Stage::Embed, "chunk", &cid).await?;
-    Ok(Json(st.core.store.get_chunk(&cid).await?))
+    st.core.store.get_chunk(&cid).await?;
+
+    // The embedder is shown the title followed by the body, so either of those
+    // invalidates the stored vector. A category or a tag changes only what the
+    // payload says about the chunk.
+    let revectorize = req.text.is_some() || req.title.is_some();
+
+    if let Some(t) = &req.text {
+        st.core.store.update_chunk_text(&cid, t).await?;
+    }
+    if let Some(t) = &req.title {
+        st.core.store.update_chunk_title(&cid, t).await?;
+    }
+    if req.category.is_some() || req.tags.is_some() {
+        st.core
+            .store
+            .update_chunk_meta(&cid, req.category.as_deref(), req.tags.as_deref())
+            .await?;
+    }
+
+    let chunk = st.core.store.get_chunk(&cid).await?;
+    if revectorize {
+        st.core.store.enqueue(Stage::Embed, "chunk", &cid).await?;
+    } else {
+        // Nothing the model saw has changed, so rewrite the payload in place
+        // rather than spending an inference call to recompute the same vector.
+        st.core
+            .vectors
+            .set_payload(&crate::vector::VectorPayload {
+                chunk_id: chunk.id.clone(),
+                source_id: chunk.source_id.clone(),
+                text: chunk.text.clone(),
+                title: chunk.title.clone(),
+                category: chunk.category.clone(),
+                tags: chunk.tags.clone(),
+                created_at: chunk.created_at,
+                last_seen_at: None,
+            })
+            .await?;
+    }
+    Ok(Json(chunk))
 }
 
 async fn delete_chunk(
@@ -229,6 +292,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/sources/{id}/reprocess", post(reprocess))
         .route("/search", get(search))
         .route("/ask", post(ask))
+        .route("/resurface", get(resurface))
         .route(
             "/chunks/{id}",
             get(get_chunk).patch(patch_chunk).delete(delete_chunk),
@@ -243,10 +307,16 @@ mod tests {
     use tower::ServiceExt;
 
     async fn app_and_token() -> (axum::Router, String) {
+        let (app, token, _core) = app_token_and_core().await;
+        (app, token)
+    }
+
+    pub async fn app_token_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
         let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1")
             .await
             .unwrap();
+        let state_core = core.clone();
         let state = crate::web::state::AppState {
             core,
             auth: std::sync::Arc::new(crate::web::state::AuthContext {
@@ -257,7 +327,7 @@ mod tests {
                 secure_cookies: false,
             }),
         };
-        (crate::web::router(state), token)
+        (crate::web::router(state), token, state_core)
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {
@@ -278,6 +348,16 @@ mod tests {
             .unwrap()
     }
 
+    pub fn patch_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .method("PATCH")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     async fn json_of(res: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
             .await
@@ -292,6 +372,7 @@ mod tests {
         let (app, _) = app_and_token().await;
         for (method, uri) in [
             ("GET", "/api/v1/search?q=x"),
+            ("GET", "/api/v1/resurface"),
             ("GET", "/api/v1/sources"),
             ("POST", "/api/v1/sources"),
             ("GET", "/api/v1/sources/abc"),
@@ -492,5 +573,147 @@ mod tests {
         assert!(v["jobs"].is_array());
         assert!(v["sources"].is_array());
         assert!(v["failed"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::tests::*;
+    use crate::store::chunks::{EmbedState, NewChunk};
+    use crate::vector::SearchFilter;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    /// One embedded chunk, and the app that can edit it.
+    async fn one_chunk() -> (axum::Router, String, crate::core::Core, String) {
+        let (app, token, core) = app_token_and_core().await;
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[NewChunk {
+                    ordinal: 0,
+                    text: "the body".into(),
+                    source_span: None,
+                    title: Some("a title".into()),
+                    category: Some("concept".into()),
+                    tags: vec!["old".into()],
+                }],
+            )
+            .await
+            .unwrap();
+        let cid = made[0].id.clone();
+        crate::jobs::embed::run(&core, &cid).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        (app, token, core, cid)
+    }
+
+    #[tokio::test]
+    async fn editing_only_tags_rewrites_the_payload_without_re_embedding() {
+        // Tags are not shown to the embedding model, so recomputing the vector
+        // would spend an inference call to arrive at the same numbers.
+        let (app, token, core, cid) = one_chunk().await;
+
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "tags": ["fresh"] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        assert!(
+            core.store.claim_job().await.unwrap().is_none(),
+            "a metadata edit queued a re-embed"
+        );
+        assert_eq!(
+            core.store.get_chunk(&cid).await.unwrap().embed_state,
+            EmbedState::Embedded,
+            "the stored vector is still correct and must stay so"
+        );
+
+        // And the vector store agrees, so a filtered search finds it.
+        let hits = core
+            .vectors
+            .search(
+                &[0.0; crate::core::test_support::TEST_DIM],
+                &Default::default(),
+                10,
+                &SearchFilter {
+                    tags: vec!["fresh".into()],
+                    category: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the payload in Qdrant still says `old`");
+    }
+
+    #[tokio::test]
+    async fn editing_the_title_does_queue_a_re_embed() {
+        // The embedder is shown the title followed by the body, so a new title
+        // means the stored vector describes text that no longer exists.
+        let (app, token, core, cid) = one_chunk().await;
+
+        app.oneshot(patch_json(
+            &format!("/api/v1/chunks/{cid}"),
+            &token,
+            serde_json::json!({ "title": "a better title" }),
+        ))
+        .await
+        .unwrap();
+
+        assert!(
+            core.store.claim_job().await.unwrap().is_some(),
+            "a title change left a stale vector in place"
+        );
+        assert_eq!(
+            core.store.get_chunk(&cid).await.unwrap().embed_state,
+            EmbedState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_the_text_still_queues_a_re_embed() {
+        let (app, token, core, cid) = one_chunk().await;
+        app.oneshot(patch_json(
+            &format!("/api/v1/chunks/{cid}"),
+            &token,
+            serde_json::json!({ "text": "different body" }),
+        ))
+        .await
+        .unwrap();
+        assert!(core.store.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_changes_nothing_is_rejected() {
+        let (app, token, _core, cid) = one_chunk().await;
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_empty_text_is_still_rejected() {
+        let (app, token, _core, cid) = one_chunk().await;
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "text": "   " }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }

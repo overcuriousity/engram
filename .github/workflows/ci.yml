@@ -54,10 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       qdrant:
-        image: qdrant/qdrant:v1.18.2
+        image: qdrant/qdrant:v1.19.0
         ports:
           - 6333:6333
-          - 6334:6334
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +71,7 @@ jobs:
           exit 1
       - run: cargo test --locked --test integration_qdrant -- --ignored
         env:
-          ENGRAM_TEST_QDRANT: http://localhost:6334
+          ENGRAM_TEST_QDRANT: http://localhost:6333
 
   audit:
     name: security advisories

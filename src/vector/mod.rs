@@ -1,5 +1,6 @@
 pub mod memory;
 pub mod qdrant;
+pub mod sparse;
 
 use crate::error::Result;
 use async_trait::async_trait;
@@ -13,11 +14,19 @@ pub struct VectorPayload {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub created_at: i64,
+    /// When this chunk last appeared in results. Optional and omitted when
+    /// unset, because Qdrant merges a payload write: a writer that does not
+    /// know the stamp must leave the stored one alone rather than clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct VectorPoint {
     pub vector: Vec<f32>,
+    /// BM25 terms for the same text. Empty when the store does not do hybrid
+    /// retrieval, which is why it is a plain value rather than an option.
+    pub sparse: sparse::SparseVector,
     pub payload: VectorPayload,
 }
 
@@ -45,11 +54,31 @@ pub struct SearchHit {
 pub trait VectorStore: Send + Sync {
     async fn ensure_collection(&self, dim: usize) -> Result<()>;
     async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()>;
+    /// Replace a point's payload, leaving its vector alone. Editing tags or a
+    /// category changes nothing the embedding model saw, so re-embedding for it
+    /// would spend an inference call to arrive at the same vector.
+    async fn set_payload(&self, payload: &VectorPayload) -> Result<()>;
+    /// `sparse` carries the query's BM25 terms. An empty one means the query
+    /// held no indexable token, and the lexical half is skipped rather than
+    /// asked to match nothing.
     async fn search(
         &self,
         vector: &[f32],
+        sparse: &sparse::SparseVector,
         limit: usize,
         filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>>;
+    /// Record that these chunks were just shown. Merged into the stored
+    /// payload, never written as a whole one.
+    async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()>;
+    /// A random sample of chunks captured before `older_than` and not shown
+    /// since `unseen_since`. Random rather than ranked: there is no query here,
+    /// only the question of what has been forgotten.
+    async fn resurface(
+        &self,
+        limit: usize,
+        older_than: i64,
+        unseen_since: i64,
     ) -> Result<Vec<SearchHit>>;
     async fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()>;
     async fn delete_by_source(&self, source_id: &str) -> Result<()>;

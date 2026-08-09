@@ -1,5 +1,5 @@
 use crate::core::Core;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::store::chunks::{Chunk, NewChunk};
 use crate::store::jobs::Stage;
 use crate::store::sources::SourceStatus;
@@ -9,37 +9,127 @@ use crate::vector::{VectorPayload, VectorPoint};
 /// remaining headroom absorbs tokenizer estimation error.
 const SAFETY: f32 = 0.8;
 
+/// Chunks sent to the embedder in one request. Bounded because a long source
+/// can hold hundreds of chunks and endpoints cap how many inputs they accept.
+const BATCH: usize = 32;
+
+/// Text for the embedding carries the title: it holds topical signal the body
+/// often leaves implicit.
+fn embed_text(chunk: &Chunk) -> String {
+    match &chunk.title {
+        Some(t) => format!("{t}\n{}", chunk.text),
+        None => chunk.text.clone(),
+    }
+}
+
 pub async fn run(core: &Core, chunk_id: &str) -> Result<()> {
-    let limit = (core.embedder.max_input_tokens() as f32 * SAFETY) as usize;
-    run_with_limit(core, chunk_id, limit).await
+    run_with_limit(core, chunk_id, default_limit(core)).await
+}
+
+fn default_limit(core: &Core) -> usize {
+    (core.embedder.max_input_tokens() as f32 * SAFETY) as usize
 }
 
 pub async fn run_with_limit(core: &Core, chunk_id: &str, limit: usize) -> Result<()> {
     let chunk = core.store.get_chunk(chunk_id).await?;
+    let text = embed_text(&chunk);
 
-    // Text for the embedding carries the title: it holds topical signal the
-    // body often leaves implicit.
-    let embed_text = match &chunk.title {
-        Some(t) => format!("{t}\n{}", chunk.text),
-        None => chunk.text.clone(),
-    };
-
-    if core.counter.count(&embed_text) > limit {
+    if core.counter.count(&text) > limit {
         return split_oversize(core, &chunk, limit).await;
     }
 
-    let vectors = core.embedder.embed(&[embed_text]).await?;
-    core.vectors
-        .upsert(vec![VectorPoint {
-            vector: vectors.into_iter().next().unwrap(),
-            payload: payload_of(&chunk),
-        }])
-        .await?;
-
-    core.store
-        .mark_embedded(&chunk.id, core.embedder.model())
-        .await?;
+    embed_batch(core, std::slice::from_ref(&chunk), vec![text]).await?;
     settle_source(core, &chunk.source_id).await
+}
+
+/// Embed every chunk of a source that is still waiting, in as few inference
+/// calls as the batch size allows.
+///
+/// One call per source rather than per chunk is the whole point: the embedding
+/// endpoint is the slow, rate-limited, and often paid part of ingest.
+pub async fn run_source(core: &Core, source_id: &str) -> Result<()> {
+    run_source_with_limit(core, source_id, default_limit(core)).await
+}
+
+pub async fn run_source_with_limit(core: &Core, source_id: &str, limit: usize) -> Result<()> {
+    let pending = core.store.pending_chunks_for_source(source_id).await?;
+
+    // An oversize chunk becomes siblings instead of a vector, so it cannot ride
+    // along in a batch. It leaves behind its own per-chunk jobs.
+    let mut batch: Vec<Chunk> = Vec::with_capacity(pending.len());
+    let mut texts: Vec<String> = Vec::with_capacity(pending.len());
+    for chunk in pending {
+        let text = embed_text(&chunk);
+        if core.counter.count(&text) > limit {
+            split_oversize(core, &chunk, limit).await?;
+        } else {
+            texts.push(text);
+            batch.push(chunk);
+        }
+    }
+
+    for (chunks, texts) in batch.chunks(BATCH).zip(texts.chunks(BATCH)) {
+        embed_batch(core, chunks, texts.to_vec()).await?;
+    }
+    settle_source(core, source_id).await
+}
+
+/// One inference call and one upsert for the whole slice. Chunks are marked
+/// embedded only once Qdrant has durably accepted their vectors, so a crash
+/// leaves work to redo rather than a chunk that claims to be searchable.
+async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Result<()> {
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    let vectors = core.embedder.embed(&texts).await?;
+    if vectors.len() != chunks.len() {
+        return Err(Error::Inference {
+            role: "embed",
+            detail: format!(
+                "asked for {} embeddings and got {}; pairing them would attach vectors \
+                 to the wrong chunks",
+                chunks.len(),
+                vectors.len()
+            ),
+        });
+    }
+
+    let points = chunks
+        .iter()
+        .zip(texts.iter())
+        .zip(vectors)
+        .map(|((c, text), vector)| VectorPoint {
+            vector,
+            // The same text the embedder saw, so the lexical and the semantic
+            // half of a hit always describe the same thing.
+            sparse: crate::vector::sparse::encode_document(text),
+            payload: payload_of(c),
+        })
+        .collect();
+    core.vectors.upsert(points).await?;
+
+    for c in chunks {
+        core.store
+            .mark_embedded(&c.id, core.embedder.model())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Fall back from one job per source to one job per chunk. A batch that has
+/// exhausted its retries may be failing on a single chunk the embedder rejects,
+/// and one bad chunk must not keep its siblings out of search.
+pub async fn split_into_chunk_jobs(core: &Core, source_id: &str) -> Result<()> {
+    let pending = core.store.pending_chunks_for_source(source_id).await?;
+    for c in &pending {
+        core.store.enqueue(Stage::Embed, "chunk", &c.id).await?;
+    }
+    tracing::info!(
+        source_id,
+        chunks = pending.len(),
+        "split batch into per-chunk embed jobs"
+    );
+    Ok(())
 }
 
 /// A chunk larger than the embedder accepts becomes several sibling chunks
@@ -61,6 +151,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
         core.vectors
             .upsert(vec![VectorPoint {
                 vector: vectors.into_iter().next().unwrap(),
+                sparse: crate::vector::sparse::encode_document(&chunk.text),
                 payload: payload_of(chunk),
             }])
             .await?;
@@ -128,6 +219,8 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         category: chunk.category.clone(),
         tags: chunk.tags.clone(),
         created_at: chunk.created_at,
+        // Left unset so re-embedding does not make a chunk look forgotten.
+        last_seen_at: None,
     }
 }
 
@@ -138,6 +231,11 @@ pub async fn settle_source(core: &Core, source_id: &str) -> Result<()> {
         return Ok(());
     }
     let status = if core.store.failed_embed_count(source_id).await? > 0 {
+        SourceStatus::Partial
+    } else if core.store.get_source(source_id).await?.status == SourceStatus::Partial {
+        // A source segmented by the structural fallback is already partial.
+        // Its chunks embedding cleanly does not undo that degradation, and
+        // reporting `ready` would hide it.
         SourceStatus::Partial
     } else {
         SourceStatus::Ready
@@ -195,7 +293,7 @@ mod tests {
             .unwrap();
         let hits = core
             .vectors
-            .search(&q[0], 5, &Default::default())
+            .search(&q[0], &Default::default(), 5, &Default::default())
             .await
             .unwrap();
         assert_eq!(hits[0].payload.source_id, src_id);
@@ -228,6 +326,99 @@ mod tests {
         run(&core, &ids[0]).await.unwrap();
         core.store.mark_embed_failed(&ids[1]).await.unwrap();
         settle_source(&core, &src_id).await.unwrap();
+        assert_eq!(
+            core.store.get_source(&src_id).await.unwrap().status,
+            SourceStatus::Partial
+        );
+    }
+
+    #[tokio::test]
+    async fn a_whole_source_is_embedded_in_one_inference_call() {
+        // The embedding endpoint is the slow, rate-limited part of ingest.
+        // Five chunks must cost one call, not five.
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        let (src_id, ids) = seed(&core, &["one", "two", "three", "four", "five"]).await;
+
+        run_source(&core, &src_id).await.unwrap();
+
+        assert_eq!(embedder.calls(), 1, "chunks were embedded one at a time");
+        assert_eq!(core.vectors.count().await.unwrap(), 5);
+        for id in &ids {
+            assert_eq!(
+                core.store.get_chunk(id).await.unwrap().embed_state,
+                EmbedState::Embedded
+            );
+        }
+        assert_eq!(
+            core.store.get_source(&src_id).await.unwrap().status,
+            SourceStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_larger_than_the_request_limit_is_split_across_calls() {
+        // Endpoints cap how many inputs they accept, so the batch is bounded.
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        let texts: Vec<String> = (0..BATCH + 5).map(|i| format!("chunk {i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (src_id, _) = seed(&core, &refs).await;
+
+        run_source(&core, &src_id).await.unwrap();
+
+        assert_eq!(embedder.calls(), 2, "the batch was not bounded");
+        assert_eq!(core.vectors.count().await.unwrap(), (BATCH + 5) as u64);
+    }
+
+    #[tokio::test]
+    async fn a_source_with_nothing_pending_still_settles() {
+        // Re-running a finished job must not leave the source stuck in
+        // `embedding` forever.
+        let core = test_core().await;
+        let (src_id, _) = seed(&core, &["one"]).await;
+        run_source(&core, &src_id).await.unwrap();
+        run_source(&core, &src_id).await.unwrap();
+        assert_eq!(
+            core.store.get_source(&src_id).await.unwrap().status,
+            SourceStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversize_chunk_does_not_block_its_siblings() {
+        // It becomes siblings rather than a vector, so it cannot ride along in
+        // the batch. The rest of the source must still be embedded.
+        let core = test_core().await;
+        let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
+        let (src_id, _) = seed(&core, &["small one", &big, "small two"]).await;
+
+        run_source_with_limit(&core, &src_id, 200).await.unwrap();
+
+        assert_eq!(
+            core.vectors.count().await.unwrap(),
+            2,
+            "the two small chunks should be embedded"
+        );
+        let chunks = core.store.chunks_for_source(&src_id).await.unwrap();
+        assert!(
+            chunks.len() > 3,
+            "the oversize chunk should have become siblings"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_segmented_source_is_not_promoted_to_ready() {
+        // `partial` records that segmentation was degraded. Every chunk
+        // embedding cleanly does not undo that, and reporting `ready` would
+        // hide it.
+        let core = test_core().await;
+        let (src_id, _) = seed(&core, &["one", "two"]).await;
+        core.store
+            .set_source_status(&src_id, SourceStatus::Partial)
+            .await
+            .unwrap();
+
+        run_source(&core, &src_id).await.unwrap();
+
         assert_eq!(
             core.store.get_source(&src_id).await.unwrap().status,
             SourceStatus::Partial

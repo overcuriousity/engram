@@ -31,6 +31,28 @@ pub struct VectorConfig {
     pub collection: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// How much a result's age counts against it. Fused ranks land between
+    /// roughly 0.1 and 1.0, so the default breaks near-ties in favour of the
+    /// newer note without ever overturning a clearly better match. `0.0` turns
+    /// recency off entirely.
+    #[serde(default = "default_recency_weight")]
+    pub recency_weight: f32,
+    /// Age at which a chunk has lost half of that boost.
+    #[serde(default = "default_recency_half_life_days")]
+    pub recency_half_life_days: u32,
+    /// Extra score for a chunk carrying the `pinned` tag, so something you
+    /// decided matters can outrank the decay curve.
+    #[serde(default = "default_pinned_boost")]
+    pub pinned_boost: f32,
+}
+fn default_recency_weight() -> f32 {
+    0.05
+}
+fn default_recency_half_life_days() -> u32 {
+    180
+}
+fn default_pinned_boost() -> f32 {
+    0.15
 }
 
 #[derive(Debug, Deserialize, Clone)]

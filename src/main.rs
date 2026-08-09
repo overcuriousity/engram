@@ -21,6 +21,16 @@ struct Args {
     /// Print an argon2id hash for a password, for auth.local.password_hash.
     #[arg(long)]
     hash_password: Option<String>,
+    /// Copy every vector into a fresh collection generation and swap the alias
+    /// onto it, then exit. Costs no embedding calls and leaves the previous
+    /// generation in place.
+    #[arg(long)]
+    reindex: bool,
+    /// With --reindex, permit deleting a pre-alias collection once its points
+    /// have been copied and counted. Needed only for a collection created
+    /// before engram addressed vectors through an alias.
+    #[arg(long)]
+    replace_legacy: bool,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
@@ -135,6 +145,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.reindex {
+        let vectors = engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?;
+        let target = vectors
+            .reindex(cfg.infer.embed.dim, args.replace_legacy)
+            .await?;
+        println!("{} now serves `{}`", cfg.vector.collection, target);
+        return Ok(());
+    }
+
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
     let store = engram::store::Store::connect(&cfg.store).await?;
@@ -203,9 +222,12 @@ mod startup_tests {
                 path: "engram.db".into(),
             },
             vector: VectorConfig {
-                url: "http://localhost:6334".into(),
+                url: "http://localhost:6333".into(),
                 collection: "chunks".into(),
                 api_key: None,
+                recency_weight: 0.05,
+                recency_half_life_days: 180,
+                pinned_boost: 0.15,
             },
             infer: InferConfig {
                 chunk: ChunkRole {

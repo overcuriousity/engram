@@ -8,17 +8,29 @@ use sha2::{Digest, Sha256};
 /// retrieval tests need from an embedding model.
 pub struct FakeEmbedder {
     dim: usize,
+    /// How many times the endpoint was called. Batching is invisible in the
+    /// output — only the call count shows whether it happened.
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeEmbedder {
     pub fn new(dim: usize) -> Self {
-        Self { dim }
+        Self {
+            dim,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 #[async_trait]
 impl Embedder for FakeEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(texts
             .iter()
             .map(|t| {

@@ -26,9 +26,12 @@ pub async fn run_one(core: &Core) -> Result<bool> {
     );
     let _guard = span.enter();
 
-    let result = match job.stage {
-        Stage::Segment | Stage::Enrich => segment::run(core, &job.target_id).await,
-        Stage::Embed => embed::run(core, &job.target_id).await,
+    let result = match (job.stage, job.target_kind.as_str()) {
+        (Stage::Segment | Stage::Enrich, _) => segment::run(core, &job.target_id).await,
+        // Embedding is batched per source; the per-chunk path is for edits,
+        // for oversize splits, and for isolating a chunk the batch chokes on.
+        (Stage::Embed, "source") => embed::run_source(core, &job.target_id).await,
+        (Stage::Embed, _) => embed::run(core, &job.target_id).await,
     };
 
     match result {
@@ -44,29 +47,49 @@ pub async fn run_one(core: &Core) -> Result<bool> {
             Ok(true)
         }
         Err(e) if e.retryable() => {
-            if job.attempts >= MAX_ATTEMPTS && job.stage == Stage::Segment {
+            let exhausted = job.attempts >= MAX_ATTEMPTS;
+            match (job.stage, job.target_kind.as_str()) {
                 // Out of attempts against the chunker. A structural split is
                 // worse than an LLM split, and far better than losing the source.
-                tracing::warn!(error = %e, "segmentation exhausted retries; using structural fallback");
-                match segment::run_with_fallback(core, &job.target_id).await {
-                    Ok(()) => {
-                        core.store.complete_job(job.id).await?;
-                    }
-                    Err(fe) => {
-                        core.store
-                            .fail_job(job.id, job.attempts, &fe.to_string())
-                            .await?;
+                (Stage::Segment, _) if exhausted => {
+                    tracing::warn!(error = %e, "segmentation exhausted retries; using structural fallback");
+                    match segment::run_with_fallback(core, &job.target_id).await {
+                        Ok(()) => {
+                            core.store.complete_job(job.id).await?;
+                        }
+                        Err(fe) => {
+                            core.store
+                                .fail_job(job.id, job.attempts, &fe.to_string())
+                                .await?;
+                        }
                     }
                 }
-            } else {
-                tracing::warn!(error = %e, "job failed; will retry");
-                core.store
-                    .fail_job(job.id, job.attempts, &e.to_string())
-                    .await?;
-                if job.stage == Stage::Embed && job.attempts >= MAX_ATTEMPTS {
-                    core.store.mark_embed_failed(&job.target_id).await?;
-                    if let Ok(c) = core.store.get_chunk(&job.target_id).await {
-                        embed::settle_source(core, &c.source_id).await?;
+                // A whole source failing together usually means the endpoint is
+                // down, but it can also be one chunk the embedder rejects.
+                // Retrying chunk by chunk isolates the culprit either way.
+                (Stage::Embed, "source") if exhausted => {
+                    tracing::warn!(error = %e, "batch embedding exhausted retries; retrying chunk by chunk");
+                    match embed::split_into_chunk_jobs(core, &job.target_id).await {
+                        Ok(()) => {
+                            core.store.complete_job(job.id).await?;
+                        }
+                        Err(fe) => {
+                            core.store
+                                .fail_job(job.id, job.attempts, &fe.to_string())
+                                .await?;
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(error = %e, "job failed; will retry");
+                    core.store
+                        .fail_job(job.id, job.attempts, &e.to_string())
+                        .await?;
+                    if job.stage == Stage::Embed && exhausted {
+                        core.store.mark_embed_failed(&job.target_id).await?;
+                        if let Ok(c) = core.store.get_chunk(&job.target_id).await {
+                            embed::settle_source(core, &c.source_id).await?;
+                        }
                     }
                 }
             }
