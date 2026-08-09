@@ -1,0 +1,45 @@
+version: 2
+
+updates:
+  # Rust dependencies.
+  #
+  # Grouped deliberately: this project pins exact versions and several of its
+  # crates (qdrant-client, openidconnect, rmcp) change API shape between minor
+  # releases. One grouped PR per week that CI can validate as a unit is far more
+  # useful than a dozen separate ones that each need the same manual check.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      patch-and-minor:
+        update-types:
+          - patch
+          - minor
+      # Majors stay separate: for this dependency set a major bump usually
+      # means real API work, not a version-number edit.
+      major:
+        update-types:
+          - major
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+
+  # The workflows themselves.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"

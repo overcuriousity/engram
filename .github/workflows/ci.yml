@@ -4,11 +4,24 @@ on:
   push:
   pull_request:
 
+# A newer push makes an in-flight run irrelevant. Cancelling keeps queue times
+# down without weakening what lands on the default branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # Note: deliberately NOT setting `RUSTFLAGS: -D warnings` globally. It would
+  # apply to dependency compilation too, so any warning in a third-party crate
+  # would fail our build. Our own code is held to -D warnings via clippy below.
+
+permissions:
+  contents: read
 
 jobs:
   check:
+    name: fmt, clippy, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +30,27 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Everything here runs without infrastructure: inference roles and the
+      # vector store sit behind traits with deterministic fakes.
+      - run: cargo test --locked
+
+  msrv:
+    name: minimum supported rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the version README and Cargo.toml promise. The floor is set
+      # by sqlx 0.9, which requires 1.94 — higher than the 1.88 our own
+      # let-chains need. This job is what stops that promise drifting silently.
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --all-targets --locked
 
   integration:
+    name: qdrant integration
     runs-on: ubuntu-latest
     services:
       qdrant:
@@ -32,6 +62,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --test integration_qdrant -- --ignored
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:6333/ >/dev/null && exit 0
+            sleep 2
+          done
+          echo "Qdrant did not become ready" >&2
+          exit 1
+      - run: cargo test --locked --test integration_qdrant -- --ignored
         env:
           ENGRAM_TEST_QDRANT: http://localhost:6334
+
+  audit:
+    name: security advisories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # audit-check reports findings as a check run.
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

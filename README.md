@@ -27,7 +27,8 @@ the field it listens to.
 
 ## Requirements
 
-- Rust 1.88 or newer (uses let-chains).
+- Rust 1.94 or newer. The floor comes from sqlx 0.9; our own code needs
+  only 1.88 for let-chains.
 - Qdrant, reachable over **gRPC** (port 6334, not just the REST port 6333).
 - An OpenAI-compatible inference endpoint providing chat completions and
   embeddings. One server can fill all roles, or you can point each role
