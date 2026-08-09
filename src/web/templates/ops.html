@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+{% block title %}Ops — pkdb{% endblock %}
+{% block content %}
+
+<h3>Queue</h3>
+<div class="row" style="gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
+  {% for j in job_counts %}<span class="badge">{{ j.0 }}: {{ j.1 }}</span>{% endfor %}
+  {% if let Some(age) = oldest_pending_secs %}
+    <span class="badge badge-muted">oldest pending: {{ age }}s</span>
+  {% endif %}
+  <span class="badge badge-muted">chunks: {{ chunk_count }}</span>
+  <span class="badge badge-muted">vectors: {{ vector_count }}</span>
+</div>
+
+<h3>Failed jobs</h3>
+{% if failed.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<table class="grid">
+  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Error</th><th></th></tr></thead>
+  <tbody>
+  {% for f in failed %}
+    <tr>
+      <td class="mono">{{ f.stage }}</td>
+      <td class="mono">{{ f.target_id }}</td>
+      <td class="mono">{{ f.attempts }}</td>
+      <td class="muted">{% if let Some(e) = f.last_error %}{{ e }}{% else %}—{% endif %}</td>
+      <td>
+        <form method="post" action="/ui/ops/jobs/{{ f.id }}/retry">
+          <button class="btn btn-sm" type="submit">Retry</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>API tokens</h3>
+<div id="token-result"></div>
+<form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"
+      class="row" style="margin-bottom:1rem">
+  <input class="input" name="name" placeholder="Token name, e.g. claude-code" style="max-width:20rem">
+  <button class="btn btn-accent" type="submit">Mint</button>
+</form>
+
+<table class="grid">
+  <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
+  <tbody>
+  {% for t in tokens %}
+    <tr>
+      <td>{{ t.name }}</td>
+      <td class="muted mono">{{ t.created }}</td>
+      <td class="muted mono">{{ t.last_used }}</td>
+      <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>
+          {% else %}<span class="badge badge-success">active</span>{% endif %}</td>
+      <td>
+        {% if !t.revoked %}
+        <form method="post" action="/ui/ops/tokens/{{ t.id }}/revoke">
+          <button class="btn btn-sm btn-danger" type="submit">Revoke</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

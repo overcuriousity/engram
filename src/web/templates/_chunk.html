@@ -1,0 +1,21 @@
+<div class="card" id="chunk-{{ c.id }}">
+  <div class="card-head">
+    <span class="card-title">{{ c.title }}</span>
+    <span class="card-meta"><span class="badge {{ c.embed_badge }}">{{ c.embed_state }}</span></span>
+  </div>
+  <div class="md">{{ c.html|safe }}</div>
+  <div class="chips">
+    {% for t in c.tags %}<span class="badge">{{ t }}</span>{% endfor %}
+    <button class="btn btn-ghost btn-sm"
+            onclick="document.getElementById('edit-{{ c.id }}').style.display='block';this.style.display='none'">
+      edit
+    </button>
+  </div>
+  <form id="edit-{{ c.id }}" style="display:none;margin-top:0.75rem"
+        hx-put="/ui/chunks/{{ c.id }}" hx-target="#chunk-{{ c.id }}" hx-swap="outerHTML">
+    <textarea class="textarea" name="text" style="min-height:8rem">{{ c.text }}</textarea>
+    <div class="row" style="margin-top:0.5rem">
+      <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
+    </div>
+  </form>
+</div>

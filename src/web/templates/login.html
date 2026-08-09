@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+{% block title %}Sign in — pkdb{% endblock %}
+{% block nav %}{% endblock %}
+{% block content %}
+<div class="card" style="max-width:22rem;margin:6rem auto">
+  <div class="card-head"><span class="card-title">Sign in to pkdb</span></div>
+  {% if oidc %}
+    <p class="muted">Authentication is handled by your identity provider.</p>
+    <a class="btn btn-accent" href="/auth/login?go=1" style="width:100%">Continue</a>
+  {% else %}
+    <p class="muted">Local development mode.</p>
+    <form method="post" action="/auth/login" class="stack">
+      <input class="input" name="username" placeholder="Username" autocomplete="username" autofocus>
+      <input class="input" name="password" type="password" placeholder="Password"
+             autocomplete="current-password">
+      <button class="btn btn-accent" type="submit">Sign in</button>
+    </form>
+  {% endif %}
+  {% if let Some(e) = error %}<p style="color:var(--color-danger)">{{ e }}</p>{% endif %}
+</div>
+{% endblock %}

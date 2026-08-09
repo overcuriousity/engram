@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" data-theme="{{ theme }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}pkdb{% endblock %}</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/htmx.min.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    {% block nav %}
+    <nav class="top">
+      <a href="/ui/capture">Capture</a>
+      <a href="/ui/search">Search</a>
+      <a href="/ui/browse">Browse</a>
+      <a href="/ui/ask">Ask</a>
+      <span class="spacer"></span>
+      <a href="/ui/ops">Ops</a>
+      <form method="post" action="/auth/logout" style="display:inline">
+        <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
+      </form>
+    </nav>
+    {% endblock %}
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

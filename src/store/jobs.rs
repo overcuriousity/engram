@@ -61,14 +61,16 @@ impl Store {
         // finished or failed is re-armed, which is exactly what a manual
         // reprocess needs.
         sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after)
-             VALUES (?, ?, ?, 'pending', 0, 0)
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
+             VALUES (?, ?, ?, 'pending', 0, 0, ?)
              ON CONFLICT(stage, target_id) DO UPDATE SET
-               state = 'pending', attempts = 0, run_after = 0, last_error = NULL, claimed_at = NULL",
+               state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
+               claimed_at = NULL, created_at = excluded.created_at",
         )
         .bind(stage.as_str())
         .bind(target_kind)
         .bind(target_id)
+        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -173,8 +175,12 @@ impl Store {
             .collect())
     }
 
+    /// How long the longest-waiting pending job has been queued, in seconds.
+    ///
+    /// Measured from `created_at`, not `run_after`: a job that was never
+    /// delayed has `run_after = 0`, which would report seconds-since-epoch.
     pub async fn oldest_pending_age(&self) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT MIN(run_after) AS oldest FROM jobs WHERE state = 'pending'")
+        let row = sqlx::query("SELECT MIN(created_at) AS oldest FROM jobs WHERE state = 'pending'")
             .fetch_one(&self.pool)
             .await?;
         let oldest: Option<i64> = row.get("oldest");
@@ -327,6 +333,25 @@ mod tests {
             s.claim_job().await.unwrap().is_some(),
             "reclaimed job must be runnable again"
         );
+    }
+
+    #[tokio::test]
+    async fn oldest_pending_age_is_a_waiting_time_not_a_timestamp() {
+        let s = Store::memory().await.unwrap();
+        assert_eq!(s.oldest_pending_age().await.unwrap(), None);
+
+        s.enqueue(Stage::Segment, "source", "src-1").await.unwrap();
+        let age = s.oldest_pending_age().await.unwrap().unwrap();
+        assert!(age < 5, "a just-enqueued job reported an age of {age}s");
+
+        // A job enqueued an hour ago should read as roughly an hour.
+        sqlx::query("UPDATE jobs SET created_at = ?")
+            .bind(crate::store::now() - 3600)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let age = s.oldest_pending_age().await.unwrap().unwrap();
+        assert!((3595..=3605).contains(&age), "got {age}");
     }
 
     #[tokio::test]

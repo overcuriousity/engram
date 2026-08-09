@@ -1,0 +1,22 @@
+<div class="card">
+  <div class="card-head">
+    <span class="card-title">Answer</span>
+    {% if dropped > 0 %}
+      <span class="card-meta"><span class="badge badge-warning">{{ dropped }} excerpt(s) omitted for context budget</span></span>
+    {% endif %}
+  </div>
+  <div class="md">{{ answer|safe }}</div>
+</div>
+<h3>Sources</h3>
+{% for r in citations %}
+<div class="card">
+  <div class="card-head">
+    <span class="card-title">{{ r.title }}</span>
+    <span class="card-meta">{{ r.score }}</span>
+  </div>
+  <div class="md">{{ r.html|safe }}</div>
+  <div class="chips">
+    <a class="btn btn-ghost btn-sm" href="/ui/sources/{{ r.source_id }}">source</a>
+  </div>
+</div>
+{% endfor %}

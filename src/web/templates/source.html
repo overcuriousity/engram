@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% block title %}Source — pkdb{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:1rem">
+  <span class="badge {{ badge }}">{{ status }}</span>
+  <span class="spacer"></span>
+  <form method="post" action="/ui/sources/{{ id }}/reprocess" style="display:inline">
+    <button class="btn btn-sm" type="submit">Re-segment</button>
+  </form>
+  <form method="post" action="/ui/sources/{{ id }}/delete" style="display:inline"
+        onsubmit="return confirm('Delete this source and all its chunks?')">
+    <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><span class="card-title">Raw source</span></div>
+  <pre class="mono" style="white-space:pre-wrap;font-size:0.8125rem;margin:0">{{ raw_text }}</pre>
+</div>
+
+<h3>Chunks</h3>
+{% for c in chunks %}{% include "_chunk.html" %}{% endfor %}
+{% if chunks.is_empty() %}<p class="muted">Not segmented yet.</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+{% block title %}Browse — pkdb{% endblock %}
+{% block content %}
+<table class="grid">
+  <thead><tr><th>Source</th><th>Status</th><th>Chunks</th><th>Captured</th></tr></thead>
+  <tbody>
+  {% for s in sources %}
+    <tr>
+      <td><a href="/ui/sources/{{ s.id }}">{{ s.label }}</a></td>
+      <td><span class="badge {{ s.badge }}">{{ s.status }}</span></td>
+      <td class="mono">{{ s.chunk_count }}</td>
+      <td class="muted mono">{{ s.created }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if sources.is_empty() %}<p class="muted">Nothing captured yet.</p>{% endif %}
+{% endblock %}
