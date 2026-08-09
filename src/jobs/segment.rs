@@ -61,17 +61,32 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         }
 
         // Line numbers come back relative to the window, so shift them into
-        // the coordinates of the original document.
+        // the coordinates of the original document — and no further. A span
+        // outside its own window is nonsense the detail pane would render as
+        // the wrong text, so clamp it here and flag it below.
+        // Clamping erases the evidence, so record which spans had to be moved
+        // before it happens.
+        let mut clamped_spans = Vec::with_capacity(chunks.len());
         for c in &mut chunks {
-            c.source_lines = c
+            let shifted = c
                 .source_lines
                 .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
-                .or(Some((w.start_line, w.end_line)));
+                .unwrap_or((w.start_line, w.end_line));
+            let clamped = (
+                shifted.0.clamp(w.start_line, w.end_line),
+                shifted.1.clamp(w.start_line, w.end_line),
+            );
+            clamped_spans.push(clamped != shifted);
+            c.source_lines = Some(if clamped.0 <= clamped.1 {
+                clamped
+            } else {
+                (w.start_line, w.end_line)
+            });
         }
 
         let written =
             write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
-        flag_unverified_literals(core, &written, &text).await?;
+        flag_unverified(core, &written, &clamped_spans, &text, &src.raw_text).await?;
         core.store
             .set_window_state(source_id, w.idx, WindowState::Done, None)
             .await?;
@@ -109,24 +124,48 @@ fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
         .any(|c| !crate::infer::verify::missing_literals(&c.text, window).is_empty())
 }
 
-/// Mark what the retry could not fix. The chunk is kept — a warning the reader
-/// can see beats a chapter silently missing from the base.
-async fn flag_unverified_literals(
+/// Mark what verification could not vouch for. The chunk is kept — a warning
+/// the reader can see beats a chapter silently missing from the base.
+async fn flag_unverified(
     core: &Core,
     written: &[crate::store::chunks::Chunk],
-    window: &str,
+    // Per chunk, whether its claimed span had to be clamped into the window.
+    clamped_spans: &[bool],
+    window_body: &str,
+    raw_text: &str,
 ) -> Result<()> {
-    for c in written {
-        let missing = crate::infer::verify::missing_literals(&c.text, window);
+    use crate::infer::verify;
+
+    for (i, c) in written.iter().enumerate() {
+        let mut flags = Vec::new();
+        let mut detail: Option<String> = None;
+
+        let missing = verify::missing_literals(&c.text, window_body);
         if let Some(first) = missing.first() {
-            core.store
-                .set_chunk_flags(
-                    &c.id,
-                    &[crate::infer::verify::FLAG_LITERALS.to_string()],
-                    Some(&format!("missing literal: {first}")),
-                )
-                .await?;
+            flags.push(verify::FLAG_LITERALS.to_string());
+            detail = Some(format!("missing literal: {first}"));
             tracing::warn!(chunk_id = %c.id, literal = %first, "literal not found in source window");
+        }
+
+        if let Some(span) = &c.source_span {
+            let claimed = window_text(raw_text, span.start_line, span.end_line);
+            let was_clamped = clamped_spans.get(i).copied().unwrap_or(false);
+            if was_clamped || !verify::span_is_plausible(&c.text, &claimed) {
+                flags.push(verify::FLAG_SPAN.to_string());
+                detail.get_or_insert_with(|| {
+                    format!(
+                        "span {}–{} does not match the chunk",
+                        span.start_line, span.end_line
+                    )
+                });
+                tracing::warn!(chunk_id = %c.id, "chunk span does not match the lines it claims");
+            }
+        }
+
+        if !flags.is_empty() {
+            core.store
+                .set_chunk_flags(&c.id, &flags, detail.as_deref())
+                .await?;
         }
     }
     Ok(())
@@ -135,6 +174,7 @@ async fn flag_unverified_literals(
 /// Everything that can only be decided once every window has resolved:
 /// continuous ordinals, the source's status, and the single batched embed job.
 pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
+    let src = core.store.get_source(source_id).await?;
     core.store.renumber_chunks(source_id).await?;
     let windows = core.store.windows_for_source(source_id).await?;
     let degraded = windows.iter().any(|w| w.state == WindowState::Fallback);
@@ -144,6 +184,23 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
             .set_source_status(source_id, SourceStatus::Failed)
             .await?;
         return Ok(());
+    }
+
+    // How much of the source ended up inside a chunk. A source where the
+    // segmenter quietly dropped half a chapter used to look identical to one
+    // where it did not.
+    let spans: Vec<(i64, i64)> = chunks
+        .iter()
+        .filter_map(|c| c.source_span.as_ref().map(|s| (s.start_line, s.end_line)))
+        .collect();
+    let cov = crate::infer::verify::coverage(&spans, &src.raw_text);
+    core.store.set_source_coverage(source_id, cov).await?;
+    if cov < crate::infer::verify::LOW_COVERAGE {
+        tracing::warn!(
+            source_id,
+            coverage = cov,
+            "most of this source is unclaimed"
+        );
     }
 
     // One job for the whole source: every chunk was just written, and embedding
@@ -398,6 +455,44 @@ Then run sync.";
                 .contains("dd if="),
             "the detail must name the literal that went missing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_span_outside_its_window_is_clamped_and_flagged() {
+        let mut core = test_core().await;
+        core.chunker = std::sync::Arc::new(crate::infer::fake::LyingSpanChunker);
+        let out = core
+            .ingest("first para\n\nsecond para", "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let c = &core.store.chunks_for_source(&out.id).await.unwrap()[0];
+        let span = c.source_span.as_ref().unwrap();
+        assert!(
+            span.start_line >= 1 && span.end_line <= 3,
+            "span must be clamped to the window"
+        );
+        assert!(c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN));
+    }
+
+    #[tokio::test]
+    async fn coverage_is_recorded_on_the_source() {
+        let core = test_core().await;
+        let out = core
+            .ingest("first para\n\nsecond para", "web", None)
+            .await
+            .unwrap();
+        run(&core, &out.id).await.unwrap();
+        let cov = core
+            .store
+            .get_source(&out.id)
+            .await
+            .unwrap()
+            .coverage
+            .unwrap();
+        assert!(cov > 0.0 && cov <= 1.0);
     }
 
     #[tokio::test]

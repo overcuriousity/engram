@@ -182,6 +182,31 @@ impl Chunker for ParaphrasingChunker {
     }
 }
 
+/// Claims every chunk came from lines far outside its window. The span check
+/// exists because the model's line numbers are taken on trust.
+#[derive(Default)]
+pub struct LyingSpanChunker;
+
+#[async_trait]
+impl Chunker for LyingSpanChunker {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+        Ok(vec![ProposedChunk {
+            text: text.to_string(),
+            title: Some("mislabelled".into()),
+            category: None,
+            tags: vec![],
+            source_lines: Some((9_000, 9_100)),
+        }])
+    }
+    fn budget(&self) -> ChunkBudget {
+        ChunkBudget {
+            context_tokens: 4096,
+            max_output_tokens: 1024,
+            output_ratio: 1.4,
+        }
+    }
+}
+
 /// Reverses the candidate order. Deliberately not identity: a test asserting
 /// rerank ran can only tell the difference if the order actually changes.
 #[derive(Default)]

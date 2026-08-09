@@ -87,6 +87,59 @@ pub fn missing_literals(chunk_text: &str, window_text: &str) -> Vec<String> {
         .collect()
 }
 
+/// A chunk whose span points somewhere else entirely.
+pub const FLAG_SPAN: &str = "span_unverified";
+
+/// Below this fraction of a source inside some chunk, the segmenter probably
+/// dropped part of the document.
+pub const LOW_COVERAGE: f64 = 0.6;
+
+fn distinctive_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '=')))
+        .map(|t| t.to_ascii_lowercase())
+        .filter(|t| t.len() > 3)
+        .collect()
+}
+
+/// Does the chunk plausibly describe the lines it claims?
+///
+/// The chunker rewrites prose, so this cannot demand equality — only that a
+/// third of the chunk's distinctive tokens appear in the claimed range. That is
+/// enough to catch a span pointing at a different section, which is the failure
+/// the detail pane would otherwise render as a rendering bug.
+pub fn span_is_plausible(chunk_text: &str, claimed_text: &str) -> bool {
+    let chunk = distinctive_tokens(chunk_text);
+    if chunk.is_empty() {
+        return true;
+    }
+    let claimed = distinctive_tokens(claimed_text);
+    let shared = chunk.iter().filter(|t| claimed.contains(*t)).count();
+    shared * 3 >= chunk.len()
+}
+
+/// Fraction of the source's non-blank lines that some chunk span covers.
+pub fn coverage(spans: &[(i64, i64)], raw_text: &str) -> f64 {
+    let lines: Vec<&str> = raw_text.lines().collect();
+    let total = lines.iter().filter(|l| !l.trim().is_empty()).count();
+    if total == 0 {
+        return 0.0;
+    }
+    let mut covered = vec![false; lines.len()];
+    for (start, end) in spans {
+        let first = (*start).max(1);
+        let last = (*end).min(lines.len() as i64);
+        for n in first..=last {
+            covered[(n - 1) as usize] = true;
+        }
+    }
+    let hit = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| !l.trim().is_empty() && covered[*i])
+        .count();
+    hit as f64 / total as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +197,29 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     #[test]
     fn prose_alone_has_no_literals_to_check() {
         assert!(extract_literals("Just some ordinary prose about disks.").is_empty());
+    }
+
+    #[test]
+    fn a_span_over_the_lines_the_chunk_rewrote_is_plausible() {
+        let claimed = "    dd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress";
+        let chunk = "Write the image:\n\n```\ndd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress\n```";
+        assert!(span_is_plausible(chunk, claimed));
+    }
+
+    #[test]
+    fn a_span_pointing_at_unrelated_lines_is_not_plausible() {
+        let claimed = "The kernel keeps a page cache of recently read blocks.";
+        let chunk = "```\nmkfs.ext4 /dev/sdX1\n```\nFormat the partition with mkfs.";
+        assert!(!span_is_plausible(chunk, claimed));
+    }
+
+    #[test]
+    fn coverage_is_the_fraction_of_non_blank_lines_claimed() {
+        let raw = "one\n\ntwo\nthree\nfour"; // four non-blank lines
+        assert!((coverage(&[(1, 1), (3, 3)], raw) - 0.5).abs() < 1e-6);
+        assert!((coverage(&[(1, 5)], raw) - 1.0).abs() < 1e-6);
+        assert_eq!(coverage(&[], raw), 0.0);
+        // Overlapping spans must not push coverage above one.
+        assert!((coverage(&[(1, 5), (2, 4)], raw) - 1.0).abs() < 1e-6);
     }
 }
