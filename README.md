@@ -79,6 +79,39 @@ Ingest never calls inference. Capture writes the text and returns; segmentation
 and embedding run in the background with retries. A dead endpoint slows
 processing but never loses a capture.
 
+Segmentation runs one window at a time and remembers where it got to. A window
+that succeeds is written before the next is attempted, so a retry resumes
+rather than re-paying for the windows that already worked, and a window the
+chunker cannot handle is split structurally on its own lines while the rest
+keep their LLM segmentation. That source is reported `partial`, and Ops names
+the window. Browse shows `segmenting 3/9` while it happens.
+
+Paste a chapter at a time. A book works — it is windowed the same way — but it
+costs one model call per window, and a chapter is what search results read best
+from. The capture screen says so and warns above roughly one window's worth of
+text. The request body limit is an explicit 8 MB.
+
+## Does the chunk still say what the source said?
+
+Each window is checked before its chunks are stored.
+
+- **Literals.** Commands, paths and flags in a chunk must appear in the window
+  it came from, compared with whitespace normalised. If they do not, the window
+  is segmented once more; failing that, the chunk is stored with a flag naming
+  the literal that went missing. A paraphrased command is a command that later
+  gets pasted into a root shell, and losing the chapter to protect against that
+  would be worse than a warning the reader can see.
+- **Spans.** A chunk's claimed `source_lines` are clamped to its own window and
+  checked for plausible overlap with the lines they name. The detail pane
+  renders those lines beside the chunk, so a wrong span is not cosmetic.
+- **Coverage.** The fraction of a source's lines that ended up inside some
+  chunk is recorded and shown on Browse. Below 60% it reads as a warning — a
+  source where the segmenter dropped half a chapter used to look identical to
+  one where it did not.
+
+Flagged chunks are listed on Ops with two actions: re-segment that one window,
+or mark the chunk reviewed.
+
 ## How search works
 
 One embedding call, one hybrid query, and one rerank call if a reranker is
@@ -114,6 +147,17 @@ Result **scores are ranking scores, not similarities**. A hybrid query returns a
 fused rank, a query with no indexable term returns a cosine, and both then carry
 the recency term. They order one result list and mean nothing between two, which
 is why the UI shows a position rather than a number.
+
+The search page keeps the ranked list beside the result. Opening a hit fills a
+detail pane with the chunk and the source lines it claims, so a paraphrase is
+visible without leaving the page; `/ui/chunks/{id}` is the same view as a
+standalone page, for links and new tabs. Query terms are highlighted, long
+chunks clamp with an expand control, and every fenced block has a copy button.
+
+Typing is cheap: query embeddings are cached, so a burst of keystrokes costs one
+embedding call rather than one per prefix. Incremental searches do not record
+what they showed — only opening a chunk, or a deliberate API, MCP or `ask` call,
+does. That is what keeps `resurface` meaningful.
 
 Editing a chunk's `tags` or `category` rewrites the Qdrant payload in place.
 Editing `text` or `title` queues a re-embed — those are what the model was shown.
