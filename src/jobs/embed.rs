@@ -387,9 +387,9 @@ pub async fn settle_source(core: &Core, source_id: &str) -> Result<()> {
     let status = if core.store.failed_embed_count(source_id).await? > 0 {
         SourceStatus::Partial
     } else if core.store.get_source(source_id).await?.status == SourceStatus::Partial {
-        // A source segmented by the structural fallback is already partial.
-        // Its chunks embedding cleanly does not undo that degradation, and
-        // reporting `ready` would hide it.
+        // A source with a window the model refused is already partial. Its
+        // chunks embedding cleanly does not fill the hole those lines left,
+        // and reporting `ready` would hide it.
         SourceStatus::Partial
     } else {
         SourceStatus::Ready
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fallback_segmented_source_is_not_promoted_to_ready() {
+    async fn a_partially_segmented_source_is_not_promoted_to_ready() {
         // `partial` records that segmentation was degraded. Every chunk
         // embedding cleanly does not undo that, and reporting `ready` would
         // hide it.

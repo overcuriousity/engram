@@ -2,15 +2,16 @@ use super::Store;
 use crate::error::Result;
 use sqlx::Row;
 
-/// Where one window of a source stands. `Fallback` means the chunker never
-/// succeeded here and the lines were split structurally instead — worse than
-/// an LLM split, and the reason the source ends up `partial`.
+/// Where one window of a source stands. `Failed` means the chunker never
+/// succeeded here and the lines are represented by no chunk at all — the model
+/// is a hard dependency, so an unsegmentable window leaves a hole that the
+/// source's coverage measures, and the reason it ends up `partial`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowState {
     Pending,
     Done,
-    Fallback,
+    Failed,
 }
 
 impl WindowState {
@@ -18,13 +19,13 @@ impl WindowState {
         match self {
             WindowState::Pending => "pending",
             WindowState::Done => "done",
-            WindowState::Fallback => "fallback",
+            WindowState::Failed => "failed",
         }
     }
     pub fn parse(s: &str) -> WindowState {
         match s {
             "done" => WindowState::Done,
-            "fallback" => WindowState::Fallback,
+            "failed" => WindowState::Failed,
             _ => WindowState::Pending,
         }
     }
@@ -147,7 +148,7 @@ impl Store {
     }
 
     /// `(resolved, total)`, where resolved counts both a clean window and one
-    /// that gave up and split structurally.
+    /// the model gave up on. Both are settled; neither is still owed work.
     pub async fn window_progress(&self, source_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS total,
@@ -204,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progress_counts_done_and_fallback_as_resolved() {
+    async fn progress_counts_done_and_failed_as_resolved() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_source("raw", "web", None).await.unwrap();
         s.upsert_windows(&src.id, &[(1, 5), (6, 10), (11, 15)])
@@ -214,7 +215,7 @@ mod tests {
         s.set_window_state(&src.id, 0, WindowState::Done, None)
             .await
             .unwrap();
-        s.set_window_state(&src.id, 1, WindowState::Fallback, Some("endpoint down"))
+        s.set_window_state(&src.id, 1, WindowState::Failed, Some("endpoint down"))
             .await
             .unwrap();
 
@@ -231,7 +232,7 @@ mod tests {
 
         assert_eq!(s.bump_window_attempts(&src.id, 0).await.unwrap(), 1);
         assert_eq!(s.bump_window_attempts(&src.id, 0).await.unwrap(), 2);
-        s.set_window_state(&src.id, 0, WindowState::Fallback, Some("boom"))
+        s.set_window_state(&src.id, 0, WindowState::Failed, Some("boom"))
             .await
             .unwrap();
 

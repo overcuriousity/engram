@@ -49,13 +49,12 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // Out of attempts against the chunker. Only the windows that
-                // never finished are split structurally; the rest keep the
-                // segmentation they already earned.
+                // Out of attempts against the chunker. The windows that were
+                // actually tried are recorded as failed; the ones that never
+                // ran go back in the queue.
                 (Stage::Segment, _) if exhausted => {
-                    tracing::warn!(error = %e, "segmentation exhausted retries; falling back per window");
-                    match segment::fallback_pending_windows(core, &job.target_id, &e.to_string())
-                        .await
+                    tracing::warn!(error = %e, "segmentation exhausted retries; failing the windows it tried");
+                    match segment::fail_pending_windows(core, &job.target_id, &e.to_string()).await
                     {
                         Ok(requeue) => {
                             core.store.complete_job(job.id).await?;
@@ -188,7 +187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_stage_is_retried_then_falls_back() {
+    async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
         let core = test_core_with_failing_chunker().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
@@ -202,15 +201,26 @@ mod tests {
             let _ = run_one(&core).await;
         }
 
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
-        assert_eq!(
-            chunks.len(),
-            2,
-            "exhausting retries must not lose the source"
+        // The model is a hard dependency: a source it never segmented has no
+        // chunks rather than paragraphs split on blank lines.
+        assert!(
+            core.store
+                .chunks_for_source(&out.id)
+                .await
+                .unwrap()
+                .is_empty()
         );
         assert_eq!(
             core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Partial
+            SourceStatus::Failed
+        );
+        // The window says why, so Ops can name the lines and the error rather
+        // than only reporting that something did not work.
+        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, crate::store::windows::WindowState::Failed);
+        assert!(
+            w.last_error.as_deref().is_some_and(|e| !e.is_empty()),
+            "a failed window must carry the model's own error"
         );
     }
 

@@ -127,34 +127,6 @@ pub fn window_text(text: &str, start_line: i64, end_line: i64) -> String {
         .join("\n")
 }
 
-/// Deterministic paragraph split with no rewriting. Used when the chunker's
-/// output cannot be parsed twice in a row: a source must never end up with
-/// zero chunks just because a model returned bad JSON.
-pub fn structural_chunks(text: &str) -> Vec<(String, i64, i64)> {
-    let mut out = Vec::new();
-    let mut buf: Vec<&str> = Vec::new();
-    let mut start = 1i64;
-    for (idx, line) in text.lines().enumerate() {
-        let line_no = idx as i64 + 1;
-        if line.trim().is_empty() {
-            if !buf.is_empty() {
-                out.push((buf.join("\n"), start, line_no - 1));
-                buf.clear();
-            }
-            start = line_no + 1;
-        } else {
-            if buf.is_empty() {
-                start = line_no;
-            }
-            buf.push(line);
-        }
-    }
-    if !buf.is_empty() {
-        out.push((buf.join("\n"), start, text.lines().count() as i64));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,16 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn structural_fallback_splits_on_paragraphs() {
-        let out = structural_chunks("para one\nstill one\n\npara two");
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, "para one\nstill one");
-        assert_eq!(out[0].1, 1);
-        assert_eq!(out[0].2, 2);
-        assert_eq!(out[1].1, 4);
-    }
-
-    #[test]
     fn window_text_returns_exactly_the_lines_a_window_claims() {
         let src = "one\ntwo\nthree\nfour\nfive";
         assert_eq!(window_text(src, 2, 4), "two\nthree\nfour");
@@ -281,6 +243,5 @@ mod tests {
     #[test]
     fn empty_input_produces_nothing() {
         assert!(split_into_windows("   \n  ", &TokenCounter::Estimate, 100).is_empty());
-        assert!(structural_chunks("").is_empty());
     }
 }

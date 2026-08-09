@@ -1,7 +1,7 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::window_tokens;
-use crate::infer::split::{split_into_windows, structural_chunks, window_text};
+use crate::infer::split::{split_into_windows, window_text};
 use crate::store::chunks::{NewChunk, SourceSpan};
 use crate::store::jobs::Stage;
 use crate::store::sources::SourceStatus;
@@ -243,7 +243,7 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
     let src = core.store.get_source(source_id).await?;
     core.store.renumber_chunks(source_id).await?;
     let windows = core.store.windows_for_source(source_id).await?;
-    let degraded = windows.iter().any(|w| w.state == WindowState::Fallback);
+    let degraded = windows.iter().any(|w| w.state != WindowState::Done);
     let chunks = core.store.chunks_for_source(source_id).await?;
     if chunks.is_empty() {
         core.store
@@ -284,77 +284,59 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// No-LLM fallback, used once a window has exhausted its retries.
+/// Settle the windows a spent job leaves behind.
 ///
-/// Scoped to the windows that never finished: a structural split is worse than
-/// an LLM split, and applying it to windows that already succeeded would throw
-/// away good work to punish one bad one.
+/// The model is a hard dependency: a window it will not segment stays
+/// unsegmented and records why. There is no structural split to fall back on,
+/// because paragraphs stored verbatim are not what the rest of the system means
+/// by a chunk — no title, no category, no tags, and not rewritten to stand
+/// alone — and they would compete for queries against chunks that are.
+///
+/// Only windows that have actually been tried get a verdict. A local endpoint
+/// fails in bursts — the model is loading, or something else took the VRAM —
+/// and the job's attempt count is shared by every window, so an outage during
+/// window 1 must not condemn windows 2 onward that the model never saw. Those
+/// go back in the queue instead. "Tried at least once" is the line rather than
+/// "spent every attempt", because the attempt count belongs to the job, which
+/// covers the whole source.
 ///
 /// Returns whether windows are still waiting for the model, which the caller
 /// answers with a fresh job. It cannot be enqueued here: the caller's own job
 /// row is keyed `(stage, target_id)`, so enqueuing the same source would reuse
 /// that row and the `complete_job` that follows would close it again — the
 /// untried windows would be left with nothing to come back to.
-pub async fn fallback_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<bool> {
-    let src = core.store.get_source(source_id).await?;
+pub async fn fail_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<bool> {
     let pending = core.store.pending_windows(source_id).await?;
     if pending.is_empty() {
         finish(core, source_id).await?;
         return Ok(false);
     }
 
-    // Only demote windows that have actually spent their attempts. A local
-    // endpoint fails in bursts — the model is loading, or something else took
-    // the VRAM — and the job's attempt count is shared by every window, so an
-    // outage during window 1 used to condemn windows 2 onward that had never
-    // been tried at all. Those go back in the queue instead.
-    // "Tried at least once" is the line, not "spent every attempt": the
-    // attempt count belongs to the job, which covers the whole source, so a
-    // window that has run even once is one the model has actually refused.
     let (tried, untried): (Vec<_>, Vec<_>) = pending.into_iter().partition(|w| w.attempts > 0);
 
     if !untried.is_empty() {
         tracing::info!(
             source_id,
             windows = untried.len(),
-            "leaving untried windows queued rather than splitting them structurally"
+            "leaving untried windows queued rather than failing them"
         );
     }
 
     if tried.is_empty() {
-        // Nothing has earned a fallback yet; the caller queues another attempt.
+        // Nothing has earned a verdict yet; the caller queues another attempt.
         return Ok(true);
     }
 
     for w in tried {
-        let text = window_text(&src.raw_text, w.start_line, w.end_line);
-        let new: Vec<NewChunk> = structural_chunks(&text)
-            .into_iter()
-            .enumerate()
-            .map(|(i, (text, start, end))| NewChunk {
-                ordinal: i as i64,
-                text,
-                // `structural_chunks` numbers from the window's first line, so
-                // the offset is the same shift the LLM path applies.
-                source_span: Some(SourceSpan {
-                    start_line: start + w.start_line - 1,
-                    end_line: end + w.start_line - 1,
-                }),
-                title: None,
-                category: None,
-                tags: vec![],
-                window_idx: Some(w.idx),
-            })
-            .collect();
-        write_window_chunks(core, source_id, w.idx, new).await?;
         core.store
-            .set_window_state(source_id, w.idx, WindowState::Fallback, Some(reason))
+            .set_window_state(source_id, w.idx, WindowState::Failed, Some(reason))
             .await?;
         tracing::warn!(
             source_id,
             window = w.idx,
             lines = format!("{}-{}", w.start_line, w.end_line),
-            "window fell back to a structural split"
+            reason,
+            "window could not be segmented; its lines have no chunk"
         );
     }
     // Windows still waiting for their own attempts mean the source is not
@@ -464,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unparsable_chunker_output_falls_back_to_a_structural_split() {
+    async fn a_window_the_model_refuses_is_marked_failed_not_split() {
         let core = test_core_with_failing_chunker().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
@@ -474,18 +456,31 @@ mod tests {
         let err = run(&core, &out.id).await.unwrap_err();
         assert!(
             err.retryable(),
-            "a dead endpoint deserves a retry, not a fallback"
+            "a dead endpoint deserves a retry, not a verdict"
         );
 
-        fallback_pending_windows(&core, &out.id, "endpoint down")
+        let requeue = fail_pending_windows(&core, &out.id, "endpoint down")
             .await
             .unwrap();
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].text, "alpha para");
+
+        assert!(!requeue, "nothing is left waiting when every window failed");
+        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, WindowState::Failed);
+        assert_eq!(w.last_error.as_deref(), Some("endpoint down"));
+
+        // The point of the change: no paragraph-shaped debris competing for
+        // queries against chunks that were actually written to stand alone.
+        assert!(
+            core.store
+                .chunks_for_source(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused window must produce no chunks at all"
+        );
         assert_eq!(
             core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Partial
+            SourceStatus::Failed
         );
     }
 
@@ -624,9 +619,9 @@ Then run sync.";
     #[tokio::test]
     async fn a_burst_of_endpoint_failures_does_not_condemn_untried_windows() {
         // The job's attempt count is shared by every window of a source, so an
-        // outage while window 0 is running used to send the whole rest of the
-        // document through a structural split without ever calling the model
-        // for it. Locally that outage is usually the model still loading.
+        // outage while window 0 is running used to condemn the whole rest of
+        // the document without ever calling the model for it. Locally that
+        // outage is usually the model still loading.
         let mut core = test_core().await;
         let body = multi_window_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
@@ -636,7 +631,7 @@ Then run sync.";
         // The endpoint refuses while the first window is running; the rest of
         // the source never gets a call at all.
         assert!(run(&core, &out.id).await.is_err());
-        let requeue = fallback_pending_windows(&core, &out.id, "502 Bad Gateway")
+        let requeue = fail_pending_windows(&core, &out.id, "502 Bad Gateway")
             .await
             .unwrap();
 
@@ -644,10 +639,10 @@ Then run sync.";
         assert_eq!(
             windows
                 .iter()
-                .filter(|w| w.state == WindowState::Fallback)
+                .filter(|w| w.state == WindowState::Failed)
                 .count(),
             1,
-            "only the window that spent its attempts may be demoted"
+            "only the window that spent its attempts may be given a verdict"
         );
         assert!(
             windows
@@ -666,8 +661,8 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn a_source_with_untried_windows_still_has_a_job_after_the_fallback() {
-        // The fallback used to enqueue the retry itself. The queue is keyed by
+    async fn a_source_with_untried_windows_still_has_a_job_after_a_failure() {
+        // Settling the windows used to enqueue the retry itself. The queue is keyed by
         // (stage, target), so that reused the very row the worker was running,
         // and the `complete_job` that followed closed it again: the untried
         // windows were abandoned and the source sat in `segmenting` forever.
@@ -703,7 +698,7 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn only_the_unfinished_window_falls_back_to_a_structural_split() {
+    async fn windows_that_succeeded_keep_their_chunks_when_a_later_one_fails() {
         let mut core = test_core().await;
         let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_window_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
@@ -712,8 +707,9 @@ Then run sync.";
         // First pass records the good windows and raises on the bad one.
         assert!(run(&core, &out.id).await.is_err());
         let llm_chunks = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        assert!(llm_chunks > 0);
 
-        fallback_pending_windows(&core, &out.id, "endpoint refused the window")
+        fail_pending_windows(&core, &out.id, "endpoint refused the window")
             .await
             .unwrap();
 
@@ -722,24 +718,25 @@ Then run sync.";
             windows.iter().any(|w| w.state == WindowState::Done),
             "successful windows must stay done"
         );
-        let fell_back: Vec<_> = windows
+        let failed: Vec<_> = windows
             .iter()
-            .filter(|w| w.state == WindowState::Fallback)
+            .filter(|w| w.state == WindowState::Failed)
             .collect();
-        assert_eq!(fell_back.len(), 1);
+        assert_eq!(failed.len(), 1);
         assert_eq!(
-            fell_back[0].last_error.as_deref(),
+            failed[0].last_error.as_deref(),
             Some("endpoint refused the window")
         );
 
-        assert!(
-            core.store.chunks_for_source(&out.id).await.unwrap().len() > llm_chunks,
-            "the fallback window must contribute its own chunks"
+        assert_eq!(
+            core.store.chunks_for_source(&out.id).await.unwrap().len(),
+            llm_chunks,
+            "a failed window must not disturb the chunks another window earned"
         );
         assert_eq!(
             core.store.get_source(&out.id).await.unwrap().status,
             SourceStatus::Partial,
-            "a degraded window makes the source partial, not ready"
+            "a window with no chunks makes the source partial, not ready"
         );
     }
 

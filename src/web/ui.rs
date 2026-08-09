@@ -860,7 +860,7 @@ mod tests {
             .set_window_state(
                 &out.id,
                 0,
-                crate::store::windows::WindowState::Fallback,
+                crate::store::windows::WindowState::Failed,
                 Some("boom"),
             )
             .await
