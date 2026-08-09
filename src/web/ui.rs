@@ -8,7 +8,7 @@ use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 
 // ── View models ─────────────────────────────────────────────────────────────
 
@@ -52,6 +52,26 @@ pub struct ChunkView {
     pub tags: Vec<String>,
     pub embed_state: String,
     pub embed_badge: &'static str,
+}
+
+/// A chunk beside the source lines it claims — the search pane, and the
+/// review surface for anything verification flagged.
+pub struct ChunkDetail {
+    pub id: String,
+    pub title: String,
+    /// Sanitized by `markdown::render`. Rendered with `|safe`.
+    pub html: String,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub flags: Vec<String>,
+    pub flag_detail: Option<String>,
+    pub source_id: String,
+    pub window_idx: Option<i64>,
+    pub slice_label: String,
+    pub slice_lines: Vec<crate::web::source_view::SourceLine>,
+    /// Query terms to highlight, space separated. Empty when the pane was
+    /// opened outside a search.
+    pub terms: String,
 }
 
 /// A chunk verification could not vouch for, and the window that produced it.
@@ -177,6 +197,19 @@ struct SourceTemplate {
 #[template(path = "_chunk.html")]
 struct ChunkFragment {
     c: ChunkView,
+}
+
+#[derive(Template)]
+#[template(path = "_chunk_detail.html")]
+struct ChunkDetailFragment {
+    d: ChunkDetail,
+}
+
+#[derive(Template)]
+#[template(path = "chunk_detail.html")]
+struct ChunkDetailPage {
+    theme: String,
+    d: ChunkDetail,
 }
 
 #[derive(Template)]
@@ -549,6 +582,59 @@ async fn ask_submit(
     .into_response())
 }
 
+/// Everything the pane needs, in one place, so the handler is only routing.
+pub(crate) async fn build_chunk_detail(
+    core: &crate::core::Core,
+    chunk_id: &str,
+    terms: &str,
+) -> Result<ChunkDetail> {
+    let c = core.store.get_chunk(chunk_id).await?;
+    let src = core.store.get_source(&c.source_id).await?;
+    let slice = crate::web::source_view::for_source(&src).slice(&src, c.source_span.as_ref(), 3);
+    Ok(ChunkDetail {
+        id: c.id,
+        title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+        html: markdown::render(&c.text),
+        category: c.category,
+        tags: c.tags,
+        flags: c.flags,
+        flag_detail: c.flag_detail,
+        source_id: c.source_id,
+        window_idx: c.window_idx,
+        slice_label: slice.label,
+        slice_lines: slice.lines,
+        terms: terms.to_string(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ChunkViewParams {
+    #[serde(default)]
+    terms: String,
+}
+
+/// One route, two shapes. An htmx swap wants the pane's body; a pasted link
+/// wants a page with navigation around it.
+async fn chunk_detail(
+    State(st): State<AppState>,
+    _id: Identity,
+    headers: axum::http::HeaderMap,
+    Path(cid): Path<String>,
+    Query(p): Query<ChunkViewParams>,
+) -> Result<Response> {
+    let d = build_chunk_detail(&st.core, &cid, &p.terms).await?;
+    // Opening a chunk is the deliberate act that counts as remembering it.
+    st.core.mark_chunk_seen(&cid);
+    if headers.contains_key("hx-request") {
+        return Ok(HtmlTemplate(ChunkDetailFragment { d }).into_response());
+    }
+    Ok(HtmlTemplate(ChunkDetailPage {
+        theme: "light".into(),
+        d,
+    })
+    .into_response())
+}
+
 /// The action behind "re-segment this window": put the window back in the
 /// queue's path and make sure something will pick it up. Split out from the
 /// handler so it can be tested without a request.
@@ -598,7 +684,7 @@ pub fn ui_router() -> Router<AppState> {
             "/ui/sources/{sid}/windows/{idx}/resegment",
             post(resegment_window),
         )
-        .route("/ui/chunks/{id}", put(put_chunk))
+        .route("/ui/chunks/{id}", get(chunk_detail).put(put_chunk))
         .route("/ui/chunks/{cid}/reviewed", post(mark_chunk_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
@@ -613,6 +699,59 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn the_detail_view_pairs_a_chunk_with_the_lines_it_claims() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        let c = core
+            .store
+            .chunks_for_source(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+
+        let d = match super::build_chunk_detail(&core, &c.id, "").await {
+            Ok(d) => d,
+            Err(e) => panic!("detail view failed: {e}"),
+        };
+
+        assert_eq!(d.source_id, out.id);
+        assert!(d.html.contains("alpha"), "the chunk body must be rendered");
+        assert!(
+            !d.slice_lines.is_empty(),
+            "the source slice must not be empty"
+        );
+        assert!(
+            d.slice_lines.iter().any(|l| l.in_span),
+            "at least one line must be marked as the span"
+        );
+        assert!(d.slice_label.starts_with("lines "));
+    }
+
+    #[tokio::test]
+    async fn a_chunk_whose_source_vanished_is_not_a_500() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        let c = core
+            .store
+            .chunks_for_source(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+        core.delete_source(&out.id).await.unwrap();
+
+        match super::build_chunk_detail(&core, &c.id, "").await {
+            Err(crate::error::Error::NotFound) => {}
+            Err(e) => panic!("expected a not-found, got {e}"),
+            Ok(_) => panic!("a chunk whose source was deleted must not resolve"),
+        }
+    }
 
     #[tokio::test]
     async fn resegmenting_a_window_makes_it_pending_and_queues_the_job() {

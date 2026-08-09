@@ -219,3 +219,37 @@ nav.top a.brand img { display: block; }
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
 .brand-name { font-size: 1.375rem; font-weight: 600; letter-spacing: -0.02em; }
 .brand-tag { margin-top: 0; margin-bottom: 1rem; }
+
+/* ── Chunk detail: the chunk beside the lines it claims ──────────────────── */
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+@media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
+
+.pane-label {
+  display: flex; gap: 0.5rem; align-items: baseline;
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted); margin-bottom: 0.375rem;
+}
+
+.raw {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); overflow: auto; max-height: 30rem;
+}
+.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8125rem; }
+.raw td { padding: 1px 0.5rem; vertical-align: top; white-space: pre-wrap; }
+.raw td.ln {
+  width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
+  border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
+}
+.raw tr.in td { background: var(--color-accent-dim); }
+.raw tr.in td.ln { color: var(--color-accent); }
+
+.flag {
+  display: flex; gap: 0.625rem; align-items: flex-start;
+  border: 1px solid var(--color-warning); background: var(--color-warning-dim);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+  font-size: 0.8125rem; margin-bottom: 0.75rem;
+}
+.flag b { color: var(--color-warning); }
+
+.crumb { font-size: 0.8125rem; color: var(--color-fg-muted); margin-bottom: 0.75rem; }

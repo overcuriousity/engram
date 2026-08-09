@@ -1,0 +1,54 @@
+<div data-terms="{{ d.terms }}">
+  <div class="crumb">
+    <a href="/ui/sources/{{ d.source_id }}">source</a> · {{ d.slice_label }}
+  </div>
+
+  {% if !d.flags.is_empty() %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>{{ d.flags|join(", ") }}</b>
+      {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
+      <div class="chips">
+        {% if let Some(w) = d.window_idx %}
+        <form method="post" action="/ui/sources/{{ d.source_id }}/windows/{{ w }}/resegment">
+          <button class="btn btn-sm" type="submit">Re-segment window</button>
+        </form>
+        {% endif %}
+        <button class="btn btn-sm" hx-post="/ui/chunks/{{ d.id }}/reviewed"
+                hx-target="closest .flag" hx-swap="outerHTML">Mark reviewed</button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="split">
+    <div>
+      <div class="pane-label">Chunk</div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
+        <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        <div class="chips">
+          {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
+          {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="pane-label">
+        {{ d.slice_label }}
+        <span class="spacer"></span>
+        <a href="/ui/sources/{{ d.source_id }}">open full source</a>
+      </div>
+      <div class="raw">
+        <table>
+          {% for l in d.slice_lines %}
+          <tr class="{% if l.in_span %}in{% endif %}">
+            <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+  </div>
+</div>

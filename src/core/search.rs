@@ -99,6 +99,20 @@ impl Core {
         });
     }
 
+    /// Opening a chunk is the deliberate act that counts as remembering it,
+    /// which is why the detail pane records it and an incremental search does
+    /// not.
+    pub fn mark_chunk_seen(&self, chunk_id: &str) {
+        let ids = vec![chunk_id.to_string()];
+        let vectors = self.vectors.clone();
+        let now = now_secs();
+        self.background.spawn(async move {
+            if let Err(e) = vectors.touch(&ids, now).await {
+                tracing::warn!(error = %e, "could not record that a chunk was opened");
+            }
+        });
+    }
+
     /// A random handful of chunks that have not surfaced in a month.
     ///
     /// Random rather than ranked, because there is no query: the question is
