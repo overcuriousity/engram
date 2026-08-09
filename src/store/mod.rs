@@ -1,4 +1,5 @@
 pub mod chunks;
+pub mod jobs;
 pub mod sources;
 
 use crate::config::StoreConfig;
