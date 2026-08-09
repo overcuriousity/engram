@@ -54,6 +54,15 @@ pub struct ChunkView {
     pub embed_badge: &'static str,
 }
 
+/// A chunk verification could not vouch for, and the window that produced it.
+pub struct FlaggedRow {
+    pub chunk_id: String,
+    pub source_id: String,
+    pub title: String,
+    pub detail: String,
+    pub window_idx: Option<i64>,
+}
+
 pub struct TokenRow {
     pub id: String,
     pub name: String,
@@ -179,6 +188,7 @@ struct OpsTemplate {
     chunk_count: i64,
     vector_count: u64,
     failed: Vec<crate::store::jobs::FailedJob>,
+    flagged: Vec<FlaggedRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -423,8 +433,27 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         })
         .collect();
 
+    let flagged = st
+        .core
+        .store
+        .flagged_chunks(50)
+        .await?
+        .into_iter()
+        .map(|c| FlaggedRow {
+            title: c
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+            detail: c.flag_detail.clone().unwrap_or_else(|| c.flags.join(", ")),
+            window_idx: c.window_idx,
+            chunk_id: c.id,
+            source_id: c.source_id,
+        })
+        .collect();
+
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
+        flagged,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         chunk_count,
@@ -520,6 +549,41 @@ async fn ask_submit(
     .into_response())
 }
 
+/// The action behind "re-segment this window": put the window back in the
+/// queue's path and make sure something will pick it up. Split out from the
+/// handler so it can be tested without a request.
+pub(crate) async fn resegment_window_inner(
+    core: &crate::core::Core,
+    source_id: &str,
+    idx: i64,
+) -> Result<()> {
+    core.store.reset_window(source_id, idx).await?;
+    core.store
+        .enqueue(crate::store::jobs::Stage::Segment, "source", source_id)
+        .await?;
+    Ok(())
+}
+
+async fn resegment_window(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((sid, idx)): Path<(String, i64)>,
+) -> Result<Response> {
+    resegment_window_inner(&st.core, &sid, idx).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+/// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
+/// beside its source lines and decided the warning was noise.
+async fn mark_chunk_reviewed(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+) -> Result<Response> {
+    st.core.store.clear_chunk_flags(&cid).await?;
+    Ok(axum::response::Html(String::new()).into_response())
+}
+
 pub fn ui_router() -> Router<AppState> {
     Router::new()
         .route("/ui", get(|| async { Redirect::to("/ui/search") }))
@@ -530,7 +594,12 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/sources/{id}", get(source_detail))
         .route("/ui/sources/{id}/delete", post(delete_source_ui))
         .route("/ui/sources/{id}/reprocess", post(reprocess_ui))
+        .route(
+            "/ui/sources/{sid}/windows/{idx}/resegment",
+            post(resegment_window),
+        )
         .route("/ui/chunks/{id}", put(put_chunk))
+        .route("/ui/chunks/{cid}/reviewed", post(mark_chunk_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
@@ -544,6 +613,41 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn resegmenting_a_window_makes_it_pending_and_queues_the_job() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("first para\n\nsecond para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        core.store
+            .set_window_state(
+                &out.id,
+                0,
+                crate::store::windows::WindowState::Fallback,
+                Some("boom"),
+            )
+            .await
+            .unwrap();
+
+        super::resegment_window_inner(&core, &out.id, 0)
+            .await
+            .unwrap();
+
+        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, crate::store::windows::WindowState::Pending);
+        assert_eq!(w.attempts, 0);
+
+        let mut found = false;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            if j.stage == crate::store::jobs::Stage::Segment && j.target_id == out.id {
+                found = true;
+            }
+        }
+        assert!(found, "a segment job must be queued for the source");
+    }
 
     async fn app_with_session() -> (axum::Router, String) {
         let core = crate::core::test_support::test_core().await;
