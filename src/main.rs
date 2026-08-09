@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod infer;
 mod store;
 
 use axum::{Router, routing::get};
