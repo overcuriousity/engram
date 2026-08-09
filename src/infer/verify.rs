@@ -87,6 +87,43 @@ pub fn missing_literals(chunk_text: &str, window_text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Where in the window a chunk's own lines actually appear.
+///
+/// The chunker is asked for `source_lines` and frequently omits them. Falling
+/// back to the whole window is honest but useless: the detail pane then marks
+/// every line as the span, which points at nothing. Matching the chunk's lines
+/// against the window recovers a real span for anything the model reproduced
+/// verbatim, which is precisely the commands and paths worth pointing at.
+///
+/// Returns `None` when nothing matches, and the caller keeps the window.
+pub fn locate_span(chunk_text: &str, window_body: &str, window_start: i64) -> Option<(i64, i64)> {
+    let window: Vec<String> = window_body.lines().map(normalize).collect();
+    let needles: Vec<String> = chunk_text
+        .lines()
+        .map(normalize)
+        .filter(|l| l.len() > 8)
+        .collect();
+    if needles.is_empty() {
+        return None;
+    }
+
+    let mut first = usize::MAX;
+    let mut last = 0usize;
+    for needle in &needles {
+        if let Some(at) = window
+            .iter()
+            .position(|w| w == needle || w.contains(needle))
+        {
+            first = first.min(at);
+            last = last.max(at);
+        }
+    }
+    if first == usize::MAX {
+        return None;
+    }
+    Some((window_start + first as i64, window_start + last as i64))
+}
+
 /// A chunk whose span points somewhere else entirely.
 pub const FLAG_SPAN: &str = "span_unverified";
 
@@ -211,6 +248,25 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         let claimed = "The kernel keeps a page cache of recently read blocks.";
         let chunk = "```\nmkfs.ext4 /dev/sdX1\n```\nFormat the partition with mkfs.";
         assert!(!span_is_plausible(chunk, claimed));
+    }
+
+    #[test]
+    fn a_missing_span_is_recovered_from_the_lines_the_chunk_reproduced() {
+        // The real chunker omits source_lines more often than not, and the
+        // whole window is not a useful answer to "where did this come from".
+        let chunk = "    dd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress";
+        let found = locate_span(chunk, WINDOW, 101).expect("the command is in the window");
+        // WINDOW line 6 (1-based) holds the dd command, so with the window
+        // starting at 101 the span is line 106.
+        assert_eq!(found, (106, 106));
+    }
+
+    #[test]
+    fn a_span_cannot_be_located_for_a_chunk_that_shares_no_lines() {
+        assert_eq!(
+            locate_span("Something else entirely, rewritten freely.", WINDOW, 1),
+            None
+        );
     }
 
     #[test]

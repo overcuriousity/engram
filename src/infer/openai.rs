@@ -179,7 +179,15 @@ impl Embedder for HttpEmbedder {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        let body = json!({ "model": self.model, "input": texts });
+        // `encoding_format` is optional in OpenAI's own API and defaults to
+        // float there, but proxies in front of llama.cpp-style servers pass the
+        // absent field through as null and the backend rejects it. Sending it
+        // explicitly costs nothing and keeps those endpoints usable.
+        let body = json!({
+            "model": self.model,
+            "input": texts,
+            "encoding_format": "float",
+        });
         let v = post_json(
             "embed",
             &self.client,
@@ -530,6 +538,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.retryable());
+    }
+
+    #[tokio::test]
+    async fn embedder_asks_for_float_encoding_explicitly() {
+        // A litellm proxy in front of a llama.cpp-style server forwards the
+        // absent field as null, and the backend answers 500 with
+        // "type must be string, but is null". Every embed call fails against
+        // such an endpoint unless the field is sent.
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(body_partial_json(
+                serde_json::json!({"encoding_format": "float"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]}),
+            ))
+            .mount(&server)
+            .await;
+
+        let out = HttpEmbedder::new(&embed_cfg(server.uri()))
+            .embed(&["x".into()])
+            .await
+            .unwrap();
+        assert_eq!(out[0], vec![1.0, 0.0, 0.0, 0.0]);
     }
 
     #[tokio::test]

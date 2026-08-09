@@ -103,7 +103,10 @@ Each window is checked before its chunks are stored.
   would be worse than a warning the reader can see.
 - **Spans.** A chunk's claimed `source_lines` are clamped to its own window and
   checked for plausible overlap with the lines they name. The detail pane
-  renders those lines beside the chunk, so a wrong span is not cosmetic.
+  renders those lines beside the chunk, so a wrong span is not cosmetic. Models
+  omit `source_lines` more often than not; when that happens the span is
+  recovered by finding the chunk's own verbatim lines in the window, and only a
+  span the model actually asserted is ever doubted.
 - **Coverage.** The fraction of a source's lines that ended up inside some
   chunk is recorded and shown on Browse. Below 60% it reads as a warning — a
   source where the segmenter dropped half a chapter used to look identical to

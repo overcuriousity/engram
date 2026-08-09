@@ -301,6 +301,23 @@ struct UiSearchParams {
     category: Option<String>,
 }
 
+/// Function words carry no signal and appear in every chunk, so highlighting
+/// them marks the whole card and hides the terms that actually matched.
+const STOPWORDS: [&str; 40] = [
+    "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by", "for", "with",
+    "from", "into", "is", "are", "was", "were", "be", "been", "do", "does", "did", "how", "what",
+    "when", "where", "why", "which", "that", "this", "it", "its", "my", "i", "you", "can",
+];
+
+/// Query terms worth marking in a result, space separated for the client.
+fn highlightable_terms(query: &str) -> String {
+    crate::vector::sparse::tokenize(query)
+        .into_iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn split_tags(t: Option<String>) -> Vec<String> {
     t.map(|s| {
         s.split(',')
@@ -329,7 +346,9 @@ async fn search_results(
 
     // The same terms the sparse branch derives, handed to the client so
     // highlighting never has to touch the sanitized HTML on this side.
-    let terms = crate::vector::sparse::tokenize(p.q.trim()).join(" ");
+    // Function words are dropped: a query phrased as a situation is mostly
+    // stopwords, and highlighting every "to" marks the whole card.
+    let terms = highlightable_terms(p.q.trim());
     let (hits, t) = st
         .core
         .search_timed(&SearchQuery {
@@ -724,6 +743,22 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn highlighting_skips_function_words_but_keeps_short_technical_terms() {
+        // A query phrased as a situation is mostly stopwords; marking every
+        // "to" and "how" highlights the entire card and hides the real hits.
+        let terms = super::highlightable_terms("how do i write an iso to a usb stick with dd");
+        assert!(terms.contains("iso"));
+        assert!(terms.contains("usb"));
+        assert!(terms.contains("dd"), "short technical terms must survive");
+        for noise in ["how", "the", " to ", " an ", " with "] {
+            assert!(
+                !format!(" {terms} ").contains(noise),
+                "{noise} should not be highlighted"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn a_rail_entry_carries_the_chunk_id_it_links_to() {

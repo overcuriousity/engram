@@ -64,19 +64,36 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         // the coordinates of the original document — and no further. A span
         // outside its own window is nonsense the detail pane would render as
         // the wrong text, so clamp it here and flag it below.
-        // Clamping erases the evidence, so record which spans had to be moved
-        // before it happens.
-        let mut clamped_spans = Vec::with_capacity(chunks.len());
+        // Only a span the model asserted can be wrong about where the chunk
+        // came from. One this job derived matched by construction, and one that
+        // fell back to the window claims nothing in particular — checking
+        // either against the chunk's own text just invents warnings.
+        let mut spans = Vec::with_capacity(chunks.len());
         for c in &mut chunks {
-            let shifted = c
-                .source_lines
-                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
-                .unwrap_or((w.start_line, w.end_line));
+            let (shifted, origin) = match c.source_lines {
+                Some((a, b)) => (
+                    (a + w.start_line - 1, b + w.start_line - 1),
+                    SpanOrigin::Model,
+                ),
+                // The model omits `source_lines` more often than not. The whole
+                // window is an honest answer and a useless one — the pane would
+                // mark every line as the span — so look for the chunk's own
+                // lines in the window first.
+                None => match crate::infer::verify::locate_span(&c.text, &text, w.start_line) {
+                    Some(found) => (found, SpanOrigin::Derived),
+                    None => ((w.start_line, w.end_line), SpanOrigin::Window),
+                },
+            };
             let clamped = (
                 shifted.0.clamp(w.start_line, w.end_line),
                 shifted.1.clamp(w.start_line, w.end_line),
             );
-            clamped_spans.push(clamped != shifted);
+            // Clamping erases the evidence, so record the move before it happens.
+            spans.push(if origin == SpanOrigin::Model && clamped != shifted {
+                SpanOrigin::Clamped
+            } else {
+                origin
+            });
             c.source_lines = Some(if clamped.0 <= clamped.1 {
                 clamped
             } else {
@@ -86,7 +103,7 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
 
         let written =
             write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
-        flag_unverified(core, &written, &clamped_spans, &text, &src.raw_text).await?;
+        flag_unverified(core, &written, &spans, &text, &src.raw_text).await?;
         core.store
             .set_window_state(source_id, w.idx, WindowState::Done, None)
             .await?;
@@ -117,6 +134,20 @@ async fn write_window_chunks(
     core.store.insert_chunks(source_id, &new).await
 }
 
+/// Where a chunk's stored span came from, which decides whether it is worth
+/// doubting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanOrigin {
+    /// The model said so, and nothing had to be corrected.
+    Model,
+    /// The model said so and named lines outside its own window.
+    Clamped,
+    /// Recovered here by matching the chunk's lines against the window.
+    Derived,
+    /// Nothing to go on; the span is the window itself.
+    Window,
+}
+
 /// Did any proposed chunk lose a literal its window contains?
 fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
     chunks
@@ -129,8 +160,8 @@ fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
 async fn flag_unverified(
     core: &Core,
     written: &[crate::store::chunks::Chunk],
-    // Per chunk, whether its claimed span had to be clamped into the window.
-    clamped_spans: &[bool],
+    // Per chunk, where its stored span came from.
+    spans: &[SpanOrigin],
     window_body: &str,
     raw_text: &str,
 ) -> Result<()> {
@@ -147,10 +178,14 @@ async fn flag_unverified(
             tracing::warn!(chunk_id = %c.id, literal = %first, "literal not found in source window");
         }
 
-        if let Some(span) = &c.source_span {
+        // A derived span matched by construction and a window span claims
+        // nothing in particular; only what the model asserted can be wrong.
+        let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Window);
+        if let Some(span) = &c.source_span
+            && matches!(origin, SpanOrigin::Model | SpanOrigin::Clamped)
+        {
             let claimed = window_text(raw_text, span.start_line, span.end_line);
-            let was_clamped = clamped_spans.get(i).copied().unwrap_or(false);
-            if was_clamped || !verify::span_is_plausible(&c.text, &claimed) {
+            if origin == SpanOrigin::Clamped || !verify::span_is_plausible(&c.text, &claimed) {
                 flags.push(verify::FLAG_SPAN.to_string());
                 detail.get_or_insert_with(|| {
                     format!(
