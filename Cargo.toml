@@ -25,6 +25,11 @@ async-trait = "0.1.92"
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
 qdrant-client = "1.19.0"
+pulldown-cmark = "0.13.4"
+ammonia = "4.1.4"
+argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
+base64 = "0.22"
+openidconnect = "4.0.1"
 
 [dev-dependencies]
 tempfile = "3"

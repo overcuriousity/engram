@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod core;
 mod error;
@@ -5,6 +6,7 @@ mod infer;
 mod jobs;
 mod store;
 mod vector;
+mod web;
 
 use axum::{Router, routing::get};
 use clap::Parser;

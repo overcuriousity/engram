@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod chunks;
 pub mod jobs;
 pub mod sources;
