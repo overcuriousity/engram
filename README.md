@@ -230,6 +230,18 @@ visible without leaving the page; `/ui/artifacts/{id}` is the same view as a
 standalone page, for links and new tabs. Query terms are highlighted, long
 artifacts clamp with an expand control, and every fenced block has a copy button.
 
+Beside the box are **filter chips**, one row for categories and one for tags,
+built from Qdrant's facet counts over the payload index. They show what this
+collection can actually be narrowed by, which is the part a URL parameter cannot:
+`category=procedure` only helps if you already knew that category existed. The
+chips are single-select and the API is not — `tags` still takes several,
+combined with AND.
+
+Under the artifact, the pane lists its **nearest neighbours**. The vector is
+already stored, so this costs no embedding call and no completion, and it is the
+way out of landing near what you wanted rather than on it. An artifact whose
+embed job has not run yet simply has no neighbours to list.
+
 Typing is cheap: query embeddings are cached, so a burst of keystrokes costs one
 embedding call rather than one per prefix. Incremental searches do not record
 what they showed — only opening an artifact, or a deliberate API, MCP or `ask` call,
@@ -365,6 +377,31 @@ every account your provider knows.
 
 **Local mode** is a single hardcoded credential for development. It refuses a
 non-loopback bind without `--i-know-this-is-insecure`.
+
+## Installing it on a phone
+
+The UI ships a web app manifest, so a phone can install it as an app rather
+than a bookmark: it opens without browser chrome, from its own icon, at
+`/ui/search`. On Android, the browser menu offers *Install app*; on iOS it is
+*Share → Add to Home Screen*, which reads the touch icon and the Apple meta
+tags instead of the manifest.
+
+Installation needs a **secure context**, which is HTTPS, or `localhost`. A LAN
+address over plain HTTP is neither, so the worker does not register there and no
+install is offered. Put engram behind the same TLS reverse proxy the rest of
+this document assumes and the option appears.
+
+The service worker exists only because browsers require one before they treat a
+site as installable. It caches nothing and only holds a small page to show when
+the network is unreachable. That is deliberate: a search is a vector query and a
+capture is a write, so there is no useful offline mode, and a worker that cached
+the app shell would only find ways to serve yesterday's HTML against today's
+server. Everything else is fetched from the network exactly as it would be
+without a worker.
+
+The icons are generated from `assets/icon.svg` and committed as PNGs, so a build
+never needs a rasterizer. The command to regenerate them is in a comment at the
+top of that file.
 
 ## Security posture
 
