@@ -1,1 +1,201 @@
+use super::Core;
+use super::search::{SearchQuery, SearchResult};
+use crate::error::{Error, Result};
+use crate::infer::budget::pack_by_budget;
 
+const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
+Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
+say so plainly rather than guessing. Cite excerpts by their number.";
+
+/// Reserve part of the context for the answer itself.
+const ANSWER_RESERVE_TOKENS: usize = 1024;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AskRequest {
+    pub q: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AskResponse {
+    pub answer: String,
+    /// Exactly the excerpts the model saw.
+    pub citations: Vec<SearchResult>,
+    /// Retrieved but left out for budget. Reported so a missing citation is
+    /// visible rather than silent.
+    pub dropped: usize,
+}
+
+impl Core {
+    pub async fn ask(&self, req: &AskRequest) -> Result<AskResponse> {
+        if req.q.trim().is_empty() {
+            return Err(Error::Validation("question is empty".into()));
+        }
+
+        let hits = self
+            .search(&SearchQuery {
+                q: req.q.clone(),
+                limit: req.limit.unwrap_or(8),
+                tags: req.tags.clone(),
+                category: req.category.clone(),
+            })
+            .await?;
+
+        if hits.is_empty() {
+            // No retrieval, no completion: spending a model call to say
+            // "nothing found" is pure latency.
+            return Ok(AskResponse {
+                answer: "Nothing in the knowledge base matches that question.".into(),
+                citations: vec![],
+                dropped: 0,
+            });
+        }
+
+        let blocks: Vec<String> = hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                format!(
+                    "[{}] {}\n{}",
+                    i + 1,
+                    h.title.clone().unwrap_or_default(),
+                    h.text
+                )
+            })
+            .collect();
+
+        let budget = self
+            .completer
+            .context_tokens()
+            .saturating_sub(self.counter.count(ASK_SYSTEM))
+            .saturating_sub(self.counter.count(&req.q))
+            .saturating_sub(ANSWER_RESERVE_TOKENS);
+
+        // Highest score first, so what gets cut is what mattered least.
+        let kept = pack_by_budget(&blocks, &self.counter, budget);
+        let dropped = blocks.len() - kept;
+        if dropped > 0 {
+            tracing::info!(dropped, kept, "ask: excerpts trimmed to fit the context");
+        }
+
+        if kept == 0 {
+            return Ok(AskResponse {
+                answer: "The best matching excerpt is too large for the configured context window."
+                    .into(),
+                citations: vec![],
+                dropped,
+            });
+        }
+
+        let user = format!(
+            "Question: {}\n\nExcerpts:\n\n{}",
+            req.q,
+            blocks[..kept].join("\n\n---\n\n")
+        );
+        let answer = self.completer.complete(ASK_SYSTEM, &user).await?;
+
+        Ok(AskResponse {
+            answer,
+            citations: hits.into_iter().take(kept).collect(),
+            dropped,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::test_support::test_core;
+    use crate::store::chunks::NewChunk;
+
+    async fn seed(core: &crate::core::Core, n: usize, size: usize) {
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let new: Vec<NewChunk> = (0..n)
+            .map(|i| NewChunk {
+                ordinal: i as i64,
+                text: format!("chunk {i} ") + &"filler ".repeat(size),
+                source_span: None,
+                title: Some(format!("t{i}")),
+                category: Some("note".into()),
+                tags: vec![],
+            })
+            .collect();
+        let made = core.store.insert_chunks(&src.id, &new).await.unwrap();
+        for c in &made {
+            crate::jobs::embed::run(core, &c.id).await.unwrap();
+        }
+    }
+
+    fn req(q: &str) -> AskRequest {
+        AskRequest {
+            q: q.into(),
+            limit: None,
+            tags: vec![],
+            category: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_returns_an_answer_with_the_chunks_it_used() {
+        let core = test_core().await;
+        seed(&core, 2, 2).await;
+        let out = core.ask(&req("how do I do the thing")).await.unwrap();
+        assert_eq!(out.answer, "fake answer");
+        assert!(
+            !out.citations.is_empty(),
+            "an answer with no citations is unverifiable"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_reports_chunks_dropped_for_budget() {
+        let core = test_core().await;
+        // FakeCompleter reports a 4096-token context; oversized excerpts force
+        // some to be left out.
+        seed(&core, 20, 400).await;
+        let out = core.ask(&req("anything")).await.unwrap();
+        assert!(
+            out.dropped > 0,
+            "a silently dropped citation is worse than a reported one"
+        );
+        assert!(out.citations.len() < 20);
+    }
+
+    #[tokio::test]
+    async fn citations_match_exactly_what_the_model_was_shown() {
+        let core = test_core().await;
+        seed(&core, 20, 400).await;
+        let out = core.ask(&req("anything")).await.unwrap();
+        assert_eq!(
+            out.citations.len() + out.dropped,
+            8,
+            "citations plus dropped must account for every retrieved excerpt"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_with_no_matches_says_so_without_calling_the_model() {
+        let core = test_core().await;
+        let out = core.ask(&req("nothing is stored")).await.unwrap();
+        assert!(out.citations.is_empty());
+        assert!(
+            out.answer.to_lowercase().contains("nothing"),
+            "got: {}",
+            out.answer
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_question_is_rejected() {
+        let core = test_core().await;
+        assert!(matches!(
+            core.ask(&req("  ")).await,
+            Err(crate::error::Error::Validation(_))
+        ));
+    }
+}
