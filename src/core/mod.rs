@@ -3,7 +3,9 @@ pub mod background;
 pub mod ingest;
 pub mod search;
 
+use crate::config::Config;
 use crate::infer::budget::TokenCounter;
+use crate::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
 use crate::infer::{Chunker, Completer, Embedder, Reranker};
 use crate::store::Store;
 use crate::vector::VectorStore;
@@ -66,6 +68,38 @@ pub struct Core {
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
 }
 
+impl Core {
+    /// Build the running core from configuration. Lives here rather than in
+    /// `main`, so the evaluation harness drives exactly the `Core` the binary
+    /// does — a benchmark against a differently wired core measures the wrong
+    /// program.
+    pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
+        // Chunk size is capped by what the embedder accepts, with headroom for
+        // token-count estimation error.
+        let max_chunk_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
+
+        Core {
+            store,
+            vectors,
+            chunker: Arc::new(
+                HttpChunker::new(&cfg.infer.chunk).with_max_chunk_tokens(max_chunk_tokens),
+            ),
+            embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
+            reranker: cfg
+                .infer
+                .rerank
+                .as_ref()
+                .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
+            completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
+            counter: Arc::new(TokenCounter::load(
+                cfg.infer.chunk.tokenizer_path.as_deref(),
+            )),
+            background: Arc::new(Background::default()),
+            query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod test_support {
     use super::*;
@@ -116,5 +150,41 @@ pub mod test_support {
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// The one wiring decision `from_config` makes that is not a straight
+    /// field copy: rerank is optional, and an absent block must leave search
+    /// in vector order rather than defaulting to an endpoint.
+    #[tokio::test]
+    async fn rerank_is_wired_only_when_configured() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+
+        // `Config` has no `Default`, and adding one just for a test would put
+        // a fake endpoint in the type. The committed example file is a real
+        // config and costs nothing to read.
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.infer.rerank.is_none(),
+            "the example config sets no reranker"
+        );
+        let core = Core::from_config(&cfg, vectors.clone(), store.clone());
+        assert!(core.reranker.is_none());
+
+        cfg.infer.rerank = Some(crate::config::RerankRole {
+            base_url: "http://localhost:8001".into(),
+            model: "bge-reranker-v2-m3".into(),
+            api_key: None,
+            style: crate::config::RerankStyle::Tei,
+            timeout_secs: 60,
+        });
+        let core = Core::from_config(&cfg, vectors, store);
+        assert!(core.reranker.is_some());
     }
 }

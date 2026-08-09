@@ -2,8 +2,6 @@ use clap::Parser;
 use engram::config::{AuthMode, Config};
 use engram::core::Core;
 use engram::error::{Error, Result};
-use engram::infer::budget::TokenCounter;
-use engram::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -52,38 +50,6 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn build_core(
-    cfg: &Config,
-    vectors: Arc<dyn engram::vector::VectorStore>,
-    store: engram::store::Store,
-) -> Core {
-    // Chunk size is capped by what the embedder accepts, with headroom for
-    // token-count estimation error.
-    let max_chunk_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
-
-    Core {
-        store,
-        vectors,
-        chunker: Arc::new(
-            HttpChunker::new(&cfg.infer.chunk).with_max_chunk_tokens(max_chunk_tokens),
-        ),
-        embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
-        reranker: cfg
-            .infer
-            .rerank
-            .as_ref()
-            .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn engram::infer::Reranker>),
-        completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
-        counter: Arc::new(TokenCounter::load(
-            cfg.infer.chunk.tokenizer_path.as_deref(),
-        )),
-        background: Arc::new(engram::core::background::Background::default()),
-        query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
-            engram::core::QUERY_CACHE_CAPACITY,
-        ))),
-    }
 }
 
 /// Fail fast on anything that would otherwise surface much later as bad search
@@ -163,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let store = engram::store::Store::connect(&cfg.store).await?;
     let vectors: Arc<dyn engram::vector::VectorStore> =
         Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
-    let core = build_core(&cfg, vectors, store);
+    let core = Core::from_config(&cfg, vectors, store);
     startup_checks(&core, &cfg).await?;
 
     let oidc = match cfg.auth.mode {
