@@ -1003,3 +1003,121 @@ async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
 
     v.drop_collection().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn a_point_written_by_something_else_does_not_take_search_down() {
+    // A rebuild copies payloads verbatim, and nothing stops an operator from
+    // inserting their own point. Two things would otherwise turn one foreign
+    // point into a total outage: the scoring formula reads `created_at` and
+    // fails the whole query when it is missing, and the payload would not
+    // deserialize. Neither may cost the results that *are* ours.
+    let name = "engram_it_foreign_point";
+    let v = fresh(name, 4).await;
+    v.upsert(vec![point(
+        "mine",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &[],
+        "c",
+    )])
+    .await
+    .unwrap();
+
+    let collection = v.resolve_alias().await.unwrap().expect("no alias");
+    raw(
+        reqwest::Method::PUT,
+        &format!("/collections/{collection}/points?wait=true"),
+        Some(serde_json::json!({
+            "points": [{
+                "id": "11111111-1111-4111-8111-111111111111",
+                "vector": { "dense": [0.9, 0.1, 0.0, 0.0] },
+                "payload": { "something": "else" },
+            }],
+        })),
+    )
+    .await;
+
+    let hits = v
+        .search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &Default::default(),
+            5,
+            &SearchFilter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1, "the foreign point was not skipped: {hits:?}");
+    assert_eq!(hits[0].payload.chunk_id, "mine");
+
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_neighbouring_collection_is_not_mistaken_for_a_generation() {
+    // `drop_collection` deletes everything the alias claims. Claiming by name
+    // prefix would make `engram_it_neighbour_vault` ours to delete.
+    let name = "engram_it_neighbour";
+    let neighbour = format!("{name}_vault");
+    let v = fresh(name, 4).await;
+    raw(
+        reqwest::Method::PUT,
+        &format!("/collections/{neighbour}"),
+        Some(serde_json::json!({ "vectors": { "size": 4, "distance": "Cosine" } })),
+    )
+    .await;
+
+    v.drop_collection().await.unwrap();
+
+    let body = raw(
+        reqwest::Method::GET,
+        &format!("/collections/{neighbour}/exists"),
+        None,
+    )
+    .await;
+    assert!(
+        body.contains("true"),
+        "a collection that merely starts the same way was deleted: {body}"
+    );
+
+    // And it is not adopted as a generation either: with no alias and no
+    // numbered generation, startup must build `_v1` rather than claim it.
+    v.ensure_collection(4).await.unwrap();
+    assert_eq!(
+        v.resolve_alias().await.unwrap().as_deref(),
+        Some(format!("{name}_v1").as_str()),
+        "the neighbour was adopted as this alias's newest generation"
+    );
+
+    v.drop_collection().await.unwrap();
+    raw(
+        reqwest::Method::DELETE,
+        &format!("/collections/{neighbour}"),
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn two_processes_starting_together_end_up_on_one_generation() {
+    // Both read no alias, both create the first generation, both write the
+    // alias. Losing that race is the outcome we wanted; failing startup over
+    // it is not.
+    let name = "engram_it_startup_race";
+    let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
+    v.drop_collection().await.unwrap();
+
+    let a = QdrantVectors::connect(&cfg(name)).await.unwrap();
+    let b = QdrantVectors::connect(&cfg(name)).await.unwrap();
+    let (ra, rb) = tokio::join!(a.ensure_collection(4), b.ensure_collection(4));
+    ra.expect("first process failed to start");
+    rb.expect("second process failed to start");
+
+    assert_eq!(
+        v.resolve_alias().await.unwrap().as_deref(),
+        Some(format!("{name}_v1").as_str())
+    );
+    v.drop_collection().await.unwrap();
+}

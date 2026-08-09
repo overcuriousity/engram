@@ -40,23 +40,37 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Keep at most `max` hits per source, preserving the order they arrived in.
+/// Promote at most `max` hits per source to the front of the list, then refill
+/// from what that displaced until `limit` is reached.
 ///
-/// Applied to a ranked list, this keeps each source's strongest chunks and
-/// drops the tail, which is what stops one long document from filling an answer
-/// with near-identical paragraphs.
+/// The cap is a diversity rule, not a ceiling. Capping alone would mean a base
+/// holding two sources could never answer with more than `2 * max` results
+/// however many good matches it contains — which is the common case for a young
+/// knowledge base, and the case where throwing matches away hurts most. So the
+/// displaced hits go back on the end in rank order: one long document no longer
+/// leads the list, but it still fills it when nothing else can.
 fn cap_per_source(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
+    limit: usize,
 ) -> Vec<crate::vector::SearchHit> {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    hits.into_iter()
-        .filter(|h| {
-            let n = seen.entry(h.payload.source_id.clone()).or_insert(0);
-            *n += 1;
-            *n <= max
-        })
-        .collect()
+    let mut kept = Vec::with_capacity(hits.len());
+    let mut displaced = Vec::new();
+    for h in hits {
+        let n = seen.entry(h.payload.source_id.clone()).or_insert(0);
+        *n += 1;
+        if *n <= max {
+            kept.push(h);
+        } else {
+            displaced.push(h);
+        }
+    }
+    if kept.len() < limit {
+        let room = limit - kept.len();
+        kept.extend(displaced.into_iter().take(room));
+    }
+    kept
 }
 
 /// Chunks older than this are candidates for resurfacing, and a chunk shown
@@ -68,7 +82,9 @@ impl Core {
     /// Record that these results were shown, without making the caller wait.
     ///
     /// One request for the whole list, off the request path: a search must not
-    /// get slower, or fail, because a bookkeeping write did.
+    /// get slower, or fail, because a bookkeeping write did. Tracked rather
+    /// than merely spawned, so shutdown drains it instead of dropping it — a
+    /// lost stamp makes a chunk look forgotten when it is not.
     fn mark_seen(&self, results: &[SearchResult]) {
         if results.is_empty() {
             return;
@@ -76,7 +92,7 @@ impl Core {
         let ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
         let vectors = self.vectors.clone();
         let now = now_secs();
-        tokio::spawn(async move {
+        self.background.spawn(async move {
             if let Err(e) = vectors.touch(&ids, now).await {
                 tracing::warn!(error = %e, "could not record which chunks were shown");
             }
@@ -158,10 +174,10 @@ impl Core {
             .search(&vectors[0], &sparse, candidates, &filter)
             .await?;
 
-        // Cap before reranking, in vector order, so what survives per source is
+        // Cap before reranking, in vector order, so what leads per source is
         // that source's best.
         let hits = match cap {
-            Some(max) => cap_per_source(hits, max),
+            Some(max) => cap_per_source(hits, max, limit),
             None => hits,
         };
 
@@ -395,9 +411,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_source_cannot_fill_the_whole_result_list() {
+    async fn one_source_cannot_lead_the_whole_result_list() {
         // A forty-chunk document otherwise crowds out every other source and
-        // the answer becomes forty near-identical paragraphs.
+        // the top of the list becomes forty near-identical paragraphs.
         let core = test_core().await;
         let hog: Vec<String> = (0..12).map(|i| format!("alpha {i}")).collect();
         let refs: Vec<(&str, &str, &[&str])> =
@@ -406,42 +422,70 @@ mod tests {
         let small = seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
         let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
-        let from_big = hits.iter().filter(|h| h.source_id == big).count();
+        let leading = &hits[..hits.len().min(MAX_PER_SOURCE + 1)];
+        let from_big = leading.iter().filter(|h| h.source_id == big).count();
         assert!(
             from_big <= MAX_PER_SOURCE,
-            "one source contributed {from_big} of {} results",
-            hits.len()
+            "one source took {from_big} of the leading {} results",
+            leading.len()
         );
         assert!(
-            hits.iter().any(|h| h.source_id == small),
-            "the crowded-out source never appeared"
+            leading.iter().any(|h| h.source_id == small),
+            "the crowded-out source never reached the top of the list"
         );
     }
 
     #[tokio::test]
-    async fn ask_may_draw_every_excerpt_from_one_source() {
-        // The cap exists to keep a browsable list varied. An answer is often
-        // found in a single document, and rationing its paragraphs would make
-        // the answer worse rather than the list fairer.
+    async fn a_single_source_base_still_fills_the_limit() {
+        // The cap orders the list, it does not shorten it. A base holding one
+        // document must not answer every query with three results.
         let core = test_core().await;
         let texts: Vec<String> = (0..8).map(|i| format!("alpha {i}")).collect();
         let refs: Vec<(&str, &str, &[&str])> =
             texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
         seed_from(&core, "only", &refs).await;
 
+        let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            8,
+            "the per-source cap swallowed matches nothing else could replace"
+        );
+        // And still no duplicates: refilling must not re-add a kept hit.
+        let ids: std::collections::HashSet<&str> =
+            hits.iter().map(|h| h.chunk_id.as_str()).collect();
+        assert_eq!(ids.len(), hits.len(), "a hit appeared twice");
+    }
+
+    #[tokio::test]
+    async fn ask_reads_in_rank_order_rather_than_diversity_order() {
+        // An answer is often found in one document. `ask` takes the ranked
+        // list as it is, rather than the reordering that makes a browsable
+        // list varied.
+        let core = test_core().await;
+        let hog: Vec<String> = (0..6).map(|i| format!("alpha {i}")).collect();
+        let refs: Vec<(&str, &str, &[&str])> =
+            hog.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
+        seed_from(&core, "big", &refs).await;
+        seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
+
         let capped = core.search(&q("t0\nalpha 0")).await.unwrap();
         let uncapped = core.search_capped(&q("t0\nalpha 0"), None).await.unwrap();
-        assert_eq!(capped.len(), MAX_PER_SOURCE);
         assert!(
-            uncapped.len() > MAX_PER_SOURCE,
-            "an uncapped search returned {} results",
-            uncapped.len()
+            uncapped.windows(2).all(|w| w[0].score >= w[1].score),
+            "ask was handed a reordered list: {:?}",
+            uncapped.iter().map(|h| h.score).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            capped.len(),
+            uncapped.len(),
+            "the two paths must differ in order, not in how much they return"
         );
     }
 
     #[test]
-    fn the_cap_keeps_the_highest_ranked_chunk_of_each_source() {
-        // Applied to a ranked list, what survives per source must be its best,
+    fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
+        // Applied to a ranked list, what leads per source must be its best,
         // not whichever chunk happened to be enumerated first.
         use crate::vector::{SearchHit, VectorPayload};
         let hit = |chunk: &str, src: &str, score: f32| SearchHit {
@@ -457,17 +501,26 @@ mod tests {
             },
             score,
         };
-        let kept = cap_per_source(
+        let ranked = || {
             vec![
                 hit("a1", "a", 0.9),
                 hit("a2", "a", 0.8),
                 hit("b1", "b", 0.7),
                 hit("a3", "a", 0.6),
-            ],
-            2,
+            ]
+        };
+        let ids = |hits: Vec<SearchHit>| -> Vec<String> {
+            hits.iter().map(|h| h.payload.chunk_id.clone()).collect()
+        };
+
+        // Room for three: the cap holds and `a3` stays out.
+        assert_eq!(ids(cap_per_source(ranked(), 2, 3)), vec!["a1", "a2", "b1"]);
+        // Room for four and nothing else to offer: `a3` comes back, last.
+        assert_eq!(
+            ids(cap_per_source(ranked(), 2, 4)),
+            vec!["a1", "a2", "b1", "a3"],
+            "a displaced hit must refill an otherwise short list"
         );
-        let ids: Vec<&str> = kept.iter().map(|h| h.payload.chunk_id.as_str()).collect();
-        assert_eq!(ids, vec!["a1", "a2", "b1"]);
     }
 
     #[tokio::test]
@@ -512,9 +565,9 @@ mod tests {
         reembed_all(&core).await;
 
         assert_eq!(core.resurface(10).await.unwrap().len(), 1);
-        // mark_seen runs off the request path; let it land.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // mark_seen runs off the request path; wait for it rather than sleeping
+        // and hoping, or this test fails on a loaded machine and nowhere else.
+        core.background.wait_idle().await;
         assert!(
             core.resurface(10).await.unwrap().is_empty(),
             "a chunk shown a moment ago is not forgotten"

@@ -1,4 +1,5 @@
 pub mod ask;
+pub mod background;
 pub mod ingest;
 pub mod search;
 
@@ -6,6 +7,7 @@ use crate::infer::budget::TokenCounter;
 use crate::infer::{Chunker, Completer, Embedder, Reranker};
 use crate::store::Store;
 use crate::vector::VectorStore;
+use background::Background;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -17,6 +19,9 @@ pub struct Core {
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
     pub counter: Arc<TokenCounter>,
+    /// Writes that run off the request path. Shared by every clone of `Core`,
+    /// so draining one drains them all.
+    pub background: Arc<Background>,
 }
 
 #[cfg(test)]
@@ -62,6 +67,7 @@ pub mod test_support {
             reranker,
             completer: Arc::new(FakeCompleter::default()),
             counter: Arc::new(TokenCounter::Estimate),
+            background: Arc::new(Background::default()),
         }
     }
 }

@@ -19,7 +19,13 @@ pub struct RenderedResult {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub source_id: String,
-    pub score: String,
+    /// Position in the list, as `#1`, `#2`, …
+    ///
+    /// Not the raw score. That number is a fused rank from Qdrant plus a
+    /// recency term, so it is comparable within one result list and meaningless
+    /// between two — a hybrid query and a dense-only fallback do not even score
+    /// on the same scale. Showing it invited a comparison it cannot support.
+    pub rank: String,
 }
 
 pub struct BrowseRow {
@@ -267,19 +273,23 @@ async fn search_results(
         .await?;
 
     Ok(HtmlTemplate(ResultsTemplate {
-        results: hits.into_iter().map(render_hit).collect(),
+        results: hits
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| render_hit(i, h))
+            .collect(),
     })
     .into_response())
 }
 
-fn render_hit(h: crate::core::search::SearchResult) -> RenderedResult {
+fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
     RenderedResult {
         title: h.title.unwrap_or_else(|| "Untitled".into()),
         html: markdown::render(&h.text),
         category: h.category,
         tags: h.tags,
         source_id: h.source_id,
-        score: format!("{:.3}", h.score),
+        rank: format!("#{}", position + 1),
     }
 }
 
@@ -485,7 +495,12 @@ async fn ask_submit(
         // The answer is model output too, so it goes through the same
         // sanitizing renderer as chunk text.
         answer: markdown::render(&out.answer),
-        citations: out.citations.into_iter().map(render_hit).collect(),
+        citations: out
+            .citations
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| render_hit(i, h))
+            .collect(),
         dropped: out.dropped,
     })
     .into_response())

@@ -15,12 +15,17 @@ const K1: f32 = 1.2;
 
 /// Document-length normalisation, deliberately disabled.
 ///
-/// A non-zero `b` needs the corpus average document length, which means
-/// corpus-wide statistics on the write path and a full re-encode whenever the
-/// average drifts. The segmenter already bounds chunk length, so the correction
-/// it would apply is small. Changing this means rebuilding every sparse vector,
-/// which `--reindex` exists to make routine.
-const B: f32 = 0.0;
+/// BM25 divides term frequency by `1 - b + b * (len / avg_len)`. A non-zero `b`
+/// therefore needs the corpus average document length: corpus-wide statistics
+/// on the write path, and a full re-encode whenever the average drifts. The
+/// segmenter already bounds chunk length, so the correction it would apply is
+/// small.
+///
+/// Held as a constant rather than a parameter because the whole normalisation
+/// term collapses to `1.0` only while it is zero. Reintroducing it means
+/// bringing `avg_len` with it — and rebuilding every sparse vector, which
+/// `--reindex` exists to make routine.
+const LENGTH_NORM: f32 = 1.0;
 
 /// Longer than any real identifier; past this it is a base64 blob or a hash,
 /// and indexing it only costs space.
@@ -76,6 +81,16 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// restarts and match between the write and the read path. Hashing gives that
 /// for free, without a vocabulary file that could drift out of sync with the
 /// stored vectors.
+///
+/// The width is not a choice: Qdrant sparse indices are `u32`, so any hashed
+/// vocabulary collides eventually. At ~100k distinct terms the chance that
+/// *some* pair collides is better than even, though the chance that a given
+/// query hits one stays around one in forty thousand. A collision merges two
+/// terms into one dimension, so a document matches a word it does not contain —
+/// which the dense half of the hybrid query then has to outvote. Cheap
+/// insurance against the worst of it: this is the *only* place term ids are
+/// derived, so the day the tail matters, a vocabulary table replaces this
+/// function and `--reindex` rebuilds every sparse vector.
 pub fn term_id(token: &str) -> u32 {
     let digest = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes());
     u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
@@ -117,9 +132,7 @@ pub fn encode_query(text: &str) -> SparseVector {
 }
 
 fn saturate(tf: f32) -> f32 {
-    // With B = 0 the length-normalisation term collapses to 1.
-    let norm = 1.0 - B + B;
-    tf * (K1 + 1.0) / (tf + K1 * norm)
+    tf * (K1 + 1.0) / (tf + K1 * LENGTH_NORM)
 }
 
 #[cfg(test)]
