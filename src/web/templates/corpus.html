@@ -19,6 +19,6 @@
 </div>
 
 <h3>Chunks</h3>
-{% for c in chunks %}{% include "_chunk.html" %}{% endfor %}
+{% for c in chunks %}{% include "_artifact.html" %}{% endfor %}
 {% if chunks.is_empty() %}<p class="muted">Not segmented yet.</p>{% endif %}
 {% endblock %}

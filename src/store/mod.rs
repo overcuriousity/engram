@@ -1,8 +1,8 @@
+pub mod artifacts;
 pub mod auth;
-pub mod chunks;
+pub mod corpora;
 pub mod jobs;
-pub mod sources;
-pub mod windows;
+pub mod segments;
 
 use crate::config::StoreConfig;
 use crate::error::Result;

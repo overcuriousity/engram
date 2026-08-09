@@ -43,8 +43,8 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
         vector: v,
         sparse: Default::default(),
         payload: VectorPayload {
-            chunk_id: id.into(),
-            source_id: src.into(),
+            artifact_id: id.into(),
+            corpus_id: src.into(),
             text: format!("text {id}"),
             title: Some(id.into()),
             category: Some(cat.into()),
@@ -84,7 +84,7 @@ async fn upsert_search_and_payload_roundtrip() {
         )
         .await
         .unwrap();
-    assert_eq!(hits[0].payload.chunk_id, "a");
+    assert_eq!(hits[0].payload.artifact_id, "a");
     assert_eq!(hits[0].payload.tags, vec!["linux".to_string()]);
     assert_eq!(
         hits[0].payload.created_at, 42,
@@ -120,7 +120,7 @@ async fn filtered_search_uses_payload_indexes() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].payload.chunk_id, "a");
+    assert_eq!(hits[0].payload.artifact_id, "a");
 
     let f = SearchFilter {
         tags: vec![],
@@ -131,7 +131,7 @@ async fn filtered_search_uses_payload_indexes() {
             .await
             .unwrap()[0]
             .payload
-            .chunk_id,
+            .artifact_id,
         "b"
     );
     v.drop_collection().await.unwrap();
@@ -171,7 +171,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1, "tag filter behaved as OR, not AND");
-    assert_eq!(hits[0].payload.chunk_id, "both");
+    assert_eq!(hits[0].payload.artifact_id, "both");
     v.drop_collection().await.unwrap();
 }
 
@@ -210,7 +210,7 @@ async fn delete_by_source_removes_only_that_source() {
     ])
     .await
     .unwrap();
-    v.delete_by_source("s1").await.unwrap();
+    v.delete_by_corpus("s1").await.unwrap();
 
     let hits = v
         .search(
@@ -222,7 +222,7 @@ async fn delete_by_source_removes_only_that_source() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].payload.source_id, "s2");
+    assert_eq!(hits[0].payload.corpus_id, "s2");
     v.drop_collection().await.unwrap();
 }
 
@@ -236,7 +236,7 @@ async fn delete_chunks_removes_exactly_the_listed_ids() {
     ])
     .await
     .unwrap();
-    v.delete_chunks(&["a".to_string()]).await.unwrap();
+    v.delete_artifacts(&["a".to_string()]).await.unwrap();
 
     let hits = v
         .search(
@@ -248,7 +248,7 @@ async fn delete_chunks_removes_exactly_the_listed_ids() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].payload.chunk_id, "b");
+    assert_eq!(hits[0].payload.artifact_id, "b");
     v.drop_collection().await.unwrap();
 }
 
@@ -323,7 +323,7 @@ async fn reindex_copies_every_point_and_swaps_the_alias() {
         )
         .await
         .unwrap();
-    assert_eq!(hits[0].payload.chunk_id, "a");
+    assert_eq!(hits[0].payload.artifact_id, "a");
     assert_eq!(hits[0].payload.tags, vec!["linux".to_string()]);
     assert_eq!(hits[0].payload.created_at, 42);
     assert!(hits[0].score > 0.99);
@@ -379,7 +379,7 @@ async fn a_pre_alias_collection_is_refused_at_startup_then_migrated() {
                 "id": "11111111-1111-1111-1111-111111111111",
                 "vector": [1.0, 0.0, 0.0, 0.0],
                 "payload": {
-                    "chunk_id": "legacy", "source_id": "s1", "text": "text legacy",
+                    "artifact_id": "legacy", "corpus_id": "s1", "text": "text legacy",
                     "title": "legacy", "category": "c", "tags": [], "created_at": 42
                 }
             } ]
@@ -409,7 +409,7 @@ async fn a_pre_alias_collection_is_refused_at_startup_then_migrated() {
         .await
         .unwrap();
     assert_eq!(
-        hits[0].payload.chunk_id, "legacy",
+        hits[0].payload.artifact_id, "legacy",
         "an unnamed vector must survive the move to named vectors"
     );
 
@@ -590,8 +590,8 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
         vector: dense,
         sparse: engram::vector::sparse::encode_document(text),
         payload: VectorPayload {
-            chunk_id: id.into(),
-            source_id: "s1".into(),
+            artifact_id: id.into(),
+            corpus_id: "s1".into(),
             text: text.into(),
             title: None,
             category: Some("c".into()),
@@ -642,7 +642,7 @@ async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
         .await
         .unwrap();
     assert_ne!(
-        dense_only[0].payload.chunk_id, "target",
+        dense_only[0].payload.artifact_id, "target",
         "the fixture is wrong: dense search already finds it, so this proves nothing"
     );
 
@@ -653,12 +653,12 @@ async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
         .await
         .unwrap();
     assert_eq!(
-        hybrid[0].payload.chunk_id,
+        hybrid[0].payload.artifact_id,
         "target",
         "hybrid search did not promote the exact-token match: {:?}",
         hybrid
             .iter()
-            .map(|h| &h.payload.chunk_id)
+            .map(|h| &h.payload.artifact_id)
             .collect::<Vec<_>>()
     );
 }
@@ -693,7 +693,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1, "the filter leaked on one of the branches");
-    assert_eq!(hits[0].payload.chunk_id, "wanted");
+    assert_eq!(hits[0].payload.artifact_id, "wanted");
 
     v.drop_collection().await.unwrap();
 }
@@ -748,7 +748,7 @@ async fn a_rebuild_adds_the_lexical_half_to_a_generation_without_it() {
         .await
         .unwrap();
     assert_eq!(
-        before[0].payload.chunk_id, "decoy",
+        before[0].payload.artifact_id, "decoy",
         "the fixture is wrong: the term already matched before the rebuild"
     );
 
@@ -759,7 +759,7 @@ async fn a_rebuild_adds_the_lexical_half_to_a_generation_without_it() {
         .await
         .unwrap();
     assert_eq!(
-        after[0].payload.chunk_id, "target",
+        after[0].payload.artifact_id, "target",
         "the rebuild did not compute sparse vectors"
     );
 
@@ -780,8 +780,8 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
         vector: dense,
         sparse: Default::default(),
         payload: VectorPayload {
-            chunk_id: id.into(),
-            source_id: "s1".into(),
+            artifact_id: id.into(),
+            corpus_id: "s1".into(),
             text: format!("text {id}"),
             title: None,
             category: Some("c".into()),
@@ -813,7 +813,7 @@ async fn recency_breaks_a_tie_between_equally_relevant_chunks() {
         .await
         .unwrap();
     assert_eq!(
-        hits[0].payload.chunk_id, "new",
+        hits[0].payload.artifact_id, "new",
         "identical vectors, so only age can order them"
     );
 }
@@ -840,7 +840,7 @@ async fn recency_does_not_overturn_a_clearly_better_match() {
         )
         .await
         .unwrap();
-    assert_eq!(hits[0].payload.chunk_id, "relevant_but_old");
+    assert_eq!(hits[0].payload.artifact_id, "relevant_but_old");
 }
 
 #[tokio::test]
@@ -865,7 +865,7 @@ async fn a_pinned_chunk_outranks_the_decay_curve() {
         .await
         .unwrap();
     assert_eq!(
-        hits[0].payload.chunk_id, "pinned_old",
+        hits[0].payload.artifact_id, "pinned_old",
         "the pinned tag did not beat a newer, slightly closer chunk"
     );
 }
@@ -892,7 +892,7 @@ async fn scoring_leaves_the_filter_alone() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].payload.chunk_id, "keep");
+    assert_eq!(hits[0].payload.artifact_id, "keep");
 
     v.drop_collection().await.unwrap();
 }
@@ -915,7 +915,7 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
 
     let cutoff = now_secs() - month;
     let out = v.resurface(10, cutoff, cutoff).await.unwrap();
-    let ids: Vec<&str> = out.iter().map(|h| h.payload.chunk_id.as_str()).collect();
+    let ids: Vec<&str> = out.iter().map(|h| h.payload.artifact_id.as_str()).collect();
     assert_eq!(
         ids,
         vec!["forgotten"],
@@ -1075,7 +1075,7 @@ async fn a_point_written_by_something_else_does_not_take_search_down() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1, "the foreign point was not skipped: {hits:?}");
-    assert_eq!(hits[0].payload.chunk_id, "mine");
+    assert_eq!(hits[0].payload.artifact_id, "mine");
 
     v.drop_collection().await.unwrap();
 }

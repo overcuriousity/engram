@@ -1,4 +1,4 @@
-use super::{ChunkBudget, Chunker, Completer, Embedder, ProposedChunk, Reranker};
+use super::{Completer, Embedder, ProposedArtifact, Reranker, SynthesisBudget, Synthesizer};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -59,14 +59,14 @@ impl Embedder for FakeEmbedder {
 }
 
 #[derive(Default)]
-pub struct FakeChunker {
+pub struct FakeSynthesizer {
     fail_with: Option<String>,
     /// Fail only on windows containing this marker. Lets a test model the
     /// realistic case — some windows succeed, one does not.
     fail_on_marker: Option<String>,
 }
 
-impl FakeChunker {
+impl FakeSynthesizer {
     pub fn failing(msg: &str) -> Self {
         Self {
             fail_with: Some(msg.to_string()),
@@ -83,8 +83,8 @@ impl FakeChunker {
 }
 
 #[async_trait]
-impl Chunker for FakeChunker {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+impl Synthesizer for FakeSynthesizer {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
         if let Some(marker) = &self.fail_on_marker
             && text.contains(marker.as_str())
         {
@@ -104,17 +104,17 @@ impl Chunker for FakeChunker {
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .enumerate()
-            .map(|(i, p)| ProposedChunk {
+            .map(|(i, p)| ProposedArtifact {
                 text: p.to_string(),
                 title: Some(format!("chunk {i}")),
                 category: Some("note".into()),
                 tags: vec!["fake".into()],
-                source_lines: None,
+                corpus_lines: None,
             })
             .collect())
     }
-    fn budget(&self) -> ChunkBudget {
-        ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
+        SynthesisBudget {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
@@ -125,14 +125,14 @@ impl Chunker for FakeChunker {
 /// Drops a token from the first window it sees and reproduces it faithfully
 /// afterwards. Models the case the retry exists for: a one-off paraphrase that
 /// a second attempt gets right.
-pub struct ParaphrasingChunker {
+pub struct ParaphrasingSynthesizer {
     drop_token: String,
     calls: std::sync::atomic::AtomicUsize,
     /// Keep paraphrasing forever rather than recovering on the retry.
     persistent: bool,
 }
 
-impl ParaphrasingChunker {
+impl ParaphrasingSynthesizer {
     pub fn recovering(drop_token: &str) -> Self {
         Self {
             drop_token: drop_token.to_string(),
@@ -155,8 +155,8 @@ impl ParaphrasingChunker {
 }
 
 #[async_trait]
-impl Chunker for ParaphrasingChunker {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+impl Synthesizer for ParaphrasingSynthesizer {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
         let n = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -165,16 +165,16 @@ impl Chunker for ParaphrasingChunker {
         } else {
             text.to_string()
         };
-        Ok(vec![ProposedChunk {
+        Ok(vec![ProposedArtifact {
             text: body,
             title: Some("paraphrased".into()),
             category: Some("note".into()),
             tags: vec![],
-            source_lines: None,
+            corpus_lines: None,
         }])
     }
-    fn budget(&self) -> ChunkBudget {
-        ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
+        SynthesisBudget {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
@@ -182,28 +182,28 @@ impl Chunker for ParaphrasingChunker {
     }
 }
 
-/// Segments like `FakeChunker` but reports a cooldown, so a test can assert
+/// Segments like `FakeSynthesizer` but reports a cooldown, so a test can assert
 /// the job actually paces itself instead of running flat out.
-pub struct PacedChunker {
-    inner: FakeChunker,
+pub struct PacedSynthesizer {
+    inner: FakeSynthesizer,
     cooldown: std::time::Duration,
 }
 
-impl PacedChunker {
+impl PacedSynthesizer {
     pub fn new(cooldown: std::time::Duration) -> Self {
         Self {
-            inner: FakeChunker::default(),
+            inner: FakeSynthesizer::default(),
             cooldown,
         }
     }
 }
 
 #[async_trait]
-impl Chunker for PacedChunker {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
+impl Synthesizer for PacedSynthesizer {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
         self.inner.segment(text).await
     }
-    fn budget(&self) -> ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
         self.inner.budget()
     }
     fn cooldown(&self) -> std::time::Duration {
@@ -214,21 +214,21 @@ impl Chunker for PacedChunker {
 /// Claims every chunk came from lines far outside its window. The span check
 /// exists because the model's line numbers are taken on trust.
 #[derive(Default)]
-pub struct LyingSpanChunker;
+pub struct LyingSpanSynthesizer;
 
 #[async_trait]
-impl Chunker for LyingSpanChunker {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
-        Ok(vec![ProposedChunk {
+impl Synthesizer for LyingSpanSynthesizer {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+        Ok(vec![ProposedArtifact {
             text: text.to_string(),
             title: Some("mislabelled".into()),
             category: None,
             tags: vec![],
-            source_lines: Some((9_000, 9_100)),
+            corpus_lines: Some((9_000, 9_100)),
         }])
     }
-    fn budget(&self) -> ChunkBudget {
-        ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
+        SynthesisBudget {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
@@ -239,21 +239,21 @@ impl Chunker for LyingSpanChunker {
 /// Returns text that appears nowhere in its window, with a bogus span. The
 /// case where nothing can be recovered and the reader has to be told.
 #[derive(Default)]
-pub struct HallucinatingChunker;
+pub struct HallucinatingSynthesizer;
 
 #[async_trait]
-impl Chunker for HallucinatingChunker {
-    async fn segment(&self, _text: &str) -> Result<Vec<ProposedChunk>> {
-        Ok(vec![ProposedChunk {
+impl Synthesizer for HallucinatingSynthesizer {
+    async fn segment(&self, _text: &str) -> Result<Vec<ProposedArtifact>> {
+        Ok(vec![ProposedArtifact {
             text: "Entirely invented material about unrelated subjects".into(),
             title: Some("invented".into()),
             category: None,
             tags: vec![],
-            source_lines: Some((9_000, 9_100)),
+            corpus_lines: Some((9_000, 9_100)),
         }])
     }
-    fn budget(&self) -> ChunkBudget {
-        ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
+        SynthesisBudget {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
@@ -370,7 +370,7 @@ impl Completer for FakeCompleter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infer::{Chunker, Embedder, Reranker};
+    use crate::infer::{Embedder, Reranker, Synthesizer};
 
     #[tokio::test]
     async fn fake_embedder_is_deterministic_and_correctly_sized() {
@@ -407,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_chunker_splits_on_blank_lines() {
-        let c = FakeChunker::default();
+        let c = FakeSynthesizer::default();
         let out = c.segment("first para\n\nsecond para").await.unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "first para");
@@ -416,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_chunker_can_be_told_to_fail() {
-        let c = FakeChunker::failing("endpoint down");
+        let c = FakeSynthesizer::failing("endpoint down");
         assert!(matches!(
             c.segment("x").await,
             Err(crate::error::Error::Inference { .. })

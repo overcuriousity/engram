@@ -20,9 +20,9 @@ use engram::config::Config;
 use engram::core::Core;
 use engram::core::search::SearchQuery;
 use engram::eval::metrics::{mrr, recall_at};
-use engram::eval::{EvalPair, FrozenChunk, eval_dir, load_chunks, load_pairs};
+use engram::eval::{EvalPair, FrozenArtifact, eval_dir, load_artifacts, load_pairs};
 use engram::store::Store;
-use engram::store::chunks::NewChunk;
+use engram::store::artifacts::NewArtifact;
 use engram::vector::VectorStore;
 use engram::vector::qdrant::QdrantVectors;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ const COLLECTION: &str = "engram_eval";
 
 fn cap_from_env() -> Option<usize> {
     match std::env::var("ENGRAM_EVAL_CAP").ok().as_deref() {
-        None => Some(engram::core::search::MAX_PER_SOURCE),
+        None => Some(engram::core::search::MAX_PER_CORPUS),
         Some("none") => None,
         Some(n) => Some(
             n.parse()
@@ -49,7 +49,7 @@ fn cap_from_env() -> Option<usize> {
 #[ignore]
 async fn evaluate_retrieval() {
     let dir = eval_dir();
-    let (chunks, pairs) = match (load_chunks(&dir), load_pairs(&dir)) {
+    let (chunks, pairs) = match (load_artifacts(&dir), load_pairs(&dir)) {
         (Ok(c), Ok(p)) => (c, p),
         (c, p) => {
             // Not a failure: most people running the suite have no corpus, and
@@ -113,7 +113,7 @@ async fn evaluate_retrieval() {
             mark: false,
         };
         let results = core.search_capped(&q, cap).await.expect("search failed");
-        let rank = results.iter().position(|r| r.chunk_id == pair.expect);
+        let rank = results.iter().position(|r| r.artifact_id == pair.expect);
         if rank.is_none_or(|i| i >= LIMIT) {
             misses.push((pair, rank));
         }
@@ -126,39 +126,39 @@ async fn evaluate_retrieval() {
 
 /// Load the frozen chunks and embed them.
 ///
-/// One store source per corpus file, because `source_id` is what the
+/// One store source per corpus file, because `corpus_id` is what the
 /// per-source cap groups by — collapsing the corpus into a single source would
 /// silently disable the cap and measure a different program from the one that
 /// serves the search page.
-async fn index(core: &Core, chunks: &[FrozenChunk]) {
-    let mut by_source: std::collections::BTreeMap<&str, Vec<&FrozenChunk>> = Default::default();
+async fn index(core: &Core, chunks: &[FrozenArtifact]) {
+    let mut by_corpus: std::collections::BTreeMap<&str, Vec<&FrozenArtifact>> = Default::default();
     for c in chunks {
-        by_source.entry(c.source.as_str()).or_default().push(c);
+        by_corpus.entry(c.source.as_str()).or_default().push(c);
     }
 
-    for (name, group) in by_source {
+    for (name, group) in by_corpus {
         // The raw text has to differ per source: sources are deduplicated by
         // a hash of it.
         let src = core
             .store
-            .insert_source(&format!("eval corpus: {name}"), "eval", Some(name))
+            .insert_corpus(&format!("eval corpus: {name}"), "eval", Some(name))
             .await
             .unwrap();
-        let new: Vec<NewChunk> = group
+        let new: Vec<NewArtifact> = group
             .iter()
             .enumerate()
-            .map(|(i, c)| NewChunk {
+            .map(|(i, c)| NewArtifact {
                 ordinal: i as i64,
                 text: c.text.clone(),
-                source_span: None,
+                corpus_span: None,
                 title: c.title.clone(),
                 category: c.category.clone(),
                 tags: c.tags.clone(),
-                window_idx: None,
+                segment_idx: None,
             })
             .collect();
-        core.store.insert_chunks(&src.id, &new).await.unwrap();
-        engram::jobs::embed::run_source(core, &src.id)
+        core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        engram::jobs::embed::run_corpus(core, &src.id)
             .await
             .expect("embedding the corpus failed");
     }
@@ -166,7 +166,7 @@ async fn index(core: &Core, chunks: &[FrozenChunk]) {
 
 fn report(
     cfg: &Config,
-    chunks: &[FrozenChunk],
+    chunks: &[FrozenArtifact],
     pairs: &[EvalPair],
     ranks: &[Option<usize>],
     misses: &[(&EvalPair, Option<usize>)],

@@ -38,17 +38,17 @@ impl VectorStore for MemoryVectors {
             // would make a chunk read yesterday look forgotten.
             if p.payload.last_seen_at.is_none() {
                 p.payload.last_seen_at = w
-                    .get(&p.payload.chunk_id)
+                    .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.last_seen_at);
             }
-            w.insert(p.payload.chunk_id.clone(), p);
+            w.insert(p.payload.artifact_id.clone(), p);
         }
         Ok(())
     }
 
     async fn set_payload(&self, payload: &super::VectorPayload) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        if let Some(p) = w.get_mut(&payload.chunk_id) {
+        if let Some(p) = w.get_mut(&payload.artifact_id) {
             // A merge, matching Qdrant: an absent stamp means "unchanged", so
             // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
@@ -58,9 +58,9 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
-    async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()> {
+    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        for id in chunk_ids {
+        for id in artifact_ids {
             if let Some(p) = w.get_mut(id) {
                 p.payload.last_seen_at = Some(seen_at);
             }
@@ -113,28 +113,28 @@ impl VectorStore for MemoryVectors {
                 score: cosine(vector, &p.vector),
             })
             .collect();
-        // Tie-break on chunk_id so equal scores produce a stable order rather
+        // Tie-break on artifact_id so equal scores produce a stable order rather
         // than whatever the HashMap iterated this time.
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| a.payload.chunk_id.cmp(&b.payload.chunk_id))
+                .then_with(|| a.payload.artifact_id.cmp(&b.payload.artifact_id))
         });
         hits.truncate(limit);
         Ok(hits)
     }
 
-    async fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()> {
+    async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        for id in chunk_ids {
+        for id in artifact_ids {
             w.remove(id);
         }
         Ok(())
     }
 
-    async fn delete_by_source(&self, source_id: &str) -> Result<()> {
+    async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        w.retain(|_, p| p.payload.source_id != source_id);
+        w.retain(|_, p| p.payload.corpus_id != corpus_id);
         Ok(())
     }
 
@@ -153,8 +153,8 @@ mod tests {
             vector: v,
             sparse: Default::default(),
             payload: VectorPayload {
-                chunk_id: id.into(),
-                source_id: src.into(),
+                artifact_id: id.into(),
+                corpus_id: src.into(),
                 text: format!("text of {id}"),
                 title: Some(id.into()),
                 category: Some(cat.into()),
@@ -185,7 +185,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(hits[0].payload.chunk_id, "near");
+        assert_eq!(hits[0].payload.artifact_id, "near");
         assert!(hits[0].score > hits[1].score);
     }
 
@@ -240,7 +240,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].payload.chunk_id, "both");
+        assert_eq!(hits[0].payload.artifact_id, "both");
     }
 
     #[tokio::test]
@@ -262,7 +262,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].payload.chunk_id, "c");
+        assert_eq!(hits[0].payload.artifact_id, "c");
     }
 
     #[tokio::test]
@@ -303,7 +303,7 @@ mod tests {
         ])
         .await
         .unwrap();
-        v.delete_by_source("s1").await.unwrap();
+        v.delete_by_corpus("s1").await.unwrap();
         assert_eq!(v.count().await.unwrap(), 1);
     }
 
@@ -362,11 +362,11 @@ mod tests {
             assert_eq!(
                 first
                     .iter()
-                    .map(|h| &h.payload.chunk_id)
+                    .map(|h| &h.payload.artifact_id)
                     .collect::<Vec<_>>(),
                 again
                     .iter()
-                    .map(|h| &h.payload.chunk_id)
+                    .map(|h| &h.payload.artifact_id)
                     .collect::<Vec<_>>(),
                 "identical scores produced an unstable ordering"
             );

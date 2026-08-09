@@ -1,9 +1,9 @@
-use super::ChunkBudget;
+use super::SynthesisBudget;
 
 /// Below this a window cannot hold a useful unit of text, so a
 /// misconfigured context or an oversized prompt fails loudly at the call site
 /// rather than producing single-word chunks.
-pub const MIN_WINDOW_TOKENS: usize = 256;
+pub const MIN_SEGMENT_TOKENS: usize = 256;
 
 pub enum TokenCounter {
     Exact(Box<tokenizers::Tokenizer>),
@@ -54,17 +54,17 @@ fn estimate(text: &str) -> usize {
     text.chars().count() * 2 / 7
 }
 
-/// Usable input tokens per chunker call.
+/// Usable input tokens per synthesizer call.
 ///
-/// The chunker rewrites rather than splits, so output can exceed input. Two
+/// The synthesizer rewrites rather than splits, so output can exceed input. Two
 /// independent ceilings apply: the context has to hold input plus output, and
 /// the output itself is capped by `max_output_tokens`. The smaller wins.
-pub fn window_tokens(budget: ChunkBudget, prompt_overhead: usize) -> usize {
+pub fn segment_tokens(budget: SynthesisBudget, prompt_overhead: usize) -> usize {
     let ratio = budget.output_ratio.max(0.1);
     let usable = budget.context_tokens.saturating_sub(prompt_overhead);
     let by_context = (usable as f32 / (1.0 + ratio)) as usize;
     let by_output = (budget.max_output_tokens as f32 / ratio) as usize;
-    by_context.min(by_output).max(MIN_WINDOW_TOKENS)
+    by_context.min(by_output).max(MIN_SEGMENT_TOKENS)
 }
 
 /// How many leading items fit inside `budget` tokens. Used to pack retrieved
@@ -84,10 +84,10 @@ pub fn pack_by_budget(items: &[String], counter: &TokenCounter, budget: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infer::ChunkBudget;
+    use crate::infer::SynthesisBudget;
 
-    fn budget(ctx: usize, max_out: usize, ratio: f32) -> ChunkBudget {
-        ChunkBudget {
+    fn budget(ctx: usize, max_out: usize, ratio: f32) -> SynthesisBudget {
+        SynthesisBudget {
             context_tokens: ctx,
             max_output_tokens: max_out,
             output_ratio: ratio,
@@ -98,7 +98,7 @@ mod tests {
     fn window_leaves_room_for_a_larger_rewritten_output() {
         // 32k context, 1000 tokens of prompt, output up to 1.4x the input.
         // (32768 - 1000) / 2.4 = 13236
-        let w = window_tokens(budget(32768, 100_000, 1.4), 1000);
+        let w = segment_tokens(budget(32768, 100_000, 1.4), 1000);
         assert_eq!(w, 13236);
         assert!(w < 32768 / 2, "window must not assume output is free");
     }
@@ -107,15 +107,15 @@ mod tests {
     fn window_is_also_clamped_by_max_output_tokens() {
         // Context would allow ~13k, but 8192 max output at ratio 1.4 caps
         // the input at 8192 / 1.4 = 5851.
-        let w = window_tokens(budget(32768, 8192, 1.4), 1000);
+        let w = segment_tokens(budget(32768, 8192, 1.4), 1000);
         assert_eq!(w, 5851);
     }
 
     #[test]
     fn window_never_returns_zero_or_underflows() {
         // Overhead larger than the whole context must not wrap around.
-        let w = window_tokens(budget(1000, 8192, 1.4), 5000);
-        assert!(w >= MIN_WINDOW_TOKENS, "got {w}");
+        let w = segment_tokens(budget(1000, 8192, 1.4), 5000);
+        assert!(w >= MIN_SEGMENT_TOKENS, "got {w}");
     }
 
     #[test]

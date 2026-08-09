@@ -57,7 +57,7 @@ fn default_pinned_boost() -> f32 {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InferConfig {
-    pub chunk: ChunkRole,
+    pub chunk: SynthesizeRole,
     pub embed: EmbedRole,
     pub ask: AskRole,
     #[serde(default)]
@@ -84,7 +84,7 @@ fn default_timeout_secs() -> u64 {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct ChunkRole {
+pub struct SynthesizeRole {
     pub base_url: String,
     pub model: String,
     #[serde(default)]
@@ -134,7 +134,7 @@ pub struct AskRole {
     pub context_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// See `ChunkRole::reasoning_effort`.
+    /// See `SynthesizeRole::reasoning_effort`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
 }

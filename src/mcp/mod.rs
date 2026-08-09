@@ -26,7 +26,7 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
                 "### {}. {title}\n_score {:.3}{tags} · source: {}_\n\n{}",
                 i + 1,
                 r.score,
-                r.source_id,
+                r.corpus_id,
                 r.text
             )
         })

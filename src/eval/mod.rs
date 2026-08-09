@@ -27,7 +27,7 @@ pub fn eval_dir() -> PathBuf {
 /// One chunk as the segmenter produced it, frozen so a benchmark run costs no
 /// completions and two runs rank exactly the same text.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct FrozenChunk {
+pub struct FrozenArtifact {
     pub id: String,
     /// Corpus file this came from. Also what the per-source cap groups by, so
     /// it has to survive the freeze.
@@ -47,13 +47,13 @@ pub struct FrozenChunk {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvalPair {
     pub query: String,
-    /// `FrozenChunk::id` of the expected answer.
+    /// `FrozenArtifact::id` of the expected answer.
     pub expect: String,
     #[serde(default)]
     pub note: Option<String>,
 }
 
-pub fn chunks_path(dir: &Path) -> PathBuf {
+pub fn artifacts_path(dir: &Path) -> PathBuf {
     dir.join("chunks.json")
 }
 
@@ -61,16 +61,16 @@ pub fn pairs_path(dir: &Path) -> PathBuf {
     dir.join("pairs.json")
 }
 
-pub fn load_chunks(dir: &Path) -> Result<Vec<FrozenChunk>> {
-    let path = chunks_path(dir);
+pub fn load_artifacts(dir: &Path) -> Result<Vec<FrozenArtifact>> {
+    let path = artifacts_path(dir);
     let raw =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-pub fn save_chunks(dir: &Path, chunks: &[FrozenChunk]) -> Result<()> {
+pub fn save_artifacts(dir: &Path, chunks: &[FrozenArtifact]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = chunks_path(dir);
+    let path = artifacts_path(dir);
     let json = serde_json::to_string_pretty(chunks)?;
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
 }
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn chunks_survive_a_round_trip_through_the_frozen_file() {
         let dir = tempfile::tempdir().unwrap();
-        let chunks = vec![FrozenChunk {
+        let chunks = vec![FrozenArtifact {
             id: "01J8".into(),
             source: "dateisysteme-fat.txt".into(),
             text: "Ein Cluster ist die kleinste adressierbare Einheit.".into(),
@@ -98,8 +98,8 @@ mod tests {
             tags: vec!["fat".into()],
         }];
 
-        save_chunks(dir.path(), &chunks).unwrap();
-        assert_eq!(load_chunks(dir.path()).unwrap(), chunks);
+        save_artifacts(dir.path(), &chunks).unwrap();
+        assert_eq!(load_artifacts(dir.path()).unwrap(), chunks);
     }
 
     #[test]

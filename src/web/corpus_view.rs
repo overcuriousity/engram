@@ -6,43 +6,43 @@
 //! `page 42` and its lines come from extracted text — and nothing in the pane
 //! needs to know which implementation answered.
 
-use crate::store::chunks::SourceSpan;
-use crate::store::sources::Source;
+use crate::store::artifacts::CorpusSpan;
+use crate::store::corpora::Source;
 
 /// Lines shown without a span are context, not the claim itself.
 const HEADLESS_PREVIEW_LINES: usize = 40;
 
-pub struct SourceLine {
+pub struct CorpusLine {
     pub number: i64,
     pub text: String,
     /// Inside the chunk's span, as opposed to the context around it.
     pub in_span: bool,
 }
 
-pub struct SourceSlice {
-    pub lines: Vec<SourceLine>,
+pub struct CorpusSlice {
+    pub lines: Vec<CorpusLine>,
     /// What to call this range in the UI: `lines 118–141`, later `page 42`.
     pub label: String,
 }
 
-pub trait SourceView {
-    fn slice(&self, source: &Source, span: Option<&SourceSpan>, context: usize) -> SourceSlice;
+pub trait CorpusView {
+    fn slice(&self, source: &Source, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice;
 }
 
 pub struct TextLines;
 
-impl SourceView for TextLines {
-    fn slice(&self, source: &Source, span: Option<&SourceSpan>, context: usize) -> SourceSlice {
+impl CorpusView for TextLines {
+    fn slice(&self, source: &Source, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
         let all: Vec<&str> = source.raw_text.lines().collect();
         let total = all.len() as i64;
 
         let Some(span) = span else {
-            return SourceSlice {
+            return CorpusSlice {
                 lines: all
                     .iter()
                     .enumerate()
                     .take(HEADLESS_PREVIEW_LINES)
-                    .map(|(i, t)| SourceLine {
+                    .map(|(i, t)| CorpusLine {
                         number: i as i64 + 1,
                         text: (*t).to_string(),
                         in_span: false,
@@ -56,7 +56,7 @@ impl SourceView for TextLines {
         let end = (span.end_line + context as i64).min(total);
         let lines = (start..=end)
             .filter_map(|n| {
-                all.get((n - 1) as usize).map(|t| SourceLine {
+                all.get((n - 1) as usize).map(|t| CorpusLine {
                     number: n,
                     text: (*t).to_string(),
                     in_span: n >= span.start_line && n <= span.end_line,
@@ -64,7 +64,7 @@ impl SourceView for TextLines {
             })
             .collect();
 
-        SourceSlice {
+        CorpusSlice {
             lines,
             label: format!("lines {}–{}", span.start_line, span.end_line),
         }
@@ -73,18 +73,18 @@ impl SourceView for TextLines {
 
 /// The view for a source. One implementation today; this is where a PDF source
 /// will branch.
-pub fn for_source(_source: &Source) -> Box<dyn SourceView> {
+pub fn for_corpus(_source: &Source) -> Box<dyn CorpusView> {
     Box::new(TextLines)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::chunks::SourceSpan;
+    use crate::store::artifacts::CorpusSpan;
 
     async fn a_source(raw: &str) -> Source {
         let s = crate::store::Store::memory().await.unwrap();
-        s.insert_source(raw, "web", None).await.unwrap()
+        s.insert_corpus(raw, "web", None).await.unwrap()
     }
 
     #[tokio::test]
@@ -92,7 +92,7 @@ mod tests {
         let src = a_source("l1\nl2\nl3\nl4\nl5\nl6").await;
         let slice = TextLines.slice(
             &src,
-            Some(&SourceSpan {
+            Some(&CorpusSpan {
                 start_line: 3,
                 end_line: 4,
             }),
@@ -125,7 +125,7 @@ mod tests {
         let src = a_source("l1\nl2").await;
         let slice = TextLines.slice(
             &src,
-            Some(&SourceSpan {
+            Some(&CorpusSpan {
                 start_line: 5,
                 end_line: 9,
             }),

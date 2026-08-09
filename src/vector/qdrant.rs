@@ -91,11 +91,11 @@ fn legacy_layout(alias: &str) -> Error {
 /// Qdrant point ids must be an unsigned integer or a UUID. Chunk ids are
 /// already UUIDv7 strings, so they pass through; anything else is hashed into
 /// a deterministic UUID so the mapping stays stable across restarts.
-pub fn point_uuid(chunk_id: &str) -> String {
-    match uuid::Uuid::parse_str(chunk_id) {
+pub fn point_uuid(artifact_id: &str) -> String {
+    match uuid::Uuid::parse_str(artifact_id) {
         Ok(u) => u.to_string(),
         Err(_) => {
-            let digest = <sha2::Sha256 as sha2::Digest>::digest(chunk_id.as_bytes());
+            let digest = <sha2::Sha256 as sha2::Digest>::digest(artifact_id.as_bytes());
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(&digest[..16]);
             uuid::Uuid::from_bytes(bytes).to_string()
@@ -420,7 +420,7 @@ impl QdrantVectors {
         for (field, schema) in [
             ("tags", "keyword"),
             ("category", "keyword"),
-            ("source_id", "keyword"),
+            ("corpus_id", "keyword"),
             ("created_at", "integer"),
             ("last_seen_at", "integer"),
         ] {
@@ -554,7 +554,12 @@ impl QdrantVectors {
         }
         let by_uuid: std::collections::HashMap<String, &str> = wanted
             .iter()
-            .map(|p| (point_uuid(&p.payload.chunk_id), p.payload.chunk_id.as_str()))
+            .map(|p| {
+                (
+                    point_uuid(&p.payload.artifact_id),
+                    p.payload.artifact_id.as_str(),
+                )
+            })
             .collect();
         let ids: Vec<&String> = by_uuid.keys().collect();
         let found: Vec<ScrolledPoint> = self
@@ -572,11 +577,11 @@ impl QdrantVectors {
         let mut out = std::collections::HashMap::new();
         for p in found {
             let Some(uuid) = p.id.as_str() else { continue };
-            let Some(chunk_id) = by_uuid.get(uuid) else {
+            let Some(artifact_id) = by_uuid.get(uuid) else {
                 continue;
             };
             if let Some(seen) = p.payload.get("last_seen_at").and_then(Value::as_i64) {
-                out.insert((*chunk_id).to_string(), seen);
+                out.insert((*artifact_id).to_string(), seen);
             }
         }
         Ok(out)
@@ -863,7 +868,7 @@ impl VectorStore for QdrantVectors {
         for p in points {
             let mut payload = p.payload.clone();
             if payload.last_seen_at.is_none() {
-                payload.last_seen_at = stored.get(&payload.chunk_id).copied();
+                payload.last_seen_at = stored.get(&payload.artifact_id).copied();
             }
             let payload =
                 serde_json::to_value(&payload).map_err(|e| Error::Vector(e.to_string()))?;
@@ -872,7 +877,7 @@ impl VectorStore for QdrantVectors {
                 vector[SPARSE] = sp;
             }
             body.push(json!({
-                "id": point_uuid(&p.payload.chunk_id),
+                "id": point_uuid(&p.payload.artifact_id),
                 "vector": vector,
                 "payload": payload,
             }));
@@ -888,7 +893,7 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
                     "payload": body,
-                    "points": [ point_uuid(&payload.chunk_id) ],
+                    "points": [ point_uuid(&payload.artifact_id) ],
                 })),
             )
             .await?;
@@ -975,11 +980,11 @@ impl VectorStore for QdrantVectors {
         Ok(hits_of(res))
     }
 
-    async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()> {
-        if chunk_ids.is_empty() {
+    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
+        if artifact_ids.is_empty() {
             return Ok(());
         }
-        let ids: Vec<String> = chunk_ids.iter().map(|c| point_uuid(c)).collect();
+        let ids: Vec<String> = artifact_ids.iter().map(|c| point_uuid(c)).collect();
         // One request for the whole result list, and only the one key: this
         // runs on every search, so it must not be a write per hit nor a
         // read-modify-write of the full payload. It still waits: the shutdown
@@ -1025,11 +1030,11 @@ impl VectorStore for QdrantVectors {
         Ok(hits_of(res))
     }
 
-    async fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()> {
-        if chunk_ids.is_empty() {
+    async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
+        if artifact_ids.is_empty() {
             return Ok(());
         }
-        let ids: Vec<String> = chunk_ids.iter().map(|c| point_uuid(c)).collect();
+        let ids: Vec<String> = artifact_ids.iter().map(|c| point_uuid(c)).collect();
         let _: Value = self
             .call(
                 Method::POST,
@@ -1040,13 +1045,13 @@ impl VectorStore for QdrantVectors {
         Ok(())
     }
 
-    async fn delete_by_source(&self, source_id: &str) -> Result<()> {
+    async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
         let _: Value = self
             .call(
                 Method::POST,
                 &format!("/collections/{}/points/delete?wait=true", self.alias),
                 Some(json!({
-                    "filter": { "must": [ { "key": "source_id", "match": { "value": source_id } } ] }
+                    "filter": { "must": [ { "key": "corpus_id", "match": { "value": corpus_id } } ] }
                 })),
             )
             .await?;

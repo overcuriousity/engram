@@ -5,8 +5,8 @@
 <div data-terms="{{ terms }}">
   {% for r in results %}
   <a class="rail-item" role="option" aria-selected="false"
-     href="/ui/chunks/{{ r.chunk_id }}"
-     hx-get="/ui/chunks/{{ r.chunk_id }}?terms={{ terms|urlencode }}"
+     href="/ui/chunks/{{ r.artifact_id }}"
+     hx-get="/ui/chunks/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
      hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
     <div class="rail-head">
       <span class="rail-rank mono">{{ r.rank }}</span>

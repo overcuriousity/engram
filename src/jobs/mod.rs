@@ -1,5 +1,5 @@
 pub mod embed;
-pub mod segment;
+pub mod synthesize;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -27,10 +27,10 @@ pub async fn run_one(core: &Core) -> Result<bool> {
     let _guard = span.enter();
 
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Segment | Stage::Enrich, _) => segment::run(core, &job.target_id).await,
+        (Stage::Segment | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
-        (Stage::Embed, "source") => embed::run_source(core, &job.target_id).await,
+        (Stage::Embed, "source") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
     };
 
@@ -49,12 +49,13 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // Out of attempts against the chunker. The windows that were
+                // Out of attempts against the synthesizer. The windows that were
                 // actually tried are recorded as failed; the ones that never
                 // ran go back in the queue.
                 (Stage::Segment, _) if exhausted => {
                     tracing::warn!(error = %e, "segmentation exhausted retries; failing the windows it tried");
-                    match segment::fail_pending_windows(core, &job.target_id, &e.to_string()).await
+                    match synthesize::fail_pending_segments(core, &job.target_id, &e.to_string())
+                        .await
                     {
                         Ok(requeue) => {
                             core.store.complete_job(job.id).await?;
@@ -80,7 +81,7 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                 // Retrying chunk by chunk isolates the culprit either way.
                 (Stage::Embed, "source") if exhausted => {
                     tracing::warn!(error = %e, "batch embedding exhausted retries; retrying chunk by chunk");
-                    match embed::split_into_chunk_jobs(core, &job.target_id).await {
+                    match embed::split_into_artifact_jobs(core, &job.target_id).await {
                         Ok(()) => {
                             core.store.complete_job(job.id).await?;
                         }
@@ -98,8 +99,8 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                         .await?;
                     if job.stage == Stage::Embed && exhausted {
                         core.store.mark_embed_failed(&job.target_id).await?;
-                        if let Ok(c) = core.store.get_chunk(&job.target_id).await {
-                            embed::settle_source(core, &c.source_id).await?;
+                        if let Ok(c) = core.store.get_artifact(&job.target_id).await {
+                            embed::settle_corpus(core, &c.corpus_id).await?;
                         }
                     }
                 }
@@ -157,9 +158,9 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_failing_chunker};
+    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::MAX_ATTEMPTS;
-    use crate::store::sources::SourceStatus;
 
     #[tokio::test]
     async fn run_one_reports_when_the_queue_is_empty() {
@@ -181,14 +182,14 @@ mod tests {
             assert!(guard < 50, "worker loop failed to terminate");
         }
 
-        let src = core.store.get_source(&out.id).await.unwrap();
-        assert_eq!(src.status, SourceStatus::Ready);
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Ready);
         assert_eq!(core.vectors.count().await.unwrap(), 2);
     }
 
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
-        let core = test_core_with_failing_chunker().await;
+        let core = test_core_with_failing_synthesizer().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to
@@ -205,19 +206,19 @@ mod tests {
         // chunks rather than paragraphs split on blank lines.
         assert!(
             core.store
-                .chunks_for_source(&out.id)
+                .artifacts_for_corpus(&out.id)
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Failed
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Failed
         );
         // The window says why, so Ops can name the lines and the error rather
         // than only reporting that something did not work.
-        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
-        assert_eq!(w.state, crate::store::windows::WindowState::Failed);
+        let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, crate::store::segments::SegmentState::Failed);
         assert!(
             w.last_error.as_deref().is_some_and(|e| !e.is_empty()),
             "a failed window must carry the model's own error"
@@ -270,11 +271,11 @@ mod tests {
         }
 
         for id in &ids {
-            let chunks = core.store.chunks_for_source(id).await.unwrap();
+            let chunks = core.store.artifacts_for_corpus(id).await.unwrap();
             assert_eq!(chunks.len(), 2, "source {id} has {} chunks", chunks.len());
             assert_eq!(
-                core.store.get_source(id).await.unwrap().status,
-                SourceStatus::Ready
+                core.store.get_corpus(id).await.unwrap().status,
+                CorpusStatus::Ready
             );
         }
         assert_eq!(core.vectors.count().await.unwrap(), 24);

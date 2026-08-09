@@ -9,26 +9,26 @@ use crate::error::Result;
 use async_trait::async_trait;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProposedChunk {
+pub struct ProposedArtifact {
     pub text: String,
     pub title: Option<String>,
     pub category: Option<String>,
     pub tags: Vec<String>,
-    pub source_lines: Option<(i64, i64)>,
+    pub corpus_lines: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ChunkBudget {
+pub struct SynthesisBudget {
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub output_ratio: f32,
 }
 
 #[async_trait]
-pub trait Chunker: Send + Sync {
+pub trait Synthesizer: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>>;
-    fn budget(&self) -> ChunkBudget;
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>>;
+    fn budget(&self) -> SynthesisBudget;
     /// How long to idle between windows, so a long source is not one
     /// unbroken thermal load on a desktop GPU. Zero for anything remote.
     fn cooldown(&self) -> std::time::Duration {

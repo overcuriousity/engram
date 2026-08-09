@@ -5,8 +5,8 @@ pub mod search;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
-use crate::infer::openai::{HttpChunker, HttpCompleter, HttpEmbedder, HttpReranker};
-use crate::infer::{Chunker, Completer, Embedder, Reranker};
+use crate::infer::openai::{HttpCompleter, HttpEmbedder, HttpReranker, HttpSynthesizer};
+use crate::infer::{Completer, Embedder, Reranker, Synthesizer};
 use crate::store::Store;
 use crate::vector::VectorStore;
 use background::Background;
@@ -56,7 +56,7 @@ impl QueryCache {
 pub struct Core {
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    pub chunker: Arc<dyn Chunker>,
+    pub synthesizer: Arc<dyn Synthesizer>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
@@ -76,13 +76,14 @@ impl Core {
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
         // Chunk size is capped by what the embedder accepts, with headroom for
         // token-count estimation error.
-        let max_chunk_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
+        let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
         Core {
             store,
             vectors,
-            chunker: Arc::new(
-                HttpChunker::new(&cfg.infer.chunk).with_max_chunk_tokens(max_chunk_tokens),
+            synthesizer: Arc::new(
+                HttpSynthesizer::new(&cfg.infer.chunk)
+                    .with_max_artifact_tokens(max_artifact_tokens),
             ),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
@@ -103,17 +104,17 @@ impl Core {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
-    use crate::infer::fake::{FakeChunker, FakeCompleter, FakeEmbedder, FakeReranker};
+    use crate::infer::fake::{FakeCompleter, FakeEmbedder, FakeReranker, FakeSynthesizer};
     use crate::vector::memory::MemoryVectors;
 
     pub const TEST_DIM: usize = 8;
 
     pub async fn test_core() -> Core {
-        build(Arc::new(FakeChunker::default()), None).await
+        build(Arc::new(FakeSynthesizer::default()), None).await
     }
 
-    pub async fn test_core_with_failing_chunker() -> Core {
-        build(Arc::new(FakeChunker::failing("endpoint down")), None).await
+    pub async fn test_core_with_failing_synthesizer() -> Core {
+        build(Arc::new(FakeSynthesizer::failing("endpoint down")), None).await
     }
 
     pub async fn test_core_with_rerank() -> Core {
@@ -124,7 +125,7 @@ pub mod test_support {
     /// candidate pool it was handed actually was.
     pub async fn test_core_counting_reranked_docs() -> (Core, Arc<FakeReranker>) {
         let reranker = Arc::new(FakeReranker::default());
-        let core = build(Arc::new(FakeChunker::default()), Some(reranker.clone())).await;
+        let core = build(Arc::new(FakeSynthesizer::default()), Some(reranker.clone())).await;
         (core, reranker)
     }
 
@@ -132,17 +133,17 @@ pub mod test_support {
     /// endpoint was called rather than only what came back.
     pub async fn test_core_counting_embed_calls() -> (Core, Arc<FakeEmbedder>) {
         let embedder = Arc::new(FakeEmbedder::new(TEST_DIM));
-        let mut core = build(Arc::new(FakeChunker::default()), None).await;
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
         core.embedder = embedder.clone();
         (core, embedder)
     }
 
-    async fn build(chunker: Arc<dyn Chunker>, reranker: Option<Arc<dyn Reranker>>) -> Core {
+    async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
             store,
             vectors: Arc::new(MemoryVectors::new()),
-            chunker,
+            synthesizer,
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             completer: Arc::new(FakeCompleter::default()),

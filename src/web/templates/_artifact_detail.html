@@ -1,6 +1,6 @@
 <div data-terms="{{ d.terms }}">
   <div class="crumb">
-    <a href="/ui/sources/{{ d.source_id }}">source</a> · {{ d.slice_label }}
+    <a href="/ui/sources/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
   </div>
 
   {% if !d.flags.is_empty() %}
@@ -10,8 +10,8 @@
       <b>{{ d.flags|join(", ") }}</b>
       {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
       <div class="chips">
-        {% if let Some(w) = d.window_idx %}
-        <form method="post" action="/ui/sources/{{ d.source_id }}/windows/{{ w }}/resegment">
+        {% if let Some(w) = d.segment_idx %}
+        <form method="post" action="/ui/sources/{{ d.corpus_id }}/windows/{{ w }}/resegment">
           <button class="btn btn-sm" type="submit">Re-segment window</button>
         </form>
         {% endif %}
@@ -38,7 +38,7 @@
       <div class="pane-label">
         {{ d.slice_label }}
         <span class="spacer"></span>
-        <a href="/ui/sources/{{ d.source_id }}">open full source</a>
+        <a href="/ui/sources/{{ d.corpus_id }}">open full source</a>
       </div>
       <div class="raw">
         <table>

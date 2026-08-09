@@ -219,7 +219,7 @@ mod startup_tests {
                 pinned_boost: 0.15,
             },
             infer: InferConfig {
-                chunk: ChunkRole {
+                chunk: SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,

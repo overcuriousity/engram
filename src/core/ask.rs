@@ -119,22 +119,22 @@ impl Core {
 mod tests {
     use super::*;
     use crate::core::test_support::test_core;
-    use crate::store::chunks::NewChunk;
+    use crate::store::artifacts::NewArtifact;
 
     async fn seed(core: &crate::core::Core, n: usize, size: usize) {
-        let src = core.store.insert_source("raw", "web", None).await.unwrap();
-        let new: Vec<NewChunk> = (0..n)
-            .map(|i| NewChunk {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..n)
+            .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk {i} ") + &"filler ".repeat(size),
-                source_span: None,
+                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("note".into()),
                 tags: vec![],
-                window_idx: None,
+                segment_idx: None,
             })
             .collect();
-        let made = core.store.insert_chunks(&src.id, &new).await.unwrap();
+        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
         for c in &made {
             crate::jobs::embed::run(core, &c.id).await.unwrap();
         }

@@ -8,7 +8,7 @@
   {% if let Some(age) = oldest_pending_secs %}
     <span class="badge badge-muted">oldest pending: {{ age }}s</span>
   {% endif %}
-  <span class="badge badge-muted">chunks: {{ chunk_count }}</span>
+  <span class="badge badge-muted">chunks: {{ artifact_count }}</span>
   <span class="badge badge-muted">vectors: {{ vector_count }}</span>
 </div>
 
@@ -45,11 +45,11 @@
   <tbody>
   {% for f in flagged %}
     <tr>
-      <td><a href="/ui/chunks/{{ f.chunk_id }}">{{ f.title }}</a></td>
+      <td><a href="/ui/chunks/{{ f.artifact_id }}">{{ f.title }}</a></td>
       <td class="mono muted">{{ f.detail }}</td>
       <td>
-        {% if let Some(w) = f.window_idx %}
-        <form method="post" action="/ui/sources/{{ f.source_id }}/windows/{{ w }}/resegment">
+        {% if let Some(w) = f.segment_idx %}
+        <form method="post" action="/ui/sources/{{ f.corpus_id }}/windows/{{ w }}/resegment">
           <button class="btn btn-sm" type="submit">Re-segment window</button>
         </form>
         {% endif %}

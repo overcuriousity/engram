@@ -1,5 +1,5 @@
 //! Freeze the evaluation corpus: segment every `corpus/*.txt` once with the
-//! real chunker and write the result to `chunks.json`.
+//! real synthesizer and write the result to `chunks.json`.
 //!
 //! Run deliberately, not per benchmark. Segmenting on every run would cost a
 //! completion per window and return slightly different chunks each time, so a
@@ -14,7 +14,7 @@
 use anyhow::{Context, Result, bail};
 use engram::config::Config;
 use engram::core::Core;
-use engram::eval::{FrozenChunk, eval_dir, save_chunks};
+use engram::eval::{FrozenArtifact, eval_dir, save_artifacts};
 use engram::store::Store;
 use engram::vector::memory::MemoryVectors;
 use std::sync::Arc;
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         bail!("no .txt files in {}", corpus.display());
     }
 
-    let mut frozen: Vec<FrozenChunk> = Vec::new();
+    let mut frozen: Vec<FrozenArtifact> = Vec::new();
     for path in &files {
         let name = path
             .file_name()
@@ -77,11 +77,11 @@ async fn main() -> Result<()> {
         // to completion.
         let mut passes = 0;
         loop {
-            if let Err(e) = engram::jobs::segment::run(&core, &out.id).await {
+            if let Err(e) = engram::jobs::synthesize::run(&core, &out.id).await {
                 tracing::warn!(error = %e, file = %name, "segmentation pass failed");
             }
             passes += 1;
-            let pending = core.store.pending_windows(&out.id).await?;
+            let pending = core.store.pending_segments(&out.id).await?;
             if pending.is_empty() {
                 break;
             }
@@ -96,10 +96,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        let chunks = core.store.chunks_for_source(&out.id).await?;
+        let chunks = core.store.artifacts_for_corpus(&out.id).await?;
         tracing::info!(file = %name, chunks = chunks.len(), "segmented");
         for c in chunks {
-            frozen.push(FrozenChunk {
+            frozen.push(FrozenArtifact {
                 id: c.id,
                 source: name.clone(),
                 text: c.text,
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    save_chunks(&dir, &frozen)?;
+    save_artifacts(&dir, &frozen)?;
     println!(
         "froze {} chunks from {} documents into {}",
         frozen.len(),

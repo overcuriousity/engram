@@ -12,16 +12,20 @@ fn is_heading(line: &str) -> bool {
     t.starts_with('#') && t.trim_start_matches('#').starts_with(' ')
 }
 
-/// Split `text` into windows that each fit `window_tokens`.
+/// Split `text` into windows that each fit `segment_tokens`.
 ///
 /// Boundary preference is headings, then blank lines, then a hard cut. Each
 /// window after the first repeats the most recent heading, so a procedure
 /// split across windows still tells the model what it belongs to.
-pub fn split_into_windows(text: &str, counter: &TokenCounter, window_tokens: usize) -> Vec<Window> {
+pub fn split_into_segments(
+    text: &str,
+    counter: &TokenCounter,
+    segment_tokens: usize,
+) -> Vec<Window> {
     if text.trim().is_empty() {
         return vec![];
     }
-    if counter.count(text) <= window_tokens {
+    if counter.count(text) <= segment_tokens {
         let lines = text.lines().count().max(1) as i64;
         return vec![Window {
             text: text.to_string(),
@@ -46,10 +50,10 @@ pub fn split_into_windows(text: &str, counter: &TokenCounter, window_tokens: usi
         // Flush when the line would overflow the window. Prefer to break at a
         // heading or blank line; if the buffer has grown well past the budget
         // with no boundary in sight, cut anyway rather than emit one huge window.
-        let overflows = !buf.is_empty() && buf_tokens + line_tokens > window_tokens;
+        let overflows = !buf.is_empty() && buf_tokens + line_tokens > segment_tokens;
         let blank = line.trim().is_empty();
 
-        if overflows && (at_boundary || buf_tokens >= window_tokens) {
+        if overflows && (at_boundary || buf_tokens >= segment_tokens) {
             if blank {
                 // A blank line separates; it closes the window it follows
                 // rather than opening the next one with an empty first line.
@@ -116,7 +120,7 @@ fn flush(
 /// Takes line numbers rather than a `Window` because windows live in the
 /// database between job runs: the row may be stale, and clamping beats
 /// panicking on data.
-pub fn window_text(text: &str, start_line: i64, end_line: i64) -> String {
+pub fn segment_text(text: &str, start_line: i64, end_line: i64) -> String {
     if start_line < 1 || end_line < start_line {
         return String::new();
     }
@@ -134,7 +138,7 @@ mod tests {
 
     #[test]
     fn short_text_is_a_single_window() {
-        let w = split_into_windows("just a line", &TokenCounter::Estimate, 1000);
+        let w = split_into_segments("just a line", &TokenCounter::Estimate, 1000);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].text, "just a line");
         assert_eq!(w[0].start_line, 1);
@@ -143,7 +147,7 @@ mod tests {
     #[test]
     fn splits_on_headings_before_blank_lines() {
         let text = "## A\nalpha content here\n\n## B\nbeta content here\n\n## C\ngamma content";
-        let w = split_into_windows(text, &TokenCounter::Estimate, 12);
+        let w = split_into_segments(text, &TokenCounter::Estimate, 12);
         assert!(w.len() >= 2);
         assert!(
             w[1].text.starts_with("## "),
@@ -155,7 +159,7 @@ mod tests {
     #[test]
     fn windows_carry_one_heading_of_overlap() {
         let text = "## A\n".to_string() + &"alpha ".repeat(50) + "\n\n## B\n" + &"beta ".repeat(50);
-        let w = split_into_windows(&text, &TokenCounter::Estimate, 40);
+        let w = split_into_segments(&text, &TokenCounter::Estimate, 40);
         assert!(w.len() >= 2);
         for win in &w[1..] {
             assert!(
@@ -172,7 +176,7 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_windows(&text, &TokenCounter::Estimate, 30);
+        let w = split_into_segments(&text, &TokenCounter::Estimate, 30);
         assert_eq!(w[0].start_line, 1);
         assert_eq!(w.last().unwrap().end_line, 100);
         for pair in w.windows(2) {
@@ -189,7 +193,7 @@ mod tests {
             .map(|i| format!("prose line number {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_windows(&text, &TokenCounter::Estimate, 50);
+        let w = split_into_segments(&text, &TokenCounter::Estimate, 50);
         assert!(w.len() > 1, "unstructured text must still be windowed");
         for win in &w {
             assert!(
@@ -214,7 +218,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_windows(&text, &TokenCounter::Estimate, 60);
+        let w = split_into_segments(&text, &TokenCounter::Estimate, 60);
         let joined = w
             .iter()
             .map(|x| x.text.clone())
@@ -233,15 +237,15 @@ mod tests {
     #[test]
     fn window_text_returns_exactly_the_lines_a_window_claims() {
         let src = "one\ntwo\nthree\nfour\nfive";
-        assert_eq!(window_text(src, 2, 4), "two\nthree\nfour");
+        assert_eq!(segment_text(src, 2, 4), "two\nthree\nfour");
         // Out-of-range ends clamp rather than panic: the stored window is data,
         // and data can be stale.
-        assert_eq!(window_text(src, 4, 99), "four\nfive");
-        assert_eq!(window_text(src, 99, 120), "");
+        assert_eq!(segment_text(src, 4, 99), "four\nfive");
+        assert_eq!(segment_text(src, 99, 120), "");
     }
 
     #[test]
     fn empty_input_produces_nothing() {
-        assert!(split_into_windows("   \n  ", &TokenCounter::Estimate, 100).is_empty());
+        assert!(split_into_segments("   \n  ", &TokenCounter::Estimate, 100).is_empty());
     }
 }

@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 
 pub struct RenderedResult {
     /// What the rail entry links to: the detail pane for this chunk.
-    pub chunk_id: String,
+    pub artifact_id: String,
     pub title: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
@@ -22,7 +22,7 @@ pub struct RenderedResult {
     pub snippet: String,
     pub category: Option<String>,
     pub tags: Vec<String>,
-    pub source_id: String,
+    pub corpus_id: String,
     /// Position in the list, as `#1`, `#2`, …
     ///
     /// Not the raw score. That number is a fused rank from Qdrant plus a
@@ -37,7 +37,7 @@ pub struct BrowseRow {
     pub label: String,
     pub status: String,
     pub badge: &'static str,
-    pub chunk_count: i64,
+    pub artifact_count: i64,
     pub created: String,
     /// `3/9` while windows are still being segmented, `None` once every window
     /// has resolved.
@@ -47,7 +47,7 @@ pub struct BrowseRow {
     pub low_coverage: bool,
 }
 
-pub struct ChunkView {
+pub struct ArtifactView {
     pub id: String,
     pub title: String,
     /// Sanitized by `markdown::render`. One of the few `|safe` interpolations.
@@ -60,7 +60,7 @@ pub struct ChunkView {
 
 /// A chunk beside the source lines it claims — the search pane, and the
 /// review surface for anything verification flagged.
-pub struct ChunkDetail {
+pub struct ArtifactDetail {
     pub id: String,
     pub title: String,
     /// Sanitized by `markdown::render`. Rendered with `|safe`.
@@ -69,10 +69,10 @@ pub struct ChunkDetail {
     pub tags: Vec<String>,
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
-    pub source_id: String,
-    pub window_idx: Option<i64>,
+    pub corpus_id: String,
+    pub segment_idx: Option<i64>,
     pub slice_label: String,
-    pub slice_lines: Vec<crate::web::source_view::SourceLine>,
+    pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
     /// Query terms to highlight, space separated. Empty when the pane was
     /// opened outside a search.
     pub terms: String,
@@ -80,11 +80,11 @@ pub struct ChunkDetail {
 
 /// A chunk verification could not vouch for, and the window that produced it.
 pub struct FlaggedRow {
-    pub chunk_id: String,
-    pub source_id: String,
+    pub artifact_id: String,
+    pub corpus_id: String,
     pub title: String,
     pub detail: String,
-    pub window_idx: Option<i64>,
+    pub segment_idx: Option<i64>,
 }
 
 pub struct TokenRow {
@@ -95,8 +95,8 @@ pub struct TokenRow {
     pub revoked: bool,
 }
 
-pub fn status_badge(status: &crate::store::sources::SourceStatus) -> &'static str {
-    use crate::store::sources::SourceStatus::*;
+pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static str {
+    use crate::store::corpora::CorpusStatus::*;
     match status {
         Ready => "badge-success",
         Partial => "badge-warning",
@@ -105,8 +105,8 @@ pub fn status_badge(status: &crate::store::sources::SourceStatus) -> &'static st
     }
 }
 
-pub fn embed_badge(state: &crate::store::chunks::EmbedState) -> &'static str {
-    use crate::store::chunks::EmbedState::*;
+pub fn embed_badge(state: &crate::store::artifacts::EmbedState) -> &'static str {
+    use crate::store::artifacts::EmbedState::*;
     match state {
         Embedded => "badge-success",
         Failed => "badge-danger",
@@ -137,8 +137,8 @@ pub fn fmt_time(ts: i64) -> String {
     )
 }
 
-fn chunk_view(c: &crate::store::chunks::Chunk) -> ChunkView {
-    ChunkView {
+fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
+    ArtifactView {
         id: c.id.clone(),
         title: c
             .title
@@ -193,33 +193,33 @@ struct BrowseTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "source.html")]
-struct SourceTemplate {
+#[template(path = "corpus.html")]
+struct CorpusTemplate {
     theme: String,
     id: String,
     raw_text: String,
     status: String,
     badge: &'static str,
-    chunks: Vec<ChunkView>,
+    chunks: Vec<ArtifactView>,
 }
 
 #[derive(Template)]
-#[template(path = "_chunk.html")]
-struct ChunkFragment {
-    c: ChunkView,
+#[template(path = "_artifact.html")]
+struct ArtifactFragment {
+    c: ArtifactView,
 }
 
 #[derive(Template)]
-#[template(path = "_chunk_detail.html")]
-struct ChunkDetailFragment {
-    d: ChunkDetail,
+#[template(path = "_artifact_detail.html")]
+struct ArtifactDetailFragment {
+    d: ArtifactDetail,
 }
 
 #[derive(Template)]
-#[template(path = "chunk_detail.html")]
-struct ChunkDetailPage {
+#[template(path = "artifact_detail.html")]
+struct ArtifactDetailPage {
     theme: String,
-    d: ChunkDetail,
+    d: ArtifactDetail,
 }
 
 #[derive(Template)]
@@ -228,7 +228,7 @@ struct OpsTemplate {
     theme: String,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
-    chunk_count: i64,
+    artifact_count: i64,
     vector_count: u64,
     failed: Vec<crate::store::jobs::FailedJob>,
     flagged: Vec<FlaggedRow>,
@@ -375,21 +375,21 @@ async fn search_results(
 
 fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
     RenderedResult {
-        chunk_id: h.chunk_id,
+        artifact_id: h.artifact_id,
         title: h.title.unwrap_or_else(|| "Untitled".into()),
         html: markdown::render(&h.text),
         snippet: markdown::snippet(&h.text, 140),
         category: h.category,
         tags: h.tags,
-        source_id: h.source_id,
+        corpus_id: h.corpus_id,
         rank: format!("#{}", position + 1),
     }
 }
 
 async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
-    for s in st.core.store.list_sources(200, 0).await? {
-        let (resolved, total) = st.core.store.window_progress(&s.id).await?;
+    for s in st.core.store.list_corpora(200, 0).await? {
+        let (resolved, total) = st.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
         let low_coverage = s
             .coverage
@@ -404,7 +404,7 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 .unwrap_or_else(|| markdown::snippet(&s.raw_text, 60)),
             badge: status_badge(&s.status),
             status: s.status.as_str().to_string(),
-            chunk_count: st.core.store.chunks_for_source(&s.id).await?.len() as i64,
+            artifact_count: st.core.store.artifacts_for_corpus(&s.id).await?.len() as i64,
             created: fmt_time(s.created_at),
             id: s.id,
         });
@@ -416,21 +416,21 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     .into_response())
 }
 
-async fn source_detail(
+async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
     Path(sid): Path<String>,
 ) -> Result<Response> {
-    let s = st.core.store.get_source(&sid).await?;
+    let s = st.core.store.get_corpus(&sid).await?;
     let chunks = st
         .core
         .store
-        .chunks_for_source(&sid)
+        .artifacts_for_corpus(&sid)
         .await?
         .iter()
-        .map(chunk_view)
+        .map(artifact_view)
         .collect();
-    Ok(HtmlTemplate(SourceTemplate {
+    Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
         id: s.id,
         raw_text: s.raw_text,
@@ -442,35 +442,38 @@ async fn source_detail(
 }
 
 #[derive(serde::Deserialize)]
-struct ChunkEditForm {
+struct ArtifactEditForm {
     text: String,
 }
 
-async fn put_chunk(
+async fn put_artifact(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
-    Form(f): Form<ChunkEditForm>,
+    Form(f): Form<ArtifactEditForm>,
 ) -> Result<Response> {
     if f.text.trim().is_empty() {
         return Err(Error::Validation("chunk text is empty".into()));
     }
-    st.core.store.update_chunk_text(&cid, &f.text).await?;
+    st.core.store.update_artifact_text(&cid, &f.text).await?;
     // The stored vector describes wording that no longer exists.
     st.core
         .store
         .enqueue(crate::store::jobs::Stage::Embed, "chunk", &cid)
         .await?;
-    let c = st.core.store.get_chunk(&cid).await?;
-    Ok(HtmlTemplate(ChunkFragment { c: chunk_view(&c) }).into_response())
+    let c = st.core.store.get_artifact(&cid).await?;
+    Ok(HtmlTemplate(ArtifactFragment {
+        c: artifact_view(&c),
+    })
+    .into_response())
 }
 
-async fn delete_source_ui(
+async fn delete_corpus_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(sid): Path<String>,
 ) -> Result<Response> {
-    st.core.delete_source(&sid).await?;
+    st.core.delete_corpus(&sid).await?;
     Ok(Redirect::to("/ui/browse").into_response())
 }
 
@@ -487,7 +490,7 @@ async fn reprocess_ui(
 
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
-    let chunk_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&st.core.store.pool)
         .await?
         .get("n");
@@ -513,7 +516,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let flagged = st
         .core
         .store
-        .flagged_chunks(50)
+        .flagged_artifacts(50)
         .await?
         .into_iter()
         .map(|c| FlaggedRow {
@@ -522,9 +525,9 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 .clone()
                 .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
             detail: c.flag_detail.clone().unwrap_or_else(|| c.flags.join(", ")),
-            window_idx: c.window_idx,
-            chunk_id: c.id,
-            source_id: c.source_id,
+            segment_idx: c.segment_idx,
+            artifact_id: c.id,
+            corpus_id: c.corpus_id,
         })
         .collect();
 
@@ -533,7 +536,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         flagged,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
-        chunk_count,
+        artifact_count,
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
@@ -627,15 +630,15 @@ async fn ask_submit(
 }
 
 /// Everything the pane needs, in one place, so the handler is only routing.
-pub(crate) async fn build_chunk_detail(
+pub(crate) async fn build_artifact_detail(
     core: &crate::core::Core,
-    chunk_id: &str,
+    artifact_id: &str,
     terms: &str,
-) -> Result<ChunkDetail> {
-    let c = core.store.get_chunk(chunk_id).await?;
-    let src = core.store.get_source(&c.source_id).await?;
-    let slice = crate::web::source_view::for_source(&src).slice(&src, c.source_span.as_ref(), 3);
-    Ok(ChunkDetail {
+) -> Result<ArtifactDetail> {
+    let c = core.store.get_artifact(artifact_id).await?;
+    let src = core.store.get_corpus(&c.corpus_id).await?;
+    let slice = crate::web::corpus_view::for_corpus(&src).slice(&src, c.corpus_span.as_ref(), 3);
+    Ok(ArtifactDetail {
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
         html: markdown::render(&c.text),
@@ -643,8 +646,8 @@ pub(crate) async fn build_chunk_detail(
         tags: c.tags,
         flags: c.flags,
         flag_detail: c.flag_detail,
-        source_id: c.source_id,
-        window_idx: c.window_idx,
+        corpus_id: c.corpus_id,
+        segment_idx: c.segment_idx,
         slice_label: slice.label,
         slice_lines: slice.lines,
         terms: terms.to_string(),
@@ -652,27 +655,27 @@ pub(crate) async fn build_chunk_detail(
 }
 
 #[derive(serde::Deserialize)]
-struct ChunkViewParams {
+struct ArtifactViewParams {
     #[serde(default)]
     terms: String,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
-async fn chunk_detail(
+async fn artifact_detail(
     State(st): State<AppState>,
     _id: Identity,
     headers: axum::http::HeaderMap,
     Path(cid): Path<String>,
-    Query(p): Query<ChunkViewParams>,
+    Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_chunk_detail(&st.core, &cid, &p.terms).await?;
+    let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
-    st.core.mark_chunk_seen(&cid);
+    st.core.mark_artifact_seen(&cid);
     if headers.contains_key("hx-request") {
-        return Ok(HtmlTemplate(ChunkDetailFragment { d }).into_response());
+        return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
-    Ok(HtmlTemplate(ChunkDetailPage {
+    Ok(HtmlTemplate(ArtifactDetailPage {
         theme: "light".into(),
         d,
     })
@@ -682,35 +685,35 @@ async fn chunk_detail(
 /// The action behind "re-segment this window": put the window back in the
 /// queue's path and make sure something will pick it up. Split out from the
 /// handler so it can be tested without a request.
-pub(crate) async fn resegment_window_inner(
+pub(crate) async fn resynthesize_segment_inner(
     core: &crate::core::Core,
-    source_id: &str,
+    corpus_id: &str,
     idx: i64,
 ) -> Result<()> {
-    core.store.reset_window(source_id, idx).await?;
+    core.store.reset_segment(corpus_id, idx).await?;
     core.store
-        .enqueue(crate::store::jobs::Stage::Segment, "source", source_id)
+        .enqueue(crate::store::jobs::Stage::Segment, "source", corpus_id)
         .await?;
     Ok(())
 }
 
-async fn resegment_window(
+async fn resynthesize_segment(
     State(st): State<AppState>,
     _id: Identity,
     Path((sid, idx)): Path<(String, i64)>,
 ) -> Result<Response> {
-    resegment_window_inner(&st.core, &sid, idx).await?;
+    resynthesize_segment_inner(&st.core, &sid, idx).await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
-async fn mark_chunk_reviewed(
+async fn mark_artifact_reviewed(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<Response> {
-    st.core.store.clear_chunk_flags(&cid).await?;
+    st.core.store.clear_artifact_flags(&cid).await?;
     Ok(axum::response::Html(String::new()).into_response())
 }
 
@@ -721,15 +724,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
         .route("/ui/browse", get(browse))
-        .route("/ui/sources/{id}", get(source_detail))
-        .route("/ui/sources/{id}/delete", post(delete_source_ui))
+        .route("/ui/sources/{id}", get(corpus_detail))
+        .route("/ui/sources/{id}/delete", post(delete_corpus_ui))
         .route("/ui/sources/{id}/reprocess", post(reprocess_ui))
         .route(
             "/ui/sources/{sid}/windows/{idx}/resegment",
-            post(resegment_window),
+            post(resynthesize_segment),
         )
-        .route("/ui/chunks/{id}", get(chunk_detail).put(put_chunk))
-        .route("/ui/chunks/{cid}/reviewed", post(mark_chunk_reviewed))
+        .route("/ui/chunks/{id}", get(artifact_detail).put(put_artifact))
+        .route("/ui/chunks/{cid}/reviewed", post(mark_artifact_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
@@ -767,8 +770,8 @@ mod tests {
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
-        crate::jobs::segment::run(&core, &out.id).await.unwrap();
-        crate::jobs::embed::run_source(&core, &out.id)
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
 
@@ -785,7 +788,7 @@ mod tests {
         let r = super::render_hit(0, hits[0].clone());
 
         assert!(
-            !r.chunk_id.is_empty(),
+            !r.artifact_id.is_empty(),
             "the rail needs a chunk id to link to"
         );
         assert!(!r.snippet.is_empty(), "the rail shows a plain-text snippet");
@@ -802,20 +805,20 @@ mod tests {
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
             .unwrap();
-        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
         let c = core
             .store
-            .chunks_for_source(&out.id)
+            .artifacts_for_corpus(&out.id)
             .await
             .unwrap()
             .remove(0);
 
-        let d = match super::build_chunk_detail(&core, &c.id, "").await {
+        let d = match super::build_artifact_detail(&core, &c.id, "").await {
             Ok(d) => d,
             Err(e) => panic!("detail view failed: {e}"),
         };
 
-        assert_eq!(d.source_id, out.id);
+        assert_eq!(d.corpus_id, out.id);
         assert!(d.html.contains("alpha"), "the chunk body must be rendered");
         assert!(
             !d.slice_lines.is_empty(),
@@ -832,16 +835,16 @@ mod tests {
     async fn a_chunk_whose_source_vanished_is_not_a_500() {
         let core = crate::core::test_support::test_core().await;
         let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
-        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
         let c = core
             .store
-            .chunks_for_source(&out.id)
+            .artifacts_for_corpus(&out.id)
             .await
             .unwrap()
             .remove(0);
-        core.delete_source(&out.id).await.unwrap();
+        core.delete_corpus(&out.id).await.unwrap();
 
-        match super::build_chunk_detail(&core, &c.id, "").await {
+        match super::build_artifact_detail(&core, &c.id, "").await {
             Err(crate::error::Error::NotFound) => {}
             Err(e) => panic!("expected a not-found, got {e}"),
             Ok(_) => panic!("a chunk whose source was deleted must not resolve"),
@@ -855,23 +858,23 @@ mod tests {
             .ingest("first para\n\nsecond para", "web", None)
             .await
             .unwrap();
-        crate::jobs::segment::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
         core.store
-            .set_window_state(
+            .set_segment_state(
                 &out.id,
                 0,
-                crate::store::windows::WindowState::Failed,
+                crate::store::segments::SegmentState::Failed,
                 Some("boom"),
             )
             .await
             .unwrap();
 
-        super::resegment_window_inner(&core, &out.id, 0)
+        super::resynthesize_segment_inner(&core, &out.id, 0)
             .await
             .unwrap();
 
-        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
-        assert_eq!(w.state, crate::store::windows::WindowState::Pending);
+        let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, crate::store::segments::SegmentState::Pending);
         assert_eq!(w.attempts, 0);
 
         let mut found = false;
@@ -922,7 +925,7 @@ mod tests {
 
     #[test]
     fn status_maps_to_the_right_badge_class() {
-        use crate::store::sources::SourceStatus::*;
+        use crate::store::corpora::CorpusStatus::*;
         assert_eq!(status_badge(&Ready), "badge-success");
         assert_eq!(status_badge(&Partial), "badge-warning");
         assert_eq!(status_badge(&Failed), "badge-danger");

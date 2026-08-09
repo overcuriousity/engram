@@ -9,7 +9,7 @@ pub const MAX_LIMIT: usize = 50;
 pub const CANDIDATE_MULTIPLIER: usize = 3;
 /// Chunks one source may contribute to a result list. A forty-chunk document
 /// otherwise fills the whole answer and hides everything else in the corpus.
-pub const MAX_PER_SOURCE: usize = 3;
+pub const MAX_PER_CORPUS: usize = 3;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SearchQuery {
@@ -40,8 +40,8 @@ pub struct SearchTiming {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
-    pub chunk_id: String,
-    pub source_id: String,
+    pub artifact_id: String,
+    pub corpus_id: String,
     pub title: Option<String>,
     pub text: String,
     pub category: Option<String>,
@@ -65,7 +65,7 @@ fn now_secs() -> i64 {
 /// knowledge base, and the case where throwing matches away hurts most. So the
 /// displaced hits go back on the end in rank order: one long document no longer
 /// leads the list, but it still fills it when nothing else can.
-fn cap_per_source(
+fn cap_per_corpus(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
     target: usize,
@@ -74,7 +74,7 @@ fn cap_per_source(
     let mut kept = Vec::with_capacity(hits.len());
     let mut displaced = Vec::new();
     for h in hits {
-        let n = seen.entry(h.payload.source_id.clone()).or_insert(0);
+        let n = seen.entry(h.payload.corpus_id.clone()).or_insert(0);
         *n += 1;
         if *n <= max {
             kept.push(h);
@@ -105,7 +105,7 @@ impl Core {
         if results.is_empty() {
             return;
         }
-        let ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+        let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
         let vectors = self.vectors.clone();
         let now = now_secs();
         self.background.spawn(async move {
@@ -118,8 +118,8 @@ impl Core {
     /// Opening a chunk is the deliberate act that counts as remembering it,
     /// which is why the detail pane records it and an incremental search does
     /// not.
-    pub fn mark_chunk_seen(&self, chunk_id: &str) {
-        let ids = vec![chunk_id.to_string()];
+    pub fn mark_artifact_seen(&self, artifact_id: &str) {
+        let ids = vec![artifact_id.to_string()];
         let vectors = self.vectors.clone();
         let now = now_secs();
         self.background.spawn(async move {
@@ -143,8 +143,8 @@ impl Core {
         let results: Vec<SearchResult> = hits
             .into_iter()
             .map(|h| SearchResult {
-                chunk_id: h.payload.chunk_id,
-                source_id: h.payload.source_id,
+                artifact_id: h.payload.artifact_id,
+                corpus_id: h.payload.corpus_id,
                 title: h.payload.title,
                 text: h.payload.text,
                 category: h.payload.category,
@@ -162,7 +162,7 @@ impl Core {
     ///
     /// Results are capped per source so one long document cannot fill the list.
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, Some(MAX_PER_SOURCE)).await?.0)
+        Ok(self.search_inner(query, Some(MAX_PER_CORPUS)).await?.0)
     }
 
     /// The same search, plus what it cost. The UI shows these faintly, so a
@@ -172,7 +172,7 @@ impl Core {
         &self,
         query: &SearchQuery,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        self.search_inner(query, Some(MAX_PER_SOURCE)).await
+        self.search_inner(query, Some(MAX_PER_CORPUS)).await
     }
 
     /// `cap` of `None` lets a single source supply every result. `ask` wants
@@ -246,15 +246,15 @@ impl Core {
         // exactly `limit` hits whenever a few sources dominate, which is the
         // case over-fetching exists for. The final truncate still cuts to size.
         let hits = match cap {
-            Some(max) => cap_per_source(hits, max, candidates),
+            Some(max) => cap_per_corpus(hits, max, candidates),
             None => hits,
         };
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
             .map(|h| SearchResult {
-                chunk_id: h.payload.chunk_id,
-                source_id: h.payload.source_id,
+                artifact_id: h.payload.artifact_id,
+                corpus_id: h.payload.corpus_id,
                 title: h.payload.title,
                 text: h.payload.text,
                 category: h.payload.category,
@@ -309,7 +309,7 @@ impl Core {
 mod tests {
     use super::*;
     use crate::core::test_support::{test_core, test_core_with_rerank};
-    use crate::store::chunks::NewChunk;
+    use crate::store::artifacts::NewArtifact;
 
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {
         seed_from(core, "raw", texts).await
@@ -321,21 +321,21 @@ mod tests {
         raw: &str,
         texts: &[(&str, &str, &[&str])],
     ) -> String {
-        let src = core.store.insert_source(raw, "web", None).await.unwrap();
-        let new: Vec<NewChunk> = texts
+        let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = texts
             .iter()
             .enumerate()
-            .map(|(i, (text, cat, tags))| NewChunk {
+            .map(|(i, (text, cat, tags))| NewArtifact {
                 ordinal: i as i64,
                 text: text.to_string(),
-                source_span: None,
+                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
-                window_idx: None,
+                segment_idx: None,
             })
             .collect();
-        let made = core.store.insert_chunks(&src.id, &new).await.unwrap();
+        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
         for c in &made {
             crate::jobs::embed::run(core, &c.id).await.unwrap();
         }
@@ -344,8 +344,8 @@ mod tests {
 
     /// Rewrite every vector payload from the current chunk rows.
     async fn reembed_all(core: &crate::core::Core) {
-        for src in core.store.list_sources(100, 0).await.unwrap() {
-            for c in core.store.chunks_for_source(&src.id).await.unwrap() {
+        for src in core.store.list_corpora(100, 0).await.unwrap() {
+            for c in core.store.artifacts_for_corpus(&src.id).await.unwrap() {
                 crate::jobs::embed::run(core, &c.id).await.unwrap();
             }
         }
@@ -449,7 +449,7 @@ mod tests {
         let core = test_core().await;
         let src_id = seed(&core, &[("body text", "concept", &["a", "b"])]).await;
         let hits = core.search(&q("t0\nbody text")).await.unwrap();
-        assert_eq!(hits[0].source_id, src_id);
+        assert_eq!(hits[0].corpus_id, src_id);
         assert_eq!(hits[0].title.as_deref(), Some("t0"));
         assert_eq!(hits[0].category.as_deref(), Some("concept"));
         assert_eq!(hits[0].tags, vec!["a".to_string(), "b".to_string()]);
@@ -596,15 +596,15 @@ mod tests {
         let small = seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
         let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
-        let leading = &hits[..hits.len().min(MAX_PER_SOURCE + 1)];
-        let from_big = leading.iter().filter(|h| h.source_id == big).count();
+        let leading = &hits[..hits.len().min(MAX_PER_CORPUS + 1)];
+        let from_big = leading.iter().filter(|h| h.corpus_id == big).count();
         assert!(
-            from_big <= MAX_PER_SOURCE,
+            from_big <= MAX_PER_CORPUS,
             "one source took {from_big} of the leading {} results",
             leading.len()
         );
         assert!(
-            leading.iter().any(|h| h.source_id == small),
+            leading.iter().any(|h| h.corpus_id == small),
             "the crowded-out source never reached the top of the list"
         );
     }
@@ -627,7 +627,7 @@ mod tests {
         );
         // And still no duplicates: refilling must not re-add a kept hit.
         let ids: std::collections::HashSet<&str> =
-            hits.iter().map(|h| h.chunk_id.as_str()).collect();
+            hits.iter().map(|h| h.artifact_id.as_str()).collect();
         assert_eq!(ids.len(), hits.len(), "a hit appeared twice");
     }
 
@@ -664,8 +664,8 @@ mod tests {
         use crate::vector::{SearchHit, VectorPayload};
         let hit = |chunk: &str, src: &str, score: f32| SearchHit {
             payload: VectorPayload {
-                chunk_id: chunk.into(),
-                source_id: src.into(),
+                artifact_id: chunk.into(),
+                corpus_id: src.into(),
                 text: String::new(),
                 title: None,
                 category: None,
@@ -684,14 +684,14 @@ mod tests {
             ]
         };
         let ids = |hits: Vec<SearchHit>| -> Vec<String> {
-            hits.iter().map(|h| h.payload.chunk_id.clone()).collect()
+            hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
         };
 
         // Room for three: the cap holds and `a3` stays out.
-        assert_eq!(ids(cap_per_source(ranked(), 2, 3)), vec!["a1", "a2", "b1"]);
+        assert_eq!(ids(cap_per_corpus(ranked(), 2, 3)), vec!["a1", "a2", "b1"]);
         // Room for four and nothing else to offer: `a3` comes back, last.
         assert_eq!(
-            ids(cap_per_source(ranked(), 2, 4)),
+            ids(cap_per_corpus(ranked(), 2, 4)),
             vec!["a1", "a2", "b1", "a3"],
             "a displaced hit must refill an otherwise short list"
         );
@@ -705,7 +705,7 @@ mod tests {
 
         // `created_at` is set by the store, so age the one that should surface.
         let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE chunks SET created_at = ? WHERE text = ?")
+        sqlx::query("UPDATE artifacts SET created_at = ? WHERE text = ?")
             .bind(cutoff)
             .bind("long forgotten")
             .execute(&core.store.pool)
@@ -731,7 +731,7 @@ mod tests {
         let core = test_core().await;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE chunks SET created_at = ?")
+        sqlx::query("UPDATE artifacts SET created_at = ?")
             .bind(old)
             .execute(&core.store.pool)
             .await

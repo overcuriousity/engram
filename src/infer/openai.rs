@@ -1,5 +1,7 @@
-use super::{ChunkBudget, Chunker, Completer, Embedder, ProposedChunk, Reranker, prompt};
-use crate::config::{AskRole, ChunkRole, EmbedRole, RerankRole, RerankStyle};
+use super::{
+    Completer, Embedder, ProposedArtifact, Reranker, SynthesisBudget, Synthesizer, prompt,
+};
+use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -60,32 +62,32 @@ async fn post_json(
     })
 }
 
-// ── Chunker ──────────────────────────────────────────────────────────────────
+// ── Synthesizer ──────────────────────────────────────────────────────────────────
 
-pub struct HttpChunker {
+pub struct HttpSynthesizer {
     client: reqwest::Client,
     base_url: String,
     model: String,
     api_key: Option<String>,
-    budget: ChunkBudget,
-    max_chunk_tokens: usize,
+    budget: SynthesisBudget,
+    max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
     cooldown: std::time::Duration,
 }
 
-impl HttpChunker {
-    pub fn new(cfg: &ChunkRole) -> Self {
+impl HttpSynthesizer {
+    pub fn new(cfg: &SynthesizeRole) -> Self {
         Self {
             client: client(cfg.timeout_secs),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
-            budget: ChunkBudget {
+            budget: SynthesisBudget {
                 context_tokens: cfg.context_tokens,
                 max_output_tokens: cfg.max_output_tokens,
                 output_ratio: cfg.output_ratio,
             },
-            max_chunk_tokens: 1024,
+            max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
             cooldown: std::time::Duration::from_secs(cfg.cooldown_secs),
         }
@@ -93,8 +95,8 @@ impl HttpChunker {
 
     /// Caps chunk size so the embedder never receives an oversized chunk.
     /// Set from `embed.max_input_tokens * 0.8` during wiring.
-    pub fn with_max_chunk_tokens(mut self, n: usize) -> Self {
-        self.max_chunk_tokens = n;
+    pub fn with_max_artifact_tokens(mut self, n: usize) -> Self {
+        self.max_artifact_tokens = n;
         self
     }
 
@@ -123,7 +125,7 @@ impl HttpChunker {
         tracing::info!(
             ms = started.elapsed().as_millis(),
             tokens = v["usage"]["completion_tokens"].as_u64(),
-            "chunker call finished"
+            "synthesizer call finished"
         );
         v["choices"][0]["message"]["content"]
             .as_str()
@@ -136,12 +138,12 @@ impl HttpChunker {
 }
 
 #[async_trait]
-impl Chunker for HttpChunker {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedChunk>> {
-        let user = prompt::user_prompt(text, 1, self.max_chunk_tokens);
+impl Synthesizer for HttpSynthesizer {
+    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+        let user = prompt::user_prompt(text, 1, self.max_artifact_tokens);
         let first = self
             .chat(json!([
-                {"role":"system","content": prompt::CHUNKER_SYSTEM},
+                {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
                 {"role":"user","content": user}
             ]))
             .await?;
@@ -151,11 +153,11 @@ impl Chunker for HttpChunker {
             Err(e) => {
                 // One repair attempt with the parser error fed back. Beyond
                 // that the caller falls back to a structural split.
-                tracing::warn!(error = %e, "chunker returned unparsable output; repairing");
+                tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let second = self
                     .chat(json!([
-                        {"role":"system","content": prompt::CHUNKER_SYSTEM},
+                        {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
                         {"role":"user","content": user},
                         {"role":"assistant","content": first},
                         {"role":"user","content": repair}
@@ -166,7 +168,7 @@ impl Chunker for HttpChunker {
         }
     }
 
-    fn budget(&self) -> ChunkBudget {
+    fn budget(&self) -> SynthesisBudget {
         self.budget
     }
 
@@ -442,13 +444,13 @@ pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AskRole, ChunkRole, EmbedRole, RerankRole, RerankStyle};
-    use crate::infer::{Chunker, Completer, Embedder, Reranker};
+    use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
+    use crate::infer::{Completer, Embedder, Reranker, Synthesizer};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn chunk_cfg(base: String) -> ChunkRole {
-        ChunkRole {
+    fn synthesize_cfg(base: String) -> SynthesizeRole {
+        SynthesizeRole {
             base_url: base,
             model: "m".into(),
             api_key: Some("secret".into()),
@@ -488,7 +490,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let c = HttpChunker::new(&chunk_cfg(server.uri()));
+        let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         let out = c.segment("anything").await.unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("A"));
@@ -515,7 +517,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let c = HttpChunker::new(&chunk_cfg(server.uri()));
+        let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         let out = c.segment("anything").await.unwrap();
         assert_eq!(out[0].text, "ok");
     }
@@ -531,7 +533,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let c = HttpChunker::new(&chunk_cfg(server.uri()));
+        let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         assert!(matches!(
             c.segment("x").await,
             Err(crate::error::Error::MalformedLlmOutput(_))
@@ -546,7 +548,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let c = HttpChunker::new(&chunk_cfg(server.uri()));
+        let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         let e = c.segment("x").await.unwrap_err();
         assert!(matches!(
             e,

@@ -1,16 +1,16 @@
 use crate::core::Core;
 use crate::error::Result;
-use crate::infer::budget::window_tokens;
-use crate::infer::split::{split_into_windows, window_text};
-use crate::store::chunks::{NewChunk, SourceSpan};
+use crate::infer::budget::segment_tokens;
+use crate::infer::split::{segment_text, split_into_segments};
+use crate::store::artifacts::{CorpusSpan, NewArtifact};
+use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
-use crate::store::sources::SourceStatus;
-use crate::store::windows::WindowState;
+use crate::store::segments::SegmentState;
 
 /// Tokens consumed by the system prompt and scaffolding. Measured from the
 /// real prompt rather than guessed.
 fn prompt_overhead(core: &Core) -> usize {
-    core.counter.count(crate::infer::prompt::CHUNKER_SYSTEM) + 200
+    core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
 }
 
 /// LLM-assisted segmentation, one window at a time.
@@ -19,45 +19,45 @@ fn prompt_overhead(core: &Core) -> usize {
 /// marked `done` before the next is attempted, so an error here costs the
 /// windows that had not started yet and nothing else — the job retries and
 /// resumes from the first pending window.
-pub async fn run(core: &Core, source_id: &str) -> Result<()> {
-    let src = core.store.get_source(source_id).await?;
+pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
+    let src = core.store.get_corpus(corpus_id).await?;
     core.store
-        .set_source_status(source_id, SourceStatus::Segmenting)
+        .set_corpus_status(corpus_id, CorpusStatus::Segmenting)
         .await?;
 
-    let windows = split_into_windows(
+    let windows = split_into_segments(
         &src.raw_text,
         &core.counter,
-        window_tokens(core.chunker.budget(), prompt_overhead(core)),
+        segment_tokens(core.synthesizer.budget(), prompt_overhead(core)),
     );
 
     if windows.is_empty() {
-        tracing::warn!(source_id, "source has no usable text");
+        tracing::warn!(corpus_id, "source has no usable text");
         core.store
-            .set_source_status(source_id, SourceStatus::Failed)
+            .set_corpus_status(corpus_id, CorpusStatus::Failed)
             .await?;
         return Ok(());
     }
 
     let spans: Vec<(i64, i64)> = windows.iter().map(|w| (w.start_line, w.end_line)).collect();
-    core.store.upsert_windows(source_id, &spans).await?;
+    core.store.upsert_segments(corpus_id, &spans).await?;
 
-    for w in core.store.pending_windows(source_id).await? {
-        core.store.bump_window_attempts(source_id, w.idx).await?;
-        let text = window_text(&src.raw_text, w.start_line, w.end_line);
+    for w in core.store.pending_segments(corpus_id).await? {
+        core.store.bump_segment_attempts(corpus_id, w.idx).await?;
+        let text = segment_text(&src.raw_text, w.start_line, w.end_line);
 
-        let mut chunks = core.chunker.segment(&text).await?;
+        let mut chunks = core.synthesizer.segment(&text).await?;
         // The model was told to keep commands, paths and flags verbatim. If it
         // did not, one more attempt usually gets it right; a second failure is
         // stored with a flag rather than dropped, because a visible warning
         // beats losing the chapter.
         if paraphrased(&chunks, &text) {
             tracing::warn!(
-                source_id,
+                corpus_id,
                 window = w.idx,
                 "literals missing; re-segmenting once"
             );
-            chunks = core.chunker.segment(&text).await?;
+            chunks = core.synthesizer.segment(&text).await?;
         }
 
         // Line numbers come back relative to the window, so shift them into
@@ -71,7 +71,7 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         let mut spans = Vec::with_capacity(chunks.len());
         for c in &mut chunks {
             let claimed = c
-                .source_lines
+                .corpus_lines
                 .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
                 .filter(|(a, b)| {
                     // A span the model asserted is only worth keeping if the
@@ -79,26 +79,26 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
                     // On a reference document full of short entries the model
                     // miscounts freely, and a confidently wrong span is worse
                     // than none: the pane renders the wrong text.
-                    let lines = window_text(&src.raw_text, *a, *b);
+                    let lines = segment_text(&src.raw_text, *a, *b);
                     crate::infer::verify::span_is_plausible(&c.text, &lines)
                 });
 
             let (shifted, origin) = match claimed {
                 Some(span) => (span, SpanOrigin::Model),
-                // Either the model omitted `source_lines` — which it does more
+                // Either the model omitted `corpus_lines` — which it does more
                 // often than not — or what it claimed did not survive the check
                 // above. Both are better answered by finding the chunk's own
                 // lines in the window than by pointing at the whole of it.
                 None => match crate::infer::verify::locate_span(&c.text, &text, w.start_line) {
                     Some(found) => (found, SpanOrigin::Derived),
-                    None => match c.source_lines {
+                    None => match c.corpus_lines {
                         // Nothing to derive and a span that failed the check:
                         // keep it, and say it is not to be trusted.
                         Some((a, b)) => (
                             (a + w.start_line - 1, b + w.start_line - 1),
                             SpanOrigin::Implausible,
                         ),
-                        None => ((w.start_line, w.end_line), SpanOrigin::Window),
+                        None => ((w.start_line, w.end_line), SpanOrigin::Segment),
                     },
                 },
             };
@@ -112,7 +112,7 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
             } else {
                 origin
             });
-            c.source_lines = Some(if clamped.0 <= clamped.1 {
+            c.corpus_lines = Some(if clamped.0 <= clamped.1 {
                 clamped
             } else {
                 (w.start_line, w.end_line)
@@ -120,17 +120,17 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         }
 
         let written =
-            write_window_chunks(core, source_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
+            write_segment_artifacts(core, corpus_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
         flag_unverified(core, &written, &spans, &text).await?;
         core.store
-            .set_window_state(source_id, w.idx, WindowState::Done, None)
+            .set_segment_state(corpus_id, w.idx, SegmentState::Done, None)
             .await?;
 
         // Idle between windows if asked to. A long source is otherwise minutes
         // of unbroken generation, which on a desktop GPU is a sustained load
         // rather than a burst. The window is already committed, so a pause here
         // costs nothing if the process dies during it.
-        let cooldown = core.chunker.cooldown();
+        let cooldown = core.synthesizer.cooldown();
         if !cooldown.is_zero() {
             tracing::debug!(
                 secs = cooldown.as_secs(),
@@ -140,29 +140,29 @@ pub async fn run(core: &Core, source_id: &str) -> Result<()> {
         }
     }
 
-    finish(core, source_id).await
+    finish(core, corpus_id).await
 }
 
 /// Replace the chunks of one window. Same "replace, never append" guarantee as
 /// before; the key is the window rather than the whole source, so a retry of
 /// window 4 cannot disturb windows 0 to 3.
-async fn write_window_chunks(
+async fn write_segment_artifacts(
     core: &Core,
-    source_id: &str,
-    window_idx: i64,
-    new: Vec<NewChunk>,
-) -> Result<Vec<crate::store::chunks::Chunk>> {
+    corpus_id: &str,
+    segment_idx: i64,
+    new: Vec<NewArtifact>,
+) -> Result<Vec<crate::store::artifacts::Chunk>> {
     let old = core
         .store
-        .chunk_ids_for_window(source_id, window_idx)
+        .artifact_ids_for_segment(corpus_id, segment_idx)
         .await?;
     if !old.is_empty() {
-        core.vectors.delete_chunks(&old).await?;
+        core.vectors.delete_artifacts(&old).await?;
         for id in &old {
-            core.store.delete_chunk(id).await?;
+            core.store.delete_artifact(id).await?;
         }
     }
-    core.store.insert_chunks(source_id, &new).await
+    core.store.insert_artifacts(corpus_id, &new).await
 }
 
 /// Where a chunk's stored span came from, which decides whether it is worth
@@ -179,11 +179,11 @@ enum SpanOrigin {
     /// Recovered here by matching the chunk's lines against the window.
     Derived,
     /// Nothing to go on; the span is the window itself.
-    Window,
+    Segment,
 }
 
 /// Did any proposed chunk lose a literal its window contains?
-fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
+fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
     chunks
         .iter()
         .any(|c| !crate::infer::verify::missing_literals(&c.text, window).is_empty())
@@ -193,10 +193,10 @@ fn paraphrased(chunks: &[crate::infer::ProposedChunk], window: &str) -> bool {
 /// the reader can see beats a chapter silently missing from the base.
 async fn flag_unverified(
     core: &Core,
-    written: &[crate::store::chunks::Chunk],
+    written: &[crate::store::artifacts::Chunk],
     // Per chunk, where its stored span came from.
     spans: &[SpanOrigin],
-    window_body: &str,
+    segment_body: &str,
 ) -> Result<()> {
     use crate::infer::verify;
 
@@ -204,18 +204,18 @@ async fn flag_unverified(
         let mut flags = Vec::new();
         let mut detail: Option<String> = None;
 
-        let missing = verify::missing_literals(&c.text, window_body);
+        let missing = verify::missing_literals(&c.text, segment_body);
         if let Some(first) = missing.first() {
             flags.push(verify::FLAG_LITERALS.to_string());
             detail = Some(format!("missing literal: {first}"));
-            tracing::warn!(chunk_id = %c.id, literal = %first, "literal not found in source window");
+            tracing::warn!(artifact_id = %c.id, literal = %first, "literal not found in source window");
         }
 
         // A derived span matched by construction, a window span claims nothing
         // in particular, and a model span that survived the check is fine. What
         // is left is a span that had to be corrected or could not be.
-        let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Window);
-        if let Some(span) = &c.source_span
+        let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Segment);
+        if let Some(span) = &c.corpus_span
             && matches!(origin, SpanOrigin::Clamped | SpanOrigin::Implausible)
         {
             flags.push(verify::FLAG_SPAN.to_string());
@@ -225,12 +225,12 @@ async fn flag_unverified(
                     span.start_line, span.end_line
                 )
             });
-            tracing::warn!(chunk_id = %c.id, "chunk span does not match the lines it claims");
+            tracing::warn!(artifact_id = %c.id, "chunk span does not match the lines it claims");
         }
 
         if !flags.is_empty() {
             core.store
-                .set_chunk_flags(&c.id, &flags, detail.as_deref())
+                .set_artifact_flags(&c.id, &flags, detail.as_deref())
                 .await?;
         }
     }
@@ -239,15 +239,15 @@ async fn flag_unverified(
 
 /// Everything that can only be decided once every window has resolved:
 /// continuous ordinals, the source's status, and the single batched embed job.
-pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
-    let src = core.store.get_source(source_id).await?;
-    core.store.renumber_chunks(source_id).await?;
-    let windows = core.store.windows_for_source(source_id).await?;
-    let degraded = windows.iter().any(|w| w.state != WindowState::Done);
-    let chunks = core.store.chunks_for_source(source_id).await?;
+pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    core.store.renumber_artifacts(corpus_id).await?;
+    let windows = core.store.segments_for_corpus(corpus_id).await?;
+    let degraded = windows.iter().any(|w| w.state != SegmentState::Done);
+    let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
     if chunks.is_empty() {
         core.store
-            .set_source_status(source_id, SourceStatus::Failed)
+            .set_corpus_status(corpus_id, CorpusStatus::Failed)
             .await?;
         return Ok(());
     }
@@ -257,13 +257,13 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
     // where it did not.
     let spans: Vec<(i64, i64)> = chunks
         .iter()
-        .filter_map(|c| c.source_span.as_ref().map(|s| (s.start_line, s.end_line)))
+        .filter_map(|c| c.corpus_span.as_ref().map(|s| (s.start_line, s.end_line)))
         .collect();
     let cov = crate::infer::verify::coverage(&spans, &src.raw_text);
-    core.store.set_source_coverage(source_id, cov).await?;
+    core.store.set_corpus_coverage(corpus_id, cov).await?;
     if cov < crate::infer::verify::LOW_COVERAGE {
         tracing::warn!(
-            source_id,
+            corpus_id,
             coverage = cov,
             "most of this source is unclaimed"
         );
@@ -272,15 +272,15 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
     // One job for the whole source: every chunk was just written, and embedding
     // them together is one inference call instead of `chunks.len()`.
     core.store
-        .enqueue(Stage::Embed, "source", source_id)
+        .enqueue(Stage::Embed, "source", corpus_id)
         .await?;
     let status = if degraded {
-        SourceStatus::Partial
+        CorpusStatus::Partial
     } else {
-        SourceStatus::Embedding
+        CorpusStatus::Embedding
     };
-    core.store.set_source_status(source_id, status).await?;
-    tracing::info!(source_id, chunks = chunks.len(), degraded, "segmented");
+    core.store.set_corpus_status(corpus_id, status).await?;
+    tracing::info!(corpus_id, chunks = chunks.len(), degraded, "segmented");
     Ok(())
 }
 
@@ -305,10 +305,10 @@ pub async fn finish(core: &Core, source_id: &str) -> Result<()> {
 /// row is keyed `(stage, target_id)`, so enqueuing the same source would reuse
 /// that row and the `complete_job` that follows would close it again — the
 /// untried windows would be left with nothing to come back to.
-pub async fn fail_pending_windows(core: &Core, source_id: &str, reason: &str) -> Result<bool> {
-    let pending = core.store.pending_windows(source_id).await?;
+pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -> Result<bool> {
+    let pending = core.store.pending_segments(corpus_id).await?;
     if pending.is_empty() {
-        finish(core, source_id).await?;
+        finish(core, corpus_id).await?;
         return Ok(false);
     }
 
@@ -316,7 +316,7 @@ pub async fn fail_pending_windows(core: &Core, source_id: &str, reason: &str) ->
 
     if !untried.is_empty() {
         tracing::info!(
-            source_id,
+            corpus_id,
             windows = untried.len(),
             "leaving untried windows queued rather than failing them"
         );
@@ -329,10 +329,10 @@ pub async fn fail_pending_windows(core: &Core, source_id: &str, reason: &str) ->
 
     for w in tried {
         core.store
-            .set_window_state(source_id, w.idx, WindowState::Failed, Some(reason))
+            .set_segment_state(corpus_id, w.idx, SegmentState::Failed, Some(reason))
             .await?;
         tracing::warn!(
-            source_id,
+            corpus_id,
             window = w.idx,
             lines = format!("{}-{}", w.start_line, w.end_line),
             reason,
@@ -341,28 +341,31 @@ pub async fn fail_pending_windows(core: &Core, source_id: &str, reason: &str) ->
     }
     // Windows still waiting for their own attempts mean the source is not
     // settled yet; finishing here would enqueue embedding for half a document.
-    if core.store.pending_windows(source_id).await?.is_empty() {
-        finish(core, source_id).await?;
+    if core.store.pending_segments(corpus_id).await?.is_empty() {
+        finish(core, corpus_id).await?;
         return Ok(false);
     }
     Ok(true)
 }
 
-fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) -> Vec<NewChunk> {
+fn proposed_to_new(
+    segment_idx: i64,
+    proposed: Vec<crate::infer::ProposedArtifact>,
+) -> Vec<NewArtifact> {
     proposed
         .into_iter()
         .enumerate()
-        .map(|(i, p)| NewChunk {
+        .map(|(i, p)| NewArtifact {
             ordinal: i as i64,
             text: p.text,
-            source_span: p.source_lines.map(|(a, b)| SourceSpan {
+            corpus_span: p.corpus_lines.map(|(a, b)| CorpusSpan {
                 start_line: a,
                 end_line: b,
             }),
             title: p.title,
             category: p.category,
             tags: p.tags,
-            window_idx: Some(window_idx),
+            segment_idx: Some(segment_idx),
         })
         .collect()
 }
@@ -370,23 +373,23 @@ fn proposed_to_new(window_idx: i64, proposed: Vec<crate::infer::ProposedChunk>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_failing_chunker};
+    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
-    use crate::store::sources::SourceStatus;
 
-    /// A body several windows long under the fake chunker's budget.
-    fn multi_window_body() -> String {
+    /// A body several windows long under the fake synthesizer's budget.
+    fn multi_segment_body() -> String {
         (0..400)
             .map(|i| format!("paragraph number {i} with some filler text"))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
 
-    fn window_count(core: &crate::core::Core, body: &str) -> usize {
-        crate::infer::split::split_into_windows(
+    fn segment_count(core: &crate::core::Core, body: &str) -> usize {
+        crate::infer::split::split_into_segments(
             body,
             &core.counter,
-            window_tokens(core.chunker.budget(), prompt_overhead(core)),
+            segment_tokens(core.synthesizer.budget(), prompt_overhead(core)),
         )
         .len()
     }
@@ -401,13 +404,13 @@ mod tests {
 
         run(&core, &out.id).await.unwrap();
 
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].ordinal, 0);
         assert_eq!(chunks[1].ordinal, 1);
         assert_eq!(
-            core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Embedding
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Embedding
         );
 
         // One embed job for the whole source, not one per chunk: the point of
@@ -427,18 +430,18 @@ mod tests {
     #[tokio::test]
     async fn ordinals_stay_continuous_across_windows() {
         let core = test_core().await;
-        // Large enough to exceed the fake chunker's window budget several
+        // Large enough to exceed the fake synthesizer's window budget several
         // times over, so segmentation really does run per window.
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
         assert!(
-            window_count(&core, &body) > 1,
+            segment_count(&core, &body) > 1,
             "test body must span multiple windows or it proves nothing"
         );
 
         run(&core, &out.id).await.unwrap();
 
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert!(chunks.len() > 1);
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.ordinal, i as i64, "ordinals must not restart per window");
@@ -447,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_window_the_model_refuses_is_marked_failed_not_split() {
-        let core = test_core_with_failing_chunker().await;
+        let core = test_core_with_failing_synthesizer().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
@@ -459,28 +462,28 @@ mod tests {
             "a dead endpoint deserves a retry, not a verdict"
         );
 
-        let requeue = fail_pending_windows(&core, &out.id, "endpoint down")
+        let requeue = fail_pending_segments(&core, &out.id, "endpoint down")
             .await
             .unwrap();
 
         assert!(!requeue, "nothing is left waiting when every window failed");
-        let w = &core.store.windows_for_source(&out.id).await.unwrap()[0];
-        assert_eq!(w.state, WindowState::Failed);
+        let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
+        assert_eq!(w.state, SegmentState::Failed);
         assert_eq!(w.last_error.as_deref(), Some("endpoint down"));
 
         // The point of the change: no paragraph-shaped debris competing for
         // queries against chunks that were actually written to stand alone.
         assert!(
             core.store
-                .chunks_for_source(&out.id)
+                .artifacts_for_corpus(&out.id)
                 .await
                 .unwrap()
                 .is_empty(),
             "a refused window must produce no chunks at all"
         );
         assert_eq!(
-            core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Failed
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Failed
         );
     }
 
@@ -491,7 +494,11 @@ mod tests {
         run(&core, &out.id).await.unwrap();
         run(&core, &out.id).await.unwrap();
         assert_eq!(
-            core.store.chunks_for_source(&out.id).await.unwrap().len(),
+            core.store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
             2,
             "a retried segment job must not double the chunks"
         );
@@ -507,16 +514,16 @@ Then run sync.";
     #[tokio::test]
     async fn a_paraphrased_literal_is_re_segmented_once_and_then_accepted() {
         let mut core = test_core().await;
-        let chunker = std::sync::Arc::new(crate::infer::fake::ParaphrasingChunker::recovering(
-            "oflag=sync ",
-        ));
-        core.chunker = chunker.clone();
+        let synthesizer = std::sync::Arc::new(
+            crate::infer::fake::ParaphrasingSynthesizer::recovering("oflag=sync "),
+        );
+        core.synthesizer = synthesizer.clone();
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         run(&core, &out.id).await.unwrap();
 
-        assert_eq!(chunker.calls(), 2, "exactly one re-segmentation");
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        assert_eq!(synthesizer.calls(), 2, "exactly one re-segmentation");
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert!(
             chunks.iter().all(|c| c.flags.is_empty()),
             "a clean retry must leave no flag"
@@ -526,14 +533,14 @@ Then run sync.";
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
-        core.chunker = std::sync::Arc::new(crate::infer::fake::ParaphrasingChunker::persistent(
-            "oflag=sync ",
-        ));
+        core.synthesizer = std::sync::Arc::new(
+            crate::infer::fake::ParaphrasingSynthesizer::persistent("oflag=sync "),
+        );
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         run(&core, &out.id).await.unwrap();
 
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert!(!chunks.is_empty(), "flagged chunks are still stored");
         let flagged: Vec<_> = chunks
             .iter()
@@ -560,7 +567,7 @@ Then run sync.";
         // Where the chunk still reproduces its source, the real span can be
         // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
-        core.chunker = std::sync::Arc::new(crate::infer::fake::LyingSpanChunker);
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::LyingSpanSynthesizer);
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -568,8 +575,8 @@ Then run sync.";
 
         run(&core, &out.id).await.unwrap();
 
-        let c = &core.store.chunks_for_source(&out.id).await.unwrap()[0];
-        let span = c.source_span.as_ref().unwrap();
+        let c = &core.store.artifacts_for_corpus(&out.id).await.unwrap()[0];
+        let span = c.corpus_span.as_ref().unwrap();
         assert!(
             span.start_line >= 1 && span.end_line <= 3,
             "the recovered span must lie inside the window"
@@ -583,7 +590,7 @@ Then run sync.";
     #[tokio::test]
     async fn a_wrong_span_that_cannot_be_recovered_is_flagged() {
         let mut core = test_core().await;
-        core.chunker = std::sync::Arc::new(crate::infer::fake::HallucinatingChunker);
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -591,7 +598,7 @@ Then run sync.";
 
         run(&core, &out.id).await.unwrap();
 
-        let c = &core.store.chunks_for_source(&out.id).await.unwrap()[0];
+        let c = &core.store.artifacts_for_corpus(&out.id).await.unwrap()[0];
         assert!(
             c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN),
             "a chunk that matches nothing in its window must say so"
@@ -608,7 +615,7 @@ Then run sync.";
         run(&core, &out.id).await.unwrap();
         let cov = core
             .store
-            .get_source(&out.id)
+            .get_corpus(&out.id)
             .await
             .unwrap()
             .coverage
@@ -623,23 +630,23 @@ Then run sync.";
         // the document without ever calling the model for it. Locally that
         // outage is usually the model still loading.
         let mut core = test_core().await;
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
-        assert!(window_count(&core, &body) > 2);
-        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing("502"));
+        assert!(segment_count(&core, &body) > 2);
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("502"));
 
         // The endpoint refuses while the first window is running; the rest of
         // the source never gets a call at all.
         assert!(run(&core, &out.id).await.is_err());
-        let requeue = fail_pending_windows(&core, &out.id, "502 Bad Gateway")
+        let requeue = fail_pending_segments(&core, &out.id, "502 Bad Gateway")
             .await
             .unwrap();
 
-        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
         assert_eq!(
             windows
                 .iter()
-                .filter(|w| w.state == WindowState::Failed)
+                .filter(|w| w.state == SegmentState::Failed)
                 .count(),
             1,
             "only the window that spent its attempts may be given a verdict"
@@ -647,7 +654,7 @@ Then run sync.";
         assert!(
             windows
                 .iter()
-                .filter(|w| w.state == WindowState::Pending)
+                .filter(|w| w.state == SegmentState::Pending)
                 .count()
                 > 1,
             "untried windows must stay queued for the model"
@@ -667,10 +674,10 @@ Then run sync.";
         // and the `complete_job` that followed closed it again: the untried
         // windows were abandoned and the source sat in `segmenting` forever.
         let mut core = test_core().await;
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
-        assert!(window_count(&core, &body) > 2);
-        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing("502"));
+        assert!(segment_count(&core, &body) > 2);
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("502"));
 
         for _ in 0..=crate::store::jobs::MAX_ATTEMPTS {
             sqlx::query("UPDATE jobs SET run_after = 0")
@@ -680,9 +687,9 @@ Then run sync.";
             let _ = crate::jobs::run_one(&core).await;
         }
 
-        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
         assert!(
-            windows.iter().any(|w| w.state == WindowState::Pending),
+            windows.iter().any(|w| w.state == SegmentState::Pending),
             "this test only proves anything while windows are still untried"
         );
         // Past the backoff the last failure set, which is a delay rather than
@@ -700,27 +707,33 @@ Then run sync.";
     #[tokio::test]
     async fn windows_that_succeeded_keep_their_chunks_when_a_later_one_fails() {
         let mut core = test_core().await;
-        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_window_body());
+        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing_on("STOPHERE"));
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing_on("STOPHERE"));
 
         // First pass records the good windows and raises on the bad one.
         assert!(run(&core, &out.id).await.is_err());
-        let llm_chunks = core.store.chunks_for_source(&out.id).await.unwrap().len();
-        assert!(llm_chunks > 0);
+        let llm_artifacts = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .len();
+        assert!(llm_artifacts > 0);
 
-        fail_pending_windows(&core, &out.id, "endpoint refused the window")
+        fail_pending_segments(&core, &out.id, "endpoint refused the window")
             .await
             .unwrap();
 
-        let windows = core.store.windows_for_source(&out.id).await.unwrap();
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
         assert!(
-            windows.iter().any(|w| w.state == WindowState::Done),
+            windows.iter().any(|w| w.state == SegmentState::Done),
             "successful windows must stay done"
         );
         let failed: Vec<_> = windows
             .iter()
-            .filter(|w| w.state == WindowState::Failed)
+            .filter(|w| w.state == SegmentState::Failed)
             .collect();
         assert_eq!(failed.len(), 1);
         assert_eq!(
@@ -729,13 +742,17 @@ Then run sync.";
         );
 
         assert_eq!(
-            core.store.chunks_for_source(&out.id).await.unwrap().len(),
-            llm_chunks,
+            core.store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
+            llm_artifacts,
             "a failed window must not disturb the chunks another window earned"
         );
         assert_eq!(
-            core.store.get_source(&out.id).await.unwrap().status,
-            SourceStatus::Partial,
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Partial,
             "a window with no chunks makes the source partial, not ready"
         );
     }
@@ -743,13 +760,13 @@ Then run sync.";
     #[tokio::test]
     async fn a_cooldown_paces_the_windows_it_segments() {
         let mut core = test_core().await;
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
-        let windows = window_count(&core, &body);
+        let windows = segment_count(&core, &body);
         assert!(windows > 1);
 
         let pause = std::time::Duration::from_millis(40);
-        core.chunker = std::sync::Arc::new(crate::infer::fake::PacedChunker::new(pause));
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::PacedSynthesizer::new(pause));
 
         let started = std::time::Instant::now();
         run(&core, &out.id).await.unwrap();
@@ -770,16 +787,21 @@ Then run sync.";
             .await
             .unwrap();
         run(&core, &out.id).await.unwrap();
-        let before = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        let before = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .len();
 
         // What an older database holds: chunks with no window, and no window
         // rows to resume from.
-        sqlx::query("UPDATE chunks SET window_idx = NULL WHERE source_id = ?")
+        sqlx::query("UPDATE artifacts SET segment_idx = NULL WHERE corpus_id = ?")
             .bind(&out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM segment_windows WHERE source_id = ?")
+        sqlx::query("DELETE FROM segments WHERE corpus_id = ?")
             .bind(&out.id)
             .execute(&core.store.pool)
             .await
@@ -788,7 +810,11 @@ Then run sync.";
         run(&core, &out.id).await.unwrap();
 
         assert_eq!(
-            core.store.chunks_for_source(&out.id).await.unwrap().len(),
+            core.store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
             before,
             "the pre-window chunks were left in place and duplicated"
         );
@@ -797,19 +823,29 @@ Then run sync.";
     #[tokio::test]
     async fn a_second_run_does_not_re_segment_windows_that_finished() {
         let core = test_core().await;
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
-        assert!(window_count(&core, &body) > 1);
+        assert!(segment_count(&core, &body) > 1);
 
         run(&core, &out.id).await.unwrap();
-        let (resolved, total) = core.store.window_progress(&out.id).await.unwrap();
+        let (resolved, total) = core.store.segment_progress(&out.id).await.unwrap();
         assert_eq!(resolved, total, "every window should have resolved");
 
-        let before = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        let before = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .len();
         // Nothing is pending, so a second run must be a no-op rather than a
         // second full pass that doubles the chunk count.
         run(&core, &out.id).await.unwrap();
-        let after = core.store.chunks_for_source(&out.id).await.unwrap().len();
+        let after = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .len();
         assert_eq!(before, after);
     }
 
@@ -818,20 +854,21 @@ Then run sync.";
         // Fails only on the window containing the marker, so window 0 succeeds
         // and a later one raises — the shape a flaky endpoint produces.
         let mut core = test_core().await;
-        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_window_body());
+        let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.chunker = std::sync::Arc::new(crate::infer::fake::FakeChunker::failing_on("STOPHERE"));
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing_on("STOPHERE"));
 
         let err = run(&core, &out.id).await.unwrap_err();
-        assert!(err.retryable(), "a chunker error must stay retryable");
+        assert!(err.retryable(), "a synthesizer error must stay retryable");
 
-        let (resolved, total) = core.store.window_progress(&out.id).await.unwrap();
+        let (resolved, total) = core.store.segment_progress(&out.id).await.unwrap();
         assert!(resolved > 0, "windows before the failure must be recorded");
         assert!(resolved < total, "the failing window must stay pending");
         assert!(
             !core
                 .store
-                .chunks_for_source(&out.id)
+                .artifacts_for_corpus(&out.id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -844,30 +881,30 @@ Then run sync.";
         let core = test_core().await;
         let src = core
             .store
-            .insert_source("\n\n  \n", "web", None)
+            .insert_corpus("\n\n  \n", "web", None)
             .await
             .unwrap();
         run(&core, &src.id).await.unwrap();
         assert_eq!(
-            core.store.get_source(&src.id).await.unwrap().status,
-            SourceStatus::Failed
+            core.store.get_corpus(&src.id).await.unwrap().status,
+            CorpusStatus::Failed
         );
     }
 
     #[tokio::test]
     async fn source_spans_are_shifted_into_document_coordinates() {
-        // The chunker sees one window at a time and numbers lines from 1.
+        // The synthesizer sees one window at a time and numbers lines from 1.
         // Without the shift, every chunk in window two would point at the
         // wrong part of the raw text.
         let core = test_core().await;
-        let body = multi_window_body();
+        let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
-        assert!(window_count(&core, &body) > 1);
+        assert!(segment_count(&core, &body) > 1);
         run(&core, &out.id).await.unwrap();
 
-        let chunks = core.store.chunks_for_source(&out.id).await.unwrap();
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         let last = chunks.last().unwrap();
-        let span = last.source_span.as_ref().expect("span must be recorded");
+        let span = last.corpus_span.as_ref().expect("span must be recorded");
         assert!(
             span.start_line > 1,
             "later chunks must not all claim to start at line 1"

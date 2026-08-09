@@ -1,6 +1,6 @@
 //! Does the chunk still say what the source said?
 //!
-//! The chunker is instructed to reproduce commands, paths and error strings
+//! The synthesizer is instructed to reproduce commands, paths and error strings
 //! verbatim while rewriting the prose around them. Nothing checked that it
 //! did, and a paraphrased command is a command that later gets pasted into a
 //! root shell. These are pure functions over two strings, so they can be
@@ -34,10 +34,10 @@ fn looks_like_a_path_or_flag(token: &str) -> bool {
 /// Every string in a chunk that must have come from the source verbatim:
 /// lines inside fenced code blocks, inline code spans, and bare path- or
 /// flag-shaped tokens in the prose.
-pub fn extract_literals(chunk_text: &str) -> Vec<String> {
+pub fn extract_literals(artifact_text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut fenced = false;
-    for line in chunk_text.lines() {
+    for line in artifact_text.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             fenced = !fenced;
@@ -85,9 +85,9 @@ pub fn extract_literals(chunk_text: &str) -> Vec<String> {
 }
 
 /// Literals present in the chunk and absent from the window it came from.
-pub fn missing_literals(chunk_text: &str, window_text: &str) -> Vec<String> {
-    let haystack = normalize(window_text);
-    extract_literals(chunk_text)
+pub fn missing_literals(artifact_text: &str, segment_text: &str) -> Vec<String> {
+    let haystack = normalize(segment_text);
+    extract_literals(artifact_text)
         .into_iter()
         .filter(|lit| !haystack.contains(&normalize(lit)))
         .collect()
@@ -95,16 +95,20 @@ pub fn missing_literals(chunk_text: &str, window_text: &str) -> Vec<String> {
 
 /// Where in the window a chunk's own lines actually appear.
 ///
-/// The chunker is asked for `source_lines` and frequently omits them. Falling
+/// The synthesizer is asked for `corpus_lines` and frequently omits them. Falling
 /// back to the whole window is honest but useless: the detail pane then marks
 /// every line as the span, which points at nothing. Matching the chunk's lines
 /// against the window recovers a real span for anything the model reproduced
 /// verbatim, which is precisely the commands and paths worth pointing at.
 ///
 /// Returns `None` when nothing matches, and the caller keeps the window.
-pub fn locate_span(chunk_text: &str, window_body: &str, window_start: i64) -> Option<(i64, i64)> {
-    let window: Vec<String> = window_body.lines().map(normalize).collect();
-    let needles: Vec<String> = chunk_text
+pub fn locate_span(
+    artifact_text: &str,
+    segment_body: &str,
+    segment_start: i64,
+) -> Option<(i64, i64)> {
+    let window: Vec<String> = segment_body.lines().map(normalize).collect();
+    let needles: Vec<String> = artifact_text
         .lines()
         .map(normalize)
         .filter(|l| l.len() > 8)
@@ -127,7 +131,7 @@ pub fn locate_span(chunk_text: &str, window_body: &str, window_start: i64) -> Op
     if first == usize::MAX {
         return None;
     }
-    Some((window_start + first as i64, window_start + last as i64))
+    Some((segment_start + first as i64, segment_start + last as i64))
 }
 
 /// A chunk whose span points somewhere else entirely.
@@ -146,12 +150,12 @@ fn distinctive_tokens(s: &str) -> std::collections::HashSet<String> {
 
 /// Does the chunk plausibly describe the lines it claims?
 ///
-/// The chunker rewrites prose, so this cannot demand equality — only that a
+/// The synthesizer rewrites prose, so this cannot demand equality — only that a
 /// third of the chunk's distinctive tokens appear in the claimed range. That is
 /// enough to catch a span pointing at a different section, which is the failure
 /// the detail pane would otherwise render as a rendering bug.
-pub fn span_is_plausible(chunk_text: &str, claimed_text: &str) -> bool {
-    let chunk = distinctive_tokens(chunk_text);
+pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
+    let chunk = distinctive_tokens(artifact_text);
     if chunk.is_empty() {
         return true;
     }
@@ -272,7 +276,7 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
 
     #[test]
     fn a_missing_span_is_recovered_from_the_lines_the_chunk_reproduced() {
-        // The real chunker omits source_lines more often than not, and the
+        // The real synthesizer omits corpus_lines more often than not, and the
         // whole window is not a useful answer to "where did this come from".
         let chunk = "    dd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress";
         let found = locate_span(chunk, WINDOW, 101).expect("the command is in the window");

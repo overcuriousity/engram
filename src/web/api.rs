@@ -32,7 +32,7 @@ fn default_stage() -> String {
 /// would make a field that can be set but never unset. Tags need no such
 /// distinction, because an empty list already says it.
 #[derive(serde::Deserialize)]
-pub struct PatchChunkRequest {
+pub struct PatchArtifactRequest {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default, deserialize_with = "explicit_null")]
@@ -151,42 +151,42 @@ fn default_limit() -> i64 {
     50
 }
 
-async fn list_sources(
+async fn list_corpora(
     State(st): State<AppState>,
     _id: Identity,
     Query(p): Query<ListParams>,
-) -> Result<Json<Vec<crate::store::sources::Source>>> {
+) -> Result<Json<Vec<crate::store::corpora::Source>>> {
     Ok(Json(
         st.core
             .store
-            .list_sources(p.limit.clamp(1, 200), p.offset.max(0))
+            .list_corpora(p.limit.clamp(1, 200), p.offset.max(0))
             .await?,
     ))
 }
 
 #[derive(serde::Serialize)]
-pub struct SourceDetail {
+pub struct CorpusDetail {
     #[serde(flatten)]
-    pub source: crate::store::sources::Source,
-    pub chunks: Vec<crate::store::chunks::Chunk>,
+    pub source: crate::store::corpora::Source,
+    pub chunks: Vec<crate::store::artifacts::Chunk>,
 }
 
-async fn get_source(
+async fn get_corpus(
     State(st): State<AppState>,
     _id: Identity,
     Path(sid): Path<String>,
-) -> Result<Json<SourceDetail>> {
-    let source = st.core.store.get_source(&sid).await?;
-    let chunks = st.core.store.chunks_for_source(&sid).await?;
-    Ok(Json(SourceDetail { source, chunks }))
+) -> Result<Json<CorpusDetail>> {
+    let source = st.core.store.get_corpus(&sid).await?;
+    let chunks = st.core.store.artifacts_for_corpus(&sid).await?;
+    Ok(Json(CorpusDetail { source, chunks }))
 }
 
-async fn delete_source(
+async fn delete_corpus(
     State(st): State<AppState>,
     _id: Identity,
     Path(sid): Path<String>,
 ) -> Result<StatusCode> {
-    st.core.delete_source(&sid).await?;
+    st.core.delete_corpus(&sid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -257,20 +257,20 @@ async fn resurface(
     Ok(Json(st.core.resurface(p.limit.unwrap_or(5)).await?))
 }
 
-async fn get_chunk(
+async fn get_artifact(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
-) -> Result<Json<crate::store::chunks::Chunk>> {
-    Ok(Json(st.core.store.get_chunk(&cid).await?))
+) -> Result<Json<crate::store::artifacts::Chunk>> {
+    Ok(Json(st.core.store.get_artifact(&cid).await?))
 }
 
-async fn patch_chunk(
+async fn patch_artifact(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
-    Json(req): Json<PatchChunkRequest>,
-) -> Result<Json<crate::store::chunks::Chunk>> {
+    Json(req): Json<PatchArtifactRequest>,
+) -> Result<Json<crate::store::artifacts::Chunk>> {
     if req.text.is_none() && req.title.is_none() && req.category.is_none() && req.tags.is_none() {
         return Err(Error::Validation("no fields to update".into()));
     }
@@ -293,7 +293,7 @@ async fn patch_chunk(
         .transpose()?;
     let tags = req.tags.as_deref().map(clean_tags).transpose()?;
 
-    st.core.store.get_chunk(&cid).await?;
+    st.core.store.get_artifact(&cid).await?;
 
     // The embedder is shown the title followed by the body, so either of those
     // invalidates the stored vector. A category or a tag changes only what the
@@ -301,25 +301,28 @@ async fn patch_chunk(
     let revectorize = text.is_some() || title.is_some();
 
     if let Some(t) = &text {
-        st.core.store.update_chunk_text(&cid, t).await?;
+        st.core.store.update_artifact_text(&cid, t).await?;
     }
     if let Some(t) = &title {
-        st.core.store.update_chunk_title(&cid, t.as_deref()).await?;
+        st.core
+            .store
+            .update_artifact_title(&cid, t.as_deref())
+            .await?;
     }
     if let Some(c) = &category {
         st.core
             .store
-            .update_chunk_category(&cid, c.as_deref())
+            .update_artifact_category(&cid, c.as_deref())
             .await?;
     }
     if let Some(t) = &tags {
-        st.core.store.update_chunk_tags(&cid, t).await?;
+        st.core.store.update_artifact_tags(&cid, t).await?;
     }
 
-    let chunk = st.core.store.get_chunk(&cid).await?;
+    let chunk = st.core.store.get_artifact(&cid).await?;
     if revectorize {
         st.core.store.enqueue(Stage::Embed, "chunk", &cid).await?;
-    } else if chunk.embed_state == crate::store::chunks::EmbedState::Embedded {
+    } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
         // Nothing the model saw has changed, so rewrite the payload in place
         // rather than spending an inference call to recompute the same vector.
         //
@@ -329,8 +332,8 @@ async fn patch_chunk(
         st.core
             .vectors
             .set_payload(&crate::vector::VectorPayload {
-                chunk_id: chunk.id.clone(),
-                source_id: chunk.source_id.clone(),
+                artifact_id: chunk.id.clone(),
+                corpus_id: chunk.corpus_id.clone(),
                 text: chunk.text.clone(),
                 title: chunk.title.clone(),
                 category: chunk.category.clone(),
@@ -343,32 +346,32 @@ async fn patch_chunk(
     Ok(Json(chunk))
 }
 
-async fn delete_chunk(
+async fn delete_artifact(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
-    st.core.store.get_chunk(&cid).await?;
+    st.core.store.get_artifact(&cid).await?;
     st.core
         .vectors
-        .delete_chunks(std::slice::from_ref(&cid))
+        .delete_artifacts(std::slice::from_ref(&cid))
         .await?;
-    st.core.store.delete_chunk(&cid).await?;
+    st.core.store.delete_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<StatusResponse>> {
     use sqlx::Row;
-    let source_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM sources GROUP BY status")
+    let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&st.core.store.pool)
         .await?;
-    let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+    let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&st.core.store.pool)
         .await?
         .get("n");
 
     Ok(Json(StatusResponse {
-        sources: source_rows
+        sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
             .collect(),
@@ -384,15 +387,17 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
-        .route("/sources", post(ingest).get(list_sources))
-        .route("/sources/{id}", get(get_source).delete(delete_source))
+        .route("/sources", post(ingest).get(list_corpora))
+        .route("/sources/{id}", get(get_corpus).delete(delete_corpus))
         .route("/sources/{id}/reprocess", post(reprocess))
         .route("/search", get(search))
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
         .route(
             "/chunks/{id}",
-            get(get_chunk).patch(patch_chunk).delete(delete_chunk),
+            get(get_artifact)
+                .patch(patch_artifact)
+                .delete(delete_artifact),
         )
         .route("/status", get(status))
 }
@@ -676,27 +681,27 @@ mod tests {
 #[cfg(test)]
 mod patch_tests {
     use super::tests::*;
-    use crate::store::chunks::{EmbedState, NewChunk};
+    use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
     use axum::http::StatusCode;
     use tower::ServiceExt;
 
     /// One embedded chunk, and the app that can edit it.
-    async fn one_chunk() -> (axum::Router, String, crate::core::Core, String) {
+    async fn one_artifact() -> (axum::Router, String, crate::core::Core, String) {
         let (app, token, core) = app_token_and_core().await;
-        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
             .store
-            .insert_chunks(
+            .insert_artifacts(
                 &src.id,
-                &[NewChunk {
+                &[NewArtifact {
                     ordinal: 0,
                     text: "the body".into(),
-                    source_span: None,
+                    corpus_span: None,
                     title: Some("a title".into()),
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
-                    window_idx: None,
+                    segment_idx: None,
                 }],
             )
             .await
@@ -711,7 +716,7 @@ mod patch_tests {
     async fn editing_only_tags_rewrites_the_payload_without_re_embedding() {
         // Tags are not shown to the embedding model, so recomputing the vector
         // would spend an inference call to arrive at the same numbers.
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
 
         let res = app
             .oneshot(patch_json(
@@ -728,7 +733,7 @@ mod patch_tests {
             "a metadata edit queued a re-embed"
         );
         assert_eq!(
-            core.store.get_chunk(&cid).await.unwrap().embed_state,
+            core.store.get_artifact(&cid).await.unwrap().embed_state,
             EmbedState::Embedded,
             "the stored vector is still correct and must stay so"
         );
@@ -754,7 +759,7 @@ mod patch_tests {
     async fn editing_the_title_does_queue_a_re_embed() {
         // The embedder is shown the title followed by the body, so a new title
         // means the stored vector describes text that no longer exists.
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
 
         app.oneshot(patch_json(
             &format!("/api/v1/chunks/{cid}"),
@@ -769,14 +774,14 @@ mod patch_tests {
             "a title change left a stale vector in place"
         );
         assert_eq!(
-            core.store.get_chunk(&cid).await.unwrap().embed_state,
+            core.store.get_artifact(&cid).await.unwrap().embed_state,
             EmbedState::Pending
         );
     }
 
     #[tokio::test]
     async fn editing_the_text_still_queues_a_re_embed() {
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
             &format!("/api/v1/chunks/{cid}"),
             &token,
@@ -789,7 +794,7 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_patch_that_changes_nothing_is_rejected() {
-        let (app, token, _core, cid) = one_chunk().await;
+        let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
                 &format!("/api/v1/chunks/{cid}"),
@@ -805,10 +810,10 @@ mod patch_tests {
     async fn a_field_can_be_cleared_with_an_explicit_null() {
         // An absent key means "leave it alone", so without this a category
         // could be set and then never removed.
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         assert_eq!(
             core.store
-                .get_chunk(&cid)
+                .get_artifact(&cid)
                 .await
                 .unwrap()
                 .category
@@ -825,12 +830,12 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(core.store.get_chunk(&cid).await.unwrap().category, None);
+        assert_eq!(core.store.get_artifact(&cid).await.unwrap().category, None);
     }
 
     #[tokio::test]
     async fn an_untouched_field_keeps_its_value() {
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
             &format!("/api/v1/chunks/{cid}"),
             &token,
@@ -839,7 +844,7 @@ mod patch_tests {
         .await
         .unwrap();
 
-        let c = core.store.get_chunk(&cid).await.unwrap();
+        let c = core.store.get_artifact(&cid).await.unwrap();
         assert_eq!(
             c.category.as_deref(),
             Some("concept"),
@@ -850,7 +855,7 @@ mod patch_tests {
 
     #[tokio::test]
     async fn tags_are_trimmed_deduplicated_and_bounded() {
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
             &format!("/api/v1/chunks/{cid}"),
             &token,
@@ -859,7 +864,7 @@ mod patch_tests {
         .await
         .unwrap();
         assert_eq!(
-            core.store.get_chunk(&cid).await.unwrap().tags,
+            core.store.get_artifact(&cid).await.unwrap().tags,
             vec!["linux".to_string(), "forensics".to_string()],
             "a repeated tag is a filter condition evaluated twice for one answer"
         );
@@ -868,7 +873,7 @@ mod patch_tests {
     #[tokio::test]
     async fn an_unbounded_tag_list_is_refused() {
         // Tags become payload on every point and a keyword index in Qdrant.
-        let (app, token, _core, cid) = one_chunk().await;
+        let (app, token, _core, cid) = one_artifact().await;
         let many: Vec<String> = (0..500).map(|i| format!("t{i}")).collect();
         let res = app
             .oneshot(patch_json(
@@ -883,7 +888,7 @@ mod patch_tests {
 
     #[tokio::test]
     async fn an_overlong_tag_is_refused() {
-        let (app, token, _core, cid) = one_chunk().await;
+        let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
                 &format!("/api/v1/chunks/{cid}"),
@@ -899,7 +904,7 @@ mod patch_tests {
     async fn a_rejected_field_leaves_the_other_fields_alone() {
         // Validation happens before any write, so a request that fails is a
         // request that changed nothing.
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
                 &format!("/api/v1/chunks/{cid}"),
@@ -910,14 +915,14 @@ mod patch_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-        let c = core.store.get_chunk(&cid).await.unwrap();
+        let c = core.store.get_artifact(&cid).await.unwrap();
         assert_eq!(c.title.as_deref(), Some("a title"), "a half-applied PATCH");
         assert_eq!(c.embed_state, EmbedState::Embedded);
     }
 
     #[tokio::test]
     async fn a_blank_title_clears_it_rather_than_storing_whitespace() {
-        let (app, token, core, cid) = one_chunk().await;
+        let (app, token, core, cid) = one_artifact().await;
         app.oneshot(patch_json(
             &format!("/api/v1/chunks/{cid}"),
             &token,
@@ -925,12 +930,12 @@ mod patch_tests {
         ))
         .await
         .unwrap();
-        assert_eq!(core.store.get_chunk(&cid).await.unwrap().title, None);
+        assert_eq!(core.store.get_artifact(&cid).await.unwrap().title, None);
     }
 
     #[tokio::test]
     async fn an_empty_text_is_still_rejected() {
-        let (app, token, _core, cid) = one_chunk().await;
+        let (app, token, _core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
                 &format!("/api/v1/chunks/{cid}"),

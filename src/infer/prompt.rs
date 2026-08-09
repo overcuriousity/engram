@@ -1,7 +1,7 @@
-use super::ProposedChunk;
+use super::ProposedArtifact;
 use crate::error::{Error, Result};
 
-pub const CHUNKER_SYSTEM: &str = r#"You split reference material into atomic, self-contained knowledge chunks.
+pub const SYNTHESIZER_SYSTEM: &str = r#"You split reference material into atomic, self-contained knowledge chunks.
 
 Each chunk holds exactly one thing: one technique, one procedure, one fact, one
 configuration. If a passage covers three techniques, emit three chunks.
@@ -21,18 +21,18 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"chunks":[{"text":"...","title":"...","category":"...","tags":["..."],"source_lines":[start,end]}]}
+{"chunks":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end]}]}
 
 - title: a short noun phrase naming the chunk.
 - category: one lowercase word, e.g. procedure, concept, reference, snippet.
 - tags: 1-5 lowercase keywords for filtering.
-- source_lines: the 1-based line range in the input this chunk came from."#;
+- corpus_lines: the 1-based line range in the input this chunk came from."#;
 
-pub fn user_prompt(window_text: &str, first_line: i64, max_chunk_tokens: usize) -> String {
+pub fn user_prompt(segment_text: &str, first_line: i64, max_artifact_tokens: usize) -> String {
     format!(
         "The input below starts at line {first_line}. Keep each chunk under roughly \
-         {max_chunk_tokens} tokens; split into more chunks rather than exceeding it.\n\n\
-         ----- INPUT -----\n{window_text}\n----- END INPUT -----"
+         {max_artifact_tokens} tokens; split into more chunks rather than exceeding it.\n\n\
+         ----- INPUT -----\n{segment_text}\n----- END INPUT -----"
     )
 }
 
@@ -47,11 +47,11 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
 
 #[derive(serde::Deserialize)]
 struct Envelope {
-    chunks: Vec<RawChunk>,
+    chunks: Vec<RawArtifact>,
 }
 
 #[derive(serde::Deserialize)]
-struct RawChunk {
+struct RawArtifact {
     text: String,
     #[serde(default)]
     title: Option<String>,
@@ -60,7 +60,7 @@ struct RawChunk {
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
-    source_lines: Option<Vec<i64>>,
+    corpus_lines: Option<Vec<i64>>,
 }
 
 /// Models wrap JSON in fences and preface it with prose no matter what the
@@ -115,7 +115,7 @@ fn salvage_truncated(json: &str) -> Option<String> {
     Some(format!("{}]}}", &json[..=end]))
 }
 
-pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
+pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     let json = extract_json(body);
     let env: Envelope = match serde_json::from_str(json) {
         Ok(env) => env,
@@ -129,7 +129,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
                     tracing::warn!(
                         error = %e,
                         chunks = env.chunks.len(),
-                        "chunker output was cut off; keeping the chunks it finished"
+                        "synthesizer output was cut off; keeping the chunks it finished"
                     );
                     env
                 }
@@ -138,11 +138,11 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
         }
     };
 
-    let chunks: Vec<ProposedChunk> = env
+    let chunks: Vec<ProposedArtifact> = env
         .chunks
         .into_iter()
         .filter(|c| !c.text.trim().is_empty())
-        .map(|c| ProposedChunk {
+        .map(|c| ProposedArtifact {
             text: c.text.trim().to_string(),
             title: c.title.filter(|t| !t.trim().is_empty()),
             category: c.category.filter(|t| !t.trim().is_empty()),
@@ -151,7 +151,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedChunk>> {
                 .into_iter()
                 .filter(|t| !t.trim().is_empty())
                 .collect(),
-            source_lines: match c.source_lines.as_deref() {
+            corpus_lines: match c.corpus_lines.as_deref() {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
             },
@@ -175,7 +175,7 @@ mod tests {
         // Exactly what a small local model emits when it runs out of output
         // budget: two complete objects, then a third cut mid-string.
         let cut = r###"{"chunks":[
-          {"text":"first complete","title":"one","tags":[],"source_lines":[1,2]},
+          {"text":"first complete","title":"one","tags":[],"corpus_lines":[1,2]},
           {"text":"second complete","title":"two","tags":[]},
           {"text":"third was cut off here"###;
         let out = parse_response(cut).expect("the finished chunks must survive");
@@ -205,7 +205,7 @@ mod tests {
     const GOOD: &str = r###"{"chunks":[
       {"text":"## Mount an image\nRun `ewfmount evidence.E01 /mnt/ewf`.",
        "title":"Mount an E01 image","category":"procedure",
-       "tags":["forensics","linux"],"source_lines":[3,9]}
+       "tags":["forensics","linux"],"corpus_lines":[3,9]}
     ]}"###;
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
             out[0].tags,
             vec!["forensics".to_string(), "linux".to_string()]
         );
-        assert_eq!(out[0].source_lines, Some((3, 9)));
+        assert_eq!(out[0].corpus_lines, Some((3, 9)));
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(out[0].text, "bare text");
         assert!(out[0].title.is_none());
         assert!(out[0].tags.is_empty());
-        assert!(out[0].source_lines.is_none());
+        assert!(out[0].corpus_lines.is_none());
     }
 
     #[test]
@@ -272,16 +272,16 @@ mod tests {
 
     #[test]
     fn a_non_array_source_lines_is_ignored_rather_than_fatal() {
-        let body = r#"{"chunks":[{"text":"t","source_lines":[1,2,3]}]}"#;
-        assert_eq!(parse_response(body).unwrap()[0].source_lines, None);
+        let body = r#"{"chunks":[{"text":"t","corpus_lines":[1,2,3]}]}"#;
+        assert_eq!(parse_response(body).unwrap()[0].corpus_lines, None);
     }
 
     #[test]
     fn system_prompt_states_the_hard_rules() {
         // These instructions are the guardrail against paraphrased commands.
-        assert!(CHUNKER_SYSTEM.contains("VERBATIM"));
-        assert!(CHUNKER_SYSTEM.contains("markdown"));
-        assert!(CHUNKER_SYSTEM.contains("H1") || CHUNKER_SYSTEM.contains("`#`"));
+        assert!(SYNTHESIZER_SYSTEM.contains("VERBATIM"));
+        assert!(SYNTHESIZER_SYSTEM.contains("markdown"));
+        assert!(SYNTHESIZER_SYSTEM.contains("H1") || SYNTHESIZER_SYSTEM.contains("`#`"));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use async_trait::async_trait;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VectorPayload {
-    pub chunk_id: String,
-    pub source_id: String,
+    pub artifact_id: String,
+    pub corpus_id: String,
     pub text: String,
     pub title: Option<String>,
     pub category: Option<String>,
@@ -70,7 +70,7 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<SearchHit>>;
     /// Record that these chunks were just shown. Merged into the stored
     /// payload, never written as a whole one.
-    async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()>;
+    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()>;
     /// A random sample of chunks captured before `older_than` and not shown
     /// since `unseen_since`. Random rather than ranked: there is no query here,
     /// only the question of what has been forgotten.
@@ -80,8 +80,8 @@ pub trait VectorStore: Send + Sync {
         older_than: i64,
         unseen_since: i64,
     ) -> Result<Vec<SearchHit>>;
-    async fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()>;
-    async fn delete_by_source(&self, source_id: &str) -> Result<()>;
+    async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
+    async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
     async fn count(&self) -> Result<u64>;
 }
 

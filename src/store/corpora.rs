@@ -5,7 +5,7 @@ use sqlx::Row;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum SourceStatus {
+pub enum CorpusStatus {
     Raw,
     Segmenting,
     Segmented,
@@ -15,27 +15,27 @@ pub enum SourceStatus {
     Failed,
 }
 
-impl SourceStatus {
+impl CorpusStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            SourceStatus::Raw => "raw",
-            SourceStatus::Segmenting => "segmenting",
-            SourceStatus::Segmented => "segmented",
-            SourceStatus::Embedding => "embedding",
-            SourceStatus::Ready => "ready",
-            SourceStatus::Partial => "partial",
-            SourceStatus::Failed => "failed",
+            CorpusStatus::Raw => "raw",
+            CorpusStatus::Segmenting => "segmenting",
+            CorpusStatus::Segmented => "segmented",
+            CorpusStatus::Embedding => "embedding",
+            CorpusStatus::Ready => "ready",
+            CorpusStatus::Partial => "partial",
+            CorpusStatus::Failed => "failed",
         }
     }
-    pub fn parse(s: &str) -> SourceStatus {
+    pub fn parse(s: &str) -> CorpusStatus {
         match s {
-            "segmenting" => SourceStatus::Segmenting,
-            "segmented" => SourceStatus::Segmented,
-            "embedding" => SourceStatus::Embedding,
-            "ready" => SourceStatus::Ready,
-            "partial" => SourceStatus::Partial,
-            "failed" => SourceStatus::Failed,
-            _ => SourceStatus::Raw,
+            "segmenting" => CorpusStatus::Segmenting,
+            "segmented" => CorpusStatus::Segmented,
+            "embedding" => CorpusStatus::Embedding,
+            "ready" => CorpusStatus::Ready,
+            "partial" => CorpusStatus::Partial,
+            "failed" => CorpusStatus::Failed,
+            _ => CorpusStatus::Raw,
         }
     }
 }
@@ -47,7 +47,7 @@ pub struct Source {
     pub origin: String,
     pub title_hint: Option<String>,
     pub content_hash: String,
-    pub status: SourceStatus,
+    pub status: CorpusStatus,
     pub created_at: i64,
     pub updated_at: i64,
     /// Fraction of this source's non-blank lines that ended up inside some
@@ -59,14 +59,14 @@ pub fn content_hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-fn row_to_source(r: &sqlx::sqlite::SqliteRow) -> Source {
+fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Source {
     Source {
         id: r.get("id"),
         raw_text: r.get("raw_text"),
         origin: r.get("origin"),
         title_hint: r.get("title_hint"),
         content_hash: r.get("content_hash"),
-        status: SourceStatus::parse(r.get::<String, _>("status").as_str()),
+        status: CorpusStatus::parse(r.get::<String, _>("status").as_str()),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
         coverage: r.get("coverage"),
@@ -74,7 +74,7 @@ fn row_to_source(r: &sqlx::sqlite::SqliteRow) -> Source {
 }
 
 impl Store {
-    pub async fn insert_source(
+    pub async fn insert_corpus(
         &self,
         raw_text: &str,
         origin: &str,
@@ -86,13 +86,13 @@ impl Store {
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
             content_hash: content_hash(raw_text),
-            status: SourceStatus::Raw,
+            status: CorpusStatus::Raw,
             created_at: now(),
             updated_at: now(),
             coverage: None,
         };
         sqlx::query(
-            "INSERT INTO sources (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at)
+            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&src.id)
@@ -108,25 +108,25 @@ impl Store {
         Ok(src)
     }
 
-    pub async fn get_source(&self, id: &str) -> Result<Source> {
-        let row = sqlx::query("SELECT * FROM sources WHERE id = ?")
+    pub async fn get_corpus(&self, id: &str) -> Result<Source> {
+        let row = sqlx::query("SELECT * FROM corpora WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::NotFound)?;
-        Ok(row_to_source(&row))
+        Ok(row_to_corpus(&row))
     }
 
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<Source>> {
-        let row = sqlx::query("SELECT * FROM sources WHERE content_hash = ?")
+        let row = sqlx::query("SELECT * FROM corpora WHERE content_hash = ?")
             .bind(hash)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_source))
+        Ok(row.as_ref().map(row_to_corpus))
     }
 
-    pub async fn set_source_status(&self, id: &str, status: SourceStatus) -> Result<()> {
-        sqlx::query("UPDATE sources SET status = ?, updated_at = ? WHERE id = ?")
+    pub async fn set_corpus_status(&self, id: &str, status: CorpusStatus) -> Result<()> {
+        sqlx::query("UPDATE corpora SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status.as_str())
             .bind(now())
             .bind(id)
@@ -138,28 +138,28 @@ impl Store {
     /// How much of this source ended up inside a chunk. Written once every
     /// window has resolved; a low number means the segmenter dropped part of
     /// the document, which nothing used to notice.
-    pub async fn set_source_coverage(&self, source_id: &str, coverage: f64) -> Result<()> {
-        sqlx::query("UPDATE sources SET coverage = ?, updated_at = ? WHERE id = ?")
+    pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: f64) -> Result<()> {
+        sqlx::query("UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?")
             .bind(coverage)
             .bind(now())
-            .bind(source_id)
+            .bind(corpus_id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    pub async fn list_sources(&self, limit: i64, offset: i64) -> Result<Vec<Source>> {
+    pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Source>> {
         let rows =
-            sqlx::query("SELECT * FROM sources ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+            sqlx::query("SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.iter().map(row_to_source).collect())
+        Ok(rows.iter().map(row_to_corpus).collect())
     }
 
-    pub async fn delete_source(&self, id: &str) -> Result<()> {
-        let res = sqlx::query("DELETE FROM sources WHERE id = ?")
+    pub async fn delete_corpus(&self, id: &str) -> Result<()> {
+        let res = sqlx::query("DELETE FROM corpora WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -179,13 +179,13 @@ mod tests {
     async fn insert_and_get_roundtrip() {
         let s = Store::memory().await.unwrap();
         let src = s
-            .insert_source("hello world", "web", Some("greeting"))
+            .insert_corpus("hello world", "web", Some("greeting"))
             .await
             .unwrap();
-        assert_eq!(src.status, SourceStatus::Raw);
+        assert_eq!(src.status, CorpusStatus::Raw);
         assert_eq!(src.content_hash, content_hash("hello world"));
 
-        let got = s.get_source(&src.id).await.unwrap();
+        let got = s.get_corpus(&src.id).await.unwrap();
         assert_eq!(got.raw_text, "hello world");
         assert_eq!(got.title_hint.as_deref(), Some("greeting"));
     }
@@ -193,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn find_by_hash_detects_duplicate_text() {
         let s = Store::memory().await.unwrap();
-        let a = s.insert_source("same text", "web", None).await.unwrap();
+        let a = s.insert_corpus("same text", "web", None).await.unwrap();
         let found = s.find_by_hash(&content_hash("same text")).await.unwrap();
         assert_eq!(found.unwrap().id, a.id);
         assert!(
@@ -207,13 +207,13 @@ mod tests {
     #[tokio::test]
     async fn status_transitions_persist() {
         let s = Store::memory().await.unwrap();
-        let src = s.insert_source("x", "web", None).await.unwrap();
-        s.set_source_status(&src.id, SourceStatus::Ready)
+        let src = s.insert_corpus("x", "web", None).await.unwrap();
+        s.set_corpus_status(&src.id, CorpusStatus::Ready)
             .await
             .unwrap();
         assert_eq!(
-            s.get_source(&src.id).await.unwrap().status,
-            SourceStatus::Ready
+            s.get_corpus(&src.id).await.unwrap().status,
+            CorpusStatus::Ready
         );
     }
 
@@ -221,7 +221,7 @@ mod tests {
     async fn get_missing_source_is_not_found() {
         let s = Store::memory().await.unwrap();
         assert!(matches!(
-            s.get_source("nope").await,
+            s.get_corpus("nope").await,
             Err(crate::error::Error::NotFound)
         ));
     }
@@ -229,9 +229,9 @@ mod tests {
     #[tokio::test]
     async fn list_is_newest_first() {
         let s = Store::memory().await.unwrap();
-        let a = s.insert_source("first", "web", None).await.unwrap();
-        let b = s.insert_source("second", "web", None).await.unwrap();
-        let list = s.list_sources(10, 0).await.unwrap();
+        let a = s.insert_corpus("first", "web", None).await.unwrap();
+        let b = s.insert_corpus("second", "web", None).await.unwrap();
+        let list = s.list_corpora(10, 0).await.unwrap();
         assert_eq!(list[0].id, b.id);
         assert_eq!(list[1].id, a.id);
     }
