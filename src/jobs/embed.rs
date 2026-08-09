@@ -226,11 +226,22 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
                 return replace_with_siblings(core, chunk, parts).await;
             }
         }
+        // Optimism, once: our token estimate may simply be wrong, and one
+        // over-long vector beats shredding a chunk on a guess. But if the
+        // server refuses it, the guess is settled and the text has to be cut.
         tracing::warn!(chunk_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
-        let vectors = core
-            .embedder
-            .embed(std::slice::from_ref(&chunk.text))
-            .await?;
+        let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
+            Ok(v) => v,
+            Err(e) if input_too_large(&e) => {
+                let parts = split_by_lines(&chunk.text, limit, &core.counter);
+                if parts.len() > 1 {
+                    tracing::warn!(chunk_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
+                    return replace_with_siblings(core, chunk, parts).await;
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         core.vectors
             .upsert(vec![VectorPoint {
                 vector: vectors.into_iter().next().unwrap(),
@@ -470,6 +481,47 @@ mod tests {
             .unwrap();
 
         run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
+        assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_during_the_as_is_attempt_still_ends_in_a_split() {
+        // The trap this closes: the estimate says the chunk is oversize, there
+        // is no paragraph to cut on, so it is embedded whole — and the server
+        // refuses it, forever, because nothing along that path can shrink it.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            120,
+        ));
+
+        let src = core.store.insert_source("raw", "web", None).await.unwrap();
+        let body = (0..60)
+            .map(|i| format!("    command --flag-{i} /path/to/thing-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let made = core
+            .store
+            .insert_chunks(
+                &src.id,
+                &[crate::store::chunks::NewChunk {
+                    ordinal: 0,
+                    text: body,
+                    source_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    window_idx: Some(0),
+                }],
+            )
+            .await
+            .unwrap();
+
+        // A limit low enough that the proactive path runs, which is the path
+        // that used to dead-end.
+        run_with_limit(&core, &made[0].id, 100).await.unwrap();
 
         let chunks = core.store.chunks_for_source(&src.id).await.unwrap();
         assert!(chunks.len() > 1, "got {} chunks", chunks.len());
