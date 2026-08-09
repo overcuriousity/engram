@@ -67,9 +67,11 @@ it is a flat list of whole chunks.
 - **Reranking on by default**, once there is a default endpoint worth assuming.
 - **Late-interaction reranking** (ColBERT-style multivectors) as a prefetch stage
   inside Qdrant, replacing the external reranker hop. Needs a model dependency.
-- **Server-side grouping.** The per-source cap is applied client-side, so a
-  source whose chunks fill the entire candidate pool still crowds others out.
-  Qdrant's `query/groups` fixes that properly.
+- **Server-side grouping.** The per-source cap is applied client-side, over a
+  candidate pool three times the limit. It reorders rather than truncates — what
+  it displaces refills the tail — but a source whose chunks fill the entire
+  candidate pool still leaves nothing to promote ahead of it. Qdrant's
+  `query/groups` fixes that at the source, by retrieving per group.
 
 ## Segmentation fidelity
 
@@ -123,7 +125,14 @@ verbatim. Nothing checks that it did.
 - The SQLite FTS5 index and its triggers exist and are tested, but nothing reads
   them. Hybrid search happens in Qdrant instead, where fusion is one round trip
   and the lexical index cannot drift from the vectors. Either wire FTS5 up as a
-  fallback or delete it.
+  fallback or delete it. Its triggers are now scoped to `text`, `title` and
+  `tags`, so at least it no longer pays for every job-status write.
+- **Term-id collisions.** Sparse dimensions are `u32` and terms are hashed into
+  them, so a large enough vocabulary conflates two terms into one dimension and
+  a document matches a word it does not contain. `sparse::term_id` is the only
+  place ids are derived, so replacing it with a vocabulary table is a contained
+  change plus a `--reindex`. Nothing measures the effect yet, which is the
+  evaluation gap above.
 - Ingest is bounded by axum's default 2MB body limit rather than a deliberate
   one. Fine for pasted prose, wrong the moment file upload lands; set the limit
   explicitly and reject oversize captures with a message rather than a

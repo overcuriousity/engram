@@ -37,6 +37,12 @@ pub const SPARSE: &str = "text";
 /// Points copied per scroll page during a rebuild.
 const REINDEX_BATCH: usize = 256;
 
+/// How long to wait for a collection another process just created to answer
+/// for itself: five attempts backing off 200ms, 400ms, … — three seconds in
+/// total, which is startup-shaped rather than request-shaped.
+const READY_ATTEMPTS: u32 = 5;
+const READY_BACKOFF: Duration = Duration::from_millis(200);
+
 /// A chunk carrying this tag is boosted past the decay curve. A tag rather than
 /// a column: `PATCH /api/v1/chunks/{id}` already edits tags without
 /// re-embedding, and the payload index that makes it filterable already exists.
@@ -108,14 +114,24 @@ fn generation_name(alias: &str, n: u32) -> String {
     format!("{alias}_v{n}")
 }
 
-/// Read the generation number back out of a physical collection name. A name
-/// that does not carry one is treated as generation 0, so the next rebuild
-/// lands on `_v1`.
-fn generation_of(alias: &str, collection: &str) -> u32 {
+/// Read the generation number back out of a physical collection name, if it
+/// carries one at all.
+///
+/// `None` is what separates `chunks_v2` from `chunks_verbose`: a prefix match
+/// alone would claim any collection whose name happens to start the same way,
+/// and this answer decides what `drop_collection` deletes and what
+/// `ensure_collection` adopts.
+fn generation_number(alias: &str, collection: &str) -> Option<u32> {
     collection
         .strip_prefix(&format!("{alias}_v"))
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+}
+
+/// The generation a rebuild would count from. A pre-alias collection carries no
+/// number, so the next one lands on `_v1`.
+fn generation_of(alias: &str, collection: &str) -> u32 {
+    generation_number(alias, collection).unwrap_or(0)
 }
 
 /// Qdrant answers `{"must": [...]}` with an implicit AND. An empty condition
@@ -169,6 +185,15 @@ fn sparse_of_payload(payload: &Value) -> SparseVector {
 /// between roughly 0.1 and 1.0. `exp_decay` returns 1.0 for something captured
 /// now and 0.5 at one half-life old, so the recency term is a small nudge
 /// rather than a second ranking.
+///
+/// `defaults` is not optional politeness: a single point whose payload lacks
+/// `created_at` fails the *whole* query with
+/// `Expected number value for created_at in the payload and/or in the formula
+/// defaults`, not just its own scoring. Every point engram writes carries the
+/// key, but `--reindex` copies payloads verbatim from whatever was in the
+/// source collection, so one hand-written point would otherwise take search
+/// down. Treating a missing stamp as the epoch scores it as maximally old,
+/// which is the honest reading of "we do not know when this arrived".
 fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> Value {
     let mut terms = vec![json!("$score")];
     if recency > 0.0 {
@@ -179,12 +204,16 @@ fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> 
         }));
     }
     if pinned > 0.0 {
-        // A filter condition evaluates to 1.0 for a point that matches it.
+        // A filter condition evaluates to 1.0 for a point that matches it, and
+        // needs no default: a point without tags simply does not match.
         terms.push(json!({
             "mult": [pinned, { "key": "tags", "match": { "value": PINNED_TAG } }]
         }));
     }
-    json!({ "formula": { "sum": terms } })
+    json!({
+        "formula": { "sum": terms },
+        "defaults": { "created_at": 0 },
+    })
 }
 
 /// A stored point's dense vector, whether the collection uses named vectors or
@@ -329,16 +358,19 @@ impl QdrantVectors {
             .map(|a| a.collection_name))
     }
 
-    /// Every collection belonging to this alias: the generations, plus a
-    /// pre-alias collection named exactly like it if one is still around.
+    /// Every collection belonging to this alias: the numbered generations, plus
+    /// a pre-alias collection named exactly like it if one is still around.
+    ///
+    /// Membership is by parsed generation number, never by prefix. A collection
+    /// called `{alias}_vault` belongs to whoever made it, and this list is what
+    /// `drop_collection` deletes.
     async fn generations(&self) -> Result<Vec<String>> {
         let list: CollectionList = self.call(Method::GET, "/collections", None).await?;
-        let prefix = format!("{}_v", self.alias);
         Ok(list
             .collections
             .into_iter()
             .map(|c| c.name)
-            .filter(|n| *n == self.alias || n.starts_with(&prefix))
+            .filter(|n| *n == self.alias || generation_number(&self.alias, n).is_some())
             .collect())
     }
 
@@ -349,8 +381,9 @@ impl QdrantVectors {
             .generations()
             .await?
             .into_iter()
-            .filter(|n| *n != self.alias)
-            .max_by_key(|n| generation_of(&self.alias, n)))
+            .filter_map(|n| generation_number(&self.alias, &n).map(|g| (g, n)))
+            .max_by_key(|(g, _)| *g)
+            .map(|(_, n)| n))
     }
 
     async fn collection_exists(&self, name: &str) -> Result<bool> {
@@ -361,13 +394,26 @@ impl QdrantVectors {
     }
 
     async fn create_generation(&self, name: &str, dim: usize) -> Result<()> {
-        let _: Value = self
-            .call(
+        if let Err(e) = self
+            .call::<Value>(
                 Method::PUT,
                 &format!("/collections/{name}"),
                 Some(collection_body(dim)),
             )
-            .await?;
+            .await
+        {
+            // Two processes starting together both find no alias and both try
+            // to build the first generation. Losing that race is not a failure,
+            // but inheriting a collection of the wrong width would be.
+            if !self.collection_exists(name).await? {
+                return Err(e);
+            }
+            let existing = self.await_readable(name).await?;
+            if existing as usize != dim {
+                return Err(dimension_mismatch(name, dim, existing as usize));
+            }
+            tracing::info!(collection = %name, "collection already existed; adopting it");
+        }
 
         // Payload indexes: without these, filtered search degrades to a
         // full scan of the collection.
@@ -412,6 +458,58 @@ impl QdrantVectors {
             .await?;
         tracing::info!(alias = %self.alias, collection, "alias now points at this generation");
         Ok(())
+    }
+
+    /// Create the alias, tolerating a process that got there first.
+    ///
+    /// Startup reads the alias, finds none, and writes one. Two processes
+    /// starting together both do that, and Qdrant refuses the second. Losing
+    /// that race is the outcome we wanted; the only thing worth failing on is
+    /// an alias pointing somewhere that cannot serve our vectors.
+    async fn claim_alias(&self, collection: &str, dim: usize) -> Result<()> {
+        let Err(e) = self.point_alias_at(collection, false).await else {
+            return Ok(());
+        };
+        let Some(current) = self.resolve_alias().await? else {
+            return Err(e);
+        };
+        let existing = self.await_readable(&current).await?;
+        if existing as usize != dim {
+            return Err(dimension_mismatch(&current, dim, existing as usize));
+        }
+        tracing::info!(
+            alias = %self.alias,
+            collection = %current,
+            "another process created the alias first"
+        );
+        Ok(())
+    }
+
+    /// The dimension of a collection that may still be coming up.
+    ///
+    /// A collection another process created a moment ago answers
+    /// `Service internal error: 0 of 0 read operations failed` until its shards
+    /// are ready. That is a state to wait out, not a startup to abort — but
+    /// only briefly, because the same message is what a genuinely broken
+    /// collection returns forever.
+    async fn await_readable(&self, collection: &str) -> Result<u64> {
+        let mut last = None;
+        for attempt in 0..READY_ATTEMPTS {
+            match self.vector_dim(collection).await {
+                Ok(dim) => return Ok(dim),
+                Err(e) => {
+                    tracing::debug!(collection, error = %e, "collection not readable yet");
+                    last = Some(e);
+                }
+            }
+            // No backoff after the last attempt: there is nothing left to wait
+            // for, and the caller is holding up a startup.
+            if attempt + 1 < READY_ATTEMPTS {
+                tokio::time::sleep(READY_BACKOFF * (attempt + 1)).await;
+            }
+        }
+        Err(last
+            .unwrap_or_else(|| Error::Vector(format!("`{collection}` did not become readable"))))
     }
 
     async fn vector_dim(&self, collection: &str) -> Result<u64> {
@@ -578,6 +676,31 @@ impl QdrantVectors {
     }
 }
 
+/// Turn a query response into hits, skipping any point whose payload is not
+/// one of ours.
+///
+/// A collection can hold points engram did not write — a rebuild copies
+/// payloads verbatim, and nothing stops an operator from inserting their own.
+/// Failing the whole result set over one of them would mean a single foreign
+/// point takes search down, which is a worse answer than a shorter list and a
+/// log line naming what was skipped.
+fn hits_of(res: QueryResult) -> Vec<SearchHit> {
+    let mut out = Vec::with_capacity(res.points.len());
+    for p in res.points {
+        match serde_json::from_value::<VectorPayload>(p.payload) {
+            Ok(payload) => out.push(SearchHit {
+                payload,
+                score: p.score,
+            }),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "skipping a point whose payload is not an engram chunk"
+            ),
+        }
+    }
+    out
+}
+
 /// Seconds since the epoch, the unit `created_at` is stored in.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -624,7 +747,13 @@ impl QdrantVectors {
         let text = res.text().await.map_err(|e| Error::Vector(e.to_string()))?;
 
         if !status.is_success() {
-            return Err(Error::Vector(describe_failure(status, &text)));
+            // The path is part of the message because several requests can fail
+            // the same way, and "which one" is the first thing anyone reading
+            // the log needs.
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
         }
 
         let env: Envelope<T> = serde_json::from_str(&text)
@@ -665,13 +794,13 @@ impl VectorStore for QdrantVectors {
                 "found generations with no alias; adopting the newest, \
                  which means an earlier rebuild did not finish"
             );
-            self.point_alias_at(&orphan, false).await?;
+            self.claim_alias(&orphan, dim).await?;
             return Ok(());
         }
 
         let first = generation_name(&self.alias, 1);
         self.create_generation(&first, dim).await?;
-        self.point_alias_at(&first, false).await?;
+        self.claim_alias(&first, dim).await?;
         Ok(())
     }
 
@@ -761,9 +890,13 @@ impl VectorStore for QdrantVectors {
         // whatever retrieval returned, so they reorder results without
         // changing which ones were retrieved.
         if self.recency_weight > 0.0 || self.pinned_boost > 0.0 {
-            let inner = std::mem::replace(&mut body, Value::Null);
-            let mut prefetch = inner;
-            prefetch.as_object_mut().map(|m| m.remove("with_payload"));
+            let mut prefetch = std::mem::replace(&mut body, Value::Null);
+            // The payload is fetched once, by the outer stage. Asking the
+            // prefetch for it too would carry every candidate's full text
+            // through a stage that only reorders ids.
+            if let Some(m) = prefetch.as_object_mut() {
+                m.remove("with_payload");
+            }
             body = json!({
                 "prefetch": [prefetch],
                 "query": scoring_formula(
@@ -784,17 +917,7 @@ impl VectorStore for QdrantVectors {
                 Some(body),
             )
             .await?;
-
-        let mut out = Vec::with_capacity(res.points.len());
-        for p in res.points {
-            let payload: VectorPayload = serde_json::from_value(p.payload)
-                .map_err(|e| Error::Vector(format!("payload did not match schema: {e}")))?;
-            out.push(SearchHit {
-                payload,
-                score: p.score,
-            });
-        }
-        Ok(out)
+        Ok(hits_of(res))
     }
 
     async fn touch(&self, chunk_ids: &[String], seen_at: i64) -> Result<()> {
@@ -842,17 +965,7 @@ impl VectorStore for QdrantVectors {
                 })),
             )
             .await?;
-
-        let mut out = Vec::with_capacity(res.points.len());
-        for p in res.points {
-            let payload: VectorPayload = serde_json::from_value(p.payload)
-                .map_err(|e| Error::Vector(format!("payload did not match schema: {e}")))?;
-            out.push(SearchHit {
-                payload,
-                score: p.score,
-            });
-        }
-        Ok(out)
+        Ok(hits_of(res))
     }
 
     async fn delete_chunks(&self, chunk_ids: &[String]) -> Result<()> {
@@ -1015,6 +1128,41 @@ mod tests {
     fn a_collection_whose_suffix_is_not_a_number_does_not_panic() {
         assert_eq!(generation_of("chunks", "chunks_vNEXT"), 0);
         assert_eq!(generation_of("chunks", "something_else"), 0);
+    }
+
+    #[test]
+    fn only_a_numeric_suffix_makes_a_collection_ours() {
+        // `drop_collection` deletes everything this claims, so a neighbouring
+        // collection that merely starts the same way must not be claimed.
+        assert_eq!(generation_number("chunks", "chunks_v3"), Some(3));
+        assert_eq!(generation_number("chunks", "chunks_verbose"), None);
+        assert_eq!(generation_number("chunks", "chunks_vault"), None);
+        assert_eq!(generation_number("chunks", "chunks_v"), None);
+        assert_eq!(generation_number("chunks", "chunks_v1x"), None);
+        assert_eq!(generation_number("chunks", "chunks"), None);
+        // `+1` and `1_0` parse as numbers in Rust but are not names we write.
+        assert_eq!(generation_number("chunks", "chunks_v+1"), None);
+        assert_eq!(generation_number("chunks", "chunks_v1_0"), None);
+    }
+
+    #[test]
+    fn the_scoring_formula_survives_a_point_without_a_created_at() {
+        // Qdrant fails the entire query, not just the offending point, when a
+        // formula reads a key the payload does not have.
+        let f = scoring_formula(1_700_000_000, 86_400, 0.05, 0.15);
+        assert_eq!(
+            f["defaults"]["created_at"], 0,
+            "a payload missing created_at would take search down: {f}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_weight_contributes_no_term() {
+        // Zero weights must drop out of the formula rather than multiply by
+        // zero, so an operator turning recency off stops paying for it.
+        let f = scoring_formula(0, 86_400, 0.0, 0.0);
+        assert_eq!(f["formula"]["sum"].as_array().unwrap().len(), 1);
+        assert_eq!(f["formula"]["sum"][0], "$score");
     }
 
     #[test]

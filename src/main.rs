@@ -79,6 +79,7 @@ fn build_core(
         counter: Arc::new(TokenCounter::load(
             cfg.infer.chunk.tokenizer_path.as_deref(),
         )),
+        background: Arc::new(engram::core::background::Background::default()),
     }
 }
 
@@ -187,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let background = core.background.clone();
     let handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
@@ -203,6 +205,24 @@ async fn main() -> anyhow::Result<()> {
     let _ = shutdown_tx.send(true);
     for h in handles {
         let _ = h.await;
+    }
+    // The last searches served each left a write behind. The listener is
+    // already closed, so this drains a bounded set rather than chasing new
+    // work; bounded further in case one of them is stuck on a wedged Qdrant.
+    if background.inflight() > 0 {
+        tracing::info!(
+            inflight = background.inflight(),
+            "draining background writes"
+        );
+        if tokio::time::timeout(std::time::Duration::from_secs(10), background.wait_idle())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                inflight = background.inflight(),
+                "gave up waiting for background writes"
+            );
+        }
     }
     Ok(())
 }

@@ -26,16 +26,90 @@ fn default_stage() -> String {
 
 /// Every field is optional so a caller can correct a tag without resending —
 /// and without re-embedding — the body text.
+///
+/// `title` and `category` are doubly optional on purpose: an absent key means
+/// "leave it alone" and an explicit `null` means "clear it". Collapsing the two
+/// would make a field that can be set but never unset. Tags need no such
+/// distinction, because an empty list already says it.
 #[derive(serde::Deserialize)]
 pub struct PatchChunkRequest {
     #[serde(default)]
     pub text: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub category: Option<String>,
+    #[serde(default, deserialize_with = "explicit_null")]
+    pub title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "explicit_null")]
+    pub category: Option<Option<String>>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+}
+
+/// Tell an absent key from an explicit `null`. Serde reaches this function only
+/// when the key was present, so the outer `Some` records that fact.
+fn explicit_null<'de, D, T>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
+}
+
+/// A chunk may carry this many tags, each this long.
+///
+/// Tags are a filter dimension and a payload index in Qdrant, not a place to
+/// put prose. Unbounded input here becomes unbounded payload on every point
+/// and an index that grows without limit.
+const MAX_TAGS: usize = 32;
+const MAX_TAG_LEN: usize = 64;
+/// Long enough for any label worth filtering on.
+const MAX_CATEGORY_LEN: usize = 64;
+const MAX_TITLE_LEN: usize = 512;
+
+/// Trim, drop blanks, deduplicate, and refuse what is out of bounds.
+///
+/// Deduplicating matters beyond tidiness: tags are ANDed in a search filter, so
+/// a repeated tag is a condition Qdrant evaluates twice for the same answer.
+fn clean_tags(tags: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::with_capacity(tags.len());
+    for t in tags {
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.chars().count() > MAX_TAG_LEN {
+            return Err(Error::Validation(format!(
+                "tag is longer than {MAX_TAG_LEN} characters"
+            )));
+        }
+        if !out.iter().any(|k| k == t) {
+            out.push(t.to_string());
+        }
+    }
+    if out.len() > MAX_TAGS {
+        return Err(Error::Validation(format!(
+            "a chunk may carry at most {MAX_TAGS} tags, got {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// Trim a settable-or-clearable string field. An empty value after trimming is
+/// a clear, so `""` and `null` mean the same thing rather than storing a label
+/// that renders as nothing.
+fn clean_optional(value: Option<String>, max: usize, field: &str) -> Result<Option<String>> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if v.chars().count() > max {
+        return Err(Error::Validation(format!(
+            "{field} is longer than {max} characters"
+        )));
+    }
+    Ok(Some(v.to_string()))
 }
 
 #[derive(serde::Serialize)]
@@ -198,37 +272,58 @@ async fn patch_chunk(
     if req.text.is_none() && req.title.is_none() && req.category.is_none() && req.tags.is_none() {
         return Err(Error::Validation("no fields to update".into()));
     }
-    if let Some(t) = &req.text
-        && t.trim().is_empty()
-    {
-        return Err(Error::Validation("chunk text is empty".into()));
-    }
+    // Validate everything before writing anything: a request half-applied and
+    // then rejected leaves a chunk in a state the caller never asked for.
+    let text = match &req.text {
+        Some(t) if t.trim().is_empty() => {
+            return Err(Error::Validation("chunk text is empty".into()));
+        }
+        Some(t) => Some(t.trim().to_string()),
+        None => None,
+    };
+    let title = req
+        .title
+        .map(|t| clean_optional(t, MAX_TITLE_LEN, "title"))
+        .transpose()?;
+    let category = req
+        .category
+        .map(|c| clean_optional(c, MAX_CATEGORY_LEN, "category"))
+        .transpose()?;
+    let tags = req.tags.as_deref().map(clean_tags).transpose()?;
+
     st.core.store.get_chunk(&cid).await?;
 
     // The embedder is shown the title followed by the body, so either of those
     // invalidates the stored vector. A category or a tag changes only what the
     // payload says about the chunk.
-    let revectorize = req.text.is_some() || req.title.is_some();
+    let revectorize = text.is_some() || title.is_some();
 
-    if let Some(t) = &req.text {
+    if let Some(t) = &text {
         st.core.store.update_chunk_text(&cid, t).await?;
     }
-    if let Some(t) = &req.title {
-        st.core.store.update_chunk_title(&cid, t).await?;
+    if let Some(t) = &title {
+        st.core.store.update_chunk_title(&cid, t.as_deref()).await?;
     }
-    if req.category.is_some() || req.tags.is_some() {
+    if let Some(c) = &category {
         st.core
             .store
-            .update_chunk_meta(&cid, req.category.as_deref(), req.tags.as_deref())
+            .update_chunk_category(&cid, c.as_deref())
             .await?;
+    }
+    if let Some(t) = &tags {
+        st.core.store.update_chunk_tags(&cid, t).await?;
     }
 
     let chunk = st.core.store.get_chunk(&cid).await?;
     if revectorize {
         st.core.store.enqueue(Stage::Embed, "chunk", &cid).await?;
-    } else {
+    } else if chunk.embed_state == crate::store::chunks::EmbedState::Embedded {
         // Nothing the model saw has changed, so rewrite the payload in place
         // rather than spending an inference call to recompute the same vector.
+        //
+        // Only when there is a point to rewrite: for a chunk still waiting to
+        // be embedded, this would be a request Qdrant accepts and applies to
+        // nothing, and the pending job writes the whole payload anyway.
         st.core
             .vectors
             .set_payload(&crate::vector::VectorPayload {
@@ -701,6 +796,133 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_field_can_be_cleared_with_an_explicit_null() {
+        // An absent key means "leave it alone", so without this a category
+        // could be set and then never removed.
+        let (app, token, core, cid) = one_chunk().await;
+        assert_eq!(
+            core.store
+                .get_chunk(&cid)
+                .await
+                .unwrap()
+                .category
+                .as_deref(),
+            Some("concept")
+        );
+
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "category": null }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(core.store.get_chunk(&cid).await.unwrap().category, None);
+    }
+
+    #[tokio::test]
+    async fn an_untouched_field_keeps_its_value() {
+        let (app, token, core, cid) = one_chunk().await;
+        app.oneshot(patch_json(
+            &format!("/api/v1/chunks/{cid}"),
+            &token,
+            serde_json::json!({ "tags": ["fresh"] }),
+        ))
+        .await
+        .unwrap();
+
+        let c = core.store.get_chunk(&cid).await.unwrap();
+        assert_eq!(
+            c.category.as_deref(),
+            Some("concept"),
+            "category was erased"
+        );
+        assert_eq!(c.title.as_deref(), Some("a title"), "title was erased");
+    }
+
+    #[tokio::test]
+    async fn tags_are_trimmed_deduplicated_and_bounded() {
+        let (app, token, core, cid) = one_chunk().await;
+        app.oneshot(patch_json(
+            &format!("/api/v1/chunks/{cid}"),
+            &token,
+            serde_json::json!({ "tags": ["  linux ", "linux", "", "   ", "forensics"] }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            core.store.get_chunk(&cid).await.unwrap().tags,
+            vec!["linux".to_string(), "forensics".to_string()],
+            "a repeated tag is a filter condition evaluated twice for one answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbounded_tag_list_is_refused() {
+        // Tags become payload on every point and a keyword index in Qdrant.
+        let (app, token, _core, cid) = one_chunk().await;
+        let many: Vec<String> = (0..500).map(|i| format!("t{i}")).collect();
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "tags": many }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_overlong_tag_is_refused() {
+        let (app, token, _core, cid) = one_chunk().await;
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "tags": ["x".repeat(500)] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_field_leaves_the_other_fields_alone() {
+        // Validation happens before any write, so a request that fails is a
+        // request that changed nothing.
+        let (app, token, core, cid) = one_chunk().await;
+        let res = app
+            .oneshot(patch_json(
+                &format!("/api/v1/chunks/{cid}"),
+                &token,
+                serde_json::json!({ "title": "a new title", "tags": ["x".repeat(500)] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let c = core.store.get_chunk(&cid).await.unwrap();
+        assert_eq!(c.title.as_deref(), Some("a title"), "a half-applied PATCH");
+        assert_eq!(c.embed_state, EmbedState::Embedded);
+    }
+
+    #[tokio::test]
+    async fn a_blank_title_clears_it_rather_than_storing_whitespace() {
+        let (app, token, core, cid) = one_chunk().await;
+        app.oneshot(patch_json(
+            &format!("/api/v1/chunks/{cid}"),
+            &token,
+            serde_json::json!({ "title": "   " }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(core.store.get_chunk(&cid).await.unwrap().title, None);
     }
 
     #[tokio::test]

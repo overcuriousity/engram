@@ -95,9 +95,12 @@ Tokenisation keeps `-`, `_`, `.` and `/` inside terms and also emits the pieces,
 so `--dry-run` matches `dry-run`, `dry` or `run`. Qdrant supplies the inverse
 document frequency. A query with no indexable term skips the lexical branch.
 
-**One source contributes at most three chunks** to a result list, so a
-forty-chunk document cannot crowd out the rest of the corpus. `ask` opts out —
-an answer often lives in one document.
+**One source leads with at most three chunks**, so a forty-chunk document
+cannot take the top of the list from the rest of the corpus. What that displaces
+goes back on the end in rank order, so the cap reorders a result list rather
+than shortening it — a base holding a single document still answers with as much
+as it has. `ask` opts out of the reordering entirely: an answer often lives in
+one document, and it reads better in rank order.
 
 **Recency and pinning** are applied as a final scoring pass. The weights let
 recency break a near-tie but never overturn a clearly better match. Pinning is a
@@ -107,8 +110,19 @@ tag: `PATCH /api/v1/chunks/{id}` with `{"tags": ["pinned"]}`.
 that have not appeared in results since. Every search records what it showed, so
 surfacing something counts as remembering it.
 
+Result **scores are ranking scores, not similarities**. A hybrid query returns a
+fused rank, a query with no indexable term returns a cosine, and both then carry
+the recency term. They order one result list and mean nothing between two, which
+is why the UI shows a position rather than a number.
+
 Editing a chunk's `tags` or `category` rewrites the Qdrant payload in place.
 Editing `text` or `title` queues a re-embed — those are what the model was shown.
+An absent field in a `PATCH` is left alone; an explicit `null` clears it.
+
+An edit that lands while a chunk is being embedded wins: chunks carry a revision
+that vector-invalidating edits bump, and the in-flight job's "indexed" mark only
+applies while the revision still matches. A losing job leaves the chunk pending,
+which is what gets it embedded again from the text that is actually there.
 
 ## Collection generations
 
@@ -160,6 +174,27 @@ every account your provider knows.
 
 **Local mode** is a single hardcoded credential for development. It refuses a
 non-loopback bind without `--i-know-this-is-insecure`.
+
+## Security posture
+
+- Chunk text is model output rendered into an authenticated session, so it is
+  treated as untrusted: rendered markdown is sanitized with `ammonia` and the
+  URL scheme allowlist is explicit. The one `|safe` interpolation in the
+  templates is the already-sanitized output.
+- API tokens are argon2id hashed and shown exactly once. Sessions are
+  server-side rows, so signing out actually revokes.
+- Local auth mode refuses a non-loopback bind without an explicit override
+  flag.
+- Internal errors (SQL, prompt fragments) never reach clients; they go to the
+  log and the client sees a generic message. Qdrant error bodies are reduced to
+  their message and truncated before they reach a log line.
+- Chunk metadata is bounded on the way in: a chunk carries at most 32 tags of
+  64 characters, because tags become payload on every point and a keyword index
+  in Qdrant.
+- CI runs `cargo audit` on every push. Advisories are ignored one id at a time
+  in `.cargo/audit.toml`, each with a written reachability argument — currently
+  one entry, RUSTSEC-2023-0071 in `rsa` via `openidconnect`, which concerns
+  private-key operations that engram never performs.
 
 ## Backup
 

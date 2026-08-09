@@ -46,6 +46,11 @@ pub struct Chunk {
     pub embed_state: EmbedState,
     pub embed_model: Option<String>,
     pub created_at: i64,
+    /// Bumped by every edit that invalidates the stored vector. Internal
+    /// bookkeeping between the editor and the embed job, so it is not part of
+    /// what the API hands out.
+    #[serde(skip)]
+    pub embed_rev: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +78,7 @@ fn row_to_chunk(r: &sqlx::sqlite::SqliteRow) -> Chunk {
         embed_state: EmbedState::parse(r.get::<String, _>("embed_state").as_str()),
         embed_model: r.get("embed_model"),
         created_at: r.get("created_at"),
+        embed_rev: r.get("embed_rev"),
     }
 }
 
@@ -93,6 +99,7 @@ impl Store {
                 embed_state: EmbedState::Pending,
                 embed_model: None,
                 created_at: now(),
+                embed_rev: 0,
             };
             sqlx::query(
                 "INSERT INTO chunks (id, source_id, ordinal, text, source_span, title, category, tags, embed_state, embed_model, created_at)
@@ -148,9 +155,15 @@ impl Store {
     /// Put every chunk of a source back in the embed queue's path. Re-embedding
     /// only happens for rows that say they still need it, so asking for it has
     /// to say so first.
+    ///
+    /// The revision bump is what makes this safe to run while a worker is
+    /// mid-batch on the same source: that worker's `mark_embedded` no longer
+    /// matches, so it cannot clear the pending state this just set.
     pub async fn reset_embed_state(&self, source_id: &str) -> Result<()> {
         sqlx::query(
-            "UPDATE chunks SET embed_state = 'pending', embed_model = NULL WHERE source_id = ?",
+            "UPDATE chunks
+             SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1
+             WHERE source_id = ?",
         )
         .bind(source_id)
         .execute(&self.pool)
@@ -158,65 +171,91 @@ impl Store {
         Ok(())
     }
 
-    /// Update the fields the embedding model never sees. Deliberately does not
-    /// touch `embed_state`: the stored vector is still correct.
-    pub async fn update_chunk_meta(
-        &self,
-        id: &str,
-        category: Option<&str>,
-        tags: Option<&[String]>,
-    ) -> Result<()> {
-        if let Some(c) = category {
+    /// Set or clear the category. Deliberately does not touch `embed_state`:
+    /// the embedding model is never shown a category, so the stored vector is
+    /// still correct.
+    pub async fn update_chunk_category(&self, id: &str, category: Option<&str>) -> Result<()> {
+        self.expect_updated(
             sqlx::query("UPDATE chunks SET category = ? WHERE id = ?")
-                .bind(c)
+                .bind(category)
                 .bind(id)
                 .execute(&self.pool)
-                .await?;
-        }
-        if let Some(t) = tags {
-            sqlx::query("UPDATE chunks SET tags = ? WHERE id = ?")
-                .bind(serde_json::to_string(t).unwrap_or_else(|_| "[]".into()))
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        }
-        Ok(())
+                .await?,
+        )
     }
 
-    /// The title is part of the text handed to the embedder, so changing it
-    /// invalidates the vector the same way changing the body does.
-    pub async fn update_chunk_title(&self, id: &str, title: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE chunks SET title = ?, embed_state = 'pending', embed_model = NULL WHERE id = ?",
+    /// Replace the tag list. An empty list is a clear, not a no-op.
+    pub async fn update_chunk_tags(&self, id: &str, tags: &[String]) -> Result<()> {
+        self.expect_updated(
+            sqlx::query("UPDATE chunks SET tags = ? WHERE id = ?")
+                .bind(serde_json::to_string(tags).unwrap_or_else(|_| "[]".into()))
+                .bind(id)
+                .execute(&self.pool)
+                .await?,
         )
-        .bind(title)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    }
+
+    /// The title is part of the text handed to the embedder, so setting or
+    /// clearing it invalidates the vector the same way changing the body does.
+    pub async fn update_chunk_title(&self, id: &str, title: Option<&str>) -> Result<()> {
+        self.expect_updated(
+            sqlx::query(
+                "UPDATE chunks
+                 SET title = ?, embed_state = 'pending', embed_model = NULL,
+                     embed_rev = embed_rev + 1
+                 WHERE id = ?",
+            )
+            .bind(title)
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
+        )
     }
 
     pub async fn update_chunk_text(&self, id: &str, text: &str) -> Result<()> {
-        let res = sqlx::query(
-            "UPDATE chunks SET text = ?, embed_state = 'pending', embed_model = NULL WHERE id = ?",
+        self.expect_updated(
+            sqlx::query(
+                "UPDATE chunks
+                 SET text = ?, embed_state = 'pending', embed_model = NULL,
+                     embed_rev = embed_rev + 1
+                 WHERE id = ?",
+            )
+            .bind(text)
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
         )
-        .bind(text)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+    }
+
+    fn expect_updated(&self, res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
         Ok(())
     }
 
-    pub async fn mark_embedded(&self, id: &str, model: &str) -> Result<()> {
-        sqlx::query("UPDATE chunks SET embed_state = 'embedded', embed_model = ? WHERE id = ?")
-            .bind(model)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Report a chunk indexed, but only if it has not been edited since the
+    /// embed job read it.
+    ///
+    /// Returns whether the mark landed. `false` means a newer revision exists
+    /// and the vector just written describes text that is already stale; the
+    /// chunk stays pending, so it will be embedded again from the current row.
+    ///
+    /// That relies on an invariant worth keeping: whoever bumps the revision
+    /// also queues the work. `update_chunk_text`, `update_chunk_title` and
+    /// `reset_embed_state` are only ever called alongside an `enqueue`, so a
+    /// chunk left pending here always has a job coming for it.
+    pub async fn mark_embedded(&self, id: &str, model: &str, rev: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE chunks SET embed_state = 'embedded', embed_model = ?
+             WHERE id = ? AND embed_rev = ?",
+        )
+        .bind(model)
+        .bind(id)
+        .bind(rev)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn mark_embed_failed(&self, id: &str) -> Result<()> {
@@ -349,7 +388,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.mark_embedded(&c.id, "bge-m3").await.unwrap();
+        assert!(s.mark_embedded(&c.id, "bge-m3", c.embed_rev).await.unwrap());
         assert_eq!(
             s.get_chunk(&c.id).await.unwrap().embed_state,
             EmbedState::Embedded
@@ -375,7 +414,9 @@ mod tests {
             .unwrap();
         assert_eq!(s.pending_embed_count(&src.id).await.unwrap(), 2);
 
-        s.mark_embedded(&made[0].id, "m").await.unwrap();
+        s.mark_embedded(&made[0].id, "m", made[0].embed_rev)
+            .await
+            .unwrap();
         s.mark_embed_failed(&made[1].id).await.unwrap();
         assert_eq!(s.pending_embed_count(&src.id).await.unwrap(), 0);
         assert_eq!(s.failed_embed_count(&src.id).await.unwrap(), 1);

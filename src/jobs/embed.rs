@@ -109,9 +109,26 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
     core.vectors.upsert(points).await?;
 
     for c in chunks {
-        core.store
-            .mark_embedded(&c.id, core.embedder.model())
-            .await?;
+        mark_indexed(core, c).await?;
+    }
+    Ok(())
+}
+
+/// Report a chunk indexed, unless it was edited while it was being embedded.
+///
+/// The revision is the one read before the inference call, so an edit that
+/// landed in between wins: the mark does not apply, the chunk stays pending,
+/// and the job the editor queued embeds the text that is actually there.
+async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
+    let landed = core
+        .store
+        .mark_embedded(&chunk.id, core.embedder.model(), chunk.embed_rev)
+        .await?;
+    if !landed {
+        tracing::info!(
+            chunk_id = %chunk.id,
+            "chunk was edited while it was being embedded; leaving it pending"
+        );
     }
     Ok(())
 }
@@ -155,9 +172,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> 
                 payload: payload_of(chunk),
             }])
             .await?;
-        core.store
-            .mark_embedded(&chunk.id, core.embedder.model())
-            .await?;
+        mark_indexed(core, chunk).await?;
         return settle_source(core, &chunk.source_id).await;
     }
 
@@ -453,6 +468,69 @@ mod tests {
         let (_src, ids) = seed(&core, &[&big]).await;
         run_with_limit(&core, &ids[0], 200).await.unwrap();
         assert_eq!(core.vectors.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_edited_mid_embed_is_not_reported_as_indexed() {
+        // The job read the chunk, called a slow endpoint, and is about to write
+        // back "indexed". An edit that landed in that window must win, or the
+        // vector describes text that no longer exists and nothing says so.
+        let core = test_core().await;
+        let (_src, ids) = seed(&core, &["one"]).await;
+        let stale = core.store.get_chunk(&ids[0]).await.unwrap();
+
+        core.store
+            .update_chunk_text(&ids[0], "edited while embedding")
+            .await
+            .unwrap();
+
+        // What the in-flight job would have done, with the revision it read.
+        assert!(
+            !core
+                .store
+                .mark_embedded(&stale.id, "fake-embed", stale.embed_rev)
+                .await
+                .unwrap(),
+            "a stale job overwrote a newer edit"
+        );
+        assert_eq!(
+            core.store.get_chunk(&ids[0]).await.unwrap().embed_state,
+            EmbedState::Pending,
+            "the chunk must stay queued for the text that is actually there"
+        );
+
+        // And the retry, reading the current row, does land.
+        run(&core, &ids[0]).await.unwrap();
+        assert_eq!(
+            core.store.get_chunk(&ids[0]).await.unwrap().embed_state,
+            EmbedState::Embedded
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocessing_a_source_outlives_a_worker_already_embedding_it() {
+        // `reset_embed_state` and an in-flight batch race by construction: both
+        // write the same chunk, and only the revision says which is current.
+        let core = test_core().await;
+        let (src_id, ids) = seed(&core, &["one", "two"]).await;
+        let inflight: Vec<_> = core.store.pending_chunks_for_source(&src_id).await.unwrap();
+
+        core.store.reset_embed_state(&src_id).await.unwrap();
+        for c in &inflight {
+            assert!(
+                !core
+                    .store
+                    .mark_embedded(&c.id, "fake-embed", c.embed_rev)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        assert_eq!(
+            core.store.pending_embed_count(&src_id).await.unwrap(),
+            ids.len() as i64,
+            "the reprocess was silently cancelled by the job it interrupted"
+        );
     }
 
     #[tokio::test]
