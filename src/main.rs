@@ -158,7 +158,12 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let background = core.background.clone();
-    let handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let ticker =
+        engram::core::background::spawn_consolidation_ticker(core.clone(), shutdown_rx.clone());
+    let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    // Joined with the workers so shutdown waits for it too, rather than leaving
+    // a task the runtime drops mid-enqueue.
+    handles.push(ticker);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
