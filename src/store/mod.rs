@@ -3,6 +3,7 @@ pub mod auth;
 pub mod corpora;
 pub mod jobs;
 pub mod segments;
+pub mod shingle;
 
 use crate::config::StoreConfig;
 use crate::error::Result;
