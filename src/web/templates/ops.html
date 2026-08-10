@@ -12,6 +12,38 @@
   <span class="badge badge-muted">vectors: {{ vector_count }}</span>
 </div>
 
+<h3>Captures waiting on a decision</h3>
+{% if parked.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">
+  Stored but not synthesised: each looks like a document already in the base.
+  Nothing is spent on them until you choose.
+</p>
+<table class="grid">
+  <thead><tr><th>Capture</th><th>Looks like</th><th>Match</th><th></th></tr></thead>
+  <tbody>
+  {% for p in parked %}
+    <tr>
+      <td>
+        <a href="/ui/corpora/{{ p.id }}">{{ p.title }}</a>
+        <span class="muted mono">{{ p.bytes }} B</span>
+      </td>
+      <td><a href="/ui/corpora/{{ p.other_id }}">{{ p.other_title }}</a></td>
+      <td class="mono">{{ p.percent }}%</td>
+      <td>
+        <form method="post" action="/ui/ops/corpora/{{ p.id }}/resolve" class="row" style="gap:0.25rem">
+          <button class="btn btn-sm" type="submit" name="action" value="replace">Replace the old one</button>
+          <button class="btn btn-sm" type="submit" name="action" value="keep_both">Keep both</button>
+          <button class="btn btn-sm" type="submit" name="action" value="discard">Discard this</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h3>Failed jobs</h3>
 {% if failed.is_empty() %}
   <p class="muted">None.</p>

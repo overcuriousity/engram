@@ -203,6 +203,24 @@ async fn reprocess(
 }
 
 #[derive(serde::Deserialize)]
+struct ResolveBody {
+    action: crate::core::ingest::NearDupeAction,
+}
+
+/// Act on a capture parked as a near-duplicate. The decision is an operator's:
+/// nothing here compares the two documents again, it only carries out what was
+/// chosen.
+async fn resolve_near_dupe(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<Json<serde_json::Value>> {
+    st.core.resolve_near_duplicate(&cid, body.action).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
 pub struct SearchParams {
     pub q: String,
     pub limit: Option<usize>,
@@ -393,6 +411,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/corpora", post(ingest).get(list_corpora))
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
         .route("/corpora/{id}/reprocess", post(reprocess))
+        .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
@@ -521,6 +540,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_parked_capture_is_resolved_over_the_api() {
+        let (app, token, core) = app_token_and_core().await;
+        let body: String = (0..200)
+            .map(|i| format!("step {i}: run the mount command and read its output"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        core.ingest(&body, "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(&body.replacen("step 7:", "step seven:", 1), "web", None)
+            .await
+            .unwrap();
+        assert!(second.near_duplicate.is_some());
+
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/corpora/{}/resolve", second.id),
+                &token,
+                serde_json::json!({ "action": "keep_both" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            crate::store::corpora::CorpusStatus::Raw
+        );
+    }
+
+    #[tokio::test]
+    async fn resolving_a_corpus_that_is_not_parked_is_a_bad_request() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core.ingest("plain text", "web", None).await.unwrap();
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/corpora/{}/resolve", out.id),
+                &token,
+                serde_json::json!({ "action": "discard" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

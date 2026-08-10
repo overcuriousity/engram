@@ -98,6 +98,17 @@ pub struct FlaggedRow {
     pub segment_idx: Option<i64>,
 }
 
+/// A parked capture, with enough of the corpus it resembles to decide without
+/// opening both.
+pub struct ParkedRow {
+    pub id: String,
+    pub title: String,
+    pub bytes: usize,
+    pub other_id: String,
+    pub other_title: String,
+    pub percent: i64,
+}
+
 pub struct TokenRow {
     pub id: String,
     pub name: String,
@@ -253,6 +264,7 @@ struct OpsTemplate {
     vector_count: u64,
     failed: Vec<crate::store::jobs::FailedJob>,
     flagged: Vec<FlaggedRow>,
+    parked: Vec<ParkedRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -600,9 +612,29 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         })
         .collect();
 
+    // A parked capture is the one corpus state no worker advances. It has to be
+    // shown here or it sits unprocessed with nothing saying why.
+    let mut parked = Vec::new();
+    for c in st.core.store.parked_corpora(50).await? {
+        let other_id = c.near_dupe_of.clone().unwrap_or_default();
+        let other_title = match st.core.store.get_corpus(&other_id).await {
+            Ok(o) => o.title_hint.unwrap_or_else(|| "untitled".into()),
+            Err(_) => "(deleted)".into(),
+        };
+        parked.push(ParkedRow {
+            percent: (c.near_dupe_score.unwrap_or(0.0) * 100.0).round() as i64,
+            bytes: c.raw_text.len(),
+            title: c.title_hint.clone().unwrap_or_else(|| "untitled".into()),
+            id: c.id,
+            other_id,
+            other_title,
+        });
+    }
+
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
         flagged,
+        parked,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -655,6 +687,21 @@ async fn retry_job(
     .bind(job_id)
     .execute(&st.core.store.pool)
     .await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct ResolveForm {
+    action: crate::core::ingest::NearDupeAction,
+}
+
+async fn resolve_near_dupe_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+    Form(form): Form<ResolveForm>,
+) -> Result<Response> {
+    st.core.resolve_near_duplicate(&cid, form.action).await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -833,6 +880,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/jobs/{id}/retry", post(retry_job))
+        .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
 }
 
 #[cfg(test)]
