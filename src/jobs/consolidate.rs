@@ -77,6 +77,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         return Ok(Outcome::default());
     }
 
+    // Finish what was started before looking for duplicates: a sweep over a
+    // half-ingested corpus is judging a base that is not there yet.
+    crate::jobs::reconcile::run(core).await?;
+
     // Deletions clear these as they happen; the sweep repeats it because a
     // hidden artifact pointing at nothing is invisible to search and to every
     // page that could put it back, and nothing else would ever notice.

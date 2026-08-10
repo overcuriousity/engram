@@ -1,5 +1,6 @@
 pub mod consolidate;
 pub mod embed;
+pub mod reconcile;
 pub mod synthesize;
 
 use crate::core::Core;
