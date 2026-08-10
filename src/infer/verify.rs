@@ -104,8 +104,44 @@ pub fn missing_literals(
     all.sort();
     all.dedup();
     all.into_iter()
-        .filter(|lit| !haystack.contains(&normalize(lit)))
+        .filter(|lit| {
+            if haystack.contains(&normalize(lit)) {
+                return false;
+            }
+            match without_label(lit) {
+                Some(bare) => !haystack.contains(&normalize(bare)),
+                None => true,
+            }
+        })
+        .map(|lit| match without_label(&lit) {
+            // Report what was actually looked for and not found, so the note on
+            // the artifact names the command rather than the model's framing.
+            Some(bare) => bare.to_string(),
+            None => lit,
+        })
         .collect()
+}
+
+/// A literal with a label the model put in front of it removed.
+///
+/// `Binär: 0010 1001 1111 1001`, for a source that says
+/// `wird binär 0010 1001 1111 1001`, invents nothing: the digits — the part
+/// that matters if somebody retypes them — are verbatim, and the label is
+/// presentation. Reporting it as a possibly-invented command buries the real
+/// misses under the model's formatting habits.
+///
+/// A colon *and a space*, and one word before it. That is what separates a
+/// label from a command's own punctuation: `backup:/etc/fstab` and
+/// `8080:8080` close up, `Binär: …` and `Run: …` do not. Stripping the first
+/// kind would let a rewritten hostname pass as verbatim, which is the failure
+/// this whole check exists to catch.
+fn without_label(lit: &str) -> Option<&str> {
+    let (label, rest) = lit.split_once(": ")?;
+    let rest = rest.trim();
+    if rest.is_empty() || label.split_whitespace().count() != 1 {
+        return None;
+    }
+    Some(rest)
 }
 
 /// Where in the window a chunk's own lines actually appear.
@@ -321,6 +357,40 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
             WINDOW,
         );
         assert_eq!(missing, vec!["wipefs --all /dev/sdX".to_string()]);
+    }
+
+    #[test]
+    fn a_label_the_model_added_is_not_a_missing_literal() {
+        // Line 635 of a real source read "wird binär 0010 1001 1111 1001". The
+        // model fenced the digits and wrote "Binär:" in front of them, and the
+        // check reported an invented command — a review task about formatting,
+        // filed among the ones that matter.
+        let window = "Die Zahl 29 F9 wird binär 0010 1001 1111 1001 gespeichert.";
+        let chunk = "```\nBinär: 0010 1001 1111 1001\n```";
+        assert!(missing_literals(chunk, &[], window).is_empty());
+    }
+
+    #[test]
+    fn an_invented_command_is_still_caught_when_it_carries_a_label() {
+        let window = "Unmount the device first.";
+        let chunk = "```\nRun: wipefs --all /dev/sdX\n```";
+        assert_eq!(
+            missing_literals(chunk, &[], window),
+            vec!["wipefs --all /dev/sdX".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_command_whose_own_colon_looks_like_a_label_is_not_weakened() {
+        // `backup:/etc/fstab` must not be reduced to `/etc/fstab`, or a
+        // rewritten hostname would stop being a missing literal. A label is
+        // written with a space after the colon; a host and a port are not.
+        let window = "Copy /etc/fstab from the box.";
+        let chunk = "```\nbackup:/etc/fstab\n```";
+        assert_eq!(
+            missing_literals(chunk, &[], window),
+            vec!["backup:/etc/fstab".to_string()]
+        );
     }
 
     #[test]
