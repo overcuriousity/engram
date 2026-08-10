@@ -352,6 +352,16 @@ struct ScrollResult {
 }
 
 #[derive(Deserialize)]
+/// The two payload keys a point write must not clobber, as currently stored.
+/// `None` means the key is absent, which for `superseded` is every point
+/// written before consolidation existed.
+#[derive(Debug, Clone, Copy, Default)]
+struct StoredBookkeeping {
+    last_seen_at: Option<i64>,
+    superseded: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct ScrolledPoint {
     id: Value,
     #[serde(default)]
@@ -601,17 +611,21 @@ impl QdrantVectors {
         Ok(res.count)
     }
 
-    /// The `last_seen_at` already stored for these chunks, for the points that
-    /// have one. Only asked for when a caller is about to overwrite payloads it
-    /// built without the stamp, and only for the one key, so this is a small
-    /// read next to the write it protects.
-    async fn stored_last_seen(
+    /// The bookkeeping keys already stored for these chunks: when the chunk was
+    /// last shown, and whether consolidation has hidden it.
+    ///
+    /// Both are written by code that knows nothing about the other — `touch`
+    /// sets one, the sweep sets the other, and the embed job rebuilding a
+    /// payload knows neither. Only asked for when a caller is about to
+    /// overwrite payloads it built without them, and only for those two keys,
+    /// so this is a small read next to the write it protects.
+    async fn stored_bookkeeping(
         &self,
         points: &[VectorPoint],
-    ) -> Result<std::collections::HashMap<String, i64>> {
+    ) -> Result<std::collections::HashMap<String, StoredBookkeeping>> {
         let wanted: Vec<&VectorPoint> = points
             .iter()
-            .filter(|p| p.payload.last_seen_at.is_none())
+            .filter(|p| p.payload.last_seen_at.is_none() || p.payload.superseded.is_none())
             .collect();
         if wanted.is_empty() {
             return Ok(Default::default());
@@ -632,7 +646,7 @@ impl QdrantVectors {
                 &format!("/collections/{}/points", self.alias),
                 Some(json!({
                     "ids": ids,
-                    "with_payload": ["last_seen_at"],
+                    "with_payload": ["last_seen_at", "superseded"],
                     "with_vector": false,
                 })),
             )
@@ -644,9 +658,13 @@ impl QdrantVectors {
             let Some(artifact_id) = by_uuid.get(uuid) else {
                 continue;
             };
-            if let Some(seen) = p.payload.get("last_seen_at").and_then(Value::as_i64) {
-                out.insert((*artifact_id).to_string(), seen);
-            }
+            out.insert(
+                (*artifact_id).to_string(),
+                StoredBookkeeping {
+                    last_seen_at: p.payload.get("last_seen_at").and_then(Value::as_i64),
+                    superseded: p.payload.get("superseded").and_then(Value::as_bool),
+                },
+            );
         }
         Ok(out)
     }
@@ -959,14 +977,20 @@ impl VectorStore for QdrantVectors {
         // A point write replaces the whole payload, unlike `set_payload` and
         // `touch`, which merge. A writer that does not know when the chunk was
         // last shown would therefore clear the stamp, and `resurface` would
-        // offer a chunk read yesterday as forgotten — so carry the stored one
-        // forward for every point that arrives without it.
-        let stored = self.stored_last_seen(&points).await?;
+        // offer a chunk read yesterday as forgotten. The same hazard applies to
+        // `superseded`, and costs more: clearing it puts an artifact the sweep
+        // hid straight back into results, on every re-embed. So carry both
+        // forward for every point that arrives without them.
+        let stored = self.stored_bookkeeping(&points).await?;
         let mut body = Vec::with_capacity(points.len());
         for p in points {
             let mut payload = p.payload.clone();
+            let old = stored.get(&payload.artifact_id);
             if payload.last_seen_at.is_none() {
-                payload.last_seen_at = stored.get(&payload.artifact_id).copied();
+                payload.last_seen_at = old.and_then(|s| s.last_seen_at);
+            }
+            if payload.superseded.is_none() {
+                payload.superseded = old.and_then(|s| s.superseded);
             }
             let payload =
                 serde_json::to_value(&payload).map_err(|e| Error::Vector(e.to_string()))?;
@@ -1234,24 +1258,33 @@ impl VectorStore for QdrantVectors {
             )
             .await?;
 
-        let mut ids: Vec<Value> = Vec::new();
+        let mut ids: Vec<&str> = Vec::new();
         for p in &res.pairs {
             if p.score < min_score {
                 continue;
             }
-            ids.push(p.a.clone());
-            ids.push(p.b.clone());
+            // Ids come back as JSON strings for UUID points. Anything else is a
+            // point this collection did not get from engram.
+            let (Some(a), Some(b)) = (p.a.as_str(), p.b.as_str()) else {
+                continue;
+            };
+            ids.push(a);
+            ids.push(b);
         }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        ids.sort_by_key(|v| v.to_string());
+        ids.sort_unstable();
         ids.dedup();
 
         // `point_uuid` is one-way, so the artifact id has to come back from the
         // payload. One retrieve for the whole sweep, asking for the single key
         // rather than dragging every candidate's text across the wire.
-        let looked_up: Value = self
+        //
+        // `call` already unwraps the `result` envelope, so this deserializes
+        // straight into the point list — reaching for `result` again here is
+        // what made every lookup miss and the sweep return nothing at all.
+        let found: Vec<ScrolledPoint> = self
             .call(
                 Method::POST,
                 &format!("/collections/{}/points", self.alias),
@@ -1260,18 +1293,14 @@ impl VectorStore for QdrantVectors {
             .await?;
         let mut by_uuid: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        if let Some(list) = looked_up.get("result").and_then(|r| r.as_array()) {
-            for p in list {
-                let (Some(id), Some(aid)) = (
-                    p.get("id"),
-                    p.get("payload")
-                        .and_then(|pl| pl.get("artifact_id"))
-                        .and_then(|v| v.as_str()),
-                ) else {
-                    continue;
-                };
-                by_uuid.insert(id.to_string(), aid.to_string());
-            }
+        for p in &found {
+            let (Some(uuid), Some(aid)) = (
+                p.id.as_str(),
+                p.payload.get("artifact_id").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            by_uuid.insert(uuid.to_string(), aid.to_string());
         }
 
         let mut out: Vec<super::NearPair> = res
@@ -1279,10 +1308,12 @@ impl VectorStore for QdrantVectors {
             .iter()
             .filter(|p| p.score >= min_score)
             .filter_map(|p| {
-                let a = by_uuid.get(&p.a.to_string())?;
-                let b = by_uuid.get(&p.b.to_string())?;
+                let a = by_uuid.get(p.a.as_str()?)?;
+                let b = by_uuid.get(p.b.as_str()?)?;
                 // A point cannot be a duplicate of itself, however the matrix
-                // reports it.
+                // reports it. The matrix also reports (a,b) and (b,a) as
+                // separate rows, which `NearPair::new` plus the dedup below
+                // collapse into one.
                 (a != b).then(|| super::NearPair::new(a, b, p.score))
             })
             .collect();
