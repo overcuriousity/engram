@@ -180,6 +180,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_model_is_shown_the_caveats_of_every_excerpt() {
+        // A caveat is the condition under which an artifact does not apply, and
+        // an answer that quotes a destructive command without it is worse than
+        // no answer. Caveats are not in the vector payload, so this asserts the
+        // store lookup that puts them back.
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(crate::infer::fake::EchoCompleter);
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "Format the device with mkfs.".into(),
+                    corpus_span: None,
+                    title: Some("Format a device".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec!["Destroys every existing file on the device.".into()],
+                }],
+            )
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &made[0].id).await.unwrap();
+
+        let out = core.ask(&req("how do I format a device")).await.unwrap();
+        assert!(
+            out.answer
+                .contains("Caveat: Destroys every existing file on the device."),
+            "the caveat never reached the model: {}",
+            out.answer
+        );
+    }
+
+    #[tokio::test]
     async fn ask_reports_chunks_dropped_for_budget() {
         let core = test_core().await;
         // FakeCompleter reports a 4096-token context; oversized excerpts force

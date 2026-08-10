@@ -371,6 +371,25 @@ impl Completer for FakeCompleter {
     }
 }
 
+/// A completer that answers with the prompt it was handed.
+///
+/// What `ask` puts in front of the model is the whole of what the model can
+/// use, and it is otherwise invisible: the reply is a fake, so a test asserting
+/// on it proves nothing about the excerpts. This makes the prompt the thing
+/// under test.
+#[derive(Default)]
+pub struct EchoCompleter;
+
+#[async_trait]
+impl Completer for EchoCompleter {
+    async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+        Ok(user.to_string())
+    }
+    fn context_tokens(&self) -> usize {
+        4096
+    }
+}
+
 /// A completer that answers from a script and counts how often it was asked.
 ///
 /// The consolidation tests are largely about *not* calling the model, so what
