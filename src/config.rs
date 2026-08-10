@@ -235,6 +235,13 @@ pub struct OidcConfig {
     pub allowed_subs: Vec<String>,
     #[serde(default)]
     pub allowed_emails: Vec<String>,
+    /// Group names from the provider's `groups` claim. Nextcloud's OIDC
+    /// provider app only sends this when the admin has turned on group
+    /// provisioning for the client; without it the claim is simply absent; and
+    /// a subject in a listed group is admitted the same as one listed by
+    /// subject or email.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
 }
 fn default_scopes() -> Vec<String> {
     vec!["openid".into(), "profile".into(), "email".into()]

@@ -58,8 +58,7 @@ pub struct ArtifactView {
     pub embed_badge: &'static str,
 }
 
-/// A chunk beside the source lines it claims — the search pane, and the
-/// review surface for anything verification flagged.
+/// A chunk beside the source lines it claims.
 pub struct ArtifactDetail {
     pub id: String,
     pub title: String,

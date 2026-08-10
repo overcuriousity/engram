@@ -125,7 +125,7 @@ mode = "local"
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 
-# Production. The allowlist is mandatory: leaving both lists empty denies
+# Production. The allowlist is mandatory: leaving all three lists empty denies
 # everyone rather than admitting every account your identity provider knows.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
@@ -135,6 +135,11 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 # scopes = ["openid", "profile", "email"]
 # allowed_subs = ["sub-abc123"]
 # allowed_emails = ["you@example.com"]
+# Membership in any of these groups also admits a subject. Requires the
+# provider to actually send a `groups` claim — on Nextcloud's OIDC provider
+# app that means turning on group provisioning for this client; a request
+# `scope` entry alone does not produce it.
+# allowed_groups = ["engram-users"]
 
 # Duplicate hygiene. Nothing here ever rewrites an artifact or deletes one on a
 # similarity score: it hides, flags, or asks.

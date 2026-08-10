@@ -453,16 +453,6 @@ impl Store {
         self.set_artifact_flags(id, &[], None).await
     }
 
-    pub async fn flagged_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE flags IS NOT NULL ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
-    }
-
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS n FROM artifacts WHERE corpus_id = ? AND embed_state = ?",
@@ -549,7 +539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flags_round_trip_and_list_only_flagged_chunks() {
+    async fn flags_round_trip() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -565,16 +555,15 @@ mod tests {
         .await
         .unwrap();
 
-        let flagged = s.flagged_artifacts(10).await.unwrap();
-        assert_eq!(flagged.len(), 1);
-        assert_eq!(flagged[0].flags, vec!["literals_unverified".to_string()]);
+        let flagged = s.get_artifact(&made[1].id).await.unwrap();
+        assert_eq!(flagged.flags, vec!["literals_unverified".to_string()]);
         assert_eq!(
-            flagged[0].flag_detail.as_deref(),
+            flagged.flag_detail.as_deref(),
             Some("missing literal: --dry-run")
         );
 
         s.clear_artifact_flags(&made[1].id).await.unwrap();
-        assert!(s.flagged_artifacts(10).await.unwrap().is_empty());
+        assert!(s.get_artifact(&made[1].id).await.unwrap().flags.is_empty());
     }
 
     #[tokio::test]
