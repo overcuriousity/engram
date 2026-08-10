@@ -1413,11 +1413,7 @@ mod tests {
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(
-                res.status(),
-                StatusCode::SEE_OTHER,
-                "{uri} was unprotected"
-            );
+            assert_eq!(res.status(), StatusCode::SEE_OTHER, "{uri} was unprotected");
             assert_eq!(
                 res.headers().get("location").unwrap(),
                 "/auth/login?go=1",

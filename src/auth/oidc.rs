@@ -152,7 +152,10 @@ impl OidcClient {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
 
-        if cfg.allowed_subs.is_empty() && cfg.allowed_emails.is_empty() && cfg.allowed_groups.is_empty() {
+        if cfg.allowed_subs.is_empty()
+            && cfg.allowed_emails.is_empty()
+            && cfg.allowed_groups.is_empty()
+        {
             return Err(Error::Validation(
                 "auth.oidc has an empty allowlist: set allowed_subs, allowed_emails or \
                  allowed_groups, otherwise every account in your identity provider could sign in"
@@ -285,8 +288,10 @@ impl OidcClient {
         // not turn into a failed sign-in for someone the ID token itself
         // vouches for.
         if email.is_none() || groups.is_empty() {
-            match client.user_info(tokens.access_token().clone(), Some(claims.subject().clone()))
-            {
+            match client.user_info(
+                tokens.access_token().clone(),
+                Some(claims.subject().clone()),
+            ) {
                 Ok(req) => match req
                     .request_async::<GroupClaims, _, openidconnect::core::CoreGenderClaim>(
                         &self.http,
