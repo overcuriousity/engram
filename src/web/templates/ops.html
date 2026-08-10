@@ -12,6 +12,60 @@
   <span class="badge badge-muted">vectors: {{ vector_count }}</span>
 </div>
 
+<h3>Pairs worth a look</h3>
+{% if pairs.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">
+  Two artifacts covering the same ground. Which one is current is a judgement
+  only you can make, so nothing here has been changed.
+</p>
+<table class="grid">
+  <thead><tr><th>Match</th><th>One</th><th>The other</th><th>Finding</th><th></th></tr></thead>
+  <tbody>
+  {% for p in pairs %}
+    <tr>
+      <td class="mono">
+        {{ p.percent }}%
+        {% if p.contradiction %}<span class="badge badge-warning">disagrees</span>{% endif %}
+      </td>
+      <td><a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a></td>
+      <td><a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a></td>
+      <td class="muted">{% if let Some(d) = p.detail %}{{ d }}{% else %}—{% endif %}</td>
+      <td>
+        <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
+          <button class="btn btn-sm" type="submit">Dismiss</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Hidden as near-identical</h3>
+{% if superseded.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">Still stored and still readable; kept out of results only.</p>
+<table class="grid">
+  <thead><tr><th>Hidden</th><th>Kept</th><th></th></tr></thead>
+  <tbody>
+  {% for s in superseded %}
+    <tr>
+      <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
+      <td><a href="/ui/artifacts/{{ s.winner_id }}">{{ s.winner_title }}</a></td>
+      <td>
+        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/unsupersede">
+          <button class="btn btn-sm" type="submit">Put it back</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h3>Captures waiting on a decision</h3>
 {% if parked.is_empty() %}
   <p class="muted">None.</p>

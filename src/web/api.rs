@@ -220,6 +220,21 @@ async fn resolve_near_dupe(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// What consolidation has decided and what it is still asking about.
+async fn consolidation(
+    State(st): State<AppState>,
+    _id: Identity,
+) -> Result<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "superseded": st.core.store.superseded_artifacts(100).await?,
+        "pairs": st
+            .core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 100)
+            .await?,
+    })))
+}
+
 #[derive(serde::Deserialize)]
 pub struct SearchParams {
     pub q: String,
@@ -416,6 +431,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/search", get(search))
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
+        .route("/consolidation", get(consolidation))
         .route(
             "/artifacts/{id}",
             get(get_artifact)

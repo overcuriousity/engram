@@ -69,6 +69,9 @@ pub struct ArtifactDetail {
     pub tags: Vec<String>,
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
+    /// The artifact this one was hidden in favour of. Opening a hidden artifact
+    /// by link has to say why it is not in results, or it reads as a bug.
+    pub superseded_by: Option<String>,
     pub corpus_id: String,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
@@ -107,6 +110,26 @@ pub struct ParkedRow {
     pub other_id: String,
     pub other_title: String,
     pub percent: i64,
+}
+
+/// An artifact the sweep hid, with the one it lost to.
+pub struct SupersededRow {
+    pub id: String,
+    pub title: String,
+    pub winner_id: String,
+    pub winner_title: String,
+}
+
+/// A pair waiting on a person.
+pub struct PairRow {
+    pub id: i64,
+    pub percent: i64,
+    pub a_id: String,
+    pub a_title: String,
+    pub b_id: String,
+    pub b_title: String,
+    pub detail: Option<String>,
+    pub contradiction: bool,
 }
 
 pub struct TokenRow {
@@ -265,6 +288,8 @@ struct OpsTemplate {
     failed: Vec<crate::store::jobs::FailedJob>,
     flagged: Vec<FlaggedRow>,
     parked: Vec<ParkedRow>,
+    superseded: Vec<SupersededRow>,
+    pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -631,10 +656,62 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
+    // A title is what makes two near-identical artifacts tellable apart at a
+    // glance; falling back to the opening of the body beats an id.
+    let title_of = |c: &crate::store::artifacts::Chunk| {
+        c.title
+            .clone()
+            .unwrap_or_else(|| c.text.chars().take(60).collect())
+    };
+
+    let mut superseded = Vec::new();
+    for c in st.core.store.superseded_artifacts(50).await? {
+        let winner_id = c.superseded_by.clone().unwrap_or_default();
+        let winner_title = match st.core.store.get_artifact(&winner_id).await {
+            Ok(w) => title_of(&w),
+            Err(_) => "(deleted)".to_string(),
+        };
+        superseded.push(SupersededRow {
+            title: title_of(&c),
+            id: c.id,
+            winner_id,
+            winner_title,
+        });
+    }
+
+    // Confirmed contradictions lead: they are the ones that mean something in
+    // the base is wrong rather than merely repeated.
+    let mut pairs = Vec::new();
+    for state in [
+        crate::store::pairs::PairState::Contradiction,
+        crate::store::pairs::PairState::Pending,
+    ] {
+        for p in st.core.store.pairs_by_state(state, 50).await? {
+            let (Ok(a), Ok(b)) = (
+                st.core.store.get_artifact(&p.a_id).await,
+                st.core.store.get_artifact(&p.b_id).await,
+            ) else {
+                continue;
+            };
+            pairs.push(PairRow {
+                id: p.id,
+                percent: (p.score * 100.0).round() as i64,
+                a_title: title_of(&a),
+                b_title: title_of(&b),
+                a_id: p.a_id,
+                b_id: p.b_id,
+                detail: p.detail,
+                contradiction: state == crate::store::pairs::PairState::Contradiction,
+            });
+        }
+    }
+
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
         flagged,
         parked,
+        superseded,
+        pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -702,6 +779,27 @@ async fn resolve_near_dupe_ui(
     Form(form): Form<ResolveForm>,
 ) -> Result<Response> {
     st.core.resolve_near_duplicate(&cid, form.action).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn unsupersede_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    st.core.unsupersede(&aid).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn dismiss_pair_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+) -> Result<Response> {
+    st.core
+        .store
+        .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -788,6 +886,7 @@ pub(crate) async fn build_artifact_detail(
         tags: c.tags,
         flags: c.flags,
         flag_detail: c.flag_detail,
+        superseded_by: c.superseded_by,
         corpus_id: c.corpus_id,
         segment_idx: c.segment_idx,
         slice_label: slice.label,
@@ -881,6 +980,8 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/jobs/{id}/retry", post(retry_job))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
+        .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
+        .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
 }
 
 #[cfg(test)]
@@ -1030,12 +1131,18 @@ mod tests {
     }
 
     async fn app_with_session() -> (axum::Router, String) {
+        let (app, cookie, _core) = app_session_and_core().await;
+        (app, cookie)
+    }
+
+    async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
         let cid = crate::store::new_id();
         core.store
             .insert_session(&cid, "user-1", None, 3600)
             .await
             .unwrap();
+        let handle = core.clone();
         let state = crate::web::state::AppState {
             core,
             auth: std::sync::Arc::new(crate::web::state::AuthContext {
@@ -1046,7 +1153,11 @@ mod tests {
                 secure_cookies: false,
             }),
         };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        (
+            crate::web::router(state),
+            format!("engram_session={cid}"),
+            handle,
+        )
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -1594,6 +1705,120 @@ mod tests {
         let html = body_of(res).await;
         assert!(html.contains("Queue"));
         assert!(html.contains("API tokens"));
+    }
+
+    /// One corpus with `n` artifacts, titled so the ops page can be searched
+    /// for them.
+    async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<String> {
+        let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+        let new: Vec<crate::store::artifacts::NewArtifact> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                ordinal: i as i64,
+                text: format!("body of {t}"),
+                corpus_span: None,
+                title: Some((*t).to_string()),
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+            })
+            .collect();
+        core.store
+            .insert_artifacts(&src.id, &new)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ops_lists_a_superseded_artifact_and_can_undo_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["the loser", "the keeper"]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("the loser") && html.contains("the keeper"),
+            "the superseded artifact is not listed"
+        );
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{}/unsupersede", ids[0]),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "undo did not clear the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_lists_a_pending_pair_and_can_dismiss_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("left one") && html.contains("right one"));
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/dismiss", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

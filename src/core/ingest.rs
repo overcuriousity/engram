@@ -142,6 +142,15 @@ impl Core {
         Ok(())
     }
 
+    /// Put a superseded artifact back in search. The row first, then the
+    /// payload, in the same order the sweep wrote them.
+    pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
+        self.store.set_superseded_by(artifact_id, None).await?;
+        self.vectors.set_superseded(artifact_id, false).await?;
+        tracing::info!(artifact_id, "restored a superseded artifact to search");
+        Ok(())
+    }
+
     /// Vectors first: an orphaned row is invisible, but an orphaned vector is
     /// still returned by search.
     pub async fn delete_corpus(&self, id: &str) -> Result<()> {

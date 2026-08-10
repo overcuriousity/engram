@@ -3,6 +3,22 @@
     <a href="/ui/corpora/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
   </div>
 
+  {% if let Some(winner) = d.superseded_by %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Hidden from results</b>
+      <div>Something near-identical and newer
+        (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
+      <div class="chips">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+          <button class="btn btn-sm" type="submit">Put it back</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   {% if !d.flags.is_empty() %}
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>
