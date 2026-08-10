@@ -51,6 +51,57 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
     )
 }
 
+/// The judge is asked one question and given no room to be helpful.
+///
+/// It is not asked which artifact is right, nor to merge them, nor to rewrite
+/// anything. Deciding which of two contradictory artifacts is current needs
+/// context the base does not hold — what the reader is actually running — and
+/// is a judgement only they can make. All this call does is tell them there is
+/// a judgement waiting.
+pub const JUDGE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
+
+A contradiction is a concrete disagreement about the same thing: a different version, number, date, path, flag, default, or step order for the same subject.
+
+These are NOT contradictions:
+- The same fact in different words.
+- Different levels of detail about the same thing.
+- Two different subjects that happen to use similar language.
+- One artifact mentioning something the other simply does not cover.
+
+Reply with JSON only, no commentary, in exactly this shape:
+
+{"contradicts": true, "detail": "..."}
+
+- contradicts: true only for a concrete disagreement, as above.
+- detail: when true, one short sentence naming the two conflicting values. Omit it when false."#;
+
+pub fn judge_prompt(a: &str, b: &str) -> String {
+    format!("----- ARTIFACT A -----\n{a}\n----- ARTIFACT B -----\n{b}\n----- END -----")
+}
+
+#[derive(serde::Deserialize)]
+struct Judgement {
+    contradicts: bool,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+/// A reply that cannot be read is an error, not a verdict.
+///
+/// Defaulting to "contradicts" would fill the review queue with noise an
+/// operator has to clear by hand; defaulting to "no" would quietly close real
+/// conflicts. Failing leaves the pair pending, and the next sweep asks again.
+pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>)> {
+    let j: Judgement = serde_json::from_str(extract_json(body)).map_err(|e| {
+        Error::MalformedLlmOutput(format!("judge reply was not the expected JSON: {e}"))
+    })?;
+    let detail = j
+        .detail
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty() && j.contradicts);
+    Ok((j.contradicts, detail))
+}
+
 #[derive(serde::Deserialize)]
 struct Envelope {
     artifacts: Vec<RawArtifact>,
@@ -342,6 +393,37 @@ mod tests {
         // rather than silently dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
+    }
+
+    #[test]
+    fn a_judgement_parses() {
+        let (yes, detail) =
+            parse_judgement(r#"{"contradicts":true,"detail":"one says 1.2, the other 1.4"}"#)
+                .unwrap();
+        assert!(yes);
+        assert_eq!(detail.as_deref(), Some("one says 1.2, the other 1.4"));
+    }
+
+    #[test]
+    fn a_negative_judgement_carries_no_detail() {
+        let (yes, detail) = parse_judgement(r#"{"contradicts":false}"#).unwrap();
+        assert!(!yes);
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn a_judgement_wrapped_in_prose_and_fences_still_parses() {
+        // The same models that fence the synthesis reply fence this one.
+        let (yes, _) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn an_unparsable_judgement_is_an_error_not_a_yes() {
+        // Defaulting to "contradicts" would fill the review queue with noise;
+        // defaulting to "no" would hide real conflicts. Neither: it fails, the
+        // pair stays pending, and the next sweep tries again.
+        assert!(parse_judgement("I could not decide.").is_err());
     }
 
     #[test]

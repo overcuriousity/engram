@@ -22,6 +22,8 @@ pub struct Outcome {
     pub examined: usize,
     pub superseded: usize,
     pub queued: usize,
+    pub judged: usize,
+    pub contradictions: usize,
 }
 
 /// Disjoint-set over artifact ids, so a run of near-identical pairs collapses
@@ -151,15 +153,101 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    if out.superseded > 0 || out.queued > 0 {
+    if cfg.judge {
+        let (judged, contradictions) = judge_pending(core).await?;
+        out.judged = judged;
+        out.contradictions = contradictions;
+    }
+
+    if out.superseded > 0 || out.queued > 0 || out.judged > 0 {
         tracing::info!(
             examined = out.examined,
             superseded = out.superseded,
             queued = out.queued,
+            judged = out.judged,
+            contradictions = out.contradictions,
             "consolidation sweep finished"
         );
     }
     Ok(out)
+}
+
+/// Ask the model about pending pairs, but only the ones that could possibly
+/// disagree, and only up to the sweep's budget.
+///
+/// Returns how many calls were made and how many found a contradiction. A
+/// failed call leaves its pair pending on purpose: a dead endpoint must never
+/// look like a clean bill of health.
+async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
+    let pending = core
+        .store
+        .pairs_by_state(crate::store::pairs::PairState::Pending, 200)
+        .await?;
+
+    let (mut judged, mut contradictions) = (0usize, 0usize);
+    for p in pending {
+        if judged >= core.consolidate.max_judgements {
+            tracing::info!(
+                budget = core.consolidate.max_judgements,
+                "judge budget spent; the rest wait for the next sweep"
+            );
+            break;
+        }
+        let (Ok(a), Ok(b)) = (
+            core.store.get_artifact(&p.a_id).await,
+            core.store.get_artifact(&p.b_id).await,
+        ) else {
+            continue;
+        };
+
+        // The whole economic argument: most near pairs have no value in common
+        // to disagree about, and a model call is minutes on this hardware.
+        if !crate::infer::facts::may_disagree(&a.text, &b.text) {
+            core.store
+                .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
+                .await?;
+            continue;
+        }
+
+        judged += 1;
+        let reply = match core
+            .completer
+            .complete(
+                crate::infer::prompt::JUDGE_SYSTEM,
+                &crate::infer::prompt::judge_prompt(&a.text, &b.text),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(pair = p.id, error = %e, "judge call failed; pair stays pending");
+                continue;
+            }
+        };
+
+        match crate::infer::prompt::parse_judgement(&reply) {
+            Ok((true, detail)) => {
+                contradictions += 1;
+                core.store
+                    .set_pair_state(
+                        p.id,
+                        crate::store::pairs::PairState::Contradiction,
+                        detail.as_deref(),
+                    )
+                    .await?;
+                tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+            }
+            Ok((false, _)) => {
+                core.store
+                    .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
+                    .await?;
+            }
+            Err(e) => {
+                tracing::warn!(pair = p.id, error = %e, "judge reply unreadable; pair stays pending");
+            }
+        }
+    }
+    Ok((judged, contradictions))
 }
 
 #[cfg(test)]
@@ -318,6 +406,130 @@ mod tests {
             }
         }
         assert_eq!(live, 1, "exactly one artifact should have survived");
+    }
+
+    /// Two artifacts about the same thing that give a different version.
+    async fn disagreeing(core: &crate::core::Core) -> Vec<String> {
+        seed(
+            core,
+            &[
+                ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
+                ("engram needs Rust 1.30.0 to build.", [0.93, 0.37]),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_judge_is_off_by_default() {
+        let core = test_core().await;
+        disagreeing(&core).await;
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.queued, 1);
+        assert_eq!(out.judged, 0, "the judge ran without being asked for");
+    }
+
+    #[tokio::test]
+    async fn an_enabled_judge_marks_a_real_contradiction() {
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":true,"detail":"1.21.4 versus 1.30.0"}"#.into(),
+        ]));
+        disagreeing(&core).await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!((out.judged, out.contradictions), (1, 1), "{out:?}");
+        let found = core
+            .store
+            .pairs_by_state(PairState::Contradiction, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].detail.as_deref(), Some("1.21.4 versus 1.30.0"));
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_no_facts_to_disagree_about_never_reaches_the_model() {
+        // The prefilter is the whole economic argument for this feature: a
+        // model call is minutes, and most near pairs have nothing to judge.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(
+            completer.calls(),
+            0,
+            "the prefilter let a factless pair through"
+        );
+        assert_eq!(out.judged, 0);
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::NoConflict, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a cleared pair must leave the pending queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_judge_stops_at_its_budget() {
+        // One sweep must not be able to occupy the GPU for an hour.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.consolidate.max_judgements = 1;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":false}"#.into(),
+            r#"{"contradicts":false}"#.into(),
+            r#"{"contradicts":false}"#.into(),
+        ]));
+        core.completer = completer.clone();
+        seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.93, 0.37]),
+                ("timeout is 90 seconds", [0.94, 0.34]),
+            ],
+        )
+        .await;
+
+        run(&core).await.unwrap();
+        assert_eq!(completer.calls(), 1, "the budget was ignored");
+    }
+
+    #[tokio::test]
+    async fn a_failed_judgement_leaves_the_pair_pending() {
+        // A dead endpoint must not silently clear a queue of real conflicts.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.completer =
+            std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+                "not json".into()
+            ]));
+        disagreeing(&core).await;
+
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

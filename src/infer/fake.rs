@@ -371,6 +371,45 @@ impl Completer for FakeCompleter {
     }
 }
 
+/// A completer that answers from a script and counts how often it was asked.
+///
+/// The consolidation tests are largely about *not* calling the model, so what
+/// they assert on is the call count as much as the reply.
+pub struct ScriptedCompleter {
+    replies: std::sync::Mutex<std::collections::VecDeque<String>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedCompleter {
+    pub fn new(replies: Vec<String>) -> Self {
+        Self {
+            replies: std::sync::Mutex::new(replies.into()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Completer for ScriptedCompleter {
+    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| crate::error::Error::Inference {
+                role: "ask",
+                detail: "the script ran out of replies".into(),
+            })
+    }
+    fn context_tokens(&self) -> usize {
+        4096
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
