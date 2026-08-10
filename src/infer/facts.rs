@@ -19,23 +19,64 @@ use std::collections::BTreeSet;
 /// Bare numbers count: a timeout, a port, a count of retries. Words do not —
 /// two artifacts using different prose for the same thing is what synthesis is
 /// supposed to produce, not a contradiction.
+/// Suffixes that make a bare number a measurement rather than a word.
+///
+/// A closed list on purpose. Accepting any trailing letters would make `3rd`
+/// and `2nd` values, and an ordinal is prose — every step-by-step artifact has
+/// one, so every pair would reach the model.
+const UNITS: &[&str] = &[
+    "s", "ms", "us", "ns", "m", "h", "d", "w", "y", "b", "k", "kb", "mb", "gb", "tb", "pb", "kib",
+    "mib", "gib", "tib", "hz", "khz", "mhz", "ghz", "px", "x",
+];
+
+/// A version is written `v1.21.4` as often as `1.21.4`, and the `v` is not what
+/// makes two artifacts agree or differ. Dropping it here means one artifact
+/// saying `v1.21.4` and another saying `1.21.4` compare as the same value
+/// rather than as two, which is what keeps them off the model's desk.
+fn devee(token: &str) -> &str {
+    match token.strip_prefix(['v', 'V']) {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => token,
+    }
+}
+
 fn is_fact(token: &str) -> bool {
-    if !token.starts_with(|c: char| c.is_ascii_digit()) {
+    let t = devee(token);
+    if !t.starts_with(|c: char| c.is_ascii_digit()) {
         return false;
     }
-    // A leading digit plus only digits and separators: 30, 1.21.4, 2024-03-01,
-    // 8080. Anything with letters in it — `3rd`, `x86_64` — is vocabulary
-    // rather than a value.
-    token
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | ':'))
+    // Digits and separators only: 30, 1.21.4, 2024-03-01, 8080.
+    let separated = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | ':' | '/' | '_'))
+    };
+    if separated(t) {
+        return true;
+    }
+    // Otherwise the letters have to earn their place. A number carrying a unit
+    // is a value — `30s`, `512mb` — and so is anything a separator has already
+    // marked as structured: `8080/tcp`, `2.0-rc1`, `1.21.4-beta`. What this
+    // still refuses is a bare number glued to a word: `3rd`, `x86_64`.
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (digits, rest) = t.split_at(split);
+    if digits.is_empty() {
+        return false;
+    }
+    if rest.starts_with(['.', '-', ':', '/', '_']) {
+        return true;
+    }
+    UNITS.contains(&rest.to_ascii_lowercase().as_str())
 }
 
 /// Every value-shaped token in the text, stripped of surrounding punctuation.
+///
+/// Punctuation is trimmed from the edges only: `8080/tcp` and `1.21.4` keep
+/// their insides, and a trailing full stop or a wrapping backtick goes.
 pub fn fact_tokens(text: &str) -> BTreeSet<String> {
     text.split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|t| is_fact(t))
+        .map(|t| devee(t).to_ascii_lowercase())
         .collect()
 }
 
@@ -113,6 +154,38 @@ mod tests {
     #[test]
     fn one_artifact_with_no_facts_never_disagrees() {
         assert!(!may_disagree("Prose only.", "Requires 1.2.3."));
+    }
+
+    #[test]
+    fn versions_carrying_a_v_are_facts_and_equal_the_bare_form() {
+        let f = fact_tokens("Needs v1.21.4 of the toolchain.");
+        assert!(f.contains("1.21.4"), "{f:?}");
+        assert!(!may_disagree(
+            "Needs v1.21.4 of the toolchain.",
+            "Needs 1.21.4 of the toolchain.",
+        ));
+        assert!(may_disagree(
+            "Needs v1.21.4 of the toolchain.",
+            "Needs v1.30.0 of the toolchain.",
+        ));
+    }
+
+    #[test]
+    fn a_number_with_a_unit_is_a_value() {
+        // The most common way a timeout or a size is actually written. Before
+        // these counted, two artifacts disagreeing about `30s` versus `90s`
+        // carried no fact tokens at all and were filed as no-conflict.
+        let f = fact_tokens("The timeout is 30s and the batch is 512MB.");
+        assert!(f.contains("30s"), "{f:?}");
+        assert!(f.contains("512mb"), "{f:?}");
+        assert!(may_disagree("Wait 30s.", "Wait 90s."));
+    }
+
+    #[test]
+    fn a_separator_marks_the_rest_as_structured() {
+        let f = fact_tokens("Listens on 8080/tcp, tagged 2.0-rc1.");
+        assert!(f.contains("8080/tcp"), "{f:?}");
+        assert!(f.contains("2.0-rc1"), "{f:?}");
     }
 
     #[test]
