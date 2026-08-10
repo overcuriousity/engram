@@ -3,11 +3,16 @@
 {% block content %}
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `keyup` only
-   for the box: a radio does not need a debounce and the box does. #}
+   for the box: a radio does not need a debounce and the box does. `change` is
+   scoped to the radios because it bubbles, and the box fires its own on blur,
+   which would repeat the search a second time for nothing. `submit` is listed
+   so htmx cancels it: a single-field form submits implicitly on Enter, and a
+   full page load would throw away the open pane. #}
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
-      hx-trigger="change,
+      hx-trigger="change from:#filters input[type=radio],
                   keyup changed delay:250ms from:input[name=q],
-                  search from:input[name=q]{% if !q.is_empty() %},
+                  search from:input[name=q],
+                  submit{% if !q.is_empty() %},
                   load{% endif %}"
       hx-indicator="#search-spinner">
   <input class="input" type="search" name="q" placeholder="Search by meaning…" autofocus
@@ -25,7 +30,7 @@
       <label class="chip">
         <input type="radio" name="category" value="{{ f.value }}"
                {% if category == f.value %}checked{% endif %}>
-        <span>{{ f.value }} <span class="muted mono">{{ f.count }}</span></span>
+        <span>{{ f.value }}{% if f.count > 0 %} <span class="muted mono">{{ f.count }}</span>{% endif %}</span>
       </label>
       {% endfor %}
     </div>
@@ -41,7 +46,7 @@
       <label class="chip">
         <input type="radio" name="tags" value="{{ f.value }}"
                {% if tag == f.value %}checked{% endif %}>
-        <span>{{ f.value }} <span class="muted mono">{{ f.count }}</span></span>
+        <span>{{ f.value }}{% if f.count > 0 %} <span class="muted mono">{{ f.count }}</span>{% endif %}</span>
       </label>
       {% endfor %}
     </div>

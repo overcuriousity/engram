@@ -62,6 +62,14 @@ self.addEventListener('fetch', function (event) {
     fetch(event.request).catch(function () {
       return caches.open(CACHE).then(function (cache) {
         return cache.match(OFFLINE_URL);
+      }).then(function (cached) {
+        // A miss — install's put failed, or site data was cleared while the
+        // registration survived — resolves undefined, and respondWith(undefined)
+        // throws. Build the page on the spot instead of losing it.
+        return cached || new Response(OFFLINE_PAGE, {
+          status: 503,
+          headers: { 'content-type': 'text/html; charset=utf-8' }
+        });
       });
     })
   );

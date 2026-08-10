@@ -314,7 +314,7 @@ async fn search_page(
     // A vector store that cannot answer must not take the search page down with
     // it: without chips the page is what it was yesterday, with them it is
     // better, and neither is worth a 500.
-    let facets = st
+    let mut facets = st
         .core
         .vectors
         .facets(FACET_LIMIT)
@@ -323,16 +323,38 @@ async fn search_page(
             tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
             Default::default()
         });
+    // The form is single-select, so only the first tag of a multi-tag deep
+    // link can be shown as chosen. The query still runs with all of them.
+    let tag = split_tags(p.tags).first().cloned().unwrap_or_default();
+    let category = p.category.unwrap_or_default();
+    // A deep link can name a value that falls outside the top `FACET_LIMIT`, or
+    // one nothing carries at all. The rail is narrowed by it either way, so the
+    // chip row has to show it: otherwise the page reads as unfiltered while the
+    // results are not, and there is no chip to click to get back out.
+    ensure_facet(&mut facets.categories, &category);
+    ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
         theme: "light".into(),
         q: p.q,
         facets,
-        // The form is single-select, so only the first tag of a multi-tag deep
-        // link can be shown as chosen. The query still runs with all of them.
-        tag: split_tags(p.tags).first().cloned().unwrap_or_default(),
-        category: p.category.unwrap_or_default(),
+        tag,
+        category,
     })
     .into_response())
+}
+
+/// Append `value` to a facet row if the store did not report it. `count` is 0
+/// because the two reasons it is missing — nothing carries it, or it was
+/// crowded out of the top `FACET_LIMIT` — are not distinguishable from here;
+/// the template renders no number rather than a wrong one.
+fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
+    if value.is_empty() || row.iter().any(|f| f.value == value) {
+        return;
+    }
+    row.push(crate::vector::FacetCount {
+        value: value.to_string(),
+        count: 0,
+    });
 }
 
 #[derive(serde::Deserialize)]
@@ -1097,6 +1119,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deep_linked_filter_the_facets_do_not_list_still_gets_a_chip() {
+        // `recipe` is a category nothing carries, so the payload index never
+        // reports it — but the rail is narrowed by it all the same. Without a
+        // chip the page would read as unfiltered over a filtered rail, with no
+        // way to click back out.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let html = flat(&get(&app, "/ui/search?q=alpha&category=recipe", &cookie).await);
+        assert!(
+            html.contains(r#"name="category" value="recipe" checked"#),
+            "a filter outside the facet list must still render, and selected"
+        );
+        assert!(
+            !html.contains(r#"name="category" value="" checked"#),
+            "`all` must not look selected while a filter is applied"
+        );
+    }
+
+    #[tokio::test]
     async fn the_search_page_renders_without_chips_when_there_is_nothing_to_narrow() {
         let (app, cookie) = app_with_session().await;
         let html = get(&app, "/ui/search", &cookie).await;
@@ -1146,6 +1186,35 @@ mod tests {
             "an artifact must not be listed as its own neighbour"
         );
         assert!(d.related.len() <= RELATED_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn a_related_link_works_on_the_standalone_artifact_page() {
+        // The detail partial is both the search pane's content and the whole of
+        // `/ui/artifacts/{id}`. A neighbour link that named `#pane` would be
+        // dead on the standalone page, which is the one a shared link opens.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("no result to open")
+            .to_string();
+
+        let page = flat(&get(&app, &format!("/ui/artifacts/{id}"), &cookie).await);
+        assert!(
+            page.contains("Related"),
+            "the standalone page must list neighbours"
+        );
+        assert!(
+            !page.contains(r##"hx-target="#pane""##),
+            "no pane exists on this page, so nothing may target one"
+        );
+        assert!(
+            page.contains(r#"hx-target="closest [data-terms]""#),
+            "a neighbour must swap the detail it is listed under"
+        );
     }
 
     #[tokio::test]

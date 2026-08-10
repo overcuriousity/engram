@@ -36,12 +36,16 @@
 
       {% if !d.related.is_empty() %}
       {# Nearest by the vector already stored for this artifact: no embedding
-         call, no completion. Targets the pane, exactly as a rail entry does. #}
+         call, no completion. Swaps this detail for the neighbour's in place,
+         rather than naming `#pane`: the same partial is also the whole of the
+         standalone artifact page, where no pane exists and a missing target
+         would leave the link dead. #}
       <div class="pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
         <a class="rail-item" href="/ui/artifacts/{{ r.id }}"
-           hx-get="/ui/artifacts/{{ r.id }}" hx-target="#pane" hx-swap="innerHTML"
+           hx-get="/ui/artifacts/{{ r.id }}"
+           hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">
           <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
           <div class="rail-snippet">{{ r.snippet }}</div>
