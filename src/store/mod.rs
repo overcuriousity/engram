@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod corpora;
 pub mod jobs;
+pub mod pairs;
 pub mod segments;
 pub mod shingle;
 
