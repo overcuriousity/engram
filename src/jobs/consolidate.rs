@@ -67,6 +67,16 @@ impl Clusters {
 /// not depend on clock resolution. Newer is the right default because the thing
 /// most often re-captured is a document that has since been updated — and Ops
 /// has an undo for when it is not.
+/// Is the whole of one artifact inside the other, whitespace aside?
+///
+/// Not a similarity — containment. A score says two texts are alike; this says
+/// one of them adds nothing, which is the only ground on which the sweep hides
+/// something below `auto_supersede`.
+fn contains_normalized(long: &str, short: &str) -> bool {
+    let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    !short.trim().is_empty() && n(long).contains(&n(short))
+}
+
 fn keeper(members: &[Chunk]) -> &Chunk {
     members
         .iter()
@@ -165,6 +175,36 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         };
         if a.superseded_by.is_some() || b.superseded_by.is_some() {
             continue;
+        }
+
+        // One synthesis call emitting the same passage twice: the shorter text
+        // is wholly inside the longer, and both came out of the same document.
+        // That is a defect in one artifact rather than two sources saying
+        // different things, and nothing is lost by hiding it — the survivor
+        // says everything it said, Ops lists it, and one press undoes it.
+        //
+        // Same corpus is the whole of the condition. Two documents that share a
+        // sentence are two sources, and hiding one of those on a 0.9 similarity
+        // is what `auto_supersede` deliberately refuses to do.
+        if a.corpus_id == b.corpus_id {
+            let (long, short) = if a.text.len() >= b.text.len() {
+                (&a, &b)
+            } else {
+                (&b, &a)
+            };
+            if contains_normalized(&long.text, &short.text) {
+                core.store
+                    .set_superseded_by(&short.id, Some(&long.id))
+                    .await?;
+                core.vectors.set_superseded(&short.id, true).await?;
+                out.superseded += 1;
+                tracing::info!(
+                    superseded = %short.id,
+                    by = %long.id,
+                    "hid a passage one synthesis call emitted twice"
+                );
+                continue;
+            }
         }
 
         // Two artifacts that state no value differently have nothing for a
@@ -365,6 +405,52 @@ mod tests {
             .collect();
         core.vectors.upsert(points).await.unwrap();
         made.into_iter().map(|c| c.id).collect()
+    }
+
+    /// One artifact under a corpus of its own, for the cases where "same
+    /// document" is the thing under test.
+    async fn seed_into_new_corpus(
+        core: &crate::core::Core,
+        text: &str,
+        vector: [f32; 2],
+    ) -> String {
+        let src = core.store.insert_corpus(text, "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .upsert(vec![VectorPoint {
+                vector: vector.to_vec(),
+                sparse: Default::default(),
+                payload: VectorPayload {
+                    artifact_id: made[0].id.clone(),
+                    corpus_id: made[0].corpus_id.clone(),
+                    text: text.to_string(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    created_at: made[0].created_at,
+                    last_seen_at: None,
+                    superseded: None,
+                },
+            }])
+            .await
+            .unwrap();
+        made[0].id.clone()
     }
 
     #[tokio::test]
@@ -731,6 +817,71 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn one_synthesis_call_emitting_a_passage_twice_resolves_itself() {
+        // Same corpus, same call, one text wholly inside the other. That is a
+        // defect in one artifact rather than two sources disagreeing, and it
+        // sat on the review queue because it scores below auto_supersede.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                (
+                    "Bind mounts attach a directory elsewhere. Use mount --bind for it.",
+                    [1.0, 0.0],
+                ),
+                ("Bind mounts attach a directory elsewhere.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.superseded, 1, "{out:?}");
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[1])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[0].as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn containment_across_two_corpora_is_left_alone() {
+        // Two documents that happen to share a sentence are two sources, and
+        // this is exactly the case auto_supersede refuses to act on below 0.95.
+        let core = test_core().await;
+        let a = seed(
+            &core,
+            &[(
+                "Bind mounts attach a directory elsewhere. Use mount --bind for it.",
+                [1.0, 0.0],
+            )],
+        )
+        .await;
+        let b = seed_into_new_corpus(
+            &core,
+            "Bind mounts attach a directory elsewhere.",
+            [0.93, 0.37],
+        )
+        .await;
+
+        run(&core).await.unwrap();
+        for id in [&a[0], &b] {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "two documents sharing a sentence are two sources"
+            );
+        }
     }
 
     #[tokio::test]
