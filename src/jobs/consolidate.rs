@@ -77,6 +77,11 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         return Ok(Outcome::default());
     }
 
+    // Deletions clear these as they happen; the sweep repeats it because a
+    // hidden artifact pointing at nothing is invisible to search and to every
+    // page that could put it back, and nothing else would ever notice.
+    core.heal_dangling_supersessions().await?;
+
     let pairs = core
         .vectors
         .near_pairs(cfg.sample, cfg.per_point, cfg.review_min)
@@ -104,6 +109,13 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             continue;
         };
         if c.superseded_by.is_some() {
+            // The row says hidden but the vector store still offered this point
+            // as a pair candidate, so its payload flag never landed — the sweep
+            // was interrupted between the two writes. Ops has been listing this
+            // artifact as hidden while every search still returned it. Finish
+            // the write that was lost; it is idempotent and costs no inference.
+            tracing::info!(artifact_id = %id, "re-applying a superseded flag the vector store is missing");
+            core.vectors.set_superseded(id, true).await?;
             continue;
         }
         let root = clusters.find(id);
@@ -199,6 +211,18 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         ) else {
             continue;
         };
+
+        // A pair queued in the review band can have a member superseded by a
+        // later sweep, once a re-embed moves the score above `auto_supersede`.
+        // Judging it would spend the scarcest thing here — a model call — to
+        // post a contradiction about an artifact that is no longer in results.
+        // The supersession is the answer to this pair.
+        if a.superseded_by.is_some() || b.superseded_by.is_some() {
+            core.store
+                .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
+                .await?;
+            continue;
+        }
 
         // The whole economic argument: most near pairs have no value in common
         // to disagree about, and a model call is minutes on this hardware.
@@ -322,6 +346,131 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].payload.artifact_id, ids[1]);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_finishes_a_supersession_whose_payload_write_was_lost() {
+        // The row and the payload cannot be written atomically. A crash between
+        // them used to be permanent: the next sweep skipped the artifact
+        // because its row said hidden, so the flag never landed and the
+        // artifact stayed listed as hidden on Ops while every search returned
+        // it, forever.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the hidden artifact is still in search: {:?}",
+            hits.iter()
+                .map(|h| &h.payload.artifact_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].payload.artifact_id, ids[1]);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_survivor_puts_the_artifact_it_hid_back() {
+        // `superseded_by` has no foreign key behind it. Deleting the keeper
+        // left the loser pointing at nothing, hidden from search in favour of a
+        // copy that no longer exists — the surviving text becomes invisible,
+        // which is the loss this whole feature exists to prevent.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        run(&core).await.unwrap();
+        let mut hidden = None;
+        for id in &ids {
+            if core
+                .store
+                .get_artifact(id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+            {
+                hidden = Some(id.clone());
+            }
+        }
+        let hidden = hidden.expect("the sweep hid nothing");
+        let keeper = ids.iter().find(|id| **id != hidden).unwrap().clone();
+
+        core.store.delete_artifact(&keeper).await.unwrap();
+        core.vectors
+            .delete_artifacts(std::slice::from_ref(&keeper))
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&hidden)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the artifact still points at a keeper that is gone"
+        );
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the last copy never came back to search");
+        assert_eq!(hits[0].payload.artifact_id, hidden);
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_member_was_since_hidden_never_reaches_the_model() {
+        // A model call is the scarcest thing in this system. Spending one to
+        // rule on an artifact that is no longer in results buys nothing, and
+        // posts a contradiction about something nobody can see.
+        let mut core = test_core().await;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        // Queue the pair with the judge off, so the only call this test can
+        // count is the one the second sweep would make.
+        let ids = disagreeing(&core).await;
+        run(&core).await.unwrap();
+        core.consolidate.judge = true;
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A later sweep hides one member, as a re-embed moving the score above
+        // `auto_supersede` would.
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+        core.vectors.set_superseded(&ids[0], true).await.unwrap();
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(completer.calls(), 0, "the judge ruled on a hidden artifact");
+        assert_eq!(out.judged, 0);
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the answered pair must leave the pending queue"
+        );
     }
 
     #[tokio::test]

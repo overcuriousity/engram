@@ -1148,7 +1148,14 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/query", self.alias),
                 Some(json!({
                     "query": { "sample": "random" },
-                    "filter": { "must": [
+                    // `must_not` for the same reason as in `build_filter`: a
+                    // point written before consolidation existed carries no
+                    // `superseded` key, and matching `false` would drop it.
+                    // Without this the forgotten list offers exactly the
+                    // duplicates the sweep just took out of search.
+                    "filter": {
+                      "must_not": [ { "key": "superseded", "match": { "value": true } } ],
+                      "must": [
                         { "key": "created_at", "range": { "lt": older_than } },
                         // Nested so this reads as AND-of-OR. A chunk written
                         // before the stamp existed has no `last_seen_at` at
@@ -1157,7 +1164,8 @@ impl VectorStore for QdrantVectors {
                             { "key": "last_seen_at", "range": { "lt": unseen_since } },
                             { "is_empty": { "key": "last_seen_at" } },
                         ] },
-                    ] },
+                      ],
+                    },
                     "limit": limit,
                     "with_payload": true,
                 })),
@@ -1209,6 +1217,11 @@ impl VectorStore for QdrantVectors {
             "query": point_uuid(artifact_id),
             "using": DENSE,
             "limit": limit + 1,
+            // A superseded artifact is out of search, so it must be out of the
+            // related pane too: it is by construction near-identical to its
+            // keeper, which means it would lead that list on every artifact it
+            // was hidden in favour of.
+            "filter": { "must_not": [ { "key": "superseded", "match": { "value": true } } ] },
             "with_payload": true,
         });
         let res: QueryResult = match self

@@ -391,6 +391,28 @@ impl Store {
         Ok(())
     }
 
+    /// Clear every `superseded_by` that names an artifact which no longer
+    /// exists, and say which artifacts were freed.
+    ///
+    /// `superseded_by` is a plain column with no foreign key, so deleting a
+    /// corpus — or reprocessing one, which deletes and re-creates every
+    /// artifact under new ids — can leave the losing side of a pair pointing at
+    /// nothing. That artifact is hidden from search forever, in favour of a
+    /// copy that is gone: the surviving text becomes invisible, which is the
+    /// exact loss consolidation exists to avoid. The caller clears the matching
+    /// payload flags.
+    pub async fn clear_dangling_superseded(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "UPDATE artifacts SET superseded_by = NULL
+              WHERE superseded_by IS NOT NULL
+                AND superseded_by NOT IN (SELECT id FROM artifacts)
+              RETURNING id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
     /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(

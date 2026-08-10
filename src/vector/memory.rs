@@ -109,7 +109,8 @@ impl VectorStore for MemoryVectors {
         let r = self.points.read().unwrap();
         Ok(r.values()
             .filter(|p| {
-                p.payload.created_at < older_than
+                p.payload.superseded != Some(true)
+                    && p.payload.created_at < older_than
                     && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
             })
             .take(limit)
@@ -182,7 +183,7 @@ impl VectorStore for MemoryVectors {
         };
         let mut hits: Vec<SearchHit> = r
             .values()
-            .filter(|p| p.payload.artifact_id != artifact_id)
+            .filter(|p| p.payload.artifact_id != artifact_id && p.payload.superseded != Some(true))
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: cosine(&seed.vector, &p.vector),
@@ -677,6 +678,33 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].payload.artifact_id, "a");
+    }
+
+    #[tokio::test]
+    async fn a_superseded_artifact_is_offered_neither_as_forgotten_nor_as_related() {
+        // Hidden means hidden everywhere a reader browses. A superseded
+        // artifact is by construction near-identical to its keeper, so it would
+        // lead the related pane of the very artifact it lost to, and the
+        // forgotten list would offer exactly what the sweep just took out.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.99, 0.1], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        v.set_superseded("b", true).await.unwrap();
+
+        let near = v.neighbours("a", 10).await.unwrap();
+        assert!(
+            near.iter().all(|h| h.payload.artifact_id != "b"),
+            "a hidden artifact was offered as related"
+        );
+        let old = v.resurface(10, i64::MAX, i64::MAX).await.unwrap();
+        assert!(
+            old.iter().all(|h| h.payload.artifact_id != "b"),
+            "a hidden artifact was offered as forgotten"
+        );
     }
 
     #[tokio::test]

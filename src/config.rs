@@ -250,6 +250,8 @@ pub struct LocalConfig {
 pub enum ConfigError {
     #[error("config: {0}")]
     Load(#[from] config::ConfigError),
+    #[error("config: {0}")]
+    Invalid(String),
 }
 
 impl Config {
@@ -268,8 +270,28 @@ impl Config {
             )
             .build()?;
         let cfg: Config = raw.try_deserialize()?;
+        cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         Ok(cfg)
+    }
+
+    /// Rules that a config can satisfy syntactically and still be wrong.
+    ///
+    /// The thresholds are the only ones so far, and they are worth refusing to
+    /// start over: `auto_supersede` at or below `review_min` means every pair
+    /// the sweep finds is hidden without asking, with no review band left at
+    /// all. That destroys knowledge quietly, and the operator who typed one
+    /// number would find out from search results going missing weeks later.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let c = &self.consolidate;
+        if c.auto_supersede <= c.review_min {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}), \
+                 or every pair found is hidden without review",
+                c.auto_supersede, c.review_min
+            )));
+        }
+        Ok(())
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file
@@ -415,6 +437,23 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             let cfg = Config::load(Some(&p)).unwrap();
             assert_eq!(cfg.infer.embed.dim, 768);
         });
+    }
+
+    #[test]
+    fn thresholds_that_leave_no_review_band_are_refused() {
+        // `auto_supersede` at or below `review_min` hides every pair the sweep
+        // finds without asking anyone. The operator would find out from search
+        // results going missing, weeks later.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nreview_min = 0.88\nauto_supersede = 0.85\n"),
+        );
+        assert!(matches!(
+            Config::load(Some(&p)),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 
     #[test]

@@ -211,7 +211,18 @@ artifacts are clustered before a winner is picked, so a run of three collapses
 onto one survivor rather than forming a chain that points at something hidden.
 Between `review_min` and that, the pair goes on a queue instead, because two
 genuinely distinct artifacts about one subsystem sit around 0.88 and hiding at
-that score would cost knowledge rather than duplication.
+that score would cost knowledge rather than duplication. `auto_supersede` at or
+below `review_min` would hide everything the sweep finds with no review band at
+all, so engram refuses to start on it rather than letting search quietly thin
+out for weeks.
+
+**Hiding is reversible, including by accident.** The row and the vector payload
+cannot be written together, so each sweep re-applies any flag whose payload
+write was lost, and each undo clears the payload before the row — leaving, in
+both directions, a state Ops still lists and one more press finishes. Deleting
+or reprocessing the surviving artifact frees whatever it hid: an artifact
+pointing at a keeper that no longer exists would otherwise be the last copy of
+that text, hidden from search in favour of nothing.
 
 **Nothing is ever merged.** A merged artifact is synthetic text standing where a
 stored passage used to be, with no segment to verify it against and no corpus

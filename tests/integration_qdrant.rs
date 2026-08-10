@@ -1373,6 +1373,44 @@ async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
 
 #[tokio::test]
 #[ignore]
+async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
+    // Hidden has to mean hidden everywhere a reader browses. A superseded
+    // artifact is near-identical to its keeper by construction, so it would
+    // lead the related pane of the artifact it lost to; and the forgotten list
+    // would hand back exactly the duplicates the sweep just took out of search.
+    let v = fresh("engram_it_superseded_browse", 4).await;
+    v.upsert(vec![
+        aged("keeper", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+        aged("hidden", vec![0.99, 0.01, 0.0, 0.0], 60, &[]),
+    ])
+    .await
+    .unwrap();
+    v.set_superseded("hidden", true).await.unwrap();
+
+    let cutoff = now_secs() - 31 * 86_400;
+    let old: Vec<String> = v
+        .resurface(10, cutoff, cutoff)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert_eq!(old, vec!["keeper".to_string()], "got {old:?}");
+
+    let near: Vec<String> = v
+        .neighbours("keeper", 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert!(near.is_empty(), "a hidden artifact was related: {near:?}");
+
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn near_pairs_skips_what_has_already_been_superseded() {
     // Otherwise every sweep re-finds the pair it resolved last time, and the
     // review queue never empties.

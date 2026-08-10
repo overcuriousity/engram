@@ -215,6 +215,11 @@ struct CaptureTemplate {
 struct CapturedTemplate {
     id: String,
     duplicate: bool,
+    /// Set when the capture was parked as a near-duplicate. Without it the page
+    /// says "processing" for a capture that nothing will ever process, and the
+    /// only hint is a queue on Ops the writer has no reason to open.
+    near_dupe_of: Option<String>,
+    near_dupe_percent: i64,
 }
 
 #[derive(Template)]
@@ -340,6 +345,12 @@ async fn capture_submit(
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
+        near_dupe_percent: out
+            .near_duplicate
+            .as_ref()
+            .map(|n| (n.similarity * 100.0).round() as i64)
+            .unwrap_or(0),
+        near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
     })
     .into_response())
 }
@@ -1469,6 +1480,39 @@ mod tests {
                 "POST {uri} was unprotected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_parked_capture_says_so_instead_of_claiming_it_is_processing() {
+        // The confirmation is the only page the writer sees. Telling them a
+        // parked capture is "processing" means it silently never is.
+        let (app, cookie, core) = app_session_and_core().await;
+        let body: String = (0..200)
+            .map(|i| format!("step {i} run the mount command and read its output"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        core.ingest(&body, "web", None).await.unwrap();
+
+        // Hand-encoded rather than pulling in a dependency: the body is plain
+        // words, so spaces and newlines are all there is to escape.
+        let edited = body
+            .replacen("step 7 ", "step seven ", 1)
+            .replace(' ', "+")
+            .replace('\n', "%0A");
+        let res = app
+            .oneshot(form("/ui/capture", &cookie, &format!("text={edited}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = flat(&body_of(res).await);
+        assert!(
+            html.contains("waiting on a decision"),
+            "the parked capture rendered as an ordinary one: {html}"
+        );
+        assert!(
+            !html.contains("badge-accent\">processing"),
+            "a parked capture must not claim to be processing: {html}"
+        );
     }
 
     #[tokio::test]

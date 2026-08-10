@@ -127,8 +127,26 @@ impl Core {
                     // The older corpus goes first. If this fails the new one is
                     // still parked, which is a state an operator can retry from;
                     // releasing it first would leave both live on a failure.
-                    self.delete_corpus(&other).await?;
-                    tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
+                    //
+                    // Unless it is already gone: `near_dupe_of` can name a
+                    // corpus that has since been deleted — including another
+                    // parked capture that was discarded, since a parked corpus
+                    // is still matchable. Failing there would leave the only
+                    // way out of the queue behind a 404, with nothing on the
+                    // page to say that "keep both" is now the same decision.
+                    match self.delete_corpus(&other).await {
+                        Ok(()) => {
+                            tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
+                        }
+                        Err(Error::NotFound) => {
+                            tracing::info!(
+                                corpus_id = %src.id,
+                                replaced = %other,
+                                "the corpus this capture replaces was already deleted"
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 self.store.set_near_dupe(&src.id, None, None).await?;
                 self.store
@@ -142,12 +160,33 @@ impl Core {
         Ok(())
     }
 
-    /// Put a superseded artifact back in search. The row first, then the
-    /// payload, in the same order the sweep wrote them.
+    /// Put a superseded artifact back in search.
+    ///
+    /// The payload flag first, then the row — the reverse of the order the
+    /// sweep wrote them, and for the same reason. The two stores cannot be
+    /// written atomically, so the intermediate state has to be one an operator
+    /// can act on: with the flag cleared and the row still set, the artifact is
+    /// listed on Ops with its restore button and the next press finishes the
+    /// job. Clearing the row first loses the only page that offers the undo
+    /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
-        self.store.set_superseded_by(artifact_id, None).await?;
         self.vectors.set_superseded(artifact_id, false).await?;
+        self.store.set_superseded_by(artifact_id, None).await?;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
+        Ok(())
+    }
+
+    /// Put back anything that was hidden in favour of an artifact which has
+    /// since been deleted. Cheap — one statement, and vector writes only for
+    /// rows it actually freed — so it runs after every deletion.
+    pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
+        for id in self.store.clear_dangling_superseded().await? {
+            self.vectors.set_superseded(&id, false).await?;
+            tracing::info!(
+                artifact_id = %id,
+                "restored an artifact whose surviving copy was deleted"
+            );
+        }
         Ok(())
     }
 
@@ -157,6 +196,7 @@ impl Core {
         self.store.get_corpus(id).await?;
         self.vectors.delete_by_corpus(id).await?;
         self.store.delete_corpus(id).await?;
+        self.heal_dangling_supersessions().await?;
         tracing::info!(corpus_id = %id, "deleted source and its vectors");
         Ok(())
     }
@@ -177,9 +217,17 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // Reprocessing a parked capture is a decision to process it, so
+                // the park has to be lifted with it. Leaving the flag set means
+                // a fully synthesized and embedded corpus sits on the review
+                // queue forever, where the discard button now deletes real work.
+                self.store.set_near_dupe(&src.id, None, None).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
+                // The artifacts just deleted may have been the surviving half of
+                // a consolidated pair; whatever they hid comes back.
+                self.heal_dangling_supersessions().await?;
                 self.store
                     .enqueue(Stage::Synthesize, "corpus", &src.id)
                     .await?;
@@ -334,6 +382,65 @@ mod tests {
             Err(crate::error::Error::NotFound)
         ));
         assert!(core.store.get_corpus(&first.id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
+        // `near_dupe_of` can name a corpus that has since been deleted —
+        // including another parked capture that was discarded, since a parked
+        // corpus is still matchable. Failing here put the only way out of the
+        // review queue behind a 404.
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.delete_corpus(&first.id).await.unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
+            .await
+            .unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Raw);
+        assert!(got.near_dupe_of.is_none());
+        assert!(core.store.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn reprocessing_a_parked_capture_takes_it_off_the_review_queue() {
+        // Reprocessing is a decision to process. Leaving the park set left a
+        // fully synthesized corpus on the queue where "discard" deletes it.
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            CorpusStatus::NeedsReview
+        );
+
+        core.reprocess(&second.id, Stage::Synthesize).await.unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert!(
+            got.near_dupe_of.is_none(),
+            "the capture is being processed and still asks to be decided on"
+        );
+        assert_eq!(got.status, CorpusStatus::Raw);
     }
 
     #[tokio::test]
