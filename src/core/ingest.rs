@@ -62,7 +62,10 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
-        let src = self.store.insert_corpus(text, origin, title_hint).await?;
+        let src = self
+            .store
+            .insert_corpus_with_signature(text, origin, title_hint, sig)
+            .await?;
 
         match &near {
             // Parked. Synthesis is the expensive stage and this text may not

@@ -109,6 +109,24 @@ impl Store {
         origin: &str,
         title_hint: Option<&str>,
     ) -> Result<Corpus> {
+        let sig = super::shingle::signature(raw_text);
+        self.insert_corpus_with_signature(raw_text, origin, title_hint, sig)
+            .await
+    }
+
+    /// Insert a capture whose shingle signature the caller already computed.
+    ///
+    /// Ingest needs the signature before the row exists, to ask whether this is
+    /// a near-duplicate of something already stored. Handing it over rather
+    /// than recomputing it here is what makes that one pass over the document
+    /// instead of two.
+    pub async fn insert_corpus_with_signature(
+        &self,
+        raw_text: &str,
+        origin: &str,
+        title_hint: Option<&str>,
+        shingles: Vec<u64>,
+    ) -> Result<Corpus> {
         let src = Corpus {
             id: new_id(),
             raw_text: raw_text.to_string(),
@@ -119,7 +137,7 @@ impl Store {
             created_at: now(),
             updated_at: now(),
             coverage: None,
-            shingles: super::shingle::signature(raw_text),
+            shingles,
             near_dupe_of: None,
             near_dupe_score: None,
         };
