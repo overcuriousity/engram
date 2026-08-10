@@ -229,19 +229,28 @@ stored passage used to be, with no segment to verify it against and no corpus
 lines to render beside it. Consolidation only ever hides, flags, or asks.
 
 **The judge**, off by default, is the one part that costs inference. Queued pairs
-are first filtered on fact-shaped tokens — versions, numbers, dates — and only a
-pair where both sides state values and the values differ reaches the model,
-which is asked one yes/no question under a per-sweep budget. A reply that cannot
-be read leaves the pair pending rather than closing it: a dead endpoint must
-never look like a clean bill of health. Which of two contradictory artifacts is
-current stays a judgement for the reader.
+are first filtered on fact-shaped tokens — versions, numbers, dates, and numbers
+carrying a unit or a separator, so `v1.21.4`, `30s` and `8080/tcp` count as
+values rather than words — and only a pair where both sides state values and the
+values differ reaches the model, which is asked one yes/no question under a
+per-sweep budget. A reply that cannot be read leaves the pair pending rather than
+closing it: a dead endpoint must never look like a clean bill of health. That
+pair then goes to the back of the queue, so one the model keeps failing on cannot
+absorb every sweep's budget while the rest is never reached, and a call that
+fails outright ends the sweep's judging instead of spending the budget on an
+endpoint that is not there. Which of two contradictory artifacts is current stays
+a judgement for the reader.
 
 Artifacts also carry **caveats**: the conditions under which they do not apply,
 emitted by the same synthesis call that wrote them, so they cost output tokens
-rather than another call. They are stored and shown, and deliberately not part
+rather than another call. They are stored, shown, and passed to `ask` alongside
+the excerpt they qualify — an answer that quotes a destructive command without
+the condition attached is worse than no answer. They are deliberately not part
 of what gets embedded — changing what every vector is built from is a decision
 for the evaluation harness, not a hunch. The literal check runs over them too,
-so a command invented in a caveat is flagged like any other.
+so a command invented in a caveat is flagged like any other; that flag is a
+warning for the reader rather than grounds for re-synthesising the whole segment,
+which is the most expensive thing here.
 
 ## How search works
 

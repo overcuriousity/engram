@@ -5,7 +5,9 @@ use crate::infer::budget::pack_by_budget;
 
 const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
-say so plainly rather than guessing. Cite excerpts by their number.";
+say so plainly rather than guessing. Cite excerpts by their number. \
+An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
+Repeat any caveat that bears on your answer rather than dropping it.";
 
 /// Reserve part of the context for the answer itself.
 const ANSWER_RESERVE_TOKENS: usize = 1024;
@@ -64,18 +66,33 @@ impl Core {
             });
         }
 
-        let blocks: Vec<String> = hits
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                format!(
-                    "[{}] {}\n{}",
-                    i + 1,
-                    h.title.clone().unwrap_or_default(),
-                    h.text
-                )
-            })
-            .collect();
+        // Caveats are the conditions under which an excerpt does not apply, and
+        // an answer that quotes "run `mkfs` on the device" without "destroys
+        // everything already on it" is worse than no answer. They are not in
+        // the vector payload — what gets embedded is a separate decision — so
+        // they are read from the store, which costs one cheap SQLite lookup per
+        // hit and no inference. An excerpt whose row has since been deleted
+        // simply carries none.
+        let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
+        for (i, h) in hits.iter().enumerate() {
+            let caveats = self
+                .store
+                .get_artifact(&h.artifact_id)
+                .await
+                .map(|c| c.caveats)
+                .unwrap_or_default();
+            let mut block = format!(
+                "[{}] {}\n{}",
+                i + 1,
+                h.title.clone().unwrap_or_default(),
+                h.text
+            );
+            for c in &caveats {
+                block.push_str("\nCaveat: ");
+                block.push_str(c);
+            }
+            blocks.push(block);
+        }
 
         let budget = self
             .completer

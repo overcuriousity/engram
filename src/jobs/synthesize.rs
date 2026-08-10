@@ -183,10 +183,18 @@ enum SpanOrigin {
 }
 
 /// Did any proposed chunk lose a literal its window contains?
+///
+/// The chunk body only, deliberately — this gates a second synthesis call over
+/// the whole window, the most expensive thing here. A caveat is prose the model
+/// is asked to write freely ("only on `/dev/sd*` devices", "requires `sudo`"),
+/// so a path it names in passing need not appear verbatim in the source, and
+/// re-synthesising a window over one is paying the largest cost in the system
+/// for the smallest reason. `flag_unverified` still checks caveats: a command
+/// invented in one is flagged for the reader like any other.
 fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
     chunks
         .iter()
-        .any(|c| !crate::infer::verify::missing_literals(&c.text, &c.caveats, window).is_empty())
+        .any(|c| !crate::infer::verify::missing_literals(&c.text, &[], window).is_empty())
 }
 
 /// Mark what verification could not vouch for. The chunk is kept — a warning
