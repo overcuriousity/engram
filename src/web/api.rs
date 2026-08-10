@@ -361,6 +361,7 @@ async fn patch_artifact(
                 tags: chunk.tags.clone(),
                 created_at: chunk.created_at,
                 last_seen_at: None,
+                superseded: None,
             })
             .await?;
     }
@@ -815,6 +816,7 @@ mod patch_tests {
                 &SearchFilter {
                     tags: vec!["fresh".into()],
                     category: None,
+                    include_superseded: false,
                 },
             )
             .await

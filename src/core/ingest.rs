@@ -409,6 +409,7 @@ mod tests {
                     tags: vec![],
                     created_at: 0,
                     last_seen_at: None,
+                    superseded: None,
                 },
             }])
             .await

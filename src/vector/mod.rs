@@ -19,6 +19,12 @@ pub struct VectorPayload {
     /// know the stamp must leave the stored one alone rather than clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
+    /// Set when this artifact lost a near-identical pair to a newer one. Like
+    /// `last_seen_at`, it is omitted when unset so that a writer which does not
+    /// know the value — the embed job rebuilding a payload — leaves the stored
+    /// one alone rather than reviving a hidden artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,11 +41,18 @@ pub struct SearchFilter {
     /// All listed tags must be present (AND, not OR).
     pub tags: Vec<String>,
     pub category: Option<String>,
+    /// Superseded artifacts are excluded by default. They are still stored and
+    /// still readable by id — keeping them out of ranking is the whole of what
+    /// superseding does.
+    pub include_superseded: bool,
 }
 
 impl SearchFilter {
+    /// Whether this filter narrows nothing. Excluding superseded points is
+    /// still a narrowing, so a filter that only does that is not empty — saying
+    /// otherwise would drop the clause on the way to Qdrant.
     pub fn is_empty(&self) -> bool {
-        self.tags.is_empty() && self.category.is_none()
+        self.tags.is_empty() && self.category.is_none() && self.include_superseded
     }
 }
 
@@ -74,6 +87,10 @@ pub trait VectorStore: Send + Sync {
     /// category changes nothing the embedding model saw, so re-embedding for it
     /// would spend an inference call to arrive at the same vector.
     async fn set_payload(&self, payload: &VectorPayload) -> Result<()>;
+    /// Hide or unhide one artifact. A payload write, not a re-embed: which
+    /// artifact won a near-identical pair changes nothing the embedding model
+    /// saw.
+    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()>;
     /// `sparse` carries the query's BM25 terms. An empty one means the query
     /// held no indexable token, and the lexical half is skipped rather than
     /// asked to match nothing.

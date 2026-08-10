@@ -147,7 +147,21 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     if let Some(c) = &filter.category {
         must.push(json!({ "key": "category", "match": { "value": c } }));
     }
-    Some(json!({ "must": must }))
+
+    // `must` is omitted rather than sent empty. A search that only excludes
+    // superseded points has no positive condition, and an empty condition list
+    // is not something to hand Qdrant and hope it reads as "no constraint".
+    let mut body = json!({});
+    if !must.is_empty() {
+        body["must"] = json!(must);
+    }
+    // Excluded with `must_not` rather than by matching `false`: a point written
+    // before consolidation existed carries no `superseded` key at all, and a
+    // `match: false` clause would drop every one of them from search.
+    if !filter.include_superseded {
+        body["must_not"] = json!([{ "key": "superseded", "match": { "value": true } }]);
+    }
+    Some(body)
 }
 
 /// The schema every generation is created with.
@@ -970,6 +984,20 @@ impl VectorStore for QdrantVectors {
         Ok(())
     }
 
+    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()> {
+        let _: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/payload?wait=true", self.alias),
+                Some(json!({
+                    "payload": { "superseded": superseded },
+                    "points": [ point_uuid(artifact_id) ],
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn search(
         &self,
         vector: &[f32],
@@ -1303,10 +1331,32 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_filter_produces_no_filter_at_all() {
-        // `{"must": []}` matches nothing in Qdrant, so an unfiltered search
-        // must omit the key rather than send an empty condition list.
-        assert!(build_filter(&SearchFilter::default()).is_none());
+    fn a_filter_that_narrows_nothing_produces_no_filter_at_all() {
+        // `{"must": []}` matches nothing in Qdrant, so a search that narrows
+        // nothing must omit the key rather than send an empty condition list.
+        // Asking for superseded points back is what "narrows nothing" means now.
+        assert!(
+            build_filter(&SearchFilter {
+                include_superseded: true,
+                ..Default::default()
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_default_filter_excludes_superseded_points() {
+        // The default is what every ordinary search sends, and superseding is
+        // only meaningful if it keeps an artifact out of that.
+        let f = build_filter(&SearchFilter::default()).unwrap();
+        assert!(
+            f.get("must").is_none(),
+            "an empty condition list must not be sent: {f}"
+        );
+        assert_eq!(
+            f["must_not"],
+            json!([{ "key": "superseded", "match": { "value": true } }]),
+        );
     }
 
     #[test]
@@ -1316,6 +1366,7 @@ mod tests {
         let f = build_filter(&SearchFilter {
             tags: vec!["linux".into(), "forensics".into()],
             category: Some("procedure".into()),
+            include_superseded: false,
         })
         .unwrap();
         let must = f["must"].as_array().unwrap();

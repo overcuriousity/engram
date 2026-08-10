@@ -375,6 +375,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // the existing stamp forward rather than letting a re-embed make a
         // chunk look forgotten.
         last_seen_at: None,
+        // Unset for the same reason, and it matters more: writing `false` here
+        // would revive an artifact the sweep hid, on every re-embed.
+        superseded: None,
     }
 }
 

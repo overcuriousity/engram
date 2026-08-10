@@ -224,6 +224,9 @@ impl Core {
         let filter = SearchFilter {
             tags: query.tags.clone(),
             category: query.category.clone(),
+            // Search never shows an artifact the sweep hid. It stays readable
+            // by id, which is what the review queue and the undo need.
+            include_superseded: false,
         };
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
@@ -672,6 +675,7 @@ mod tests {
                 tags: vec![],
                 created_at: 0,
                 last_seen_at: None,
+                superseded: None,
             },
             score,
         };

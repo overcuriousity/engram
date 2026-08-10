@@ -57,6 +57,10 @@ pub struct Chunk {
     /// Verification failures. Empty means every check passed.
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
+    /// The artifact this one lost a near-identical pair to. Set by the
+    /// consolidation sweep; the artifact stays stored and readable, and is only
+    /// kept out of ranking.
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +96,7 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         flag_detail: r.get("flag_detail"),
+        superseded_by: r.get("superseded_by"),
     }
 }
 
@@ -120,6 +125,7 @@ impl Store {
                 segment_idx: nc.segment_idx,
                 flags: vec![],
                 flag_detail: None,
+                superseded_by: None,
             };
             sqlx::query(
                 "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx)
@@ -359,6 +365,31 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Record that this artifact lost a near-identical pair. `None` undoes it.
+    pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
+        let res = sqlx::query("UPDATE artifacts SET superseded_by = ? WHERE id = ?")
+            .bind(by)
+            .bind(artifact_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Artifacts currently hidden by consolidation, newest first.
+    pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
     }
 
     /// Record what verification found. An empty list clears the flags, so a

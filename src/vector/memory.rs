@@ -56,6 +56,13 @@ impl VectorStore for MemoryVectors {
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.last_seen_at);
             }
+            // Same rule, same reason: an unset flag means "whatever is already
+            // stored", so a re-embed cannot revive an artifact the sweep hid.
+            if p.payload.superseded.is_none() {
+                p.payload.superseded = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.superseded);
+            }
             w.insert(p.payload.artifact_id.clone(), p);
         }
         Ok(())
@@ -67,8 +74,18 @@ impl VectorStore for MemoryVectors {
             // A merge, matching Qdrant: an absent stamp means "unchanged", so
             // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
+            let sup = payload.superseded.or(p.payload.superseded);
             p.payload = payload.clone();
             p.payload.last_seen_at = seen;
+            p.payload.superseded = sup;
+        }
+        Ok(())
+    }
+
+    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        if let Some(p) = w.get_mut(artifact_id) {
+            p.payload.superseded = Some(superseded);
         }
         Ok(())
     }
@@ -117,7 +134,8 @@ impl VectorStore for MemoryVectors {
         let mut hits: Vec<SearchHit> = r
             .values()
             .filter(|p| {
-                filter.tags.iter().all(|t| p.payload.tags.contains(t))
+                (filter.include_superseded || p.payload.superseded != Some(true))
+                    && filter.tags.iter().all(|t| p.payload.tags.contains(t))
                     && filter
                         .category
                         .as_ref()
@@ -198,6 +216,7 @@ impl VectorStore for MemoryVectors {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +235,7 @@ mod tests {
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 created_at: 0,
                 last_seen_at: None,
+                superseded: None,
             },
         }
     }
@@ -289,6 +309,7 @@ mod tests {
         let f = SearchFilter {
             tags: vec!["linux".into(), "forensics".into()],
             category: None,
+            include_superseded: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -311,6 +332,7 @@ mod tests {
         let f = SearchFilter {
             tags: vec![],
             category: Some("concept".into()),
+            include_superseded: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -526,5 +548,95 @@ mod tests {
             .await
             .unwrap();
         assert!(v.neighbours("missing", 5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_superseded_artifact_drops_out_of_search() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.99, 0.1], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            v.search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        v.set_superseded("b", true).await.unwrap();
+        let hits = v
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].payload.artifact_id, "a");
+    }
+
+    #[tokio::test]
+    async fn a_superseded_artifact_is_still_reachable_when_asked_for() {
+        // Superseding hides an artifact from ranking. It must not make it
+        // unreadable: the review queue and the undo both need to see it.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.99, 0.1], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        v.set_superseded("b", true).await.unwrap();
+
+        let filter = SearchFilter {
+            include_superseded: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            v.search(&[1.0, 0.0], &Default::default(), 10, &filter)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn un_superseding_puts_an_artifact_back_in_results() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "note")])
+            .await
+            .unwrap();
+        v.set_superseded("a", true).await.unwrap();
+        v.set_superseded("a", false).await.unwrap();
+        assert_eq!(
+            v.search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn re_embedding_does_not_un_supersede_an_artifact() {
+        // `payload_of` in the embed job knows nothing about consolidation, so
+        // it leaves the field unset — and unset must mean "keep what is
+        // stored", or every re-embed would silently revive a hidden artifact.
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "note")])
+            .await
+            .unwrap();
+        v.set_superseded("a", true).await.unwrap();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "note")])
+            .await
+            .unwrap();
+        assert!(
+            v.search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

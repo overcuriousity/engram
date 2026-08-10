@@ -51,6 +51,7 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: 42,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -114,6 +115,7 @@ async fn filtered_search_uses_payload_indexes() {
     let f = SearchFilter {
         tags: vec!["forensics".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -125,6 +127,7 @@ async fn filtered_search_uses_payload_indexes() {
     let f = SearchFilter {
         tags: vec![],
         category: Some("concept".into()),
+        include_superseded: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -165,6 +168,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
     let f = SearchFilter {
         tags: vec!["linux".into(), "forensics".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -604,6 +608,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     let f = SearchFilter {
         tags: vec!["fresh".into()],
         category: None,
+        include_superseded: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -615,6 +620,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     let stale = SearchFilter {
         tags: vec!["old".into()],
         category: None,
+        include_superseded: false,
     };
     assert!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &stale)
@@ -645,6 +651,7 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             tags: vec![],
             created_at: 42,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -734,6 +741,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
     let f = SearchFilter {
         tags: vec!["keep".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 10, &f)
@@ -835,6 +843,7 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: now_secs() - days_old * 86_400,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -933,6 +942,7 @@ async fn scoring_leaves_the_filter_alone() {
     let f = SearchFilter {
         tags: vec!["keep".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 10, &f)
