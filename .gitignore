@@ -1,5 +1,6 @@
 /target
 /config.toml
+/engram.env
 *.db
 *.db-wal
 *.db-shm

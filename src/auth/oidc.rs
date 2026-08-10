@@ -101,9 +101,13 @@ impl OidcClient {
         }
 
         let http = openidconnect::reqwest::ClientBuilder::new()
-            // An identity provider must never be reached through a redirect we
-            // did not choose: that is an SSRF primitive.
-            .redirect(openidconnect::reqwest::redirect::Policy::none())
+            // Nextcloud's documented nginx recipe 301s the bare .well-known
+            // path to /index.php/.well-known/...; issuer_url stays the bare
+            // domain, since that is what the discovery document itself
+            // declares as `issuer` and what ID tokens carry as `iss`. A bounded
+            // hop count, not zero: this still refuses to be walked anywhere
+            // unbounded, matching what a typical OIDC client allows by default.
+            .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|e| Error::Validation(e.to_string()))?;
 
