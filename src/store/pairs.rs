@@ -90,12 +90,15 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
-    /// File a pair that is already answered. Returns whether this was new.
+    /// File a pair that is already answered. Returns whether this changed
+    /// anything.
     ///
-    /// `INSERT OR IGNORE` like `record_pair`, and for a stronger reason: a row
-    /// that exists carries a decision — a person's dismissal, the judge's
-    /// contradiction — and the sweep re-finds the same pair every run. Settling
-    /// it again would overwrite the answer with the sweep's opinion of it.
+    /// A row that carries a real decision — a person's dismissal, the judge's
+    /// contradiction — is left alone: the sweep re-finds the same pair every
+    /// run, and overwriting the answer with its own opinion would make
+    /// dismissing pointless. `pending` is not a decision, it is the absence of
+    /// one, so it is answered here. That is also what settles pairs filed
+    /// before the sweep could answer them, without a migration.
     pub async fn record_settled_pair(
         &self,
         a: &str,
@@ -105,8 +108,10 @@ impl Store {
     ) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let res = sqlx::query(
-            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO artifact_pairs (a_id, b_id, score, state, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(a_id, b_id) DO UPDATE SET state = excluded.state
+               WHERE artifact_pairs.state = 'pending'",
         )
         .bind(a)
         .bind(b)
@@ -300,6 +305,48 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn settling_answers_a_pending_pair_and_respects_a_real_decision() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+
+        // Pending is the absence of a decision, so the sweep may answer it.
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        assert!(
+            s.record_settled_pair(&a, &b, 0.91, PairState::NoConflict)
+                .await
+                .unwrap()
+        );
+        assert!(
+            s.pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A dismissal is a decision. The sweep re-finds this pair every run and
+        // must not talk over it.
+        let p = s
+            .pairs_by_state(PairState::NoConflict, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        s.set_pair_state(p.id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+        s.record_settled_pair(&a, &b, 0.91, PairState::NoConflict)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.pairs_by_state(PairState::Dismissed, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a decision was overwritten"
         );
     }
 
