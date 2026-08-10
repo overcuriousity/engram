@@ -60,58 +60,28 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             chunks = core.synthesizer.segment(&text).await?;
         }
 
-        // Line numbers come back relative to the window, so shift them into
-        // the coordinates of the original document — and no further. A span
-        // outside its own window is nonsense the detail pane would render as
-        // the wrong text, so clamp it here and flag it below.
-        // Only a span the model asserted can be wrong about where the chunk
-        // came from. One this job derived matched by construction, and one that
-        // fell back to the window claims nothing in particular — checking
-        // either against the chunk's own text just invents warnings.
-        let mut spans = Vec::with_capacity(chunks.len());
+        // The span is ours to compute.
+        //
+        // Asking the model for `corpus_lines`, checking the answer, and having
+        // a third outcome for a claim that fails the check produced a flag on
+        // the artifact and a button offering to re-synthesise an entire segment
+        // over a line number. Since `locate_span` finds an artifact's own text
+        // even where the source is hard-wrapped and synthesis reflowed it, the
+        // claim is worth what it is: a hint for the case where nothing matches
+        // at all. Nothing here can disagree with the artifact, so nothing here
+        // has anything to report.
         for c in &mut chunks {
-            let claimed = c
+            let hinted = c
                 .corpus_lines
-                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
-                .filter(|(a, b)| {
-                    // A span the model asserted is only worth keeping if the
-                    // lines it names look like the lines the chunk describes.
-                    // On a reference document full of short entries the model
-                    // miscounts freely, and a confidently wrong span is worse
-                    // than none: the pane renders the wrong text.
-                    let lines = segment_text(&src.raw_text, *a, *b);
-                    crate::infer::verify::span_is_plausible(&c.text, &lines)
-                });
-
-            let (shifted, origin) = match claimed {
-                Some(span) => (span, SpanOrigin::Model),
-                // Either the model omitted `corpus_lines` — which it does more
-                // often than not — or what it claimed did not survive the check
-                // above. Both are better answered by finding the chunk's own
-                // lines in the window than by pointing at the whole of it.
-                None => match crate::infer::verify::locate_span(&c.text, &text, w.start_line) {
-                    Some(found) => (found, SpanOrigin::Derived),
-                    None => match c.corpus_lines {
-                        // Nothing to derive and a span that failed the check:
-                        // keep it, and say it is not to be trusted.
-                        Some((a, b)) => (
-                            (a + w.start_line - 1, b + w.start_line - 1),
-                            SpanOrigin::Implausible,
-                        ),
-                        None => ((w.start_line, w.end_line), SpanOrigin::Segment),
-                    },
-                },
-            };
+                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1));
+            let span = crate::infer::verify::locate_span(&c.text, &text, w.start_line)
+                .or(hinted)
+                .unwrap_or((w.start_line, w.end_line));
+            // A span outside its own window would render as the wrong text.
             let clamped = (
-                shifted.0.clamp(w.start_line, w.end_line),
-                shifted.1.clamp(w.start_line, w.end_line),
+                span.0.clamp(w.start_line, w.end_line),
+                span.1.clamp(w.start_line, w.end_line),
             );
-            // Clamping erases the evidence, so record the move before it happens.
-            spans.push(if origin == SpanOrigin::Model && clamped != shifted {
-                SpanOrigin::Clamped
-            } else {
-                origin
-            });
             c.corpus_lines = Some(if clamped.0 <= clamped.1 {
                 clamped
             } else {
@@ -121,7 +91,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
 
         let written =
             write_segment_artifacts(core, corpus_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
-        flag_unverified(core, &written, &spans, &text).await?;
+        flag_unverified(core, &written, &text).await?;
         core.store
             .set_segment_state(corpus_id, w.idx, SegmentState::Done, None)
             .await?;
@@ -165,23 +135,6 @@ async fn write_segment_artifacts(
     core.store.insert_artifacts(corpus_id, &new).await
 }
 
-/// Where a chunk's stored span came from, which decides whether it is worth
-/// doubting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpanOrigin {
-    /// The model said so, and nothing had to be corrected.
-    Model,
-    /// The model said so and named lines outside its own window.
-    Clamped,
-    /// The model said so, the lines do not match the chunk, and nothing better
-    /// could be derived.
-    Implausible,
-    /// Recovered here by matching the chunk's lines against the window.
-    Derived,
-    /// Nothing to go on; the span is the window itself.
-    Segment,
-}
-
 /// Did any proposed chunk lose a literal its window contains?
 ///
 /// The chunk body only, deliberately — this gates a second synthesis call over
@@ -199,16 +152,18 @@ fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool 
 
 /// Mark what verification could not vouch for. The chunk is kept — a warning
 /// the reader can see beats a chapter silently missing from the base.
+///
+/// One check, not two. A span is derived rather than adjudicated, so there is
+/// nothing left to disbelieve about it; what remains is the literal check,
+/// which is about the text itself and speaks to whoever reads the artifact.
 async fn flag_unverified(
     core: &Core,
     written: &[crate::store::artifacts::Chunk],
-    // Per chunk, where its stored span came from.
-    spans: &[SpanOrigin],
     segment_body: &str,
 ) -> Result<()> {
     use crate::infer::verify;
 
-    for (i, c) in written.iter().enumerate() {
+    for c in written {
         let mut flags = Vec::new();
         let mut detail: Option<String> = None;
 
@@ -217,23 +172,6 @@ async fn flag_unverified(
             flags.push(verify::FLAG_LITERALS.to_string());
             detail = Some(format!("missing literal: {first}"));
             tracing::warn!(artifact_id = %c.id, literal = %first, "literal not found in source window");
-        }
-
-        // A derived span matched by construction, a window span claims nothing
-        // in particular, and a model span that survived the check is fine. What
-        // is left is a span that had to be corrected or could not be.
-        let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Segment);
-        if let Some(span) = &c.corpus_span
-            && matches!(origin, SpanOrigin::Clamped | SpanOrigin::Implausible)
-        {
-            flags.push(verify::FLAG_SPAN.to_string());
-            detail.get_or_insert_with(|| {
-                format!(
-                    "span {}–{} does not match the chunk",
-                    span.start_line, span.end_line
-                )
-            });
-            tracing::warn!(artifact_id = %c.id, "chunk span does not match the lines it claims");
         }
 
         if !flags.is_empty() {
@@ -688,7 +626,11 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn a_wrong_span_that_cannot_be_recovered_is_flagged() {
+    async fn a_wrong_span_is_never_a_review_task() {
+        // A line number engram can compute itself was being asked of the model,
+        // disbelieved, and turned into a queue entry whose only button spends a
+        // model call on a whole segment. The span falls back to the window and
+        // the reader is none the wiser.
         let mut core = test_core().await;
         core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
         let out = core
@@ -698,11 +640,18 @@ Then run sync.";
 
         run(&core, &out.id).await.unwrap();
 
-        let c = &core.store.artifacts_for_corpus(&out.id).await.unwrap()[0];
-        assert!(
-            c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN),
-            "a chunk that matches nothing in its window must say so"
-        );
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            assert!(
+                !c.flags.iter().any(|f| f == "span_unverified"),
+                "a span produced a review task: {:?}",
+                c.flags
+            );
+            let span = c.corpus_span.expect("every artifact keeps a span");
+            assert!(
+                span.start_line >= 1 && span.end_line >= span.start_line,
+                "{span:?}"
+            );
+        }
     }
 
     #[tokio::test]

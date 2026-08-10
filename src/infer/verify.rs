@@ -199,9 +199,6 @@ impl Flattened {
     }
 }
 
-/// A chunk whose span points somewhere else entirely.
-pub const FLAG_SPAN: &str = "span_unverified";
-
 /// Below this fraction of a source inside some chunk, the segmenter probably
 /// dropped part of the document.
 pub const LOW_COVERAGE: f64 = 0.6;
@@ -216,9 +213,12 @@ fn distinctive_tokens(s: &str) -> std::collections::HashSet<String> {
 /// Does the chunk plausibly describe the lines it claims?
 ///
 /// The synthesizer rewrites prose, so this cannot demand equality — only that a
-/// third of the chunk's distinctive tokens appear in the claimed range. That is
-/// enough to catch a span pointing at a different section, which is the failure
-/// the detail pane would otherwise render as a rendering bug.
+/// third of the chunk's distinctive tokens appear in the claimed range.
+///
+/// Synthesis no longer calls this: it derives spans rather than checking the
+/// model's, so there is no claim left to doubt. It stays because
+/// `content_coverage` measures the same relationship — is this text in those
+/// lines — and the two want to keep answering it the same way.
 pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
     let chunk = distinctive_tokens(artifact_text);
     if chunk.is_empty() {
