@@ -188,7 +188,11 @@ impl Store {
     /// this is a few milliseconds of memory bandwidth on a path that already
     /// writes the whole document to disk. An index over MinHash bands is the
     /// answer at a scale this design does not target.
-    pub async fn find_near_duplicate(&self, sig: &[u64], min: f64) -> Result<Option<NearDuplicate>> {
+    pub async fn find_near_duplicate(
+        &self,
+        sig: &[u64],
+        min: f64,
+    ) -> Result<Option<NearDuplicate>> {
         if sig.is_empty() {
             return Ok(None);
         }

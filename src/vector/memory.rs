@@ -258,7 +258,6 @@ impl VectorStore for MemoryVectors {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -81,6 +81,7 @@ effective config with secrets redacted.
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
+| `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `sample`, `per_point`, `interval_hours`, `judge`, `max_judgements`. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
@@ -187,6 +188,49 @@ Each segment is checked before its artifacts are stored.
 
 Flagged artifacts are listed on Ops with two actions: re-synthesise that one segment,
 or mark the artifact reviewed.
+
+## Duplicates, and what goes quietly out of date
+
+Two failures look identical from a result list: the same thing stored twice, and
+the same thing stored twice with one copy now wrong. Both are handled without a
+model call in the ordinary case.
+
+**At capture.** Corpora are deduplicated by an exact hash, so re-pasting a
+chapter a year later with one changed byte used to store it twice, and the two
+copies then competed for the same queries. A shingle signature over the raw text
+catches that: the capture is stored verbatim like any other, and parked in
+`needs_review` rather than segmented. Ops offers three answers — replace the
+older corpus, keep both, or discard this one — and until one is chosen, no model
+call has been spent on it.
+
+**Afterwards.** A sweep asks Qdrant for near pairs across the collection, one
+round trip, on a timer. At or above `auto_supersede` the older artifact is marked
+`superseded_by` the newer and hidden from results; it is still stored, still
+readable by link, and Ops has a button that puts it back. Near-identical
+artifacts are clustered before a winner is picked, so a run of three collapses
+onto one survivor rather than forming a chain that points at something hidden.
+Between `review_min` and that, the pair goes on a queue instead, because two
+genuinely distinct artifacts about one subsystem sit around 0.88 and hiding at
+that score would cost knowledge rather than duplication.
+
+**Nothing is ever merged.** A merged artifact is synthetic text standing where a
+stored passage used to be, with no segment to verify it against and no corpus
+lines to render beside it. Consolidation only ever hides, flags, or asks.
+
+**The judge**, off by default, is the one part that costs inference. Queued pairs
+are first filtered on fact-shaped tokens — versions, numbers, dates — and only a
+pair where both sides state values and the values differ reaches the model,
+which is asked one yes/no question under a per-sweep budget. A reply that cannot
+be read leaves the pair pending rather than closing it: a dead endpoint must
+never look like a clean bill of health. Which of two contradictory artifacts is
+current stays a judgement for the reader.
+
+Artifacts also carry **caveats**: the conditions under which they do not apply,
+emitted by the same synthesis call that wrote them, so they cost output tokens
+rather than another call. They are stored and shown, and deliberately not part
+of what gets embedded — changing what every vector is built from is a decision
+for the evaluation harness, not a hunch. The literal check runs over them too,
+so a command invented in a caveat is flagged like any other.
 
 ## How search works
 

@@ -167,7 +167,10 @@ mod tests {
             "the reversed pair duplicated it"
         );
         assert_eq!(
-            s.pairs_by_state(PairState::Pending, 10).await.unwrap().len(),
+            s.pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -202,7 +205,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(done.len(), 1);
-        assert_eq!(done[0].detail.as_deref(), Some("version differs: 1.2 vs 1.4"));
+        assert_eq!(
+            done[0].detail.as_deref(),
+            Some("version differs: 1.2 vs 1.4")
+        );
     }
 
     #[tokio::test]

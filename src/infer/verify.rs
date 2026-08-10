@@ -244,8 +244,10 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         assert!(
             missing_literals(
                 "Write the image to the device.",
-                &["Unmount first: `dd if=archlinux.iso of=/dev/sdX` needs the whole device."
-                    .to_string()],
+                &[
+                    "Unmount first: `dd if=archlinux.iso of=/dev/sdX` needs the whole device."
+                        .to_string()
+                ],
                 WINDOW,
             )
             .is_empty()

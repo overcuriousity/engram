@@ -177,7 +177,14 @@ mod tests {
 
         // Give the first tick a chance to land, then stop the ticker.
         for _ in 0..50 {
-            if core.store.job_counts().await.unwrap().iter().any(|(_, n)| *n > 0) {
+            if core
+                .store
+                .job_counts()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(_, n)| *n > 0)
+            {
                 break;
             }
             tokio::task::yield_now().await;

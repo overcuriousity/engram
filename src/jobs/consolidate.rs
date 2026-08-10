@@ -515,10 +515,9 @@ mod tests {
         // A dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
         core.consolidate.judge = true;
-        core.completer =
-            std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-                "not json".into()
-            ]));
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            "not json".into(),
+        ]));
         disagreeing(&core).await;
 
         run(&core).await.unwrap();

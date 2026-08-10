@@ -168,6 +168,20 @@ mod tests {
     /// field copy: rerank is optional, and an absent block must leave search
     /// in vector order rather than defaulting to an endpoint.
     #[tokio::test]
+    async fn the_example_config_carries_the_consolidation_defaults() {
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(cfg.consolidate.enabled);
+        assert!(
+            cfg.consolidate.auto_supersede > cfg.consolidate.review_min,
+            "superseding at or below the review threshold would hide distinct artifacts"
+        );
+        assert!(
+            !cfg.consolidate.judge,
+            "the only inference-costing stage must be opt-in"
+        );
+    }
+
+    #[tokio::test]
     async fn rerank_is_wired_only_when_configured() {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());

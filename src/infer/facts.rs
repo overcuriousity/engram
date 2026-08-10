@@ -34,10 +34,7 @@ fn is_fact(token: &str) -> bool {
 /// Every value-shaped token in the text, stripped of surrounding punctuation.
 pub fn fact_tokens(text: &str) -> BTreeSet<String> {
     text.split_whitespace()
-        .map(|t| {
-            t.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_string()
-        })
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
         .filter(|t| is_fact(t))
         .collect()
 }
@@ -107,7 +104,10 @@ mod tests {
         // The filter is allowed to pass a pair that turns out to be fine — that
         // costs one call. It is not allowed to drop one that disagrees, which
         // would cost a stale artifact nobody ever finds.
-        assert!(may_disagree("The timeout is 30 seconds.", "It listens on 8080."));
+        assert!(may_disagree(
+            "The timeout is 30 seconds.",
+            "It listens on 8080."
+        ));
     }
 
     #[test]
