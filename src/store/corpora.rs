@@ -235,4 +235,72 @@ mod tests {
         assert_eq!(list[0].id, b.id);
         assert_eq!(list[1].id, a.id);
     }
+
+    #[tokio::test]
+    async fn the_consolidation_schema_is_present() {
+        // Migrations run on connect, so this failing means 0009 did not apply.
+        let s = Store::memory().await.unwrap();
+        for sql in [
+            "SELECT shingles, near_dupe_of, near_dupe_score FROM corpora LIMIT 1",
+            "SELECT superseded_by, caveats FROM artifacts LIMIT 1",
+            "SELECT id, a_id, b_id, score, state, detail, created_at FROM artifact_pairs LIMIT 1",
+        ] {
+            sqlx::query(sql)
+                .fetch_optional(&s.pool)
+                .await
+                .unwrap_or_else(|e| panic!("{sql} failed: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pair_is_recorded_once_whichever_order_it_is_found_in() {
+        // The sweep sees (a,b) on one run and (b,a) on the next. Without a
+        // canonical order the review queue fills with the same pair twice.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("x", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "one".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "two".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
+                 VALUES (?, ?, 0.9, 'pending', 0)",
+            )
+            .bind(&made[0].id)
+            .bind(&made[1].id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_pairs")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the unique constraint on (a_id, b_id) is missing");
+    }
 }
