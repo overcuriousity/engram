@@ -66,6 +66,9 @@ pub struct Core {
     pub background: Arc<Background>,
     /// Shared by every clone of `Core`, like the background queue.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
+    /// Thresholds and budgets for duplicate hygiene. Read on the capture path
+    /// and by the sweep, so it lives here rather than being passed down.
+    pub consolidate: crate::config::ConsolidateConfig,
 }
 
 impl Core {
@@ -97,6 +100,7 @@ impl Core {
             )),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            consolidate: cfg.consolidate.clone(),
         }
     }
 }
@@ -150,6 +154,7 @@ pub mod test_support {
             counter: Arc::new(TokenCounter::Estimate),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            consolidate: crate::config::ConsolidateConfig::default(),
         }
     }
 }

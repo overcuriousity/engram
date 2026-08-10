@@ -257,6 +257,7 @@ mod startup_tests {
                     password_hash: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aaaa".into(),
                 }),
             },
+            consolidate: ConsolidateConfig::default(),
         }
     }
 

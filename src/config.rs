@@ -8,6 +8,54 @@ pub struct Config {
     pub vector: VectorConfig,
     pub infer: InferConfig,
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub consolidate: ConsolidateConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ConsolidateConfig {
+    /// Whether the background sweep runs at all. Capture-time near-duplicate
+    /// detection is separate and always on: it costs a hash, not a query.
+    pub enabled: bool,
+    /// Estimated Jaccard over word shingles above which a capture is parked as
+    /// a near-duplicate of an existing corpus.
+    pub near_dupe_min: f64,
+    /// Cosine at or above which a pair is worth an operator's attention.
+    pub review_min: f32,
+    /// Cosine at or above which the older artifact is superseded without
+    /// asking. Deliberately far above `review_min`: two genuinely distinct
+    /// artifacts about one subsystem sit around 0.88 routinely, and superseding
+    /// at that score destroys knowledge rather than duplication.
+    pub auto_supersede: f32,
+    /// Points sampled from the collection per sweep by the matrix API.
+    pub sample: usize,
+    /// Neighbours considered per sampled point.
+    pub per_point: usize,
+    /// How often the sweep is queued.
+    pub interval_hours: u64,
+    /// Whether pairs in the review band that survive the fact-token prefilter
+    /// are sent to the completer. Off by default: it is the only part of
+    /// consolidation that costs inference.
+    pub judge: bool,
+    /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
+    pub max_judgements: usize,
+}
+
+impl Default for ConsolidateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            near_dupe_min: 0.90,
+            review_min: 0.88,
+            auto_supersede: 0.95,
+            sample: 2000,
+            per_point: 5,
+            interval_hours: 24,
+            judge: false,
+            max_judgements: 20,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
