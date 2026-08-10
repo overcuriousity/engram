@@ -9,6 +9,10 @@ pub enum Stage {
     Synthesize,
     Enrich,
     Embed,
+    /// The periodic consolidation sweep. Its target is the collection rather
+    /// than any one corpus, so there is exactly one of these in the queue at a
+    /// time.
+    Consolidate,
 }
 
 impl Stage {
@@ -17,6 +21,7 @@ impl Stage {
             Stage::Synthesize => "synthesize",
             Stage::Enrich => "enrich",
             Stage::Embed => "embed",
+            Stage::Consolidate => "consolidate",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -24,6 +29,7 @@ impl Stage {
             "synthesize" => Some(Stage::Synthesize),
             "enrich" => Some(Stage::Enrich),
             "embed" => Some(Stage::Embed),
+            "consolidate" => Some(Stage::Consolidate),
             _ => None,
         }
     }

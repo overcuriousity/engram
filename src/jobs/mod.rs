@@ -1,3 +1,4 @@
+pub mod consolidate;
 pub mod embed;
 pub mod synthesize;
 
@@ -32,6 +33,8 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
+        // The sweep looks at the whole collection, so it ignores the target.
+        (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
     };
 
     match result {

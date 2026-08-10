@@ -182,6 +182,14 @@ impl Core {
                     .set_corpus_status(&src.id, CorpusStatus::Embedding)
                     .await?;
             }
+            // Consolidation looks at the whole collection, so there is no such
+            // thing as reprocessing one corpus through it. Saying so beats
+            // silently queueing a sweep the caller did not ask for.
+            Stage::Consolidate => {
+                return Err(Error::Validation(
+                    "consolidate is a collection-wide sweep, not a per-corpus stage".into(),
+                ));
+            }
         }
         Ok(())
     }
