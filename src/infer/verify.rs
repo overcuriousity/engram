@@ -122,7 +122,7 @@ pub fn locate_span(
     segment_body: &str,
     segment_start: i64,
 ) -> Option<(i64, i64)> {
-    let window: Vec<String> = segment_body.lines().map(normalize).collect();
+    let flat = Flattened::of(segment_body);
     let needles: Vec<String> = artifact_text
         .lines()
         .map(normalize)
@@ -135,18 +135,68 @@ pub fn locate_span(
     let mut first = usize::MAX;
     let mut last = 0usize;
     for needle in &needles {
-        if let Some(at) = window
-            .iter()
-            .position(|w| w == needle || w.contains(needle))
-        {
-            first = first.min(at);
-            last = last.max(at);
+        if let Some(at) = flat.text.find(needle.as_str()) {
+            first = first.min(flat.line_at(at));
+            last = last.max(flat.line_at(at + needle.len() - 1));
         }
     }
     if first == usize::MAX {
         return None;
     }
     Some((segment_start + first as i64, segment_start + last as i64))
+}
+
+/// A window with its line breaks taken out, and the map back.
+///
+/// Comparing a chunk's lines against the window's lines only finds what the
+/// source happened to fit on one line. Sources do not cooperate: a handout
+/// exported from a PDF is hard-wrapped at eighty columns, so one sentence is
+/// three lines, and synthesis reflows it back into one. Line against line, the
+/// paragraph matches nothing and a chunk built from it claims either a single
+/// short sentence or no span at all — which is then what coverage counts.
+///
+/// Matching against the whole window as one string finds the paragraph, and the
+/// offsets say which lines it ran across.
+struct Flattened {
+    text: String,
+    /// Byte offset in `text` at which each source line begins.
+    starts: Vec<usize>,
+}
+
+impl Flattened {
+    fn of(segment_body: &str) -> Self {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        for line in segment_body.lines() {
+            let n = normalize(line);
+            // The separator stands in for the line break the source had, so a
+            // sentence reflowed across two lines reads as it does in the chunk.
+            if !text.is_empty() && !n.is_empty() {
+                text.push(' ');
+            }
+            starts.push(text.len());
+            text.push_str(&n);
+        }
+        Self { text, starts }
+    }
+
+    /// Which line a byte offset falls in. The last line that starts at or
+    /// before it — blank lines share their neighbour's offset and never win,
+    /// because a match cannot begin inside one.
+    fn line_at(&self, offset: usize) -> usize {
+        match self.starts.binary_search(&offset) {
+            // Several lines can share a start offset; take the last, which is
+            // the one that actually holds text.
+            Ok(mut i) => {
+                while i + 1 < self.starts.len() && self.starts[i + 1] == offset {
+                    i += 1;
+                }
+                i
+            }
+            Err(0) => 0,
+            Err(i) => i - 1,
+        }
+    }
 }
 
 /// A chunk whose span points somewhere else entirely.
@@ -327,6 +377,36 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         // WINDOW line 6 (1-based) holds the dd command, so with the window
         // starting at 101 the span is line 106.
         assert_eq!(found, (106, 106));
+    }
+
+    /// A lecture handout, PDF-extracted: hard-wrapped at about eighty columns,
+    /// so one sentence of prose is three lines of source.
+    const WRAPPED: &str = "\
+Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen,
+Dateigrößen, Attribute und Zeitstempel zu den gespeicherten
+Dateien und Verzeichnissen.
+Die Markierung End of File (EOF) zeigt das Dateiende an.";
+
+    #[test]
+    fn a_span_covers_every_line_a_reflowed_paragraph_came_from() {
+        // Synthesis reflows: what the source wraps over three lines comes back
+        // as one. Matching line against line then finds only the sentence that
+        // happened to fit on one source line, so a chunk built from a whole
+        // paragraph claimed a single line — and coverage, which counts the
+        // lines some span names, read a fraction of the truth on every
+        // hard-wrapped document.
+        let chunk = "Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen, Dateigrößen, Attribute und Zeitstempel zu den gespeicherten Dateien und Verzeichnissen.";
+        assert_eq!(
+            locate_span(chunk, WRAPPED, 1),
+            Some((1, 3)),
+            "the paragraph's own three source lines"
+        );
+    }
+
+    #[test]
+    fn a_reflowed_span_still_reaches_the_last_line_it_covers() {
+        let chunk = "Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen, Dateigrößen, Attribute und Zeitstempel zu den gespeicherten Dateien und Verzeichnissen.\n\nDie Markierung End of File (EOF) zeigt das Dateiende an.";
+        assert_eq!(locate_span(chunk, WRAPPED, 101), Some((101, 104)));
     }
 
     #[test]
