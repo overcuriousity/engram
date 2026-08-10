@@ -1405,6 +1405,10 @@ mod tests {
             "/ui/ask",
             "/ui/ops",
         ] {
+            // A plain GET is a browser loading a page, so a missing session
+            // sends it to sign in rather than showing it JSON it cannot act
+            // on. `redirect_unauthenticated_browsers` (web/mod.rs) is what
+            // rewrites the 401 into this.
             let res = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -1412,8 +1416,13 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 res.status(),
-                StatusCode::UNAUTHORIZED,
+                StatusCode::SEE_OTHER,
                 "{uri} was unprotected"
+            );
+            assert_eq!(
+                res.headers().get("location").unwrap(),
+                "/auth/login?go=1",
+                "{uri} did not send an unauthenticated page load to sign in"
             );
         }
         for uri in [
