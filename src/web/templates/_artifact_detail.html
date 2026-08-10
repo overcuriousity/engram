@@ -26,11 +26,6 @@
       <b>{{ d.flags|join(", ") }}</b>
       {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
       <div class="chips">
-        {% if let Some(w) = d.segment_idx %}
-        <form method="post" action="/ui/corpora/{{ d.corpus_id }}/segments/{{ w }}/resynthesize">
-          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
-        </form>
-        {% endif %}
         <button class="btn btn-sm" hx-post="/ui/artifacts/{{ d.id }}/reviewed"
                 hx-target="closest .flag" hx-swap="outerHTML">Mark reviewed</button>
       </div>

@@ -58,6 +58,17 @@ pub struct FailedJob {
     pub last_error: Option<String>,
 }
 
+/// Work waiting out a backoff. What replaced the failed list: there is no
+/// terminal state to report, only a next attempt to name.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RetryingJob {
+    pub stage: String,
+    pub target_id: String,
+    pub attempts: i64,
+    pub next_attempt_secs: i64,
+    pub last_error: Option<String>,
+}
+
 /// 2s, 4s, 8s, 16s, 32s ... doubling to a six-hour ceiling, and never stopping.
 ///
 /// The ceiling used to be five minutes, which suited a caller that gave up
@@ -199,6 +210,34 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
+    }
+
+    /// Jobs waiting on a backoff, soonest first.
+    ///
+    /// `attempts > 0` is what separates work that has hit something from work
+    /// that is merely queued: a fresh job has `run_after` in the past and does
+    /// not belong on a page about trouble.
+    pub async fn retrying_jobs(&self, limit: i64) -> Result<Vec<RetryingJob>> {
+        let rows = sqlx::query(
+            "SELECT stage, target_id, attempts, last_error, run_after FROM jobs
+              WHERE state = 'pending' AND attempts > 0 AND run_after > ?
+              ORDER BY run_after LIMIT ?",
+        )
+        .bind(now())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let at = now();
+        Ok(rows
+            .iter()
+            .map(|r| RetryingJob {
+                stage: r.get("stage"),
+                target_id: r.get("target_id"),
+                attempts: r.get("attempts"),
+                next_attempt_secs: (r.get::<i64, _>("run_after") - at).max(0),
+                last_error: r.get("last_error"),
+            })
+            .collect())
     }
 
     pub async fn failed_jobs(&self, limit: i64) -> Result<Vec<FailedJob>> {

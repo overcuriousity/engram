@@ -94,13 +94,13 @@ pub struct RelatedArtifact {
     pub snippet: String,
 }
 
-/// A chunk verification could not vouch for, and the window that produced it.
-pub struct FlaggedRow {
-    pub artifact_id: String,
-    pub corpus_id: String,
-    pub title: String,
-    pub detail: String,
-    pub segment_idx: Option<i64>,
+/// Work that hit something and is waiting to try again by itself.
+pub struct RetryingRow {
+    pub stage: String,
+    pub target_id: String,
+    pub attempts: i64,
+    pub due: String,
+    pub last_error: String,
 }
 
 /// A parked capture, with enough of the corpus it resembles to decide without
@@ -161,6 +161,18 @@ pub fn embed_badge(state: &crate::store::artifacts::EmbedState) -> &'static str 
         Embedded => "badge-success",
         Failed => "badge-danger",
         Pending => "badge-muted",
+    }
+}
+
+/// A wait, coarsely. "in 4h" is the whole of what a reader needs from a backoff
+/// — the exact second is noise, and the point of the line is that nobody has to
+/// do anything about it.
+pub fn fmt_duration(secs: i64) -> String {
+    match secs {
+        s if s <= 0 => "now".into(),
+        s if s < 90 => format!("in {s}s"),
+        s if s < 5400 => format!("in {}m", (s + 59) / 60),
+        s => format!("in {}h", (s + 3599) / 3600),
     }
 }
 
@@ -292,8 +304,7 @@ struct OpsTemplate {
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
     vector_count: u64,
-    failed: Vec<crate::store::jobs::FailedJob>,
-    flagged: Vec<FlaggedRow>,
+    retrying: Vec<RetryingRow>,
     parked: Vec<ParkedRow>,
     superseded: Vec<SupersededRow>,
     pairs: Vec<PairRow>,
@@ -632,21 +643,20 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         })
         .collect();
 
-    let flagged = st
+    // Not a queue of chores: work that hit something and is waiting to try
+    // again on its own. Nothing here needs a person.
+    let retrying: Vec<RetryingRow> = st
         .core
         .store
-        .flagged_artifacts(50)
+        .retrying_jobs(50)
         .await?
         .into_iter()
-        .map(|c| FlaggedRow {
-            title: c
-                .title
-                .clone()
-                .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
-            detail: c.flag_detail.clone().unwrap_or_else(|| c.flags.join(", ")),
-            segment_idx: c.segment_idx,
-            artifact_id: c.id,
-            corpus_id: c.corpus_id,
+        .map(|j| RetryingRow {
+            stage: j.stage,
+            target_id: j.target_id,
+            attempts: j.attempts,
+            due: fmt_duration(j.next_attempt_secs),
+            last_error: j.last_error.unwrap_or_else(|| "—".into()),
         })
         .collect();
 
@@ -721,7 +731,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
-        flagged,
+        retrying,
         parked,
         superseded,
         pairs,
@@ -731,7 +741,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
-        failed: st.core.store.failed_jobs(50).await?,
         tokens,
     })
     .into_response())
@@ -763,20 +772,6 @@ async fn revoke_token_ui(
     Path(tid): Path<String>,
 ) -> Result<Response> {
     crate::auth::tokens::revoke(&st.core.store, &tid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
-}
-
-async fn retry_job(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(job_id): Path<i64>,
-) -> Result<Response> {
-    sqlx::query(
-        "UPDATE jobs SET state='pending', attempts=0, run_after=0, last_error=NULL WHERE id=?",
-    )
-    .bind(job_id)
-    .execute(&st.core.store.pool)
-    .await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -937,30 +932,6 @@ async fn artifact_detail(
     .into_response())
 }
 
-/// The action behind "re-segment this window": put the window back in the
-/// queue's path and make sure something will pick it up. Split out from the
-/// handler so it can be tested without a request.
-pub(crate) async fn resynthesize_segment_inner(
-    core: &crate::core::Core,
-    corpus_id: &str,
-    idx: i64,
-) -> Result<()> {
-    core.store.reset_segment(corpus_id, idx).await?;
-    core.store
-        .enqueue(crate::store::jobs::Stage::Synthesize, "corpus", corpus_id)
-        .await?;
-    Ok(())
-}
-
-async fn resynthesize_segment(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path((cid, idx)): Path<(String, i64)>,
-) -> Result<Response> {
-    resynthesize_segment_inner(&st.core, &cid, idx).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
-}
-
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
@@ -982,17 +953,12 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
-        .route(
-            "/ui/corpora/{cid}/segments/{idx}/resynthesize",
-            post(resynthesize_segment),
-        )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
-        .route("/ui/ops/jobs/{id}/retry", post(retry_job))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
@@ -1110,7 +1076,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resegmenting_a_window_makes_it_pending_and_queues_the_job() {
+    async fn a_failed_segment_is_picked_up_without_anyone_asking() {
+        // What replaced the "re-synthesize segment" button. The sweep sees a
+        // segment that is not done, queues the corpus, and the run retries it.
         let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("first para\n\nsecond para", "web", None)
@@ -1126,22 +1094,16 @@ mod tests {
             )
             .await
             .unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
 
-        super::resynthesize_segment_inner(&core, &out.id, 0)
-            .await
-            .unwrap();
-
-        let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
-        assert_eq!(w.state, crate::store::segments::SegmentState::Pending);
-        assert_eq!(w.attempts, 0);
-
+        assert_eq!(crate::jobs::reconcile::run(&core).await.unwrap(), 1);
         let mut found = false;
         while let Some(j) = core.store.claim_job().await.unwrap() {
             if j.stage == crate::store::jobs::Stage::Synthesize && j.target_id == out.id {
                 found = true;
             }
         }
-        assert!(found, "a segment job must be queued for the source");
+        assert!(found, "nothing would ever retry the segment");
     }
 
     async fn app_with_session() -> (axum::Router, String) {
@@ -1459,7 +1421,7 @@ mod tests {
             "/ui/ops/tokens",
             "/ui/corpora/abc/delete",
             "/ui/corpora/abc/reprocess",
-            "/ui/ops/jobs/1/retry",
+            "/ui/ops/pairs/1/dismiss",
             "/ui/ask",
         ] {
             let res = app
@@ -1752,6 +1714,38 @@ mod tests {
         let html = body_of(res).await;
         assert!(html.contains("Queue"));
         assert!(html.contains("API tokens"));
+    }
+
+    #[tokio::test]
+    async fn ops_reports_what_is_retrying_rather_than_asking_for_a_click() {
+        let (app, cookie, core) = app_session_and_core().await;
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", "a1")
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        core.store
+            .fail_job(job.id, 9, "endpoint down")
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("Retrying"), "{html}");
+        assert!(html.contains("endpoint down"));
+        assert!(
+            !html.contains("Re-synthesize segment"),
+            "the review queue is still a to-do list"
+        );
     }
 
     /// One corpus with `n` artifacts, titled so the ops page can be searched

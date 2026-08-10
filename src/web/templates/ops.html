@@ -98,48 +98,21 @@
 </table>
 {% endif %}
 
-<h3>Failed jobs</h3>
-{% if failed.is_empty() %}
-  <p class="muted">None.</p>
+<h3>Retrying</h3>
+{% if retrying.is_empty() %}
+  <p class="muted">Nothing is stuck.</p>
 {% else %}
+<p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
 <table class="grid">
-  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Error</th><th></th></tr></thead>
+  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Next</th><th>Last error</th></tr></thead>
   <tbody>
-  {% for f in failed %}
+  {% for j in retrying %}
     <tr>
-      <td class="mono">{{ f.stage }}</td>
-      <td class="mono">{{ f.target_id }}</td>
-      <td class="mono">{{ f.attempts }}</td>
-      <td class="muted">{% if let Some(e) = f.last_error %}{{ e }}{% else %}—{% endif %}</td>
-      <td>
-        <form method="post" action="/ui/ops/jobs/{{ f.id }}/retry">
-          <button class="btn btn-sm" type="submit">Retry</button>
-        </form>
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
-<h3>Needs review</h3>
-{% if flagged.is_empty() %}
-  <p class="muted">Nothing flagged. Every artifact reproduced its corpus.</p>
-{% else %}
-<table class="grid">
-  <thead><tr><th>Artifact</th><th>Problem</th><th></th></tr></thead>
-  <tbody>
-  {% for f in flagged %}
-    <tr>
-      <td><a href="/ui/artifacts/{{ f.artifact_id }}">{{ f.title }}</a></td>
-      <td class="mono muted">{{ f.detail }}</td>
-      <td>
-        {% if let Some(w) = f.segment_idx %}
-        <form method="post" action="/ui/corpora/{{ f.corpus_id }}/segments/{{ w }}/resynthesize">
-          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
-        </form>
-        {% endif %}
-      </td>
+      <td class="mono">{{ j.stage }}</td>
+      <td class="mono">{{ j.target_id }}</td>
+      <td class="mono">{{ j.attempts }}</td>
+      <td class="mono">{{ j.due }}</td>
+      <td class="muted">{{ j.last_error }}</td>
     </tr>
   {% endfor %}
   </tbody>
