@@ -87,11 +87,19 @@ pub fn fact_tokens(text: &str) -> BTreeSet<String> {
 /// demanded a shared value, on the theory that it showed the two were talking
 /// about the same measurable thing — but that is exactly backwards for the case
 /// this exists to catch: one artifact says `1.21.4` and the other says
-/// `1.30.0`, and they share nothing at all. Whether the two are about the same
-/// subject was already settled by the similarity that put them in a pair.
+/// `1.30.0`, and they share nothing at all.
 ///
 /// So a pair stating unrelated values does get through and costs one call. That
 /// is the cheap direction of the error, and it is the one to be wrong in.
+///
+/// What this deliberately does *not* decide is whether the two are about the
+/// same subject. That used to be assumed settled by the similarity that put
+/// them in a pair, and it is not: in a reference document the entries for
+/// FAT12, FAT16 and FAT32 are near-identical in form and deliberately different
+/// in content, so they score 0.91 and every number in them differs. Similarity
+/// measures shape. The judge is the only thing here that can read a subject,
+/// which is why it is given both titles and told that different named things
+/// are not in conflict.
 pub fn may_disagree(a: &str, b: &str) -> bool {
     let (fa, fb) = (fact_tokens(a), fact_tokens(b));
     !fa.is_empty() && !fb.is_empty() && fa != fb

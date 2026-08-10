@@ -60,23 +60,39 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
 /// a judgement waiting.
 pub const JUDGE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
 
-A contradiction is a concrete disagreement about the same thing: a different version, number, date, path, flag, default, or step order for the same subject.
+First decide whether the two are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
+
+If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then the artifacts are not in conflict no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer false and stop.
+
+Only when both describe the same subject: a contradiction is a concrete disagreement about it — a different version, number, date, path, flag, default, or step order for that one subject.
 
 These are NOT contradictions:
 - The same fact in different words.
 - Different levels of detail about the same thing.
-- Two different subjects that happen to use similar language.
+- Two different subjects that happen to use similar language, or the same layout.
 - One artifact mentioning something the other simply does not cover.
+- Two values that both appear in the same artifact.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
 {"contradicts": true, "detail": "..."}
 
-- contradicts: true only for a concrete disagreement, as above.
-- detail: when true, one short sentence naming the two conflicting values. Omit it when false."#;
+- contradicts: true only for a concrete disagreement about one subject, as above.
+- detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false."#;
 
-pub fn judge_prompt(a: &str, b: &str) -> String {
-    format!("----- ARTIFACT A -----\n{a}\n----- ARTIFACT B -----\n{b}\n----- END -----")
+/// The two artifacts, each under its title.
+///
+/// The title is not decoration here, it is the subject. Synthesis writes a body
+/// that stands on its own within its segment, which is not the same as naming
+/// what it is about: a section headed "FAT32" becomes an artifact whose text
+/// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
+/// alone, the model saw two anonymous spec lists with different numbers and
+/// called them a contradiction — correctly, on the evidence it was given.
+pub fn judge_prompt(a: (&str, &str), b: (&str, &str)) -> String {
+    format!(
+        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
+        a.0, a.1, b.0, b.1
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -324,6 +340,32 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_judge_is_told_what_each_artifact_is_about() {
+        // The real case this fixes: an artifact headed "FAT32 Specifications"
+        // whose body opens "32 Bit Clusternummern" and never says FAT32 again.
+        // Given the bodies alone, the model saw two anonymous spec lists with
+        // different numbers and called them a contradiction — which was the
+        // only honest answer to the question it was actually asked.
+        let p = judge_prompt(
+            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+            ("FAT32 Specifications", "32 Bit Clusternummern."),
+        );
+        assert!(p.contains("Title: FAT16 Specifications"), "{p}");
+        assert!(p.contains("Title: FAT32 Specifications"), "{p}");
+        assert!(p.contains("Die max. Partitionsgröße: 2 GB."));
+    }
+
+    #[test]
+    fn the_judge_is_told_that_different_subjects_are_not_a_conflict() {
+        // Two sections of one reference document are near-identical in form and
+        // deliberately different in content, so similarity puts them in a pair
+        // and every number in them differs. Without this rule the feature fires
+        // hardest exactly where it is most wrong.
+        assert!(JUDGE_SYSTEM.contains("same subject"));
+        assert!(JUDGE_SYSTEM.contains("Answer false and stop."));
+    }
 
     #[test]
     fn a_truncated_list_keeps_the_artifacts_that_finished() {

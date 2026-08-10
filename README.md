@@ -289,6 +289,17 @@ fails outright ends the sweep's judging instead of spending the budget on an
 endpoint that is not there. Which of two contradictory artifacts is current stays
 a judgement for the reader.
 
+The model is shown both **titles**, and asked first whether the two are even
+about the same subject. Similarity measures shape, not subject: in a reference
+document the entries for FAT12, FAT16 and FAT32 are near-identical in form and
+deliberately different in content, so they pair at 0.91 and every number in them
+differs. Given only the bodies, the judge called that a contradiction — and it
+was right about the evidence it had, because synthesis writes a body that stands
+on its own within its segment without necessarily naming what it is about: the
+artifact titled `FAT32 Specifications` opens `32 Bit Clusternummern` and never
+says FAT32 again. Different named things are not in conflict however far apart
+their numbers are; that is what makes them different things.
+
 Artifacts also carry **caveats**: the conditions under which they do not apply,
 emitted by the same synthesis call that wrote them, so they cost output tokens
 rather than another call. They are stored, shown, and passed to `ask` alongside

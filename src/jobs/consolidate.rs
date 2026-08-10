@@ -313,7 +313,10 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             .completer
             .complete(
                 crate::infer::prompt::JUDGE_SYSTEM,
-                &crate::infer::prompt::judge_prompt(&a.text, &b.text),
+                &crate::infer::prompt::judge_prompt(
+                    (a.title.as_deref().unwrap_or("untitled"), &a.text),
+                    (b.title.as_deref().unwrap_or("untitled"), &b.text),
+                ),
             )
             .await
         {
