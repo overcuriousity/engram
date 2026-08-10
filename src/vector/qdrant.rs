@@ -164,6 +164,20 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     Some(body)
 }
 
+/// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
+/// which is why `near_pairs` follows this with a payload lookup.
+#[derive(Deserialize)]
+struct MatrixPairs {
+    pairs: Vec<MatrixPair>,
+}
+
+#[derive(Deserialize)]
+struct MatrixPair {
+    a: Value,
+    b: Value,
+    score: f32,
+}
+
 /// The schema every generation is created with.
 fn collection_body(dim: usize) -> Value {
     json!({
@@ -1197,6 +1211,91 @@ impl VectorStore for QdrantVectors {
         Ok(hits)
     }
 
+    async fn near_pairs(
+        &self,
+        sample: usize,
+        per_point: usize,
+        min_score: f32,
+    ) -> Result<Vec<super::NearPair>> {
+        // Superseded points are excluded at the source. Including them would
+        // hand the sweep pairs it has already resolved, on every single run.
+        let res: MatrixPairs = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/search/matrix/pairs", self.alias),
+                Some(json!({
+                    "sample": sample,
+                    "limit": per_point,
+                    "using": DENSE,
+                    "filter": { "must_not": [
+                        { "key": "superseded", "match": { "value": true } }
+                    ] },
+                })),
+            )
+            .await?;
+
+        let mut ids: Vec<Value> = Vec::new();
+        for p in &res.pairs {
+            if p.score < min_score {
+                continue;
+            }
+            ids.push(p.a.clone());
+            ids.push(p.b.clone());
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        ids.sort_by_key(|v| v.to_string());
+        ids.dedup();
+
+        // `point_uuid` is one-way, so the artifact id has to come back from the
+        // payload. One retrieve for the whole sweep, asking for the single key
+        // rather than dragging every candidate's text across the wire.
+        let looked_up: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points", self.alias),
+                Some(json!({ "ids": ids, "with_payload": ["artifact_id"], "with_vector": false })),
+            )
+            .await?;
+        let mut by_uuid: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        if let Some(list) = looked_up.get("result").and_then(|r| r.as_array()) {
+            for p in list {
+                let (Some(id), Some(aid)) = (
+                    p.get("id"),
+                    p.get("payload")
+                        .and_then(|pl| pl.get("artifact_id"))
+                        .and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                by_uuid.insert(id.to_string(), aid.to_string());
+            }
+        }
+
+        let mut out: Vec<super::NearPair> = res
+            .pairs
+            .iter()
+            .filter(|p| p.score >= min_score)
+            .filter_map(|p| {
+                let a = by_uuid.get(&p.a.to_string())?;
+                let b = by_uuid.get(&p.b.to_string())?;
+                // A point cannot be a duplicate of itself, however the matrix
+                // reports it.
+                (a != b).then(|| super::NearPair::new(a, b, p.score))
+            })
+            .collect();
+        out.sort_by(|x, y| {
+            y.score
+                .total_cmp(&x.score)
+                .then_with(|| x.a.cmp(&y.a))
+                .then_with(|| x.b.cmp(&y.b))
+        });
+        out.dedup_by(|x, y| x.a == y.a && x.b == y.b);
+        Ok(out)
+    }
+
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
     }
@@ -1327,6 +1426,24 @@ mod tests {
         assert_eq!(
             normalize_base("http://localhost:6333"),
             "http://localhost:6333"
+        );
+    }
+
+    #[test]
+    fn matrix_pairs_deserialise_from_qdrant_shape() {
+        let res: MatrixPairs = serde_json::from_value(json!({
+            "pairs": [ { "a": 1, "b": 2, "score": 0.97 } ]
+        }))
+        .unwrap();
+        assert_eq!(res.pairs.len(), 1);
+        assert!((res.pairs[0].score - 0.97).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pair_is_canonically_ordered() {
+        assert_eq!(
+            super::super::NearPair::new("z", "a", 0.9),
+            super::super::NearPair::new("a", "z", 0.9)
         );
     }
 

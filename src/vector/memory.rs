@@ -197,6 +197,48 @@ impl VectorStore for MemoryVectors {
         Ok(hits)
     }
 
+    async fn near_pairs(
+        &self,
+        sample: usize,
+        per_point: usize,
+        min_score: f32,
+    ) -> Result<Vec<super::NearPair>> {
+        let r = self.points.read().unwrap();
+        let live: Vec<&VectorPoint> = r
+            .values()
+            .filter(|p| p.payload.superseded != Some(true))
+            .take(sample)
+            .collect();
+
+        let mut out: Vec<super::NearPair> = Vec::new();
+        for (i, a) in live.iter().enumerate() {
+            let mut mine: Vec<super::NearPair> = live
+                .iter()
+                .skip(i + 1)
+                .map(|b| {
+                    super::NearPair::new(
+                        &a.payload.artifact_id,
+                        &b.payload.artifact_id,
+                        cosine(&a.vector, &b.vector),
+                    )
+                })
+                .filter(|p| p.score >= min_score)
+                .collect();
+            mine.sort_by(|x, y| y.score.total_cmp(&x.score));
+            mine.truncate(per_point);
+            out.extend(mine);
+        }
+        // Deterministic order, so a test never depends on HashMap iteration.
+        out.sort_by(|x, y| {
+            y.score
+                .total_cmp(&x.score)
+                .then_with(|| x.a.cmp(&y.a))
+                .then_with(|| x.b.cmp(&y.b))
+        });
+        out.dedup_by(|x, y| x.a == y.a && x.b == y.b);
+        Ok(out)
+    }
+
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
         let mut w = self.points.write().unwrap();
         for id in artifact_ids {
@@ -548,6 +590,68 @@ mod tests {
             .await
             .unwrap();
         assert!(v.neighbours("missing", 5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn near_pairs_finds_the_close_pair_and_not_the_far_one() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.999, 0.01], &[], "note"),
+            point("c", "s1", vec![0.0, 1.0], &[], "note"),
+        ])
+        .await
+        .unwrap();
+
+        let pairs = v.near_pairs(100, 5, 0.9).await.unwrap();
+        assert_eq!(pairs.len(), 1, "got {pairs:?}");
+        assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("a", "b"));
+        assert!(pairs[0].score >= 0.9);
+    }
+
+    #[tokio::test]
+    async fn a_pair_is_reported_once_not_twice() {
+        // (a,b) and (b,a) are the same pair. Reporting both doubles the review
+        // queue and makes the sweep supersede an artifact twice.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.999, 0.01], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_superseded_artifact_is_not_paired_again() {
+        // Otherwise every sweep re-finds the pair it resolved last time and
+        // the review queue never empties.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.999, 0.01], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        v.set_superseded("b", true).await.unwrap();
+        assert!(v.near_pairs(100, 5, 0.9).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pairs_come_back_best_first() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "note"),
+            point("b", "s1", vec![0.999, 0.01], &[], "note"),
+            point("c", "s1", vec![0.99, 0.1], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        let pairs = v.near_pairs(100, 5, 0.5).await.unwrap();
+        for w in pairs.windows(2) {
+            assert!(w[0].score >= w[1].score, "not sorted: {pairs:?}");
+        }
     }
 
     #[tokio::test]
