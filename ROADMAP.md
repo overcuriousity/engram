@@ -121,12 +121,14 @@ to the query path.
   together, so recovery does not mean paying for every embedding again. The
   snapshot is the artifact of record for a rebuild; a reindex is the fallback,
   not the plan.
-- **Delete the FTS5 index and its triggers.** `migrations/0002_fts.sql` and the
-  taxonomy migration's rebuild of it create tables and triggers nothing reads.
-  Hybrid search runs in Qdrant — dense and sparse as prefetch branches fused by
-  RRF in one round trip (`src/vector/qdrant.rs`) — where the lexical index
-  cannot drift from the vectors. Drop the tables and triggers in a migration
-  and remove the write-path hooks in `src/store/artifacts.rs`.
+- ~~**Delete the FTS5 index and its triggers.**~~ Done — `migrations/0008_drop_fts.sql`
+  drops `artifacts_fts` and its three write triggers, and `keyword_search` /
+  `fts_quote` are gone from `src/store/artifacts.rs`. Hybrid search runs in
+  Qdrant instead — dense and sparse as prefetch branches fused by RRF in one
+  round trip (`src/vector/qdrant.rs`) — where the lexical index cannot drift
+  from the vectors. The SQLite index was never read by any production path and
+  charged three triggers on every artifact write to stay current. It was
+  external-content, so no text was lost with it.
 - **Term-id collisions.** Sparse dimensions are `u32` and terms are hashed into
   them, so a large enough vocabulary conflates two terms into one dimension and
   a document matches a word it does not contain. `sparse::term_id` is the only

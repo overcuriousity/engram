@@ -415,40 +415,6 @@ impl Store {
     pub async fn failed_embed_count(&self, corpus_id: &str) -> Result<i64> {
         self.count_by_embed_state(corpus_id, "failed").await
     }
-
-    /// Exact-token search over chunk text, titles and tags. Vector search is
-    /// the default path; this exists for error codes, CLI flags and paths,
-    /// which embeddings match poorly.
-    pub async fn keyword_search(&self, query: &str, limit: i64) -> Result<Vec<Chunk>> {
-        let sanitized = fts_quote(query);
-        if sanitized.is_empty() {
-            return Ok(vec![]);
-        }
-        let rows = sqlx::query(
-            "SELECT c.* FROM artifacts_fts f
-             JOIN artifacts c ON c.rowid = f.rowid
-             WHERE artifacts_fts MATCH ?
-             ORDER BY bm25(artifacts_fts) LIMIT ?",
-        )
-        .bind(&sanitized)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
-    }
-}
-
-/// FTS5 has its own query grammar, and user input is not written in it. Each
-/// whitespace-separated term is wrapped as a quoted phrase so stray operators
-/// and quotes become literal text instead of syntax errors.
-fn fts_quote(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|t| t.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
@@ -627,98 +593,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fts_matches_exact_technical_strings() {
+    async fn the_fts_index_is_gone() {
+        // The lexical half of search lives in Qdrant now. This asserts the
+        // SQLite index and its three write triggers were actually dropped,
+        // rather than left behind to be paid for on every artifact write.
         let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.insert_artifacts(
-            &src.id,
-            &[
-                nc(0, "Run `robocopy /MIR` to mirror the tree."),
-                nc(1, "Check the registry at HKLM\\SYSTEM\\CurrentControlSet."),
-            ],
+        let leftovers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE name = 'artifacts_fts' OR name LIKE 'artifacts_a%'",
         )
+        .fetch_all(&s.pool)
         .await
         .unwrap();
-
-        let hits = s.keyword_search("robocopy", 10).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].text.contains("robocopy"));
-
-        let hits = s.keyword_search("HKLM", 10).await.unwrap();
-        assert_eq!(hits.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn fts_stays_in_sync_on_update_and_delete() {
-        let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        let c = s
-            .insert_artifacts(&src.id, &[nc(0, "original vanishingword")])
-            .await
-            .unwrap()
-            .remove(0);
-
-        s.update_artifact_text(&c.id, "replaced entirely")
-            .await
-            .unwrap();
-        assert!(
-            s.keyword_search("vanishingword", 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "stale term still indexed after update"
-        );
-        assert_eq!(s.keyword_search("replaced", 10).await.unwrap().len(), 1);
-
-        s.delete_artifact(&c.id).await.unwrap();
-        assert!(s.keyword_search("replaced", 10).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn fts_is_cleaned_up_when_a_source_cascades() {
-        // SQLite only fires delete triggers for rows removed by a foreign-key
-        // cascade when recursive_triggers is enabled. Without it the chunk rows
-        // vanish but their FTS entries survive, and deleted text stays
-        // searchable forever.
-        let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.insert_artifacts(&src.id, &[nc(0, "cascadingsentinel term")])
-            .await
-            .unwrap();
-        assert_eq!(
-            s.keyword_search("cascadingsentinel", 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        s.delete_corpus(&src.id).await.unwrap();
-
-        // Assert against artifacts_fts directly. `keyword_search` joins back to
-        // `chunks`, so it would report an empty result even if the index still
-        // held orphaned rows — that check cannot distinguish clean from stale.
-        let orphans: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM artifacts_fts WHERE artifacts_fts MATCH 'cascadingsentinel'",
-        )
-        .fetch_one(&s.pool)
-        .await
-        .unwrap();
-        assert_eq!(orphans, 0, "cascade left orphaned rows in the fts index");
-
-        // FTS5's own consistency check. Orphaned entries in an external-content
-        // index eventually surface as "database disk image is malformed".
-        sqlx::query("INSERT INTO artifacts_fts(artifacts_fts) VALUES('integrity-check')")
-            .execute(&s.pool)
-            .await
-            .expect("fts index failed its integrity check");
-    }
-
-    #[tokio::test]
-    async fn fts_query_syntax_errors_do_not_crash() {
-        let s = Store::memory().await.unwrap();
-        // A bare quote is invalid FTS5 syntax; a user typing it must not 500.
-        let hits = s.keyword_search("broken\" AND", 10).await.unwrap();
-        assert!(hits.is_empty());
+        assert!(leftovers.is_empty(), "fts leftovers: {leftovers:?}");
     }
 }
