@@ -51,6 +51,9 @@ pub struct ArtifactPair {
     pub state: PairState,
     pub detail: Option<String>,
     pub created_at: i64,
+    /// Model calls this pair has already cost, successful or not. Orders the
+    /// judge's queue so a pair it cannot read does not starve the rest.
+    pub judge_attempts: i64,
 }
 
 fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
@@ -62,6 +65,7 @@ fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         state: PairState::parse(r.get::<String, _>("state").as_str()),
         detail: r.get("detail"),
         created_at: r.get("created_at"),
+        judge_attempts: r.get("judge_attempts"),
     }
 }
 
@@ -104,9 +108,44 @@ impl Store {
         state: PairState,
         detail: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE artifact_pairs SET state = ?, detail = ? WHERE id = ?")
+        let res = sqlx::query("UPDATE artifact_pairs SET state = ?, detail = ? WHERE id = ?")
             .bind(state.as_str())
             .bind(detail)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        // A dismiss from a stale Ops page names a pair that is no longer there
+        // — its artifacts were deleted, or the row never existed. Redirecting
+        // as though it worked tells the operator the queue is one shorter than
+        // it is.
+        if res.rows_affected() == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Pending pairs in the order the judge should spend its budget on them.
+    ///
+    /// Least-attempted first, then by score. A pair whose reply could not be
+    /// parsed stays pending on purpose, and under a plain `score DESC` the same
+    /// top-scoring handful would absorb every sweep's budget forever while the
+    /// rest of the queue is never reached.
+    pub async fn pairs_to_judge(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifact_pairs WHERE state = 'pending'
+              ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_pair).collect())
+    }
+
+    /// Count one model call against a pair, whether or not it produced an
+    /// answer. Written before the call, so a run that dies mid-judgement still
+    /// leaves the pair at the back of the next sweep's queue.
+    pub async fn record_judge_attempt(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE artifact_pairs SET judge_attempts = judge_attempts + 1 WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -234,6 +273,56 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_pair_that_is_no_longer_there_is_an_error() {
+        // Ops pages go stale, and a pair whose artifacts were deleted is gone
+        // with them. Reporting success would tell the operator the queue is one
+        // shorter than it is.
+        let s = Store::memory().await.unwrap();
+        assert!(matches!(
+            s.set_pair_state(9999, PairState::Dismissed, None).await,
+            Err(crate::error::Error::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_judge_queue_puts_the_least_attempted_pair_first() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("four", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..4)
+            .map(|i| NewArtifact {
+                ordinal: i,
+                text: format!("artifact {i}"),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        let made = s.insert_artifacts(&src.id, &new).await.unwrap();
+        let (a, b, c, d) = (
+            made[0].id.clone(),
+            made[1].id.clone(),
+            made[2].id.clone(),
+            made[3].id.clone(),
+        );
+        // The higher score would otherwise always lead.
+        s.record_pair(&a, &b, 0.99).await.unwrap();
+        s.record_pair(&c, &d, 0.90).await.unwrap();
+        let first = s.pairs_to_judge(10).await.unwrap();
+        assert_eq!(first[0].score, 0.99);
+
+        s.record_judge_attempt(first[0].id).await.unwrap();
+        let next = s.pairs_to_judge(10).await.unwrap();
+        assert_eq!(
+            next[0].score, 0.90,
+            "a pair that already cost a call must not lead again"
+        );
+        assert_eq!(next[1].judge_attempts, 1);
     }
 
     #[tokio::test]

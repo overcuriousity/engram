@@ -191,10 +191,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// failed call leaves its pair pending on purpose: a dead endpoint must never
 /// look like a clean bill of health.
 async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
-    let pending = core
-        .store
-        .pairs_by_state(crate::store::pairs::PairState::Pending, 200)
-        .await?;
+    let pending = core.store.pairs_to_judge(200).await?;
 
     let (mut judged, mut contradictions) = (0usize, 0usize);
     for p in pending {
@@ -234,6 +231,10 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         }
 
         judged += 1;
+        // Counted before the call and regardless of how it goes, so a pair the
+        // model keeps failing on drops behind the rest of the queue instead of
+        // absorbing this budget again on the next sweep.
+        core.store.record_judge_attempt(p.id).await?;
         let reply = match core
             .completer
             .complete(
@@ -243,9 +244,17 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             .await
         {
             Ok(r) => r,
+            // A transport failure is a statement about the endpoint, not about
+            // this pair: the next nineteen calls would fail the same way, and
+            // each one costs a full timeout. Stop, keep the pairs pending, and
+            // let the next sweep find out whether anything changed.
             Err(e) => {
-                tracing::warn!(pair = p.id, error = %e, "judge call failed; pair stays pending");
-                continue;
+                tracing::warn!(
+                    pair = p.id,
+                    error = %e,
+                    "judge call failed; pairs stay pending and this sweep stops judging"
+                );
+                break;
             }
         };
 
@@ -677,6 +686,87 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_endpoint_stops_the_judge_instead_of_spending_the_budget_on_it() {
+        // Every call would fail the same way, and each one costs a full
+        // timeout. The pairs stay pending either way; what this saves is
+        // twenty consecutive waits on an endpoint that is not there.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        // Two pairs, each inside the review band and nowhere near the other, so
+        // there really is a second call for the judge to skip.
+        seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.94, 0.342]),
+                ("it listens on 8080", [-1.0, 0.0]),
+                ("it listens on 9090", [-0.94, -0.342]),
+            ],
+        )
+        .await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.queued, 2, "not enough pairs to prove anything: {out:?}");
+        assert_eq!(
+            completer.calls(),
+            1,
+            "the judge kept calling a dead endpoint"
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            out.queued,
+            "a failed call must never look like a clean bill of health"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_the_model_keeps_failing_on_goes_to_the_back_of_the_queue() {
+        // An unreadable reply leaves the pair pending on purpose. Ordered by
+        // score alone, the same top-scoring pair would then absorb every
+        // sweep's budget forever and the rest would never be judged at all.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.consolidate.max_judgements = 1;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            "not json".into(),
+            r#"{"contradicts":true,"detail":"30 versus 90"}"#.into(),
+        ]));
+        seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.999, 0.01]),
+                ("timeout is 90 seconds", [0.9, 0.44]),
+            ],
+        )
+        .await;
+
+        run(&core).await.unwrap();
+        run(&core).await.unwrap();
+
+        let pending = core.store.pairs_to_judge(10).await.unwrap();
+        assert!(
+            pending.iter().all(|p| p.judge_attempts <= 1),
+            "the second sweep judged the same pair again: {pending:?}"
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Contradiction, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the second sweep never reached an unjudged pair"
         );
     }
 
