@@ -90,6 +90,34 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
+    /// File a pair that is already answered. Returns whether this was new.
+    ///
+    /// `INSERT OR IGNORE` like `record_pair`, and for a stronger reason: a row
+    /// that exists carries a decision — a person's dismissal, the judge's
+    /// contradiction — and the sweep re-finds the same pair every run. Settling
+    /// it again would overwrite the answer with the sweep's opinion of it.
+    pub async fn record_settled_pair(
+        &self,
+        a: &str,
+        b: &str,
+        score: f32,
+        state: PairState,
+    ) -> Result<bool> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(score as f64)
+        .bind(state.as_str())
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn pairs_by_state(&self, state: PairState, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query(
             "SELECT * FROM artifact_pairs WHERE state = ?

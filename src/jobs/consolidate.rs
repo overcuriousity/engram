@@ -22,6 +22,9 @@ pub struct Outcome {
     pub examined: usize,
     pub superseded: usize,
     pub queued: usize,
+    /// Pairs settled without asking anyone, because the two artifacts state no
+    /// value differently and so have nothing to disagree about.
+    pub closed: usize,
     pub judged: usize,
     pub contradictions: usize,
 }
@@ -163,6 +166,33 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         if a.superseded_by.is_some() || b.superseded_by.is_some() {
             continue;
         }
+
+        // Two artifacts that state no value differently have nothing for a
+        // person to rule on, and asking anyway is what turned this queue into a
+        // list of chores. The pair is filed as settled — the sweep re-finds it
+        // every run, so it has to be remembered — and both artifacts stay
+        // exactly where they are. Closing a question is not hiding an answer.
+        //
+        // The prefilter used to run only when the judge was enabled, which it
+        // is not by default, so the cheap answer was reached only by bases
+        // already paying for the expensive one.
+        if !crate::infer::facts::may_disagree(&a.text, &b.text) {
+            if core
+                .store
+                .record_settled_pair(
+                    &p.a,
+                    &p.b,
+                    p.score,
+                    crate::store::pairs::PairState::NoConflict,
+                )
+                .await?
+            {
+                out.closed += 1;
+                tracing::debug!(a = %p.a, b = %p.b, score = p.score, "pair states nothing differently");
+            }
+            continue;
+        }
+
         if core.store.record_pair(&p.a, &p.b, p.score).await? {
             out.queued += 1;
             tracing::info!(a = %p.a, b = %p.b, score = p.score, "queued a pair for review");
@@ -490,8 +520,18 @@ mod tests {
     async fn a_pair_in_the_review_band_is_queued_not_superseded() {
         // 0.88 is where two genuinely distinct artifacts about one subsystem
         // routinely sit. Acting on that score destroys knowledge.
+        //
+        // The two state a value differently, which is what keeps them on the
+        // queue at all: a pair with nothing to disagree about closes itself.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.93, 0.37])]).await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.93, 0.37]),
+            ],
+        )
+        .await;
 
         let out = run(&core).await.unwrap();
         assert_eq!(out.superseded, 0, "{out:?}");
@@ -691,6 +731,60 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_nothing_to_disagree_about_never_reaches_the_queue() {
+        // The prefilter already knows these two state no differing value, but
+        // it only ran when the judge was enabled — and the judge is off by
+        // default. So every near pair became a question for a person, which is
+        // a question with no answer to give.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.queued, 0, "{out:?}");
+        assert_eq!(out.closed, 1, "{out:?}");
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Closing a question is not hiding an answer.
+        for id in &ids {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pair_stating_different_values_still_waits_for_a_person() {
+        let core = test_core().await;
+        seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 90 seconds", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.queued, 1, "{out:?}");
     }
 
     #[tokio::test]
