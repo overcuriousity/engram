@@ -72,6 +72,8 @@ pub struct ArtifactDetail {
     /// The artifact this one was hidden in favour of. Opening a hidden artifact
     /// by link has to say why it is not in results, or it reads as a bug.
     pub superseded_by: Option<String>,
+    /// Conditions the source stated under which this artifact does not apply.
+    pub caveats: Vec<String>,
     pub corpus_id: String,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
@@ -887,6 +889,7 @@ pub(crate) async fn build_artifact_detail(
         flags: c.flags,
         flag_detail: c.flag_detail,
         superseded_by: c.superseded_by,
+        caveats: c.caveats,
         corpus_id: c.corpus_id,
         segment_idx: c.segment_idx,
         slice_label: slice.label,
@@ -1722,6 +1725,7 @@ mod tests {
                 category: None,
                 tags: vec![],
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         core.store

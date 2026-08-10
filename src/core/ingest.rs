@@ -409,6 +409,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: None,
+                    caveats: vec![],
                 }],
             )
             .await

@@ -110,6 +110,7 @@ impl Synthesizer for FakeSynthesizer {
                 category: Some("note".into()),
                 tags: vec!["fake".into()],
                 corpus_lines: None,
+                caveats: vec![],
             })
             .collect())
     }
@@ -171,6 +172,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
             category: Some("note".into()),
             tags: vec![],
             corpus_lines: None,
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -225,6 +227,7 @@ impl Synthesizer for LyingSpanSynthesizer {
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -250,6 +253,7 @@ impl Synthesizer for HallucinatingSynthesizer {
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {

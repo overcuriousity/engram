@@ -185,6 +185,7 @@ mod tests {
                 category: None,
                 tags: vec![],
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

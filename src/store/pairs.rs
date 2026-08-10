@@ -134,6 +134,7 @@ mod tests {
                         category: None,
                         tags: vec![],
                         segment_idx: None,
+                        caveats: vec![],
                     },
                     NewArtifact {
                         ordinal: 1,
@@ -143,6 +144,7 @@ mod tests {
                         category: None,
                         tags: vec![],
                         segment_idx: None,
+                        caveats: vec![],
                     },
                 ],
             )

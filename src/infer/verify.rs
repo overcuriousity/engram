@@ -84,11 +84,26 @@ pub fn extract_literals(artifact_text: &str) -> Vec<String> {
     out
 }
 
-/// Literals present in the chunk and absent from the window it came from.
-pub fn missing_literals(artifact_text: &str, segment_text: &str) -> Vec<String> {
+/// Literals present in the chunk or its caveats and absent from the window they
+/// came from.
+///
+/// Caveats go through the same check rather than a weaker one. They are the
+/// newest place model prose can appear, and a caveat that says to run something
+/// first is a command that gets pasted into a root shell exactly like one in
+/// the body.
+pub fn missing_literals(
+    artifact_text: &str,
+    caveats: &[String],
+    segment_text: &str,
+) -> Vec<String> {
     let haystack = normalize(segment_text);
-    extract_literals(artifact_text)
-        .into_iter()
+    let mut all = extract_literals(artifact_text);
+    for c in caveats {
+        all.extend(extract_literals(c));
+    }
+    all.sort();
+    all.dedup();
+    all.into_iter()
         .filter(|lit| !haystack.contains(&normalize(lit)))
         .collect()
 }
@@ -211,9 +226,36 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     }
 
     #[test]
+    fn a_command_invented_in_a_caveat_is_caught() {
+        // A caveat is prose the model wrote, and it is exactly where an
+        // invented "run `wipefs --all` first" would appear. The literal check
+        // has to reach it, or caveats become the one part of an artifact that
+        // nothing verifies.
+        let missing = missing_literals(
+            "Write the image with `dd if=archlinux.iso of=/dev/sdX`.",
+            &["First run `wipefs --all /dev/sdX`.".to_string()],
+            WINDOW,
+        );
+        assert_eq!(missing, vec!["wipefs --all /dev/sdX".to_string()]);
+    }
+
+    #[test]
+    fn a_caveat_quoting_a_real_command_is_not_flagged() {
+        assert!(
+            missing_literals(
+                "Write the image to the device.",
+                &["Unmount first: `dd if=archlinux.iso of=/dev/sdX` needs the whole device."
+                    .to_string()],
+                WINDOW,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn a_verbatim_chunk_reports_nothing_missing() {
         let chunk = "Unmount first.\n\n```bash\ndd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress\n```\n\nUse /dev/sdX with --dry-run.";
-        assert!(missing_literals(chunk, WINDOW).is_empty());
+        assert!(missing_literals(chunk, &[], WINDOW).is_empty());
     }
 
     #[test]
@@ -221,7 +263,7 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         // The model rewrote the command and lost oflag=sync. This is the
         // failure the whole check exists for.
         let chunk = "```bash\ndd if=archlinux.iso of=/dev/sdX bs=4M status=progress\n```";
-        let missing = missing_literals(chunk, WINDOW);
+        let missing = missing_literals(chunk, &[], WINDOW);
         assert_eq!(missing.len(), 1);
         assert!(missing[0].contains("status=progress"));
     }
@@ -230,14 +272,14 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     fn indentation_and_whitespace_runs_do_not_count_as_a_mismatch() {
         // The window indents the command by four spaces; the chunk fences it.
         let chunk = "```\numount   /dev/sdX*\n```";
-        assert!(missing_literals(chunk, WINDOW).is_empty());
+        assert!(missing_literals(chunk, &[], WINDOW).is_empty());
     }
 
     #[test]
     fn an_indented_code_block_counts_as_code() {
         // Reference documentation indents commands as often as it fences them.
         let chunk = "Write it:\n\n    dd if=archlinux.iso of=/dev/sdX bs=4M status=progress\n";
-        let missing = missing_literals(chunk, WINDOW);
+        let missing = missing_literals(chunk, &[], WINDOW);
         assert_eq!(missing.len(), 1, "the rewritten command must be caught");
     }
 

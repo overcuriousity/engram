@@ -369,6 +369,7 @@ mod tests {
                         category: None,
                         tags: vec![],
                         segment_idx: None,
+                        caveats: vec![],
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
@@ -378,6 +379,7 @@ mod tests {
                         category: None,
                         tags: vec![],
                         segment_idx: None,
+                        caveats: vec![],
                     },
                 ],
             )

@@ -61,6 +61,10 @@ pub struct Chunk {
     /// consolidation sweep; the artifact stays stored and readable, and is only
     /// kept out of ranking.
     pub superseded_by: Option<String>,
+    /// Conditions under which this artifact does not apply, as its source
+    /// stated them. Deliberately not part of what gets embedded: changing what
+    /// every vector is built from is a decision for the evaluation harness.
+    pub caveats: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +76,7 @@ pub struct NewArtifact {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub segment_idx: Option<i64>,
+    pub caveats: Vec<String>,
 }
 
 fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
@@ -97,6 +102,10 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .unwrap_or_default(),
         flag_detail: r.get("flag_detail"),
         superseded_by: r.get("superseded_by"),
+        caveats: r
+            .get::<Option<String>, _>("caveats")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -126,10 +135,11 @@ impl Store {
                 flags: vec![],
                 flag_detail: None,
                 superseded_by: None,
+                caveats: nc.caveats.clone(),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -142,6 +152,7 @@ impl Store {
             .bind(c.embed_state.as_str())
             .bind(c.created_at)
             .bind(c.segment_idx)
+            .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
             .execute(&mut *tx)
             .await?;
             out.push(c);
@@ -461,6 +472,7 @@ mod tests {
                 start_line: 1,
                 end_line: 4,
             }),
+            caveats: vec![],
             title: Some(format!("title {ord}")),
             category: Some("procedure".into()),
             tags: vec!["forensics".into(), "windows".into()],

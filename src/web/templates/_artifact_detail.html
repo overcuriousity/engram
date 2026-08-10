@@ -44,6 +44,14 @@
       <div class="card">
         <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {% if !d.caveats.is_empty() %}
+        {# Emitted by the same synthesis call that wrote the artifact, from what
+           the source states. Shown but deliberately not embedded. #}
+        <div class="caveats">
+          <b>Before you rely on this</b>
+          <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
         <div class="chips">
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
           {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}

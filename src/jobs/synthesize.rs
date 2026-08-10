@@ -186,7 +186,7 @@ enum SpanOrigin {
 fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
     chunks
         .iter()
-        .any(|c| !crate::infer::verify::missing_literals(&c.text, window).is_empty())
+        .any(|c| !crate::infer::verify::missing_literals(&c.text, &c.caveats, window).is_empty())
 }
 
 /// Mark what verification could not vouch for. The chunk is kept — a warning
@@ -204,7 +204,7 @@ async fn flag_unverified(
         let mut flags = Vec::new();
         let mut detail: Option<String> = None;
 
-        let missing = verify::missing_literals(&c.text, segment_body);
+        let missing = verify::missing_literals(&c.text, &c.caveats, segment_body);
         if let Some(first) = missing.first() {
             flags.push(verify::FLAG_LITERALS.to_string());
             detail = Some(format!("missing literal: {first}"));
@@ -365,6 +365,7 @@ fn proposed_to_new(
             title: p.title,
             category: p.category,
             tags: p.tags,
+            caveats: p.caveats,
             segment_idx: Some(segment_idx),
         })
         .collect()

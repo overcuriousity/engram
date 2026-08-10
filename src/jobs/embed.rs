@@ -343,6 +343,9 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
             corpus_span: chunk.corpus_span.clone(),
             title: chunk.title.clone(),
             category: chunk.category.clone(),
+            // A caveat applies to the whole passage the parent held, so every
+            // fragment of it inherits the warning rather than losing it.
+            caveats: chunk.caveats.clone(),
             tags: chunk.tags.clone(),
             // Siblings belong to the window their parent came from, or a
             // re-segmentation of that window would leave them behind.
@@ -435,6 +438,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -487,6 +491,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -526,6 +531,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -593,6 +599,7 @@ mod tests {
                 category: Some("note".into()),
                 tags: vec!["x".into()],
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

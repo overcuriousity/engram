@@ -336,6 +336,7 @@ mod tests {
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

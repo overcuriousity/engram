@@ -21,12 +21,18 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end],"caveats":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
 - category: one lowercase word, e.g. procedure, concept, reference, snippet.
 - tags: 1-5 lowercase keywords for filtering.
-- corpus_lines: the 1-based line range in the input this artifact came from."#;
+- corpus_lines: the 1-based line range in the input this artifact came from.
+- caveats: 0-3 short sentences for conditions under which this artifact does
+  not hold — a prerequisite, a version or platform it is specific to, a
+  destructive effect, a documented failure. Take these only from what the input
+  states or plainly implies. Never invent a caveat, never add general advice,
+  and never put a command in a caveat that is not in the input. Use an empty
+  list when the input states none, which is the common case."#;
 
 pub fn user_prompt(segment_text: &str, first_line: i64, max_artifact_tokens: usize) -> String {
     format!(
@@ -61,6 +67,8 @@ struct RawArtifact {
     tags: Vec<String>,
     #[serde(default)]
     corpus_lines: Option<Vec<i64>>,
+    #[serde(default)]
+    caveats: Vec<String>,
 }
 
 /// Models wrap JSON in fences and preface it with prose no matter what the
@@ -241,6 +249,16 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
             },
+            // Capped at the three the prompt asks for: a model that starts
+            // listing general advice must not turn one artifact into a page of
+            // it, and the tail is the least source-grounded part of the list.
+            caveats: c
+                .caveats
+                .into_iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .take(3)
+                .collect(),
         })
         .collect();
 
@@ -324,6 +342,44 @@ mod tests {
         // rather than silently dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
+    }
+
+    #[test]
+    fn caveats_are_parsed_when_the_model_supplies_them() {
+        let body = r#"{"artifacts":[{
+            "text":"Run `mkfs.ext4 /dev/sdb1` to format the partition.",
+            "title":"Formatting a partition",
+            "category":"procedure",
+            "tags":["disk"],
+            "corpus_lines":[3,9],
+            "caveats":["Destroys every existing file on the device.",
+                       "Requires root."]
+        }]}"#;
+        let got = parse_response(body).unwrap();
+        assert_eq!(
+            got[0].caveats,
+            vec![
+                "Destroys every existing file on the device.".to_string(),
+                "Requires root.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_artifact_without_caveats_parses_to_an_empty_list() {
+        // Most models will omit the field most of the time, and a missing
+        // field must never fail a segment that is otherwise fine.
+        let body = r#"{"artifacts":[{"text":"plain","title":"t","category":"c","tags":[]}]}"#;
+        assert!(parse_response(body).unwrap()[0].caveats.is_empty());
+    }
+
+    #[test]
+    fn the_system_prompt_asks_for_caveats_and_forbids_inventing_them() {
+        assert!(SYNTHESIZER_SYSTEM.contains("caveats"));
+        assert!(
+            SYNTHESIZER_SYSTEM.contains("Never invent"),
+            "the prompt must tie caveats to what the source says"
+        );
     }
 
     // r###: the JSON contains the sequence `"##` (a quoted markdown H2),

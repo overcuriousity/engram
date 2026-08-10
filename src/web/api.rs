@@ -786,6 +786,7 @@ mod patch_tests {
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
                     segment_idx: None,
+                    caveats: vec![],
                 }],
             )
             .await
