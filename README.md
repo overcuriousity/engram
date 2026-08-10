@@ -57,7 +57,8 @@ cargo run
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
 through `raw → synthesizing → embedding → ready` on Browse. `partial` means some
-artifacts failed to embed; the Ops screen lists the failures with a retry button.
+of it has not come through yet; the Ops screen says what is retrying and when,
+and nothing there needs you.
 
 ## Configuration
 
@@ -174,13 +175,20 @@ Each segment is checked before its artifacts are stored.
   is synthesised once more; failing that, the artifact is stored with a flag naming
   the literal that went missing. A paraphrased command is a command that later
   gets pasted into a root shell, and losing the chapter to protect against that
-  would be worse than a warning the reader can see.
-- **Spans.** An artifact's claimed `corpus_lines` are clamped to its own segment and
-  checked for plausible overlap with the lines they name. The detail pane
-  renders those lines beside the artifact, so a wrong span is not cosmetic. Models
-  omit `corpus_lines` more often than not; when that happens the span is
-  recovered by finding the artifact's own verbatim lines in the segment, and only a
-  span the model actually asserted is ever doubted.
+  would be worse than a warning the reader can see. A label the model put in
+  front of something verbatim — `Binär: 0010 1001` for a source that says
+  `wird binär 0010 1001` — is not a missing literal: the digits are what
+  someone retypes, and reporting the formatting buries the real misses. A
+  colon *and a space* mark a label, so `backup:/etc/fstab` keeps its host.
+- **Spans.** The lines an artifact came from are found by matching its own text
+  against the segment, whitespace normalised, with the source's line breaks
+  taken out — a handout hard-wrapped at eighty columns and reflowed by synthesis
+  still resolves to the lines it was made from. The model is asked for
+  `corpus_lines` and its answer is used only when nothing matches at all;
+  failing that, the span is the segment. The detail pane renders those lines
+  beside the artifact, so a wrong span is not cosmetic — but it is a number
+  engram computes, not a claim to adjudicate, so there is nothing here to flag
+  and nobody to ask.
 - **Coverage.** The fraction of a corpus's lines whose content reached some
   artifact, recorded and shown on Browse. Below 60% it reads as a warning — a
   corpus where synthesis dropped half a chapter used to look identical to
@@ -195,8 +203,29 @@ Each segment is checked before its artifacts are stored.
   `--recompute-coverage` re-measures every corpus from the artifacts already
   stored, which costs no inference and re-synthesises nothing.
 
-Flagged artifacts are listed on Ops with two actions: re-synthesise that one segment,
-or mark the artifact reviewed.
+A flagged artifact says so on its own page, beside the source lines it came
+from, with a button to mark the warning noise. It is not a queue: it concerns
+one artifact and speaks to whoever reads it.
+
+## Nothing is terminal
+
+A job that fails is delayed, never abandoned. Backoff doubles from two seconds
+to a six-hour ceiling and keeps going, because the failure engram actually meets
+is an endpoint that loads a model on demand and takes ten minutes to answer —
+against which five attempts inside one minute is not patience, it is a way to
+lose a quarter of a document to a delay nobody sees. A segment marked `failed`
+records what went wrong last time, not a verdict on the text, and the next run
+picks it up.
+
+A **reconciliation sweep** runs at the head of each consolidation pass and
+queues anything left unfinished: a segment that is not done, an artifact with no
+vector. It is not the retry mechanism — every stage retries itself — it is for
+what no retry covers, like a job completed while its work was not. Without it,
+"repairs itself" would hold only for the failures engram happened to be watching
+at the time.
+
+So Ops has no failed jobs and no re-synthesise buttons. It says what is retrying
+and when it next runs, and the answer to all of it is to do nothing.
 
 ## Duplicates, and what goes quietly out of date
 
@@ -218,12 +247,22 @@ round trip, on a timer. At or above `auto_supersede` the older artifact is marke
 readable by link, and Ops has a button that puts it back. Near-identical
 artifacts are clustered before a winner is picked, so a run of three collapses
 onto one survivor rather than forming a chain that points at something hidden.
-Between `review_min` and that, the pair goes on a queue instead, because two
-genuinely distinct artifacts about one subsystem sit around 0.88 and hiding at
-that score would cost knowledge rather than duplication. `auto_supersede` at or
-below `review_min` would hide everything the sweep finds with no review band at
-all, so engram refuses to start on it rather than letting search quietly thin
-out for weeks.
+Between `review_min` and that, the pair is *not* hidden, because two genuinely
+distinct artifacts about one subsystem sit around 0.88 and hiding at that score
+would cost knowledge rather than duplication. `auto_supersede` at or below
+`review_min` would hide everything the sweep finds with no review band at all,
+so engram refuses to start on it rather than letting search quietly thin out for
+weeks.
+
+What happens in that band instead is decided without asking, wherever there is
+nothing to ask about. A pair whose fact-shaped tokens — versions, numbers, dates
+— say nothing differently has no question in it, so it is filed as settled and
+both artifacts stay exactly where they are; closing a question is not hiding an
+answer. Only a pair that states some value two ways reaches the queue, and only
+that pair is worth a person. One case in the band *is* hidden: an artifact whose
+text is wholly contained in another **from the same corpus**, which is one
+synthesis call emitting the same passage twice rather than two sources — the
+survivor says everything the hidden one said, and Ops lists it with an undo.
 
 **Hiding is reversible, including by accident.** The row and the vector payload
 cannot be written together, so each sweep re-applies any flag whose payload
