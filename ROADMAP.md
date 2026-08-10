@@ -9,7 +9,10 @@ query. The pipeline from capture to ranked artifact is built, as is the last hop
 from a ranked artifact back to where it came from: the search page pairs a ranked
 rail with the artifact beside its corpus lines, and synthesis now verifies that
 the details it must not alter — names, dates, figures, quoted wording — survived
-the rewrite.
+the rewrite. Narrowing no longer means editing a URL — the search page renders
+filter chips from Qdrant's facet counts — and the detail pane lists an
+artifact's nearest neighbours, so landing near what you wanted is a way to reach
+it.
 
 It also assumes the thesis: inference happens at write time, not read time. A
 question costs one embedding and one vector search, never a generation. So the
@@ -24,16 +27,6 @@ freezing a corpus costs real GPU time, and it is worth spending only when a
 decision actually turns on the answer. The items under *Write-time inference*
 are exactly such decisions: both add vectors to the index, and adding vectors
 always looks like it is helping.
-
-## Recall surface
-
-The workspace pairs a ranked rail with a detail pane. What it still lacks is a
-way to narrow the list without editing a URL.
-
-- **Tag and category controls.** `UiSearchParams` accepts `tags` and
-  `category`, and the search page renders no input for either, so narrowing to
-  `category=procedure` is API-only. Chips beside the search box, ideally
-  populated from facet counts (see below).
 
 ## Retrieval
 
@@ -101,19 +94,12 @@ anything to the query path.
   as a right one. Flag rather than delete: `superseded_by` on the artifact row, a
   filter that hides superseded artifacts from search by default, and a review
   queue on Ops. Deciding which of two contradictory artifacts is current is a
-  judgement the reader has to make.
-- **Related artifacts.** Qdrant's `recommend` takes a point id and returns its
-  neighbours — a "more like this" panel for free, no embedding call and no
-  completion, so it is the cheapest item on this page and the one that best
-  matches what the detail pane is already for. Also the substrate the two items
-  above need: clustering for cards and pair-finding for consolidation are the
-  same neighbour query, batched.
+  judgement the reader has to make. `VectorStore::neighbours` is the query both
+  this and the answer cards above are built from — one artifact at a time today,
+  batched over the collection for a sweep.
 - **Corpus map.** The distance-matrix API gives pairwise distances over a
   filtered subset: near-duplicate detection on ingest, and a real rendering of
   the neighbour graph the logo depicts.
-- **Facets.** Tag and category counts for the Browse sidebar, straight from the
-  payload index instead of a SQL scan. Also what the search page's filter chips
-  should be built from.
 - **File upload**, **PDF** and a **CLI**. The detail pane asks a `SourceView`
   for the lines an artifact claims, so a PDF corpus implements the same trait —
   extracted text, a page map, `page 42` as the label — and the pane needs no
@@ -143,8 +129,4 @@ anything to the query path.
   place ids are derived, so replacing it with a vocabulary table is a contained
   change plus a `--reindex`. Whether it is worth the reindex is a question the
   eval harness answers and nothing else does.
-- Ingest is bounded by axum's default 2MB body limit rather than a deliberate
-  one. Fine for pasted prose, wrong the moment file upload lands; set the limit
-  explicitly and reject oversize captures with a message rather than a
-  truncated form error.
 - `clippy` is not run locally in every environment; CI is the only gate.

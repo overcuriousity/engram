@@ -1195,3 +1195,139 @@ async fn two_processes_starting_together_end_up_on_one_generation() {
     );
     v.drop_collection().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn facets_count_what_the_collection_can_be_narrowed_by() {
+    let v = fresh("engram_it_facets", 4).await;
+    v.upsert(vec![
+        point(
+            "a",
+            "s1",
+            vec![1.0, 0.0, 0.0, 0.0],
+            &["linux", "shared"],
+            "procedure",
+        ),
+        point(
+            "b",
+            "s1",
+            vec![0.0, 1.0, 0.0, 0.0],
+            &["shared"],
+            "procedure",
+        ),
+        point("c", "s2", vec![0.0, 0.0, 1.0, 0.0], &["shared"], "concept"),
+    ])
+    .await
+    .unwrap();
+
+    let f = v.facets(10).await.unwrap();
+    let cat = |name: &str| {
+        f.categories
+            .iter()
+            .find(|c| c.value == name)
+            .map(|c| c.count)
+    };
+    let tag = |name: &str| f.tags.iter().find(|t| t.value == name).map(|t| t.count);
+
+    assert_eq!(cat("procedure"), Some(2));
+    assert_eq!(cat("concept"), Some(1));
+    // A tag is an array field, so every element of every point is counted.
+    assert_eq!(tag("shared"), Some(3));
+    assert_eq!(tag("linux"), Some(1));
+    assert_eq!(
+        f.categories[0].value, "procedure",
+        "facets arrive most frequent first"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn facets_respect_the_limit_they_are_asked_for() {
+    let v = fresh("engram_it_facet_limit", 4).await;
+    v.upsert(
+        (0..8)
+            .map(|i| {
+                point(
+                    &format!("a{i}"),
+                    "s1",
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    &[],
+                    &format!("cat{i}"),
+                )
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v.facets(3).await.unwrap().categories.len(), 3);
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn neighbours_come_back_ranked_and_never_include_the_artifact_itself() {
+    let v = fresh("engram_it_neighbours", 4).await;
+    v.upsert(vec![
+        point("seed", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("close", "s1", vec![0.9, 0.1, 0.0, 0.0], &[], "procedure"),
+        point("distant", "s1", vec![0.0, 0.0, 1.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+
+    let n = v.neighbours("seed", 5).await.unwrap();
+    assert_eq!(
+        n.iter()
+            .map(|h| h.payload.artifact_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["close", "distant"],
+        "the seed must be excluded and the rest ranked by similarity"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
+    // The query asks for one extra so the seed can be removed without
+    // shortening the list; the caller must still get exactly what it asked for.
+    let v = fresh("engram_it_neighbour_limit", 4).await;
+    v.upsert(
+        (0..6)
+            .map(|i| {
+                point(
+                    &format!("a{i}"),
+                    "s1",
+                    vec![1.0, i as f32 / 10.0, 0.0, 0.0],
+                    &[],
+                    "procedure",
+                )
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v.neighbours("a0", 3).await.unwrap().len(), 3);
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
+    // Qdrant answers a query for an absent point with an error. The pane treats
+    // that as an empty list, because an artifact awaiting its embed job is an
+    // ordinary state rather than a failure.
+    let v = fresh("engram_it_no_neighbours", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &[],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    assert!(v.neighbours("never-embedded", 5).await.unwrap().is_empty());
+    v.drop_collection().await.unwrap();
+}

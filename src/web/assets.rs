@@ -29,12 +29,7 @@ async fn serve(Path(path): Path<String>) -> Response {
         Some(file) => (
             [
                 (header::CONTENT_TYPE, content_type(&path)),
-                // Assets are rebuilt with the binary, so a long max-age is
-                // safe and keeps navigation instant.
-                (
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000".to_string(),
-                ),
+                (header::CACHE_CONTROL, cache_control(&path).to_string()),
             ],
             file.data.into_owned(),
         )
@@ -43,14 +38,59 @@ async fn serve(Path(path): Path<String>) -> Response {
     }
 }
 
+/// How long a browser may keep an asset.
+///
+/// A year for everything the page references by name, because those are
+/// rebuilt with the binary. The manifest is the exception, for the same reason
+/// the service worker is: it is read once at install time and then held by the
+/// installed app, so a year-long copy of a stale `start_url` or a stale icon
+/// set outlives several deployments.
+fn cache_control(path: &str) -> &'static str {
+    if path.ends_with(".webmanifest") {
+        "public, max-age=3600"
+    } else {
+        "public, max-age=31536000"
+    }
+}
+
+/// The service worker, from the root rather than from `/assets`.
+///
+/// Two reasons it cannot be an ordinary asset. A worker may only control paths
+/// under the directory it was served from, so one under `/assets` could not see
+/// a navigation to `/ui/search`. And it must not carry the year-long `max-age`
+/// the other assets do: an update has to be able to reach a phone that already
+/// installed the app.
+async fn service_worker() -> Response {
+    match Assets::get("sw.js") {
+        Some(file) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "text/javascript; charset=utf-8".to_string(),
+                ),
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    Router::new()
+        .route("/assets/{*path}", get(serve))
+        .route("/sw.js", get(service_worker))
+}
+
 pub fn assets_router() -> Router<AppState> {
-    Router::new().route("/assets/{*path}", get(serve))
+    routes()
 }
 
 /// Same routes with no state, for tests.
 #[cfg(test)]
 pub fn assets_router_standalone() -> Router {
-    Router::new().route("/assets/{*path}", get(serve))
+    routes()
 }
 
 #[cfg(test)]
@@ -115,6 +155,115 @@ mod tests {
                 Assets::get(&format!("fonts/{f}")).is_some(),
                 "missing embedded font {f}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_manifest_is_served_as_a_manifest() {
+        // A manifest sent as text/plain is ignored, and the install prompt
+        // never appears.
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/manifest.webmanifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "application/manifest+json");
+        // Not the year the other assets get: an installed app re-reads this,
+        // and a stale copy would outlive several deployments.
+        assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
+    }
+
+    #[test]
+    fn the_manifest_declares_what_an_install_needs() {
+        let m = Assets::get("manifest.webmanifest").expect("manifest must be embedded");
+        let m: serde_json::Value = serde_json::from_slice(m.data.as_ref())
+            .expect("the manifest must be valid JSON or the browser drops it");
+
+        assert_eq!(m["name"], "engram");
+        assert_eq!(m["display"], "standalone");
+        assert_eq!(m["start_url"], "/ui/search");
+        assert_eq!(m["scope"], "/", "the worker controls the whole origin");
+
+        let icons = m["icons"].as_array().unwrap();
+        // Android will not offer to install without both of these sizes, and
+        // will not round the icon without a maskable one.
+        for size in ["192x192", "512x512"] {
+            assert!(
+                icons.iter().any(|i| i["sizes"] == size),
+                "no {size} icon in the manifest"
+            );
+        }
+        assert!(
+            icons.iter().any(|i| i["purpose"] == "maskable"),
+            "no maskable icon in the manifest"
+        );
+        for i in icons {
+            // Manifest paths are URLs; the embed is rooted at `assets/`, so the
+            // mount point comes off before the lookup.
+            let src = i["src"].as_str().unwrap();
+            let embedded = src
+                .strip_prefix("/assets/")
+                .expect("icons are served from /assets");
+            assert!(
+                Assets::get(embedded).is_some(),
+                "the manifest names {src}, which is not embedded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_service_worker_is_served_from_the_root_and_is_not_cached() {
+        // Under /assets it could not control /ui, and with the year-long
+        // max-age the other assets carry, an update could never reach a phone
+        // that already installed the app.
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/sw.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/javascript")
+        );
+        assert_eq!(res.headers()["cache-control"], "no-cache");
+    }
+
+    #[test]
+    fn the_service_worker_handles_fetch_and_caches_no_asset() {
+        // The fetch handler is the part a browser checks for before it treats
+        // the site as installable. The absence of asset caching is the part
+        // that keeps it from serving yesterday's HTML.
+        let js = Assets::get("sw.js").expect("sw.js must be embedded");
+        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
+        assert!(js.contains("addEventListener('fetch'"));
+        assert!(!js.contains("https://"), "external url in the worker");
+        assert!(
+            !js.contains("cache.addAll"),
+            "the worker must not precache the app shell"
+        );
+    }
+
+    #[test]
+    fn the_icons_are_embedded_at_the_sizes_the_manifest_promises() {
+        for f in [
+            "icon.svg",
+            "icon-192.png",
+            "icon-512.png",
+            "apple-touch-icon.png",
+        ] {
+            assert!(Assets::get(f).is_some(), "missing embedded icon {f}");
         }
     }
 

@@ -50,6 +50,22 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+/// One facet value and how many points carry it, counted straight from the
+/// payload index rather than from a scan of SQLite.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FacetCount {
+    pub value: String,
+    pub count: u64,
+}
+
+/// What the search page offers to narrow by. Both lists arrive already sorted
+/// by count, descending, because that is the order the chips are rendered in.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct Facets {
+    pub categories: Vec<FacetCount>,
+    pub tags: Vec<FacetCount>,
+}
+
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     async fn ensure_collection(&self, dim: usize) -> Result<()>;
@@ -80,6 +96,14 @@ pub trait VectorStore: Send + Sync {
         older_than: i64,
         unseen_since: i64,
     ) -> Result<Vec<SearchHit>>;
+    /// Distinct categories and tags with their counts, each list capped at
+    /// `limit` values. Feeds the filter chips, which exist so narrowing does
+    /// not mean guessing which categories the corpus even contains.
+    async fn facets(&self, limit: usize) -> Result<Facets>;
+    /// The artifacts nearest this one, by the vector already stored for it —
+    /// no embedding call, because the query is a point that is already in the
+    /// index. The artifact itself is never among its own neighbours.
+    async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>>;
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
     async fn count(&self) -> Result<u64>;
