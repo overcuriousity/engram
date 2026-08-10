@@ -225,12 +225,22 @@ async fn consolidation(
     State(st): State<AppState>,
     _id: Identity,
 ) -> Result<Json<serde_json::Value>> {
+    use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
         "superseded": st.core.store.superseded_artifacts(100).await?,
+        // What the judge actually ruled on, listed first for the same reason
+        // Ops puts it at the top: it is the one output here that cost a model
+        // call, and an operator reading only `pairs` would conclude there was
+        // nothing to look at.
+        "contradictions": st
+            .core
+            .store
+            .pairs_by_state(PairState::Contradiction, 100)
+            .await?,
         "pairs": st
             .core
             .store
-            .pairs_by_state(crate::store::pairs::PairState::Pending, 100)
+            .pairs_by_state(PairState::Pending, 100)
             .await?,
     })))
 }
