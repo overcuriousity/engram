@@ -7,8 +7,7 @@
 //!
 //! The corpus this measures is not in the repository and must not be: it is
 //! whatever documents the operator actually wants to search. What lives here is
-//! the shape of the files and the arithmetic over ranks. See
-//! `docs/superpowers/specs/2026-08-09-retrieval-evaluation-design.md`.
+//! the shape of the files and the arithmetic over ranks.
 
 pub mod metrics;
 

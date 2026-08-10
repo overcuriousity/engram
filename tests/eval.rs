@@ -58,8 +58,7 @@ async fn evaluate_retrieval() {
                 + &p.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
                 "no evaluation corpus at {} ({}). Set ENGRAM_EVAL_DIR and run \
-                 `cargo run --bin eval-prepare` first; see \
-                 docs/superpowers/specs/2026-08-09-retrieval-evaluation-design.md.",
+                 `cargo run --bin eval-prepare` first.",
                 dir.display(),
                 why.trim()
             );

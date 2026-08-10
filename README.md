@@ -35,7 +35,6 @@ which is what lets the detail pane show a rewritten passage beside the original
 wording it was made from. One model call turns one segment into several
 artifacts; no artifact spans two segments.
 
-Design notes: [docs/superpowers/specs/2026-08-09-engram-design.md](docs/superpowers/specs/2026-08-09-engram-design.md).
 Planned work: [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
