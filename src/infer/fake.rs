@@ -110,6 +110,7 @@ impl Synthesizer for FakeSynthesizer {
                 category: Some("note".into()),
                 tags: vec!["fake".into()],
                 corpus_lines: None,
+                caveats: vec![],
             })
             .collect())
     }
@@ -171,6 +172,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
             category: Some("note".into()),
             tags: vec![],
             corpus_lines: None,
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -225,6 +227,7 @@ impl Synthesizer for LyingSpanSynthesizer {
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -250,6 +253,7 @@ impl Synthesizer for HallucinatingSynthesizer {
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
+            caveats: vec![],
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -361,6 +365,64 @@ impl Default for FakeCompleter {
 impl Completer for FakeCompleter {
     async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
         Ok(self.reply.clone())
+    }
+    fn context_tokens(&self) -> usize {
+        4096
+    }
+}
+
+/// A completer that answers with the prompt it was handed.
+///
+/// What `ask` puts in front of the model is the whole of what the model can
+/// use, and it is otherwise invisible: the reply is a fake, so a test asserting
+/// on it proves nothing about the excerpts. This makes the prompt the thing
+/// under test.
+#[derive(Default)]
+pub struct EchoCompleter;
+
+#[async_trait]
+impl Completer for EchoCompleter {
+    async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+        Ok(user.to_string())
+    }
+    fn context_tokens(&self) -> usize {
+        4096
+    }
+}
+
+/// A completer that answers from a script and counts how often it was asked.
+///
+/// The consolidation tests are largely about *not* calling the model, so what
+/// they assert on is the call count as much as the reply.
+pub struct ScriptedCompleter {
+    replies: std::sync::Mutex<std::collections::VecDeque<String>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedCompleter {
+    pub fn new(replies: Vec<String>) -> Self {
+        Self {
+            replies: std::sync::Mutex::new(replies.into()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Completer for ScriptedCompleter {
+    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| crate::error::Error::Inference {
+                role: "ask",
+                detail: "the script ran out of replies".into(),
+            })
     }
     fn context_tokens(&self) -> usize {
         4096

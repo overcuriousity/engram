@@ -1,14 +1,34 @@
 use super::Core;
 use crate::error::{Error, Result};
-use crate::store::corpora::{CorpusStatus, content_hash};
+use crate::store::corpora::{CorpusStatus, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IngestOutcome {
     pub id: String,
     pub status: CorpusStatus,
-    /// True when the text was already stored and no new source was created.
+    /// True when the text was already stored byte for byte and no new source
+    /// was created.
     pub duplicate: bool,
+    /// Set when the text is not identical to anything stored but is close
+    /// enough that segmenting it would produce artifacts competing with ones
+    /// that already exist. The capture is stored and parked, never dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_duplicate: Option<NearDuplicate>,
+}
+
+/// What an operator decided about a parked capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearDupeAction {
+    /// The new capture is the better copy: delete the old corpus and its
+    /// artifacts, then process this one.
+    Replace,
+    /// They are genuinely different despite the score. Process this one and
+    /// leave the other alone.
+    KeepBoth,
+    /// The new capture adds nothing. Delete it.
+    Discard,
 }
 
 impl Core {
@@ -30,19 +50,171 @@ impl Core {
                 id: existing.id,
                 status: existing.status,
                 duplicate: true,
+                near_duplicate: None,
             });
         }
 
-        let src = self.store.insert_corpus(text, origin, title_hint).await?;
-        self.store
-            .enqueue(Stage::Synthesize, "corpus", &src.id)
+        // Computed once, before the insert, so the same signature answers "is
+        // this a near-duplicate" and becomes the row's stored column.
+        let sig = crate::store::shingle::signature(text);
+        let near = self
+            .store
+            .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
-        tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested");
+
+        let src = self
+            .store
+            .insert_corpus_with_signature(text, origin, title_hint, sig)
+            .await?;
+
+        match &near {
+            // Parked. Synthesis is the expensive stage and this text may not
+            // deserve it; an operator decides on Ops. Nothing is lost either
+            // way — the corpus is stored verbatim like any other.
+            Some(n) => {
+                self.store
+                    .set_near_dupe(&src.id, Some(&n.corpus_id), Some(n.similarity))
+                    .await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::NeedsReview)
+                    .await?;
+                tracing::info!(
+                    corpus_id = %src.id,
+                    near = %n.corpus_id,
+                    similarity = n.similarity,
+                    "capture looks like an existing corpus; parked for review"
+                );
+            }
+            None => {
+                self.store
+                    .enqueue(Stage::Synthesize, "corpus", &src.id)
+                    .await?;
+                tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested");
+            }
+        }
+
         Ok(IngestOutcome {
             id: src.id,
-            status: CorpusStatus::Raw,
+            status: if near.is_some() {
+                CorpusStatus::NeedsReview
+            } else {
+                CorpusStatus::Raw
+            },
             duplicate: false,
+            near_duplicate: near,
         })
+    }
+
+    /// Act on a parked capture. Every branch ends with a corpus that is either
+    /// in the pipeline or gone; none of them leaves a corpus stuck in
+    /// `needs_review` with no way out.
+    pub async fn resolve_near_duplicate(
+        &self,
+        corpus_id: &str,
+        action: NearDupeAction,
+    ) -> Result<()> {
+        let src = self.store.get_corpus(corpus_id).await?;
+        let Some(other) = src.near_dupe_of.clone() else {
+            return Err(Error::Validation(
+                "this corpus is not parked as a near-duplicate".into(),
+            ));
+        };
+
+        match action {
+            NearDupeAction::Discard => {
+                self.delete_corpus(&src.id).await?;
+                tracing::info!(corpus_id = %src.id, "discarded a near-duplicate capture");
+            }
+            NearDupeAction::Replace | NearDupeAction::KeepBoth => {
+                if action == NearDupeAction::Replace {
+                    // The older corpus goes first. If this fails the new one is
+                    // still parked, which is a state an operator can retry from;
+                    // releasing it first would leave both live on a failure.
+                    //
+                    // Unless it is already gone: `near_dupe_of` can name a
+                    // corpus that has since been deleted — including another
+                    // parked capture that was discarded, since a parked corpus
+                    // is still matchable. Failing there would leave the only
+                    // way out of the queue behind a 404, with nothing on the
+                    // page to say that "keep both" is now the same decision.
+                    match self.delete_corpus(&other).await {
+                        Ok(()) => {
+                            tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
+                        }
+                        Err(Error::NotFound) => {
+                            tracing::info!(
+                                corpus_id = %src.id,
+                                replaced = %other,
+                                "the corpus this capture replaces was already deleted"
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                self.store.set_near_dupe(&src.id, None, None).await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::Raw)
+                    .await?;
+                self.store
+                    .enqueue(Stage::Synthesize, "corpus", &src.id)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Put a superseded artifact back in search.
+    ///
+    /// The payload flag first, then the row — the reverse of the order the
+    /// sweep wrote them, and for the same reason. The two stores cannot be
+    /// written atomically, so the intermediate state has to be one an operator
+    /// can act on: with the flag cleared and the row still set, the artifact is
+    /// listed on Ops with its restore button and the next press finishes the
+    /// job. Clearing the row first loses the only page that offers the undo
+    /// while the artifact is still hidden from search.
+    pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
+        self.vectors.set_superseded(artifact_id, false).await?;
+        self.store.set_superseded_by(artifact_id, None).await?;
+        tracing::info!(artifact_id, "restored a superseded artifact to search");
+        Ok(())
+    }
+
+    /// Put back anything that was hidden in favour of an artifact which has
+    /// since been deleted. Cheap — one query, and vector writes only for the
+    /// rows it actually frees — so it runs after every deletion.
+    ///
+    /// Payload before row, exactly as `unsupersede` does it, and for the same
+    /// reason. Clearing the rows first would leave every artifact whose vector
+    /// write then failed hidden from search with `superseded_by` already NULL:
+    /// off the Ops list, past the sweep's self-heal branch — which only repairs
+    /// the opposite skew — and unreachable by any button. This runs first in a
+    /// sweep, when Qdrant being unavailable is precisely the case at hand.
+    ///
+    /// One failure does not abandon the rest: each artifact is independent, and
+    /// the ones that can be freed should be. The state a failure leaves behind
+    /// is the recoverable one, so the next deletion or sweep finishes the job.
+    pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
+        let mut first_err = None;
+        for id in self.store.dangling_superseded().await? {
+            if let Err(e) = self.vectors.set_superseded(&id, false).await {
+                tracing::warn!(
+                    artifact_id = %id,
+                    error = %e,
+                    "could not clear the hidden flag; the artifact stays listed on Ops"
+                );
+                first_err.get_or_insert(e);
+                continue;
+            }
+            self.store.set_superseded_by(&id, None).await?;
+            tracing::info!(
+                artifact_id = %id,
+                "restored an artifact whose surviving copy was deleted"
+            );
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Vectors first: an orphaned row is invisible, but an orphaned vector is
@@ -51,6 +223,7 @@ impl Core {
         self.store.get_corpus(id).await?;
         self.vectors.delete_by_corpus(id).await?;
         self.store.delete_corpus(id).await?;
+        self.heal_dangling_supersessions().await?;
         tracing::info!(corpus_id = %id, "deleted source and its vectors");
         Ok(())
     }
@@ -71,9 +244,17 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // Reprocessing a parked capture is a decision to process it, so
+                // the park has to be lifted with it. Leaving the flag set means
+                // a fully synthesized and embedded corpus sits on the review
+                // queue forever, where the discard button now deletes real work.
+                self.store.set_near_dupe(&src.id, None, None).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
+                // The artifacts just deleted may have been the surviving half of
+                // a consolidated pair; whatever they hid comes back.
+                self.heal_dangling_supersessions().await?;
                 self.store
                     .enqueue(Stage::Synthesize, "corpus", &src.id)
                     .await?;
@@ -85,6 +266,14 @@ impl Core {
                     .set_corpus_status(&src.id, CorpusStatus::Embedding)
                     .await?;
             }
+            // Consolidation looks at the whole collection, so there is no such
+            // thing as reprocessing one corpus through it. Saying so beats
+            // silently queueing a sweep the caller did not ask for.
+            Stage::Consolidate => {
+                return Err(Error::Validation(
+                    "consolidate is a collection-wide sweep, not a per-corpus stage".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -92,9 +281,205 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::ingest::NearDupeAction;
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    /// A body long enough to have a stable shingle signature.
+    fn manual(marker: &str) -> String {
+        (0..200)
+            .map(|i| format!("step {i}: run the {marker} command and read its output"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_near_identical_capture_is_parked_rather_than_synthesised() {
+        // The whole point: a re-pasted chapter must not cost a model call, and
+        // must not become a second set of artifacts competing with the first.
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+
+        let edited = manual("mount").replacen("step 7:", "step seven:", 1);
+        let second = core.ingest(&edited, "web", None).await.unwrap();
+
+        assert_ne!(second.id, first.id, "the capture must still be stored");
+        assert!(!second.duplicate, "it is not a byte-identical duplicate");
+        assert_eq!(second.status, CorpusStatus::NeedsReview);
+        let near = second.near_duplicate.expect("no near-duplicate reported");
+        assert_eq!(near.corpus_id, first.id);
+        assert!(near.similarity > 0.90);
+        assert!(
+            core.store.claim_job().await.unwrap().is_none(),
+            "a parked capture must not queue synthesis"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_capture_is_unaffected() {
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+
+        let out = core.ingest(&manual("pastry"), "web", None).await.unwrap();
+        assert_eq!(out.status, CorpusStatus::Raw);
+        assert!(out.near_duplicate.is_none());
+        assert!(
+            core.store.claim_job().await.unwrap().is_some(),
+            "an unrelated capture must still queue synthesis"
+        );
+    }
+
+    #[tokio::test]
+    async fn keeping_both_releases_the_capture_into_the_pipeline() {
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
+            .await
+            .unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Raw);
+        assert!(got.near_dupe_of.is_none(), "the flag must be cleared");
+        assert!(core.store.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn replacing_deletes_the_older_corpus_and_its_vectors() {
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert!(core.vectors.count().await.unwrap() > 0);
+
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            core.store.get_corpus(&first.id).await,
+            Err(crate::error::Error::NotFound)
+        ));
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            CorpusStatus::Raw
+        );
+        assert!(core.store.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn discarding_removes_the_new_capture_only() {
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::Discard)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            core.store.get_corpus(&second.id).await,
+            Err(crate::error::Error::NotFound)
+        ));
+        assert!(core.store.get_corpus(&first.id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
+        // `near_dupe_of` can name a corpus that has since been deleted —
+        // including another parked capture that was discarded, since a parked
+        // corpus is still matchable. Failing here put the only way out of the
+        // review queue behind a 404.
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.delete_corpus(&first.id).await.unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
+            .await
+            .unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Raw);
+        assert!(got.near_dupe_of.is_none());
+        assert!(core.store.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn reprocessing_a_parked_capture_takes_it_off_the_review_queue() {
+        // Reprocessing is a decision to process. Leaving the park set left a
+        // fully synthesized corpus on the queue where "discard" deletes it.
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            CorpusStatus::NeedsReview
+        );
+
+        core.reprocess(&second.id, Stage::Synthesize).await.unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert!(
+            got.near_dupe_of.is_none(),
+            "the capture is being processed and still asks to be decided on"
+        );
+        assert_eq!(got.status, CorpusStatus::Raw);
+    }
+
+    #[tokio::test]
+    async fn resolving_a_corpus_that_is_not_parked_is_rejected() {
+        let core = test_core().await;
+        let out = core.ingest("ordinary text", "web", None).await.unwrap();
+        assert!(matches!(
+            core.resolve_near_duplicate(&out.id, NearDupeAction::Replace)
+                .await,
+            Err(crate::error::Error::Validation(_))
+        ));
+    }
 
     #[tokio::test]
     async fn ingest_returns_immediately_and_enqueues_segmentation() {
@@ -158,6 +543,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: None,
+                    caveats: vec![],
                 }],
             )
             .await
@@ -175,6 +561,7 @@ mod tests {
                     tags: vec![],
                     created_at: 0,
                     last_seen_at: None,
+                    superseded: None,
                 },
             }])
             .await

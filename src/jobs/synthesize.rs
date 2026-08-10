@@ -60,58 +60,28 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             chunks = core.synthesizer.segment(&text).await?;
         }
 
-        // Line numbers come back relative to the window, so shift them into
-        // the coordinates of the original document — and no further. A span
-        // outside its own window is nonsense the detail pane would render as
-        // the wrong text, so clamp it here and flag it below.
-        // Only a span the model asserted can be wrong about where the chunk
-        // came from. One this job derived matched by construction, and one that
-        // fell back to the window claims nothing in particular — checking
-        // either against the chunk's own text just invents warnings.
-        let mut spans = Vec::with_capacity(chunks.len());
+        // The span is ours to compute.
+        //
+        // Asking the model for `corpus_lines`, checking the answer, and having
+        // a third outcome for a claim that fails the check produced a flag on
+        // the artifact and a button offering to re-synthesise an entire segment
+        // over a line number. Since `locate_span` finds an artifact's own text
+        // even where the source is hard-wrapped and synthesis reflowed it, the
+        // claim is worth what it is: a hint for the case where nothing matches
+        // at all. Nothing here can disagree with the artifact, so nothing here
+        // has anything to report.
         for c in &mut chunks {
-            let claimed = c
+            let hinted = c
                 .corpus_lines
-                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1))
-                .filter(|(a, b)| {
-                    // A span the model asserted is only worth keeping if the
-                    // lines it names look like the lines the chunk describes.
-                    // On a reference document full of short entries the model
-                    // miscounts freely, and a confidently wrong span is worse
-                    // than none: the pane renders the wrong text.
-                    let lines = segment_text(&src.raw_text, *a, *b);
-                    crate::infer::verify::span_is_plausible(&c.text, &lines)
-                });
-
-            let (shifted, origin) = match claimed {
-                Some(span) => (span, SpanOrigin::Model),
-                // Either the model omitted `corpus_lines` — which it does more
-                // often than not — or what it claimed did not survive the check
-                // above. Both are better answered by finding the chunk's own
-                // lines in the window than by pointing at the whole of it.
-                None => match crate::infer::verify::locate_span(&c.text, &text, w.start_line) {
-                    Some(found) => (found, SpanOrigin::Derived),
-                    None => match c.corpus_lines {
-                        // Nothing to derive and a span that failed the check:
-                        // keep it, and say it is not to be trusted.
-                        Some((a, b)) => (
-                            (a + w.start_line - 1, b + w.start_line - 1),
-                            SpanOrigin::Implausible,
-                        ),
-                        None => ((w.start_line, w.end_line), SpanOrigin::Segment),
-                    },
-                },
-            };
+                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1));
+            let span = crate::infer::verify::locate_span(&c.text, &text, w.start_line)
+                .or(hinted)
+                .unwrap_or((w.start_line, w.end_line));
+            // A span outside its own window would render as the wrong text.
             let clamped = (
-                shifted.0.clamp(w.start_line, w.end_line),
-                shifted.1.clamp(w.start_line, w.end_line),
+                span.0.clamp(w.start_line, w.end_line),
+                span.1.clamp(w.start_line, w.end_line),
             );
-            // Clamping erases the evidence, so record the move before it happens.
-            spans.push(if origin == SpanOrigin::Model && clamped != shifted {
-                SpanOrigin::Clamped
-            } else {
-                origin
-            });
             c.corpus_lines = Some(if clamped.0 <= clamped.1 {
                 clamped
             } else {
@@ -121,7 +91,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
 
         let written =
             write_segment_artifacts(core, corpus_id, w.idx, proposed_to_new(w.idx, chunks)).await?;
-        flag_unverified(core, &written, &spans, &text).await?;
+        flag_unverified(core, &written, &text).await?;
         core.store
             .set_segment_state(corpus_id, w.idx, SegmentState::Done, None)
             .await?;
@@ -165,67 +135,43 @@ async fn write_segment_artifacts(
     core.store.insert_artifacts(corpus_id, &new).await
 }
 
-/// Where a chunk's stored span came from, which decides whether it is worth
-/// doubting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpanOrigin {
-    /// The model said so, and nothing had to be corrected.
-    Model,
-    /// The model said so and named lines outside its own window.
-    Clamped,
-    /// The model said so, the lines do not match the chunk, and nothing better
-    /// could be derived.
-    Implausible,
-    /// Recovered here by matching the chunk's lines against the window.
-    Derived,
-    /// Nothing to go on; the span is the window itself.
-    Segment,
-}
-
 /// Did any proposed chunk lose a literal its window contains?
+///
+/// The chunk body only, deliberately — this gates a second synthesis call over
+/// the whole window, the most expensive thing here. A caveat is prose the model
+/// is asked to write freely ("only on `/dev/sd*` devices", "requires `sudo`"),
+/// so a path it names in passing need not appear verbatim in the source, and
+/// re-synthesising a window over one is paying the largest cost in the system
+/// for the smallest reason. `flag_unverified` still checks caveats: a command
+/// invented in one is flagged for the reader like any other.
 fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
     chunks
         .iter()
-        .any(|c| !crate::infer::verify::missing_literals(&c.text, window).is_empty())
+        .any(|c| !crate::infer::verify::missing_literals(&c.text, &[], window).is_empty())
 }
 
 /// Mark what verification could not vouch for. The chunk is kept — a warning
 /// the reader can see beats a chapter silently missing from the base.
+///
+/// One check, not two. A span is derived rather than adjudicated, so there is
+/// nothing left to disbelieve about it; what remains is the literal check,
+/// which is about the text itself and speaks to whoever reads the artifact.
 async fn flag_unverified(
     core: &Core,
     written: &[crate::store::artifacts::Chunk],
-    // Per chunk, where its stored span came from.
-    spans: &[SpanOrigin],
     segment_body: &str,
 ) -> Result<()> {
     use crate::infer::verify;
 
-    for (i, c) in written.iter().enumerate() {
+    for c in written {
         let mut flags = Vec::new();
         let mut detail: Option<String> = None;
 
-        let missing = verify::missing_literals(&c.text, segment_body);
+        let missing = verify::missing_literals(&c.text, &c.caveats, segment_body);
         if let Some(first) = missing.first() {
             flags.push(verify::FLAG_LITERALS.to_string());
             detail = Some(format!("missing literal: {first}"));
             tracing::warn!(artifact_id = %c.id, literal = %first, "literal not found in source window");
-        }
-
-        // A derived span matched by construction, a window span claims nothing
-        // in particular, and a model span that survived the check is fine. What
-        // is left is a span that had to be corrected or could not be.
-        let origin = spans.get(i).copied().unwrap_or(SpanOrigin::Segment);
-        if let Some(span) = &c.corpus_span
-            && matches!(origin, SpanOrigin::Clamped | SpanOrigin::Implausible)
-        {
-            flags.push(verify::FLAG_SPAN.to_string());
-            detail.get_or_insert_with(|| {
-                format!(
-                    "span {}–{} does not match the chunk",
-                    span.start_line, span.end_line
-                )
-            });
-            tracing::warn!(artifact_id = %c.id, "chunk span does not match the lines it claims");
         }
 
         if !flags.is_empty() {
@@ -237,10 +183,54 @@ async fn flag_unverified(
     Ok(())
 }
 
+/// Measure how much of a corpus survived into its artifacts, and store it.
+///
+/// Pure local work over rows that are already there — no inference and no
+/// vector call — so it can be re-run over a whole base whenever the measure
+/// itself changes, rather than re-synthesising documents that are fine.
+pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
+    let segments = core.store.segments_for_corpus(corpus_id).await?;
+
+    let made: Vec<(i64, i64, String)> = segments
+        .iter()
+        .map(|w| {
+            let text = chunks
+                .iter()
+                .filter(|c| c.segment_idx == Some(w.idx))
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (w.start_line, w.end_line, text)
+        })
+        .collect();
+
+    // A corpus segmented before per-segment windows existed has no ranges to
+    // group by; measure it as one.
+    let made = if made.is_empty() {
+        vec![(
+            1,
+            src.raw_text.lines().count() as i64,
+            chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )]
+    } else {
+        made
+    };
+
+    let cov = crate::infer::verify::content_coverage(&src.raw_text, &made);
+    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    Ok(cov)
+}
+
 /// Everything that can only be decided once every window has resolved:
 /// continuous ordinals, the source's status, and the single batched embed job.
 pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
-    let src = core.store.get_corpus(corpus_id).await?;
+    core.store.get_corpus(corpus_id).await?;
     core.store.renumber_artifacts(corpus_id).await?;
     let windows = core.store.segments_for_corpus(corpus_id).await?;
     let degraded = windows.iter().any(|w| w.state != SegmentState::Done);
@@ -255,12 +245,7 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // How much of the source ended up inside a chunk. A source where the
     // segmenter quietly dropped half a chapter used to look identical to one
     // where it did not.
-    let spans: Vec<(i64, i64)> = chunks
-        .iter()
-        .filter_map(|c| c.corpus_span.as_ref().map(|s| (s.start_line, s.end_line)))
-        .collect();
-    let cov = crate::infer::verify::coverage(&spans, &src.raw_text);
-    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    let cov = recompute_coverage(core, corpus_id).await?;
     if cov < crate::infer::verify::LOW_COVERAGE {
         tracing::warn!(
             corpus_id,
@@ -300,11 +285,16 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
 /// "spent every attempt", because the attempt count belongs to the job, which
 /// covers the whole source.
 ///
-/// Returns whether windows are still waiting for the model, which the caller
-/// answers with a fresh job. It cannot be enqueued here: the caller's own job
-/// row is keyed `(stage, target_id)`, so enqueuing the same source would reuse
-/// that row and the `complete_job` that follows would close it again — the
+/// Returns whether windows are still waiting for their first attempt, which the
+/// caller answers with a fresh job. It cannot be enqueued here: the caller's own
+/// job row is keyed `(stage, target_id)`, so enqueuing the same source would
+/// reuse that row and the `complete_job` that follows would close it again — the
 /// untried windows would be left with nothing to come back to.
+///
+/// Either way the source is settled for now: whatever windows did succeed are
+/// embedded and the corpus reports `partial`. Settled is not finished — a failed
+/// window is still owed a model call, and the caller queues one at the backoff's
+/// distance.
 pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -> Result<bool> {
     let pending = core.store.pending_segments(corpus_id).await?;
     if pending.is_empty() {
@@ -312,7 +302,9 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
         return Ok(false);
     }
 
-    let (tried, untried): (Vec<_>, Vec<_>) = pending.into_iter().partition(|w| w.attempts > 0);
+    let (tried, untried): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|w| w.attempts > 0 || w.state == SegmentState::Failed);
 
     if !untried.is_empty() {
         tracing::info!(
@@ -339,9 +331,17 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
             "window could not be segmented; its lines have no chunk"
         );
     }
-    // Windows still waiting for their own attempts mean the source is not
+    // Windows still waiting for their first attempt mean the source is not
     // settled yet; finishing here would enqueue embedding for half a document.
-    if core.store.pending_segments(corpus_id).await?.is_empty() {
+    // A window already marked failed does not hold it up — it is owed another
+    // call, not a first one, and the next job brings that.
+    let untried_left = core
+        .store
+        .pending_segments(corpus_id)
+        .await?
+        .into_iter()
+        .any(|w| w.state == SegmentState::Pending);
+    if !untried_left {
         finish(core, corpus_id).await?;
         return Ok(false);
     }
@@ -365,6 +365,7 @@ fn proposed_to_new(
             title: p.title,
             category: p.category,
             tags: p.tags,
+            caveats: p.caveats,
             segment_idx: Some(segment_idx),
         })
         .collect()
@@ -375,7 +376,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
-    use crate::store::jobs::Stage;
+    use crate::store::jobs::{MAX_ATTEMPTS, Stage};
 
     /// A body several windows long under the fake synthesizer's budget.
     fn multi_segment_body() -> String {
@@ -446,6 +447,43 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.ordinal, i as i64, "ordinals must not restart per window");
         }
+    }
+
+    #[tokio::test]
+    async fn a_segment_the_endpoint_refused_is_queued_again() {
+        // The failure that lost a quarter of a document: the endpoint was
+        // loading a model and returned 502 for ten minutes, the job spent its
+        // attempts inside the first minute, and nothing ever tried the segment
+        // again. `failed` has to mean "waiting to be tried", not "gone".
+        let core = test_core_with_failing_synthesizer().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+
+        for _ in 0..MAX_ATTEMPTS + 2 {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            crate::jobs::run_one(&core).await.unwrap();
+        }
+
+        assert!(
+            core.store.failed_jobs(10).await.unwrap().is_empty(),
+            "the corpus was abandoned"
+        );
+        // Directly, because `finish` also queues an embed job for the corpus
+        // and `claim_job` may hand that one over first.
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs
+              WHERE stage = 'synthesize' AND target_id = ? AND state = 'pending'",
+        )
+        .bind(&out.id)
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "no job is left to retry the segment");
     }
 
     #[tokio::test]
@@ -588,7 +626,11 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn a_wrong_span_that_cannot_be_recovered_is_flagged() {
+    async fn a_wrong_span_is_never_a_review_task() {
+        // A line number engram can compute itself was being asked of the model,
+        // disbelieved, and turned into a queue entry whose only button spends a
+        // model call on a whole segment. The span falls back to the window and
+        // the reader is none the wiser.
         let mut core = test_core().await;
         core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
         let out = core
@@ -598,11 +640,18 @@ Then run sync.";
 
         run(&core, &out.id).await.unwrap();
 
-        let c = &core.store.artifacts_for_corpus(&out.id).await.unwrap()[0];
-        assert!(
-            c.flags.iter().any(|f| f == crate::infer::verify::FLAG_SPAN),
-            "a chunk that matches nothing in its window must say so"
-        );
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            assert!(
+                !c.flags.iter().any(|f| f == "span_unverified"),
+                "a span produced a review task: {:?}",
+                c.flags
+            );
+            let span = c.corpus_span.expect("every artifact keeps a span");
+            assert!(
+                span.start_line >= 1 && span.end_line >= span.start_line,
+                "{span:?}"
+            );
+        }
     }
 
     #[tokio::test]

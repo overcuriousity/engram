@@ -1,4 +1,6 @@
+pub mod consolidate;
 pub mod embed;
+pub mod reconcile;
 pub mod synthesize;
 
 use crate::core::Core;
@@ -32,6 +34,8 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
+        // The sweep looks at the whole collection, so it ignores the target.
+        (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
     };
 
     match result {
@@ -53,21 +57,29 @@ pub async fn run_one(core: &Core) -> Result<bool> {
                 // actually tried are recorded as failed; the ones that never
                 // ran go back in the queue.
                 (Stage::Synthesize, _) if exhausted => {
-                    tracing::warn!(error = %e, "segmentation exhausted retries; failing the windows it tried");
+                    tracing::warn!(error = %e, "segmentation is not getting through; backing off");
                     match synthesize::fail_pending_segments(core, &job.target_id, &e.to_string())
                         .await
                     {
-                        Ok(requeue) => {
+                        Ok(_) => {
                             core.store.complete_job(job.id).await?;
-                            // After closing this job, never before: the queue is
-                            // keyed by (stage, target), so an earlier enqueue
-                            // would be the very row `complete_job` then marks
-                            // done, and the untried windows would be abandoned.
-                            if requeue {
-                                core.store
-                                    .enqueue(Stage::Synthesize, "corpus", &job.target_id)
-                                    .await?;
-                            }
+                            // Always, not only when a window went untried. A
+                            // segment the endpoint refused is not a verdict on
+                            // the text — the endpoint was loading a model, or
+                            // the machine was asleep — and the state it records
+                            // is what the next attempt starts from rather than
+                            // where it stops. After closing this job, never
+                            // before: the queue is keyed by (stage, target), so
+                            // an earlier enqueue would be the very row
+                            // `complete_job` then marks done.
+                            core.store
+                                .enqueue_after(
+                                    Stage::Synthesize,
+                                    "corpus",
+                                    &job.target_id,
+                                    job.attempts,
+                                )
+                                .await?;
                         }
                         Err(fe) => {
                             core.store

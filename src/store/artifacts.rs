@@ -57,6 +57,14 @@ pub struct Chunk {
     /// Verification failures. Empty means every check passed.
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
+    /// The artifact this one lost a near-identical pair to. Set by the
+    /// consolidation sweep; the artifact stays stored and readable, and is only
+    /// kept out of ranking.
+    pub superseded_by: Option<String>,
+    /// Conditions under which this artifact does not apply, as its source
+    /// stated them. Deliberately not part of what gets embedded: changing what
+    /// every vector is built from is a decision for the evaluation harness.
+    pub caveats: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +76,7 @@ pub struct NewArtifact {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub segment_idx: Option<i64>,
+    pub caveats: Vec<String>,
 }
 
 fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
@@ -92,6 +101,11 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         flag_detail: r.get("flag_detail"),
+        superseded_by: r.get("superseded_by"),
+        caveats: r
+            .get::<Option<String>, _>("caveats")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -120,10 +134,12 @@ impl Store {
                 segment_idx: nc.segment_idx,
                 flags: vec![],
                 flag_detail: None,
+                superseded_by: None,
+                caveats: nc.caveats.clone(),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -136,6 +152,7 @@ impl Store {
             .bind(c.embed_state.as_str())
             .bind(c.created_at)
             .bind(c.segment_idx)
+            .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
             .execute(&mut *tx)
             .await?;
             out.push(c);
@@ -361,6 +378,55 @@ impl Store {
         Ok(())
     }
 
+    /// Record that this artifact lost a near-identical pair. `None` undoes it.
+    pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
+        let res = sqlx::query("UPDATE artifacts SET superseded_by = ? WHERE id = ?")
+            .bind(by)
+            .bind(artifact_id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Artifacts hidden in favour of a keeper that no longer exists.
+    ///
+    /// `superseded_by` is a plain column with no foreign key, so deleting a
+    /// corpus — or reprocessing one, which deletes and re-creates every
+    /// artifact under new ids — can leave the losing side of a pair pointing at
+    /// nothing. That artifact is hidden from search forever, in favour of a
+    /// copy that is gone: the surviving text becomes invisible, which is the
+    /// exact loss consolidation exists to avoid.
+    ///
+    /// A read, not a write: the caller clears the vector payload before the
+    /// row, so that a failure between the two leaves the artifact listed on Ops
+    /// rather than hidden with nothing pointing at it. See
+    /// `Core::heal_dangling_supersessions`.
+    pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT id FROM artifacts
+              WHERE superseded_by IS NOT NULL
+                AND superseded_by NOT IN (SELECT id FROM artifacts)",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// Artifacts currently hidden by consolidation, newest first.
+    pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
     /// Record what verification found. An empty list clears the flags, so a
     /// re-checked chunk does not keep a warning it no longer earns.
     pub async fn set_artifact_flags(
@@ -385,16 +451,6 @@ impl Store {
 
     pub async fn clear_artifact_flags(&self, id: &str) -> Result<()> {
         self.set_artifact_flags(id, &[], None).await
-    }
-
-    pub async fn flagged_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE flags IS NOT NULL ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
     }
 
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
@@ -430,6 +486,7 @@ mod tests {
                 start_line: 1,
                 end_line: 4,
             }),
+            caveats: vec![],
             title: Some(format!("title {ord}")),
             category: Some("procedure".into()),
             tags: vec!["forensics".into(), "windows".into()],
@@ -482,7 +539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flags_round_trip_and_list_only_flagged_chunks() {
+    async fn flags_round_trip() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -498,16 +555,15 @@ mod tests {
         .await
         .unwrap();
 
-        let flagged = s.flagged_artifacts(10).await.unwrap();
-        assert_eq!(flagged.len(), 1);
-        assert_eq!(flagged[0].flags, vec!["literals_unverified".to_string()]);
+        let flagged = s.get_artifact(&made[1].id).await.unwrap();
+        assert_eq!(flagged.flags, vec!["literals_unverified".to_string()]);
         assert_eq!(
-            flagged[0].flag_detail.as_deref(),
+            flagged.flag_detail.as_deref(),
             Some("missing literal: --dry-run")
         );
 
         s.clear_artifact_flags(&made[1].id).await.unwrap();
-        assert!(s.flagged_artifacts(10).await.unwrap().is_empty());
+        assert!(s.get_artifact(&made[1].id).await.unwrap().flags.is_empty());
     }
 
     #[tokio::test]
@@ -590,6 +646,52 @@ mod tests {
         s.mark_embed_failed(&made[1].id).await.unwrap();
         assert_eq!(s.pending_embed_count(&src.id).await.unwrap(), 0);
         assert_eq!(s.failed_embed_count(&src.id).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn listing_dangling_supersessions_does_not_clear_them() {
+        // The healing order depends on this being a read. If listing also
+        // cleared the rows, a vector write that then failed would leave the
+        // artifact hidden with `superseded_by` already NULL: off the Ops list,
+        // past the sweep's self-heal branch, and unreachable by any button.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "loser".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        s.set_superseded_by(&made[0].id, Some("an-artifact-that-is-gone"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.dangling_superseded().await.unwrap(),
+            vec![made[0].id.clone()]
+        );
+        assert_eq!(
+            s.dangling_superseded().await.unwrap(),
+            vec![made[0].id.clone()],
+            "the second call came back empty, so the first one wrote"
+        );
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
     }
 
     #[tokio::test]

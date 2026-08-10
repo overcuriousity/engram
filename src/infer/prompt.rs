@@ -21,12 +21,18 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end],"caveats":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
 - category: one lowercase word, e.g. procedure, concept, reference, snippet.
 - tags: 1-5 lowercase keywords for filtering.
-- corpus_lines: the 1-based line range in the input this artifact came from."#;
+- corpus_lines: the 1-based line range in the input this artifact came from.
+- caveats: 0-3 short sentences for conditions under which this artifact does
+  not hold — a prerequisite, a version or platform it is specific to, a
+  destructive effect, a documented failure. Take these only from what the input
+  states or plainly implies. Never invent a caveat, never add general advice,
+  and never put a command in a caveat that is not in the input. Use an empty
+  list when the input states none, which is the common case."#;
 
 pub fn user_prompt(segment_text: &str, first_line: i64, max_artifact_tokens: usize) -> String {
     format!(
@@ -45,6 +51,73 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
     )
 }
 
+/// The judge is asked one question and given no room to be helpful.
+///
+/// It is not asked which artifact is right, nor to merge them, nor to rewrite
+/// anything. Deciding which of two contradictory artifacts is current needs
+/// context the base does not hold — what the reader is actually running — and
+/// is a judgement only they can make. All this call does is tell them there is
+/// a judgement waiting.
+pub const JUDGE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
+
+First decide whether the two are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
+
+If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then the artifacts are not in conflict no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer false and stop.
+
+Only when both describe the same subject: a contradiction is a concrete disagreement about it — a different version, number, date, path, flag, default, or step order for that one subject.
+
+These are NOT contradictions:
+- The same fact in different words.
+- Different levels of detail about the same thing.
+- Two different subjects that happen to use similar language, or the same layout.
+- One artifact mentioning something the other simply does not cover.
+- Two values that both appear in the same artifact.
+
+Reply with JSON only, no commentary, in exactly this shape:
+
+{"contradicts": true, "detail": "..."}
+
+- contradicts: true only for a concrete disagreement about one subject, as above.
+- detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false."#;
+
+/// The two artifacts, each under its title.
+///
+/// The title is not decoration here, it is the subject. Synthesis writes a body
+/// that stands on its own within its segment, which is not the same as naming
+/// what it is about: a section headed "FAT32" becomes an artifact whose text
+/// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
+/// alone, the model saw two anonymous spec lists with different numbers and
+/// called them a contradiction — correctly, on the evidence it was given.
+pub fn judge_prompt(a: (&str, &str), b: (&str, &str)) -> String {
+    format!(
+        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
+        a.0, a.1, b.0, b.1
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct Judgement {
+    contradicts: bool,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+/// A reply that cannot be read is an error, not a verdict.
+///
+/// Defaulting to "contradicts" would fill the review queue with noise an
+/// operator has to clear by hand; defaulting to "no" would quietly close real
+/// conflicts. Failing leaves the pair pending, and the next sweep asks again.
+pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>)> {
+    let j: Judgement = serde_json::from_str(extract_json(body)).map_err(|e| {
+        Error::MalformedLlmOutput(format!("judge reply was not the expected JSON: {e}"))
+    })?;
+    let detail = j
+        .detail
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty() && j.contradicts);
+    Ok((j.contradicts, detail))
+}
+
 #[derive(serde::Deserialize)]
 struct Envelope {
     artifacts: Vec<RawArtifact>,
@@ -61,6 +134,8 @@ struct RawArtifact {
     tags: Vec<String>,
     #[serde(default)]
     corpus_lines: Option<Vec<i64>>,
+    #[serde(default)]
+    caveats: Vec<String>,
 }
 
 /// Models wrap JSON in fences and preface it with prose no matter what the
@@ -241,6 +316,16 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
             },
+            // Capped at the three the prompt asks for: a model that starts
+            // listing general advice must not turn one artifact into a page of
+            // it, and the tail is the least source-grounded part of the list.
+            caveats: c
+                .caveats
+                .into_iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .take(3)
+                .collect(),
         })
         .collect();
 
@@ -255,6 +340,32 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_judge_is_told_what_each_artifact_is_about() {
+        // The real case this fixes: an artifact headed "FAT32 Specifications"
+        // whose body opens "32 Bit Clusternummern" and never says FAT32 again.
+        // Given the bodies alone, the model saw two anonymous spec lists with
+        // different numbers and called them a contradiction — which was the
+        // only honest answer to the question it was actually asked.
+        let p = judge_prompt(
+            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+            ("FAT32 Specifications", "32 Bit Clusternummern."),
+        );
+        assert!(p.contains("Title: FAT16 Specifications"), "{p}");
+        assert!(p.contains("Title: FAT32 Specifications"), "{p}");
+        assert!(p.contains("Die max. Partitionsgröße: 2 GB."));
+    }
+
+    #[test]
+    fn the_judge_is_told_that_different_subjects_are_not_a_conflict() {
+        // Two sections of one reference document are near-identical in form and
+        // deliberately different in content, so similarity puts them in a pair
+        // and every number in them differs. Without this rule the feature fires
+        // hardest exactly where it is most wrong.
+        assert!(JUDGE_SYSTEM.contains("same subject"));
+        assert!(JUDGE_SYSTEM.contains("Answer false and stop."));
+    }
 
     #[test]
     fn a_truncated_list_keeps_the_artifacts_that_finished() {
@@ -324,6 +435,75 @@ mod tests {
         // rather than silently dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
+    }
+
+    #[test]
+    fn a_judgement_parses() {
+        let (yes, detail) =
+            parse_judgement(r#"{"contradicts":true,"detail":"one says 1.2, the other 1.4"}"#)
+                .unwrap();
+        assert!(yes);
+        assert_eq!(detail.as_deref(), Some("one says 1.2, the other 1.4"));
+    }
+
+    #[test]
+    fn a_negative_judgement_carries_no_detail() {
+        let (yes, detail) = parse_judgement(r#"{"contradicts":false}"#).unwrap();
+        assert!(!yes);
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn a_judgement_wrapped_in_prose_and_fences_still_parses() {
+        // The same models that fence the synthesis reply fence this one.
+        let (yes, _) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn an_unparsable_judgement_is_an_error_not_a_yes() {
+        // Defaulting to "contradicts" would fill the review queue with noise;
+        // defaulting to "no" would hide real conflicts. Neither: it fails, the
+        // pair stays pending, and the next sweep tries again.
+        assert!(parse_judgement("I could not decide.").is_err());
+    }
+
+    #[test]
+    fn caveats_are_parsed_when_the_model_supplies_them() {
+        let body = r#"{"artifacts":[{
+            "text":"Run `mkfs.ext4 /dev/sdb1` to format the partition.",
+            "title":"Formatting a partition",
+            "category":"procedure",
+            "tags":["disk"],
+            "corpus_lines":[3,9],
+            "caveats":["Destroys every existing file on the device.",
+                       "Requires root."]
+        }]}"#;
+        let got = parse_response(body).unwrap();
+        assert_eq!(
+            got[0].caveats,
+            vec![
+                "Destroys every existing file on the device.".to_string(),
+                "Requires root.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_artifact_without_caveats_parses_to_an_empty_list() {
+        // Most models will omit the field most of the time, and a missing
+        // field must never fail a segment that is otherwise fine.
+        let body = r#"{"artifacts":[{"text":"plain","title":"t","category":"c","tags":[]}]}"#;
+        assert!(parse_response(body).unwrap()[0].caveats.is_empty());
+    }
+
+    #[test]
+    fn the_system_prompt_asks_for_caveats_and_forbids_inventing_them() {
+        assert!(SYNTHESIZER_SYSTEM.contains("caveats"));
+        assert!(
+            SYNTHESIZER_SYSTEM.contains("Never invent"),
+            "the prompt must tie caveats to what the source says"
+        );
     }
 
     // r###: the JSON contains the sequence `"##` (a quoted markdown H2),

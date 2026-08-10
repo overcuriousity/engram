@@ -343,6 +343,9 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
             corpus_span: chunk.corpus_span.clone(),
             title: chunk.title.clone(),
             category: chunk.category.clone(),
+            // A caveat applies to the whole passage the parent held, so every
+            // fragment of it inherits the warning rather than losing it.
+            caveats: chunk.caveats.clone(),
             tags: chunk.tags.clone(),
             // Siblings belong to the window their parent came from, or a
             // re-segmentation of that window would leave them behind.
@@ -355,6 +358,10 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
         .await?;
+    // The parent is gone, so anything it was hiding is now hidden in favour of
+    // an artifact that does not exist. The siblings are not a substitute: they
+    // are new ids nothing points at.
+    core.heal_dangling_supersessions().await?;
 
     for c in &inserted {
         core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;
@@ -375,6 +382,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // the existing stamp forward rather than letting a re-embed make a
         // chunk look forgotten.
         last_seen_at: None,
+        // Unset for the same reason, and it matters more: writing `false` here
+        // would revive an artifact the sweep hid, on every re-embed.
+        superseded: None,
     }
 }
 
@@ -432,6 +442,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -484,6 +495,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -523,6 +535,7 @@ mod tests {
                     category: None,
                     tags: vec![],
                     segment_idx: Some(0),
+                    caveats: vec![],
                 }],
             )
             .await
@@ -590,6 +603,7 @@ mod tests {
                 category: Some("note".into()),
                 tags: vec!["x".into()],
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

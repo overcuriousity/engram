@@ -66,6 +66,9 @@ pub struct Core {
     pub background: Arc<Background>,
     /// Shared by every clone of `Core`, like the background queue.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
+    /// Thresholds and budgets for duplicate hygiene. Read on the capture path
+    /// and by the sweep, so it lives here rather than being passed down.
+    pub consolidate: crate::config::ConsolidateConfig,
 }
 
 impl Core {
@@ -97,6 +100,7 @@ impl Core {
             )),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            consolidate: cfg.consolidate.clone(),
         }
     }
 }
@@ -150,6 +154,7 @@ pub mod test_support {
             counter: Arc::new(TokenCounter::Estimate),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            consolidate: crate::config::ConsolidateConfig::default(),
         }
     }
 }
@@ -162,6 +167,20 @@ mod tests {
     /// The one wiring decision `from_config` makes that is not a straight
     /// field copy: rerank is optional, and an absent block must leave search
     /// in vector order rather than defaulting to an endpoint.
+    #[tokio::test]
+    async fn the_example_config_carries_the_consolidation_defaults() {
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(cfg.consolidate.enabled);
+        assert!(
+            cfg.consolidate.auto_supersede > cfg.consolidate.review_min,
+            "superseding at or below the review threshold would hide distinct artifacts"
+        );
+        assert!(
+            !cfg.consolidate.judge,
+            "the only inference-costing stage must be opt-in"
+        );
+    }
+
     #[tokio::test]
     async fn rerank_is_wired_only_when_configured() {
         let store = crate::store::Store::memory().await.unwrap();

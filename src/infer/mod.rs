@@ -1,4 +1,5 @@
 pub mod budget;
+pub mod facts;
 pub mod fake;
 pub mod openai;
 pub mod prompt;
@@ -15,6 +16,10 @@ pub struct ProposedArtifact {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub corpus_lines: Option<(i64, i64)>,
+    /// Conditions under which the artifact does not apply, as the source states
+    /// them. The model is already holding this segment, so asking for these
+    /// costs output tokens rather than another call.
+    pub caveats: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -29,6 +29,12 @@ struct Args {
     /// before engram addressed vectors through an alias.
     #[arg(long)]
     replace_legacy: bool,
+    /// Re-measure every corpus's coverage from the artifacts already stored,
+    /// then exit. Local work over existing rows: no inference, no vector calls,
+    /// nothing re-synthesised. Run it after upgrading past a change to how
+    /// coverage is measured, since the figure is otherwise written once.
+    #[arg(long)]
+    recompute_coverage: bool,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
@@ -124,6 +130,36 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.recompute_coverage {
+        // No vector store and no inference: this only reads artifacts and
+        // writes one number per corpus, so it must not need either to be up.
+        let store = engram::store::Store::connect(&cfg.store).await?;
+        let core = Core::from_config(
+            &cfg,
+            Arc::new(engram::vector::memory::MemoryVectors::new()),
+            store,
+        );
+        let mut offset = 0;
+        loop {
+            let page = core.store.list_corpora(100, offset).await?;
+            if page.is_empty() {
+                break;
+            }
+            for c in &page {
+                let before = c.coverage;
+                let after = engram::jobs::synthesize::recompute_coverage(&core, &c.id).await?;
+                println!(
+                    "{}  {} -> {:.3}",
+                    c.id,
+                    before.map_or("none".to_string(), |b| format!("{b:.3}")),
+                    after
+                );
+            }
+            offset += page.len() as i64;
+        }
+        return Ok(());
+    }
+
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
     let store = engram::store::Store::connect(&cfg.store).await?;
@@ -158,7 +194,12 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let background = core.background.clone();
-    let handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let ticker =
+        engram::core::background::spawn_consolidation_ticker(core.clone(), shutdown_rx.clone());
+    let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    // Joined with the workers so shutdown waits for it too, rather than leaving
+    // a task the runtime drops mid-enqueue.
+    handles.push(ticker);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
@@ -257,6 +298,7 @@ mod startup_tests {
                     password_hash: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aaaa".into(),
                 }),
             },
+            consolidate: ConsolidateConfig::default(),
         }
     }
 

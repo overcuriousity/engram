@@ -147,7 +147,35 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     if let Some(c) = &filter.category {
         must.push(json!({ "key": "category", "match": { "value": c } }));
     }
-    Some(json!({ "must": must }))
+
+    // `must` is omitted rather than sent empty. A search that only excludes
+    // superseded points has no positive condition, and an empty condition list
+    // is not something to hand Qdrant and hope it reads as "no constraint".
+    let mut body = json!({});
+    if !must.is_empty() {
+        body["must"] = json!(must);
+    }
+    // Excluded with `must_not` rather than by matching `false`: a point written
+    // before consolidation existed carries no `superseded` key at all, and a
+    // `match: false` clause would drop every one of them from search.
+    if !filter.include_superseded {
+        body["must_not"] = json!([{ "key": "superseded", "match": { "value": true } }]);
+    }
+    Some(body)
+}
+
+/// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
+/// which is why `near_pairs` follows this with a payload lookup.
+#[derive(Deserialize)]
+struct MatrixPairs {
+    pairs: Vec<MatrixPair>,
+}
+
+#[derive(Deserialize)]
+struct MatrixPair {
+    a: Value,
+    b: Value,
+    score: f32,
 }
 
 /// The schema every generation is created with.
@@ -321,6 +349,16 @@ struct ScrollResult {
     points: Vec<ScrolledPoint>,
     #[serde(default)]
     next_page_offset: Value,
+}
+
+#[derive(Deserialize)]
+/// The two payload keys a point write must not clobber, as currently stored.
+/// `None` means the key is absent, which for `superseded` is every point
+/// written before consolidation existed.
+#[derive(Debug, Clone, Copy, Default)]
+struct StoredBookkeeping {
+    last_seen_at: Option<i64>,
+    superseded: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -573,17 +611,21 @@ impl QdrantVectors {
         Ok(res.count)
     }
 
-    /// The `last_seen_at` already stored for these chunks, for the points that
-    /// have one. Only asked for when a caller is about to overwrite payloads it
-    /// built without the stamp, and only for the one key, so this is a small
-    /// read next to the write it protects.
-    async fn stored_last_seen(
+    /// The bookkeeping keys already stored for these chunks: when the chunk was
+    /// last shown, and whether consolidation has hidden it.
+    ///
+    /// Both are written by code that knows nothing about the other — `touch`
+    /// sets one, the sweep sets the other, and the embed job rebuilding a
+    /// payload knows neither. Only asked for when a caller is about to
+    /// overwrite payloads it built without them, and only for those two keys,
+    /// so this is a small read next to the write it protects.
+    async fn stored_bookkeeping(
         &self,
         points: &[VectorPoint],
-    ) -> Result<std::collections::HashMap<String, i64>> {
+    ) -> Result<std::collections::HashMap<String, StoredBookkeeping>> {
         let wanted: Vec<&VectorPoint> = points
             .iter()
-            .filter(|p| p.payload.last_seen_at.is_none())
+            .filter(|p| p.payload.last_seen_at.is_none() || p.payload.superseded.is_none())
             .collect();
         if wanted.is_empty() {
             return Ok(Default::default());
@@ -604,7 +646,7 @@ impl QdrantVectors {
                 &format!("/collections/{}/points", self.alias),
                 Some(json!({
                     "ids": ids,
-                    "with_payload": ["last_seen_at"],
+                    "with_payload": ["last_seen_at", "superseded"],
                     "with_vector": false,
                 })),
             )
@@ -616,9 +658,13 @@ impl QdrantVectors {
             let Some(artifact_id) = by_uuid.get(uuid) else {
                 continue;
             };
-            if let Some(seen) = p.payload.get("last_seen_at").and_then(Value::as_i64) {
-                out.insert((*artifact_id).to_string(), seen);
-            }
+            out.insert(
+                (*artifact_id).to_string(),
+                StoredBookkeeping {
+                    last_seen_at: p.payload.get("last_seen_at").and_then(Value::as_i64),
+                    superseded: p.payload.get("superseded").and_then(Value::as_bool),
+                },
+            );
         }
         Ok(out)
     }
@@ -931,14 +977,20 @@ impl VectorStore for QdrantVectors {
         // A point write replaces the whole payload, unlike `set_payload` and
         // `touch`, which merge. A writer that does not know when the chunk was
         // last shown would therefore clear the stamp, and `resurface` would
-        // offer a chunk read yesterday as forgotten — so carry the stored one
-        // forward for every point that arrives without it.
-        let stored = self.stored_last_seen(&points).await?;
+        // offer a chunk read yesterday as forgotten. The same hazard applies to
+        // `superseded`, and costs more: clearing it puts an artifact the sweep
+        // hid straight back into results, on every re-embed. So carry both
+        // forward for every point that arrives without them.
+        let stored = self.stored_bookkeeping(&points).await?;
         let mut body = Vec::with_capacity(points.len());
         for p in points {
             let mut payload = p.payload.clone();
+            let old = stored.get(&payload.artifact_id);
             if payload.last_seen_at.is_none() {
-                payload.last_seen_at = stored.get(&payload.artifact_id).copied();
+                payload.last_seen_at = old.and_then(|s| s.last_seen_at);
+            }
+            if payload.superseded.is_none() {
+                payload.superseded = old.and_then(|s| s.superseded);
             }
             let payload =
                 serde_json::to_value(&payload).map_err(|e| Error::Vector(e.to_string()))?;
@@ -964,6 +1016,20 @@ impl VectorStore for QdrantVectors {
                 Some(json!({
                     "payload": body,
                     "points": [ point_uuid(&payload.artifact_id) ],
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()> {
+        let _: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/payload?wait=true", self.alias),
+                Some(json!({
+                    "payload": { "superseded": superseded },
+                    "points": [ point_uuid(artifact_id) ],
                 })),
             )
             .await?;
@@ -1082,7 +1148,14 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/query", self.alias),
                 Some(json!({
                     "query": { "sample": "random" },
-                    "filter": { "must": [
+                    // `must_not` for the same reason as in `build_filter`: a
+                    // point written before consolidation existed carries no
+                    // `superseded` key, and matching `false` would drop it.
+                    // Without this the forgotten list offers exactly the
+                    // duplicates the sweep just took out of search.
+                    "filter": {
+                      "must_not": [ { "key": "superseded", "match": { "value": true } } ],
+                      "must": [
                         { "key": "created_at", "range": { "lt": older_than } },
                         // Nested so this reads as AND-of-OR. A chunk written
                         // before the stamp existed has no `last_seen_at` at
@@ -1091,7 +1164,8 @@ impl VectorStore for QdrantVectors {
                             { "key": "last_seen_at", "range": { "lt": unseen_since } },
                             { "is_empty": { "key": "last_seen_at" } },
                         ] },
-                    ] },
+                      ],
+                    },
                     "limit": limit,
                     "with_payload": true,
                 })),
@@ -1143,6 +1217,11 @@ impl VectorStore for QdrantVectors {
             "query": point_uuid(artifact_id),
             "using": DENSE,
             "limit": limit + 1,
+            // A superseded artifact is out of search, so it must be out of the
+            // related pane too: it is by construction near-identical to its
+            // keeper, which means it would lead that list on every artifact it
+            // was hidden in favour of.
+            "filter": { "must_not": [ { "key": "superseded", "match": { "value": true } } ] },
             "with_payload": true,
         });
         let res: QueryResult = match self
@@ -1167,6 +1246,98 @@ impl VectorStore for QdrantVectors {
         hits.retain(|h| h.payload.artifact_id != artifact_id);
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    async fn near_pairs(
+        &self,
+        sample: usize,
+        per_point: usize,
+        min_score: f32,
+    ) -> Result<Vec<super::NearPair>> {
+        // Superseded points are excluded at the source. Including them would
+        // hand the sweep pairs it has already resolved, on every single run.
+        let res: MatrixPairs = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/search/matrix/pairs", self.alias),
+                Some(json!({
+                    "sample": sample,
+                    "limit": per_point,
+                    "using": DENSE,
+                    "filter": { "must_not": [
+                        { "key": "superseded", "match": { "value": true } }
+                    ] },
+                })),
+            )
+            .await?;
+
+        let mut ids: Vec<&str> = Vec::new();
+        for p in &res.pairs {
+            if p.score < min_score {
+                continue;
+            }
+            // Ids come back as JSON strings for UUID points. Anything else is a
+            // point this collection did not get from engram.
+            let (Some(a), Some(b)) = (p.a.as_str(), p.b.as_str()) else {
+                continue;
+            };
+            ids.push(a);
+            ids.push(b);
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        // `point_uuid` is one-way, so the artifact id has to come back from the
+        // payload. One retrieve for the whole sweep, asking for the single key
+        // rather than dragging every candidate's text across the wire.
+        //
+        // `call` already unwraps the `result` envelope, so this deserializes
+        // straight into the point list — reaching for `result` again here is
+        // what made every lookup miss and the sweep return nothing at all.
+        let found: Vec<ScrolledPoint> = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points", self.alias),
+                Some(json!({ "ids": ids, "with_payload": ["artifact_id"], "with_vector": false })),
+            )
+            .await?;
+        let mut by_uuid: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for p in &found {
+            let (Some(uuid), Some(aid)) = (
+                p.id.as_str(),
+                p.payload.get("artifact_id").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            by_uuid.insert(uuid.to_string(), aid.to_string());
+        }
+
+        let mut out: Vec<super::NearPair> = res
+            .pairs
+            .iter()
+            .filter(|p| p.score >= min_score)
+            .filter_map(|p| {
+                let a = by_uuid.get(p.a.as_str()?)?;
+                let b = by_uuid.get(p.b.as_str()?)?;
+                // A point cannot be a duplicate of itself, however the matrix
+                // reports it. The matrix also reports (a,b) and (b,a) as
+                // separate rows, which `NearPair::new` plus the dedup below
+                // collapse into one.
+                (a != b).then(|| super::NearPair::new(a, b, p.score))
+            })
+            .collect();
+        out.sort_by(|x, y| {
+            y.score
+                .total_cmp(&x.score)
+                .then_with(|| x.a.cmp(&y.a))
+                .then_with(|| x.b.cmp(&y.b))
+        });
+        out.dedup_by(|x, y| x.a == y.a && x.b == y.b);
+        Ok(out)
     }
 
     async fn count(&self) -> Result<u64> {
@@ -1303,10 +1474,50 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_filter_produces_no_filter_at_all() {
-        // `{"must": []}` matches nothing in Qdrant, so an unfiltered search
-        // must omit the key rather than send an empty condition list.
-        assert!(build_filter(&SearchFilter::default()).is_none());
+    fn matrix_pairs_deserialise_from_qdrant_shape() {
+        let res: MatrixPairs = serde_json::from_value(json!({
+            "pairs": [ { "a": 1, "b": 2, "score": 0.97 } ]
+        }))
+        .unwrap();
+        assert_eq!(res.pairs.len(), 1);
+        assert!((res.pairs[0].score - 0.97).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pair_is_canonically_ordered() {
+        assert_eq!(
+            super::super::NearPair::new("z", "a", 0.9),
+            super::super::NearPair::new("a", "z", 0.9)
+        );
+    }
+
+    #[test]
+    fn a_filter_that_narrows_nothing_produces_no_filter_at_all() {
+        // `{"must": []}` matches nothing in Qdrant, so a search that narrows
+        // nothing must omit the key rather than send an empty condition list.
+        // Asking for superseded points back is what "narrows nothing" means now.
+        assert!(
+            build_filter(&SearchFilter {
+                include_superseded: true,
+                ..Default::default()
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_default_filter_excludes_superseded_points() {
+        // The default is what every ordinary search sends, and superseding is
+        // only meaningful if it keeps an artifact out of that.
+        let f = build_filter(&SearchFilter::default()).unwrap();
+        assert!(
+            f.get("must").is_none(),
+            "an empty condition list must not be sent: {f}"
+        );
+        assert_eq!(
+            f["must_not"],
+            json!([{ "key": "superseded", "match": { "value": true } }]),
+        );
     }
 
     #[test]
@@ -1316,6 +1527,7 @@ mod tests {
         let f = build_filter(&SearchFilter {
             tags: vec!["linux".into(), "forensics".into()],
             category: Some("procedure".into()),
+            include_superseded: false,
         })
         .unwrap();
         let must = f["must"].as_array().unwrap();

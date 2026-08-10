@@ -155,6 +155,7 @@ async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
                 category: c.category.clone(),
                 tags: c.tags.clone(),
                 segment_idx: None,
+                caveats: vec![],
             })
             .collect();
         core.store.insert_artifacts(&src.id, &new).await.unwrap();

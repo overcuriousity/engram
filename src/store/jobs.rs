@@ -2,6 +2,11 @@ use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
 
+/// Where a job's behaviour changes, not where it is abandoned.
+///
+/// Past this many attempts a stage may switch tactics — splitting a batch
+/// embed into one job per artifact, recording which segments the synthesizer
+/// refused — but the work stays queued either way, at the backoff's ceiling.
 pub const MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +14,10 @@ pub enum Stage {
     Synthesize,
     Enrich,
     Embed,
+    /// The periodic consolidation sweep. Its target is the collection rather
+    /// than any one corpus, so there is exactly one of these in the queue at a
+    /// time.
+    Consolidate,
 }
 
 impl Stage {
@@ -17,6 +26,7 @@ impl Stage {
             Stage::Synthesize => "synthesize",
             Stage::Enrich => "enrich",
             Stage::Embed => "embed",
+            Stage::Consolidate => "consolidate",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -24,6 +34,7 @@ impl Stage {
             "synthesize" => Some(Stage::Synthesize),
             "enrich" => Some(Stage::Enrich),
             "embed" => Some(Stage::Embed),
+            "consolidate" => Some(Stage::Consolidate),
             _ => None,
         }
     }
@@ -47,12 +58,29 @@ pub struct FailedJob {
     pub last_error: Option<String>,
 }
 
-/// 2s, 4s, 8s, 16s, 32s ... capped at five minutes. An endpoint that is down
-/// stays down for minutes, not milliseconds, and a tight retry loop against a
-/// dead inference server is just noise in the log.
+/// Work waiting out a backoff. What replaced the failed list: there is no
+/// terminal state to report, only a next attempt to name.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RetryingJob {
+    pub stage: String,
+    pub target_id: String,
+    pub attempts: i64,
+    pub next_attempt_secs: i64,
+    pub last_error: Option<String>,
+}
+
+/// 2s, 4s, 8s, 16s, 32s ... doubling to a six-hour ceiling, and never stopping.
+///
+/// The ceiling used to be five minutes, which suited a caller that gave up
+/// after five attempts — one minute of patience in total. An inference endpoint
+/// that loads a model on demand takes ten, so the whole budget was spent before
+/// the endpoint had finished starting, and the work was lost until a person
+/// noticed and pressed a button. Six hours is short enough that a base heals
+/// the same day and long enough that text the model will never accept costs
+/// four calls a day rather than a thousand.
 pub fn backoff_secs(attempts: i64) -> i64 {
     let exp = attempts.clamp(1, 16) as u32;
-    2i64.saturating_pow(exp).min(300)
+    2i64.saturating_pow(exp).min(21_600)
 }
 
 impl Store {
@@ -70,6 +98,38 @@ impl Store {
         .bind(stage.as_str())
         .bind(target_kind)
         .bind(target_id)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Queue work that has already been tried, so the next attempt waits.
+    ///
+    /// `enqueue` resets `attempts` to zero, which is right for a reprocess a
+    /// person asked for and wrong for a stage re-arming itself: a synthesize
+    /// job that keeps failing would come straight back with a two-second
+    /// delay and hammer an endpoint that is down. This keeps the attempt count
+    /// climbing so the backoff means something.
+    pub async fn enqueue_after(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        attempts: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?)
+             ON CONFLICT(stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = excluded.attempts,
+               run_after = excluded.run_after, claimed_at = NULL",
+        )
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(attempts)
+        .bind(now() + backoff_secs(attempts))
         .bind(now())
         .execute(&self.pool)
         .await?;
@@ -114,25 +174,22 @@ impl Store {
         Ok(())
     }
 
+    /// Put a job back in the queue with a delay.
+    ///
+    /// There is no terminal state. `attempts` past `MAX_ATTEMPTS` only means
+    /// the delay has reached its ceiling: a base that cannot reach its
+    /// endpoint should cost nothing and heal when the endpoint returns, and
+    /// the previous behaviour — mark it failed, close it, wait for a human —
+    /// turned a ten-minute outage into permanently missing knowledge.
     pub async fn fail_job(&self, id: i64, attempts: i64, err: &str) -> Result<()> {
-        if attempts >= MAX_ATTEMPTS {
-            sqlx::query(
-                "UPDATE jobs SET state = 'failed', last_error = ?, claimed_at = NULL WHERE id = ?",
-            )
-            .bind(err)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        } else {
-            sqlx::query(
-                "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
-            )
-            .bind(now() + backoff_secs(attempts))
-            .bind(err)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        }
+        sqlx::query(
+            "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
+        )
+        .bind(now() + backoff_secs(attempts))
+        .bind(err)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -153,6 +210,34 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
+    }
+
+    /// Jobs waiting on a backoff, soonest first.
+    ///
+    /// `attempts > 0` is what separates work that has hit something from work
+    /// that is merely queued: a fresh job has `run_after` in the past and does
+    /// not belong on a page about trouble.
+    pub async fn retrying_jobs(&self, limit: i64) -> Result<Vec<RetryingJob>> {
+        let rows = sqlx::query(
+            "SELECT stage, target_id, attempts, last_error, run_after FROM jobs
+              WHERE state = 'pending' AND attempts > 0 AND run_after > ?
+              ORDER BY run_after LIMIT ?",
+        )
+        .bind(now())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let at = now();
+        Ok(rows
+            .iter()
+            .map(|r| RetryingJob {
+                stage: r.get("stage"),
+                target_id: r.get("target_id"),
+                attempts: r.get("attempts"),
+                next_attempt_secs: (r.get::<i64, _>("run_after") - at).max(0),
+                last_error: r.get("last_error"),
+            })
+            .collect())
     }
 
     pub async fn failed_jobs(&self, limit: i64) -> Result<Vec<FailedJob>> {
@@ -194,13 +279,11 @@ mod tests {
     use crate::store::Store;
 
     #[test]
-    fn backoff_doubles_then_caps_at_five_minutes() {
-        assert_eq!(backoff_secs(1), 2);
+    fn backoff_doubles_then_caps() {
         assert_eq!(backoff_secs(2), 4);
         assert_eq!(backoff_secs(3), 8);
         assert_eq!(backoff_secs(4), 16);
-        assert_eq!(backoff_secs(9), 300, "must cap, not grow unbounded");
-        assert_eq!(backoff_secs(100), 300);
+        assert_eq!(backoff_secs(100), 21_600, "must cap, not grow unbounded");
     }
 
     #[tokio::test]
@@ -286,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_reschedules_with_backoff_then_gives_up() {
+    async fn failure_reschedules_with_backoff_and_keeps_the_work() {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
 
@@ -295,28 +378,30 @@ mod tests {
         // Backed off: not immediately claimable.
         assert!(s.claim_job().await.unwrap().is_none());
 
-        // Burn the remaining attempts by moving run_after into the past.
-        for _ in 0..MAX_ATTEMPTS {
+        // Well past the old give-up point.
+        for _ in 0..MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
                 .execute(&s.pool)
                 .await
                 .unwrap();
-            if let Some(j) = s.claim_job().await.unwrap() {
-                s.fail_job(j.id, j.attempts, "still down").await.unwrap();
-            }
+            let j = s
+                .claim_job()
+                .await
+                .unwrap()
+                .expect("the job must still be there to try again");
+            s.fail_job(j.id, j.attempts, "still down").await.unwrap();
         }
+
         sqlx::query("UPDATE jobs SET run_after = 0")
             .execute(&s.pool)
             .await
             .unwrap();
+        let again = s.claim_job().await.unwrap();
         assert!(
-            s.claim_job().await.unwrap().is_none(),
-            "exhausted job must stay failed"
+            again.is_some(),
+            "the work was abandoned; an endpoint that comes back would never be noticed"
         );
-
-        let failed = s.failed_jobs(10).await.unwrap();
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0].last_error.as_deref(), Some("still down"));
+        assert!(s.failed_jobs(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -360,6 +445,38 @@ mod tests {
             .unwrap();
         let age = s.oldest_pending_age().await.unwrap().unwrap();
         assert!((3595..=3605).contains(&age), "got {age}");
+    }
+
+    #[test]
+    fn backoff_climbs_to_hours_and_stops_there() {
+        // An endpoint that is down stays down for minutes; one loading a model
+        // on demand takes ten. The old ceiling of five minutes went with a
+        // caller that gave up after five attempts — one minute of patience in
+        // total, spent before the endpoint had finished starting.
+        assert_eq!(backoff_secs(1), 2);
+        assert_eq!(backoff_secs(5), 32);
+        assert_eq!(backoff_secs(20), 21_600);
+        assert_eq!(backoff_secs(1_000), 21_600);
+    }
+
+    #[tokio::test]
+    async fn a_job_out_of_attempts_waits_rather_than_failing() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Embed, "artifact", "a1").await.unwrap();
+        let job = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(job.id, MAX_ATTEMPTS + 10, "endpoint down")
+            .await
+            .unwrap();
+        assert!(
+            s.failed_jobs(10).await.unwrap().is_empty(),
+            "a job was abandoned; nothing would ever pick it up again"
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(job.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "pending");
     }
 
     #[tokio::test]

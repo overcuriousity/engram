@@ -3,6 +3,22 @@
     <a href="/ui/corpora/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
   </div>
 
+  {% if let Some(winner) = d.superseded_by %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Hidden from results</b>
+      <div>Something near-identical and newer
+        (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
+      <div class="chips">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+          <button class="btn btn-sm" type="submit">Put it back</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   {% if !d.flags.is_empty() %}
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>
@@ -10,11 +26,6 @@
       <b>{{ d.flags|join(", ") }}</b>
       {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
       <div class="chips">
-        {% if let Some(w) = d.segment_idx %}
-        <form method="post" action="/ui/corpora/{{ d.corpus_id }}/segments/{{ w }}/resynthesize">
-          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
-        </form>
-        {% endif %}
         <button class="btn btn-sm" hx-post="/ui/artifacts/{{ d.id }}/reviewed"
                 hx-target="closest .flag" hx-swap="outerHTML">Mark reviewed</button>
       </div>
@@ -28,6 +39,14 @@
       <div class="card">
         <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {% if !d.caveats.is_empty() %}
+        {# Emitted by the same synthesis call that wrote the artifact, from what
+           the source states. Shown but deliberately not embedded. #}
+        <div class="caveats">
+          <b>Before you rely on this</b>
+          <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
         <div class="chips">
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
           {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}

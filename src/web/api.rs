@@ -203,6 +203,49 @@ async fn reprocess(
 }
 
 #[derive(serde::Deserialize)]
+struct ResolveBody {
+    action: crate::core::ingest::NearDupeAction,
+}
+
+/// Act on a capture parked as a near-duplicate. The decision is an operator's:
+/// nothing here compares the two documents again, it only carries out what was
+/// chosen.
+async fn resolve_near_dupe(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<Json<serde_json::Value>> {
+    st.core.resolve_near_duplicate(&cid, body.action).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// What consolidation has decided and what it is still asking about.
+async fn consolidation(
+    State(st): State<AppState>,
+    _id: Identity,
+) -> Result<Json<serde_json::Value>> {
+    use crate::store::pairs::PairState;
+    Ok(Json(serde_json::json!({
+        "superseded": st.core.store.superseded_artifacts(100).await?,
+        // What the judge actually ruled on, listed first for the same reason
+        // Ops puts it at the top: it is the one output here that cost a model
+        // call, and an operator reading only `pairs` would conclude there was
+        // nothing to look at.
+        "contradictions": st
+            .core
+            .store
+            .pairs_by_state(PairState::Contradiction, 100)
+            .await?,
+        "pairs": st
+            .core
+            .store
+            .pairs_by_state(PairState::Pending, 100)
+            .await?,
+    })))
+}
+
+#[derive(serde::Deserialize)]
 pub struct SearchParams {
     pub q: String,
     pub limit: Option<usize>,
@@ -343,6 +386,7 @@ async fn patch_artifact(
                 tags: chunk.tags.clone(),
                 created_at: chunk.created_at,
                 last_seen_at: None,
+                superseded: None,
             })
             .await?;
     }
@@ -360,6 +404,10 @@ async fn delete_artifact(
         .delete_artifacts(std::slice::from_ref(&cid))
         .await?;
     st.core.store.delete_artifact(&cid).await?;
+    // This artifact may have been the reason another one is hidden, and a
+    // keeper that no longer exists leaves its loser out of search in favour of
+    // nothing. Deleting a whole corpus heals for the same reason.
+    st.core.heal_dangling_supersessions().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -393,9 +441,11 @@ pub fn api_router() -> Router<AppState> {
         .route("/corpora", post(ingest).get(list_corpora))
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
         .route("/corpora/{id}/reprocess", post(reprocess))
+        .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
+        .route("/consolidation", get(consolidation))
         .route(
             "/artifacts/{id}",
             get(get_artifact)
@@ -521,6 +571,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_parked_capture_is_resolved_over_the_api() {
+        let (app, token, core) = app_token_and_core().await;
+        let body: String = (0..200)
+            .map(|i| format!("step {i}: run the mount command and read its output"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        core.ingest(&body, "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(&body.replacen("step 7:", "step seven:", 1), "web", None)
+            .await
+            .unwrap();
+        assert!(second.near_duplicate.is_some());
+
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/corpora/{}/resolve", second.id),
+                &token,
+                serde_json::json!({ "action": "keep_both" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            crate::store::corpora::CorpusStatus::Raw
+        );
+    }
+
+    #[tokio::test]
+    async fn resolving_a_corpus_that_is_not_parked_is_a_bad_request() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core.ingest("plain text", "web", None).await.unwrap();
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/corpora/{}/resolve", out.id),
+                &token,
+                serde_json::json!({ "action": "discard" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -686,7 +781,8 @@ mod patch_tests {
     use super::tests::*;
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     /// One embedded chunk, and the app that can edit it.
@@ -705,6 +801,7 @@ mod patch_tests {
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
                     segment_idx: None,
+                    caveats: vec![],
                 }],
             )
             .await
@@ -751,6 +848,7 @@ mod patch_tests {
                 &SearchFilter {
                     tags: vec!["fresh".into()],
                     category: None,
+                    include_superseded: false,
                 },
             )
             .await
@@ -934,6 +1032,64 @@ mod patch_tests {
         .await
         .unwrap();
         assert_eq!(core.store.get_artifact(&cid).await.unwrap().title, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_artifact_frees_whatever_it_was_hiding() {
+        // Deleting a corpus heals for this reason; deleting one artifact left
+        // its loser hidden in favour of an id that no longer exists until the
+        // next sweep — which is never, with `consolidate.enabled = false`.
+        let (app, token, core, keeper) = one_artifact().await;
+        let src = core
+            .store
+            .insert_corpus("other", "web", None)
+            .await
+            .unwrap();
+        let hidden = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "the older copy".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .set_superseded_by(&hidden, Some(&keeper))
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/artifacts/{keeper}"))
+                    .method("DELETE")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store
+                .get_artifact(&hidden)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the artifact is still hidden in favour of a deleted one"
+        );
     }
 
     #[tokio::test]

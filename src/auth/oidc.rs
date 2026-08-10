@@ -57,7 +57,7 @@ impl Default for PendingStore {
 /// Who may sign in. An empty allowlist denies everyone by design: without it,
 /// every account the identity provider knows about could read the knowledge
 /// base.
-pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>) -> bool {
+pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: &[String]) -> bool {
     if cfg.allowed_subs.iter().any(|s| s == subject) {
         return true;
     }
@@ -71,13 +71,73 @@ pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>) -> bool 
             return true;
         }
     }
+    if cfg
+        .allowed_groups
+        .iter()
+        .any(|g| groups.iter().any(|m| m == g))
+    {
+        return true;
+    }
     false
 }
+
+/// The one claim this reads beyond the OIDC standard set: which groups the
+/// provider says the subject belongs to. A provider that never sends it — the
+/// common case, since Nextcloud's OIDC provider app only includes `groups`
+/// when an admin turns on group provisioning for the client — simply
+/// deserializes to an empty list rather than failing the claim parse.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct GroupClaims {
+    #[serde(default)]
+    groups: Vec<String>,
+}
+impl openidconnect::AdditionalClaims for GroupClaims {}
+
+type EngramIdTokenFields = openidconnect::IdTokenFields<
+    GroupClaims,
+    openidconnect::EmptyExtraTokenFields,
+    openidconnect::core::CoreGenderClaim,
+    openidconnect::core::CoreJweContentEncryptionAlgorithm,
+    openidconnect::core::CoreJwsSigningAlgorithm,
+>;
+type EngramTokenResponse =
+    openidconnect::StandardTokenResponse<EngramIdTokenFields, openidconnect::core::CoreTokenType>;
+
+/// `openidconnect::core::CoreClient` with its additional-claims parameter
+/// swapped from `EmptyAdditionalClaims` to [`GroupClaims`], so the `groups`
+/// claim decodes rather than being discarded. Otherwise identical to `Core*`
+/// — same algorithms, same error and token types.
+type EngramClient<
+    HasAuthUrl = openidconnect::EndpointNotSet,
+    HasDeviceAuthUrl = openidconnect::EndpointNotSet,
+    HasIntrospectionUrl = openidconnect::EndpointNotSet,
+    HasRevocationUrl = openidconnect::EndpointNotSet,
+    HasTokenUrl = openidconnect::EndpointNotSet,
+    HasUserInfoUrl = openidconnect::EndpointNotSet,
+> = openidconnect::Client<
+    GroupClaims,
+    openidconnect::core::CoreAuthDisplay,
+    openidconnect::core::CoreGenderClaim,
+    openidconnect::core::CoreJweContentEncryptionAlgorithm,
+    openidconnect::core::CoreJsonWebKey,
+    openidconnect::core::CoreAuthPrompt,
+    openidconnect::StandardErrorResponse<openidconnect::core::CoreErrorResponseType>,
+    EngramTokenResponse,
+    openidconnect::core::CoreTokenIntrospectionResponse,
+    openidconnect::core::CoreRevocableToken,
+    openidconnect::core::CoreRevocationErrorResponse,
+    HasAuthUrl,
+    HasDeviceAuthUrl,
+    HasIntrospectionUrl,
+    HasRevocationUrl,
+    HasTokenUrl,
+    HasUserInfoUrl,
+>;
 
 pub struct OidcClient {
     /// Discovery result, fetched once at startup.
     ///
-    /// The constructed `CoreClient` is deliberately NOT stored: openidconnect
+    /// The constructed client is deliberately NOT stored: openidconnect
     /// encodes which endpoints are configured in a seventeen-parameter
     /// typestate, and naming that type in a struct field pins us to one patch
     /// release. Rebuilding per call costs nothing (no I/O) and lets inference
@@ -92,18 +152,25 @@ impl OidcClient {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
 
-        if cfg.allowed_subs.is_empty() && cfg.allowed_emails.is_empty() {
+        if cfg.allowed_subs.is_empty()
+            && cfg.allowed_emails.is_empty()
+            && cfg.allowed_groups.is_empty()
+        {
             return Err(Error::Validation(
-                "auth.oidc has an empty allowlist: set allowed_subs or allowed_emails, \
-                 otherwise every account in your identity provider could sign in"
+                "auth.oidc has an empty allowlist: set allowed_subs, allowed_emails or \
+                 allowed_groups, otherwise every account in your identity provider could sign in"
                     .into(),
             ));
         }
 
         let http = openidconnect::reqwest::ClientBuilder::new()
-            // An identity provider must never be reached through a redirect we
-            // did not choose: that is an SSRF primitive.
-            .redirect(openidconnect::reqwest::redirect::Policy::none())
+            // Nextcloud's documented nginx recipe 301s the bare .well-known
+            // path to /index.php/.well-known/...; issuer_url stays the bare
+            // domain, since that is what the discovery document itself
+            // declares as `issuer` and what ID tokens carry as `iss`. A bounded
+            // hop count, not zero: this still refuses to be walked anywhere
+            // unbounded, matching what a typical OIDC client allows by default.
+            .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|e| Error::Validation(e.to_string()))?;
 
@@ -122,13 +189,13 @@ impl OidcClient {
     }
 
     pub fn authorize_url(&self) -> Result<(String, PendingAuth)> {
-        use openidconnect::core::{CoreClient, CoreResponseType};
+        use openidconnect::core::CoreResponseType;
         use openidconnect::{
             AuthenticationFlow, ClientId, ClientSecret, CsrfToken, Nonce, PkceCodeChallenge,
             RedirectUrl, Scope,
         };
 
-        let client = CoreClient::from_provider_metadata(
+        let client = EngramClient::from_provider_metadata(
             self.metadata.clone(),
             ClientId::new(self.cfg.client_id.clone()),
             self.cfg.client_secret.clone().map(ClientSecret::new),
@@ -169,17 +236,16 @@ impl OidcClient {
         code: &str,
         state: &str,
     ) -> Result<Identity> {
-        use openidconnect::core::CoreClient;
         use openidconnect::{
-            AuthorizationCode, ClientId, ClientSecret, Nonce, PkceCodeVerifier, RedirectUrl,
-            TokenResponse,
+            AuthorizationCode, ClientId, ClientSecret, Nonce, OAuth2TokenResponse,
+            PkceCodeVerifier, RedirectUrl, TokenResponse,
         };
 
         if state != pending.csrf {
             return Err(Error::Unauthorized);
         }
 
-        let client = CoreClient::from_provider_metadata(
+        let client = EngramClient::from_provider_metadata(
             self.metadata.clone(),
             ClientId::new(self.cfg.client_id.clone()),
             self.cfg.client_secret.clone().map(ClientSecret::new),
@@ -208,10 +274,50 @@ impl OidcClient {
             .map_err(|e| Error::Validation(format!("ID token rejected: {e}")))?;
 
         let subject = claims.subject().to_string();
-        let email = claims.email().map(|e| e.to_string());
+        let mut email = claims.email().map(|e| e.to_string());
+        let mut groups = claims.additional_claims().groups.clone();
 
-        if !is_allowed(&self.cfg, &subject, email.as_deref()) {
-            tracing::warn!(%subject, "sign-in denied: subject not on the allowlist");
+        // Nextcloud's OIDC provider app does not put `email` (or `groups`) in
+        // the ID token even when the scope is granted — they only appear from
+        // the userinfo endpoint. Without this, an allowlist keyed on either
+        // always sees nothing and every sign-in is refused, however correctly
+        // the config names the account.
+        //
+        // Best-effort: the subject from the ID token is already verified by
+        // its signature, so an endpoint that is absent or unreachable must
+        // not turn into a failed sign-in for someone the ID token itself
+        // vouches for.
+        if email.is_none() || groups.is_empty() {
+            match client.user_info(
+                tokens.access_token().clone(),
+                Some(claims.subject().clone()),
+            ) {
+                Ok(req) => match req
+                    .request_async::<GroupClaims, _, openidconnect::core::CoreGenderClaim>(
+                        &self.http,
+                    )
+                    .await
+                {
+                    Ok(info) => {
+                        if email.is_none() {
+                            email = info.email().map(|e| e.to_string());
+                        }
+                        if groups.is_empty() {
+                            groups = info.additional_claims().groups.clone();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "userinfo request failed; continuing with the ID token's claims only");
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!(error = %e, "provider has no userinfo endpoint");
+                }
+            }
+        }
+
+        if !is_allowed(&self.cfg, &subject, email.as_deref(), &groups) {
+            tracing::warn!(%subject, ?groups, "sign-in denied: subject not on the allowlist");
             return Err(Error::Forbidden);
         }
         tracing::info!(%subject, "oidc sign-in");
@@ -225,6 +331,10 @@ mod tests {
     use crate::config::OidcConfig;
 
     fn cfg(subs: &[&str], emails: &[&str]) -> OidcConfig {
+        cfg_with_groups(subs, emails, &[])
+    }
+
+    fn cfg_with_groups(subs: &[&str], emails: &[&str], groups: &[&str]) -> OidcConfig {
         OidcConfig {
             issuer_url: "https://idp.example".into(),
             client_id: "engram".into(),
@@ -233,6 +343,7 @@ mod tests {
             scopes: vec!["openid".into()],
             allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),
+            allowed_groups: groups.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -240,21 +351,39 @@ mod tests {
     fn an_empty_allowlist_denies_everyone() {
         // Defaulting open would hand the knowledge base to every account in
         // the identity provider.
-        assert!(!is_allowed(&cfg(&[], &[]), "sub-1", Some("me@example.com")));
+        assert!(!is_allowed(
+            &cfg(&[], &[]),
+            "sub-1",
+            Some("me@example.com"),
+            &[]
+        ));
     }
 
     #[test]
     fn a_listed_subject_is_allowed() {
-        assert!(is_allowed(&cfg(&["sub-1"], &[]), "sub-1", None));
-        assert!(!is_allowed(&cfg(&["sub-1"], &[]), "sub-2", None));
+        assert!(is_allowed(&cfg(&["sub-1"], &[]), "sub-1", None, &[]));
+        assert!(!is_allowed(&cfg(&["sub-1"], &[]), "sub-2", None, &[]));
     }
 
     #[test]
     fn a_listed_email_is_allowed_case_insensitively() {
         let c = cfg(&[], &["Me@Example.com"]);
-        assert!(is_allowed(&c, "sub-9", Some("me@example.com")));
-        assert!(!is_allowed(&c, "sub-9", Some("other@example.com")));
-        assert!(!is_allowed(&c, "sub-9", None));
+        assert!(is_allowed(&c, "sub-9", Some("me@example.com"), &[]));
+        assert!(!is_allowed(&c, "sub-9", Some("other@example.com"), &[]));
+        assert!(!is_allowed(&c, "sub-9", None, &[]));
+    }
+
+    #[test]
+    fn a_listed_group_is_allowed() {
+        let c = cfg_with_groups(&[], &[], &["engram-users"]);
+        assert!(is_allowed(
+            &c,
+            "sub-9",
+            None,
+            &["engram-users".to_string(), "other-group".to_string()]
+        ));
+        assert!(!is_allowed(&c, "sub-9", None, &["other-group".to_string()]));
+        assert!(!is_allowed(&c, "sub-9", None, &[]));
     }
 
     #[test]

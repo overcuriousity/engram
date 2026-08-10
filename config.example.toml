@@ -125,7 +125,7 @@ mode = "local"
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 
-# Production. The allowlist is mandatory: leaving both lists empty denies
+# Production. The allowlist is mandatory: leaving all three lists empty denies
 # everyone rather than admitting every account your identity provider knows.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
@@ -135,3 +135,36 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 # scopes = ["openid", "profile", "email"]
 # allowed_subs = ["sub-abc123"]
 # allowed_emails = ["you@example.com"]
+# Membership in any of these groups also admits a subject. Requires the
+# provider to actually send a `groups` claim — on Nextcloud's OIDC provider
+# app that means turning on group provisioning for this client; a request
+# `scope` entry alone does not produce it.
+# allowed_groups = ["engram-users"]
+
+# Duplicate hygiene. Nothing here ever rewrites an artifact or deletes one on a
+# similarity score: it hides, flags, or asks.
+[consolidate]
+# The background sweep. Capture-time near-duplicate detection is separate and
+# always on: it costs a hash of the text, not a query.
+enabled = true
+# Estimated overlap of word shingles above which a new capture is parked as a
+# near-duplicate of an existing corpus rather than segmented. It is stored
+# either way; parking only withholds the model call until you decide on Ops.
+near_dupe_min = 0.90
+# Cosine at or above which a pair of artifacts goes on the review queue.
+review_min = 0.88
+# Cosine at or above which the older artifact is hidden without asking. Well
+# clear of `review_min` on purpose: two genuinely distinct artifacts about one
+# subsystem sit around 0.88 routinely, and hiding at that score costs knowledge
+# rather than duplication. Ops lists what was hidden, with an undo.
+auto_supersede = 0.95
+# Points drawn per sweep, and neighbours considered per point. The sweep is one
+# round trip whose cost these two numbers bound, rather than a query per point.
+sample = 2000
+per_point = 5
+interval_hours = 24
+# Ask the completion model whether a queued pair actually disagrees. Off by
+# default: it is the only part of consolidation that costs inference, and it
+# only ever sees pairs whose numbers, versions or dates already differ.
+judge = false
+max_judgements = 20

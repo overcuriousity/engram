@@ -84,13 +84,64 @@ pub fn extract_literals(artifact_text: &str) -> Vec<String> {
     out
 }
 
-/// Literals present in the chunk and absent from the window it came from.
-pub fn missing_literals(artifact_text: &str, segment_text: &str) -> Vec<String> {
+/// Literals present in the chunk or its caveats and absent from the window they
+/// came from.
+///
+/// Caveats go through the same check rather than a weaker one. They are the
+/// newest place model prose can appear, and a caveat that says to run something
+/// first is a command that gets pasted into a root shell exactly like one in
+/// the body.
+pub fn missing_literals(
+    artifact_text: &str,
+    caveats: &[String],
+    segment_text: &str,
+) -> Vec<String> {
     let haystack = normalize(segment_text);
-    extract_literals(artifact_text)
-        .into_iter()
-        .filter(|lit| !haystack.contains(&normalize(lit)))
+    let mut all = extract_literals(artifact_text);
+    for c in caveats {
+        all.extend(extract_literals(c));
+    }
+    all.sort();
+    all.dedup();
+    all.into_iter()
+        .filter(|lit| {
+            if haystack.contains(&normalize(lit)) {
+                return false;
+            }
+            match without_label(lit) {
+                Some(bare) => !haystack.contains(&normalize(bare)),
+                None => true,
+            }
+        })
+        .map(|lit| match without_label(&lit) {
+            // Report what was actually looked for and not found, so the note on
+            // the artifact names the command rather than the model's framing.
+            Some(bare) => bare.to_string(),
+            None => lit,
+        })
         .collect()
+}
+
+/// A literal with a label the model put in front of it removed.
+///
+/// `Binär: 0010 1001 1111 1001`, for a source that says
+/// `wird binär 0010 1001 1111 1001`, invents nothing: the digits — the part
+/// that matters if somebody retypes them — are verbatim, and the label is
+/// presentation. Reporting it as a possibly-invented command buries the real
+/// misses under the model's formatting habits.
+///
+/// A colon *and a space*, and one word before it. That is what separates a
+/// label from a command's own punctuation: `backup:/etc/fstab` and
+/// `8080:8080` close up, `Binär: …` and `Run: …` do not. Stripping the first
+/// kind would let a rewritten hostname pass as verbatim, which is the failure
+/// this whole check exists to catch.
+fn without_label(lit: &str) -> Option<&str> {
+    let (label, rest) = lit.split_once(": ")?;
+    let rest = rest.trim();
+    if rest.is_empty() || label.split_whitespace().count() != 1 {
+        return None;
+    }
+    Some(rest)
 }
 
 /// Where in the window a chunk's own lines actually appear.
@@ -107,7 +158,7 @@ pub fn locate_span(
     segment_body: &str,
     segment_start: i64,
 ) -> Option<(i64, i64)> {
-    let window: Vec<String> = segment_body.lines().map(normalize).collect();
+    let flat = Flattened::of(segment_body);
     let needles: Vec<String> = artifact_text
         .lines()
         .map(normalize)
@@ -120,12 +171,9 @@ pub fn locate_span(
     let mut first = usize::MAX;
     let mut last = 0usize;
     for needle in &needles {
-        if let Some(at) = window
-            .iter()
-            .position(|w| w == needle || w.contains(needle))
-        {
-            first = first.min(at);
-            last = last.max(at);
+        if let Some(at) = flat.text.find(needle.as_str()) {
+            first = first.min(flat.line_at(at));
+            last = last.max(flat.line_at(at + needle.len() - 1));
         }
     }
     if first == usize::MAX {
@@ -134,8 +182,58 @@ pub fn locate_span(
     Some((segment_start + first as i64, segment_start + last as i64))
 }
 
-/// A chunk whose span points somewhere else entirely.
-pub const FLAG_SPAN: &str = "span_unverified";
+/// A window with its line breaks taken out, and the map back.
+///
+/// Comparing a chunk's lines against the window's lines only finds what the
+/// source happened to fit on one line. Sources do not cooperate: a handout
+/// exported from a PDF is hard-wrapped at eighty columns, so one sentence is
+/// three lines, and synthesis reflows it back into one. Line against line, the
+/// paragraph matches nothing and a chunk built from it claims either a single
+/// short sentence or no span at all — which is then what coverage counts.
+///
+/// Matching against the whole window as one string finds the paragraph, and the
+/// offsets say which lines it ran across.
+struct Flattened {
+    text: String,
+    /// Byte offset in `text` at which each source line begins.
+    starts: Vec<usize>,
+}
+
+impl Flattened {
+    fn of(segment_body: &str) -> Self {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        for line in segment_body.lines() {
+            let n = normalize(line);
+            // The separator stands in for the line break the source had, so a
+            // sentence reflowed across two lines reads as it does in the chunk.
+            if !text.is_empty() && !n.is_empty() {
+                text.push(' ');
+            }
+            starts.push(text.len());
+            text.push_str(&n);
+        }
+        Self { text, starts }
+    }
+
+    /// Which line a byte offset falls in. The last line that starts at or
+    /// before it — blank lines share their neighbour's offset and never win,
+    /// because a match cannot begin inside one.
+    fn line_at(&self, offset: usize) -> usize {
+        match self.starts.binary_search(&offset) {
+            // Several lines can share a start offset; take the last, which is
+            // the one that actually holds text.
+            Ok(mut i) => {
+                while i + 1 < self.starts.len() && self.starts[i + 1] == offset {
+                    i += 1;
+                }
+                i
+            }
+            Err(0) => 0,
+            Err(i) => i - 1,
+        }
+    }
+}
 
 /// Below this fraction of a source inside some chunk, the segmenter probably
 /// dropped part of the document.
@@ -151,9 +249,12 @@ fn distinctive_tokens(s: &str) -> std::collections::HashSet<String> {
 /// Does the chunk plausibly describe the lines it claims?
 ///
 /// The synthesizer rewrites prose, so this cannot demand equality — only that a
-/// third of the chunk's distinctive tokens appear in the claimed range. That is
-/// enough to catch a span pointing at a different section, which is the failure
-/// the detail pane would otherwise render as a rendering bug.
+/// third of the chunk's distinctive tokens appear in the claimed range.
+///
+/// Synthesis no longer calls this: it derives spans rather than checking the
+/// model's, so there is no claim left to doubt. It stays because
+/// `content_coverage` measures the same relationship — is this text in those
+/// lines — and the two want to keep answering it the same way.
 pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
     let chunk = distinctive_tokens(artifact_text);
     if chunk.is_empty() {
@@ -164,26 +265,60 @@ pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
     shared * 3 >= chunk.len()
 }
 
-/// Fraction of the source's non-blank lines that some chunk span covers.
-pub fn coverage(spans: &[(i64, i64)], raw_text: &str) -> f64 {
+/// A source line counts as covered when this share of its distinctive tokens
+/// appears in the artifacts made from the segment it belongs to.
+///
+/// Half, because synthesis rewrites: a line survives as its subject and its
+/// values, not as its wording. Demanding all of it would call every rewritten
+/// line lost, which is what the artifacts are supposed to be.
+const LINE_TOKEN_RECALL: f64 = 0.5;
+
+/// Fraction of the source that survived into some artifact.
+///
+/// Each entry is one segment's line range and the text of every artifact made
+/// from it. A line outside every range — a segment that failed, or one never
+/// attempted — is uncovered, which is exactly the case this number exists to
+/// make visible.
+///
+/// This asks whether the *content* arrived, not whether an artifact claimed the
+/// line. Claims were the earlier measure and they answer a different question:
+/// the model omits `corpus_lines` more often than not, and a span recovered by
+/// matching verbatim text finds only the quarter of an artifact that was not
+/// rewritten. A faithfully rewritten chapter therefore scored near zero, which
+/// read exactly like a chapter that had been dropped.
+pub fn content_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> f64 {
     let lines: Vec<&str> = raw_text.lines().collect();
     let total = lines.iter().filter(|l| !l.trim().is_empty()).count();
     if total == 0 {
         return 0.0;
     }
-    let mut covered = vec![false; lines.len()];
-    for (start, end) in spans {
-        let first = (*start).max(1);
-        let last = (*end).min(lines.len() as i64);
-        for n in first..=last {
-            covered[(n - 1) as usize] = true;
+    let indexed: Vec<(i64, i64, std::collections::HashSet<String>)> = segments
+        .iter()
+        .map(|(a, b, text)| (*a, *b, distinctive_tokens(text)))
+        .collect();
+
+    let mut hit = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let n = i as i64 + 1;
+        let Some((_, _, made)) = indexed.iter().find(|(a, b, _)| *a <= n && n <= *b) else {
+            continue;
+        };
+        let want = distinctive_tokens(line);
+        // A line with nothing distinctive on it — a page number, a rule of
+        // dashes — cannot be looked for and must not be counted against the
+        // document. PDF exports are full of them.
+        if want.is_empty() {
+            hit += 1;
+            continue;
+        }
+        let found = want.iter().filter(|t| made.contains(*t)).count();
+        if found as f64 >= want.len() as f64 * LINE_TOKEN_RECALL {
+            hit += 1;
         }
     }
-    let hit = lines
-        .iter()
-        .enumerate()
-        .filter(|(i, l)| !l.trim().is_empty() && covered[*i])
-        .count();
     hit as f64 / total as f64
 }
 
@@ -211,9 +346,72 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     }
 
     #[test]
+    fn a_command_invented_in_a_caveat_is_caught() {
+        // A caveat is prose the model wrote, and it is exactly where an
+        // invented "run `wipefs --all` first" would appear. The literal check
+        // has to reach it, or caveats become the one part of an artifact that
+        // nothing verifies.
+        let missing = missing_literals(
+            "Write the image with `dd if=archlinux.iso of=/dev/sdX`.",
+            &["First run `wipefs --all /dev/sdX`.".to_string()],
+            WINDOW,
+        );
+        assert_eq!(missing, vec!["wipefs --all /dev/sdX".to_string()]);
+    }
+
+    #[test]
+    fn a_label_the_model_added_is_not_a_missing_literal() {
+        // Line 635 of a real source read "wird binär 0010 1001 1111 1001". The
+        // model fenced the digits and wrote "Binär:" in front of them, and the
+        // check reported an invented command — a review task about formatting,
+        // filed among the ones that matter.
+        let window = "Die Zahl 29 F9 wird binär 0010 1001 1111 1001 gespeichert.";
+        let chunk = "```\nBinär: 0010 1001 1111 1001\n```";
+        assert!(missing_literals(chunk, &[], window).is_empty());
+    }
+
+    #[test]
+    fn an_invented_command_is_still_caught_when_it_carries_a_label() {
+        let window = "Unmount the device first.";
+        let chunk = "```\nRun: wipefs --all /dev/sdX\n```";
+        assert_eq!(
+            missing_literals(chunk, &[], window),
+            vec!["wipefs --all /dev/sdX".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_command_whose_own_colon_looks_like_a_label_is_not_weakened() {
+        // `backup:/etc/fstab` must not be reduced to `/etc/fstab`, or a
+        // rewritten hostname would stop being a missing literal. A label is
+        // written with a space after the colon; a host and a port are not.
+        let window = "Copy /etc/fstab from the box.";
+        let chunk = "```\nbackup:/etc/fstab\n```";
+        assert_eq!(
+            missing_literals(chunk, &[], window),
+            vec!["backup:/etc/fstab".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_caveat_quoting_a_real_command_is_not_flagged() {
+        assert!(
+            missing_literals(
+                "Write the image to the device.",
+                &[
+                    "Unmount first: `dd if=archlinux.iso of=/dev/sdX` needs the whole device."
+                        .to_string()
+                ],
+                WINDOW,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn a_verbatim_chunk_reports_nothing_missing() {
         let chunk = "Unmount first.\n\n```bash\ndd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress\n```\n\nUse /dev/sdX with --dry-run.";
-        assert!(missing_literals(chunk, WINDOW).is_empty());
+        assert!(missing_literals(chunk, &[], WINDOW).is_empty());
     }
 
     #[test]
@@ -221,7 +419,7 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         // The model rewrote the command and lost oflag=sync. This is the
         // failure the whole check exists for.
         let chunk = "```bash\ndd if=archlinux.iso of=/dev/sdX bs=4M status=progress\n```";
-        let missing = missing_literals(chunk, WINDOW);
+        let missing = missing_literals(chunk, &[], WINDOW);
         assert_eq!(missing.len(), 1);
         assert!(missing[0].contains("status=progress"));
     }
@@ -230,14 +428,14 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     fn indentation_and_whitespace_runs_do_not_count_as_a_mismatch() {
         // The window indents the command by four spaces; the chunk fences it.
         let chunk = "```\numount   /dev/sdX*\n```";
-        assert!(missing_literals(chunk, WINDOW).is_empty());
+        assert!(missing_literals(chunk, &[], WINDOW).is_empty());
     }
 
     #[test]
     fn an_indented_code_block_counts_as_code() {
         // Reference documentation indents commands as often as it fences them.
         let chunk = "Write it:\n\n    dd if=archlinux.iso of=/dev/sdX bs=4M status=progress\n";
-        let missing = missing_literals(chunk, WINDOW);
+        let missing = missing_literals(chunk, &[], WINDOW);
         assert_eq!(missing.len(), 1, "the rewritten command must be caught");
     }
 
@@ -285,6 +483,36 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         assert_eq!(found, (106, 106));
     }
 
+    /// A lecture handout, PDF-extracted: hard-wrapped at about eighty columns,
+    /// so one sentence of prose is three lines of source.
+    const WRAPPED: &str = "\
+Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen,
+Dateigrößen, Attribute und Zeitstempel zu den gespeicherten
+Dateien und Verzeichnissen.
+Die Markierung End of File (EOF) zeigt das Dateiende an.";
+
+    #[test]
+    fn a_span_covers_every_line_a_reflowed_paragraph_came_from() {
+        // Synthesis reflows: what the source wraps over three lines comes back
+        // as one. Matching line against line then finds only the sentence that
+        // happened to fit on one source line, so a chunk built from a whole
+        // paragraph claimed a single line — and coverage, which counts the
+        // lines some span names, read a fraction of the truth on every
+        // hard-wrapped document.
+        let chunk = "Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen, Dateigrößen, Attribute und Zeitstempel zu den gespeicherten Dateien und Verzeichnissen.";
+        assert_eq!(
+            locate_span(chunk, WRAPPED, 1),
+            Some((1, 3)),
+            "the paragraph's own three source lines"
+        );
+    }
+
+    #[test]
+    fn a_reflowed_span_still_reaches_the_last_line_it_covers() {
+        let chunk = "Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen, Dateigrößen, Attribute und Zeitstempel zu den gespeicherten Dateien und Verzeichnissen.\n\nDie Markierung End of File (EOF) zeigt das Dateiende an.";
+        assert_eq!(locate_span(chunk, WRAPPED, 101), Some((101, 104)));
+    }
+
     #[test]
     fn a_span_cannot_be_located_for_a_chunk_that_shares_no_lines() {
         assert_eq!(
@@ -294,12 +522,42 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     }
 
     #[test]
-    fn coverage_is_the_fraction_of_non_blank_lines_claimed() {
-        let raw = "one\n\ntwo\nthree\nfour"; // four non-blank lines
-        assert!((coverage(&[(1, 1), (3, 3)], raw) - 0.5).abs() < 1e-6);
-        assert!((coverage(&[(1, 5)], raw) - 1.0).abs() < 1e-6);
-        assert_eq!(coverage(&[], raw), 0.0);
-        // Overlapping spans must not push coverage above one.
-        assert!((coverage(&[(1, 5), (2, 4)], raw) - 1.0).abs() < 1e-6);
+    fn coverage_counts_a_line_whose_content_reached_an_artifact() {
+        let raw =
+            "Mount the filesystem first.\n\nThe timeout is 30 seconds.\nUnrelated trailing note.";
+        // One artifact carrying both subjects, rewritten rather than copied.
+        let made = "Mount the filesystem before anything else. A timeout of 30 seconds applies.";
+        let cov = content_coverage(raw, &[(1, 4, made.into())]);
+        assert!((cov - 2.0 / 3.0).abs() < 1e-6, "{cov}");
+    }
+
+    #[test]
+    fn a_segment_that_produced_nothing_is_uncovered() {
+        // The case the number exists for: a segment the model refused leaves
+        // its lines out of every artifact, and that must be visible.
+        let raw = "alpha bravo charlie\ndelta echo foxtrot";
+        assert_eq!(content_coverage(raw, &[]), 0.0);
+        assert_eq!(
+            content_coverage(raw, &[(1, 1, "alpha bravo charlie".into())]),
+            0.5
+        );
+    }
+
+    #[test]
+    fn a_rewritten_line_still_counts() {
+        // The failure this replaced: an artifact that reproduces a line's
+        // subject and values in its own words scored zero, because no span
+        // could be matched back to it.
+        let raw = "Der Startcluster steht im Verzeichniseintrag.";
+        let made = "Verzeichniseintrag: hier steht der Startcluster der Datei.";
+        assert_eq!(content_coverage(raw, &[(1, 1, made.into())]), 1.0);
+    }
+
+    #[test]
+    fn a_line_with_nothing_distinctive_on_it_is_not_held_against_the_document() {
+        // A page number from a PDF export. Nothing can be looked for, so
+        // counting it lost would make every handout read as half-dropped.
+        let raw = "32";
+        assert_eq!(content_coverage(raw, &[(1, 1, String::new())]), 1.0);
     }
 }

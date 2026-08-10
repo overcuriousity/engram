@@ -3,8 +3,17 @@
     <span class="card-title">Captured</span>
     <span class="card-meta">
       {% if duplicate %}<span class="badge badge-muted">already stored</span>
+      {% else if near_dupe_of.is_some() %}<span class="badge badge-muted">waiting on a decision</span>
       {% else %}<span class="badge badge-accent">processing</span>{% endif %}
     </span>
   </div>
+  {% if let Some(other) = near_dupe_of %}
+  <p class="muted">
+    This looks {{ near_dupe_percent }}% like
+    <a href="/ui/corpora/{{ other }}">an existing source</a>, so it is stored but
+    not processed until someone decides between them.
+    <a href="/ui/ops">Decide on Ops</a>.
+  </p>
+  {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>

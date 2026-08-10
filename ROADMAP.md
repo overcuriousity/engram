@@ -80,25 +80,36 @@ to the query path.
   query path nothing. Needs the per-corpus cap and grouping to work on artifact
   identity rather than point identity, and wants eval pairs written first —
   this is the change most likely to look good and rank worse.
-- **Near-duplicate detection on capture.** Corpora are deduplicated by an exact
-  hash of the raw text, so re-pasting the same chapter a year later with one
-  changed byte stores it twice, and the two copies then compete for the same
-  queries. The distance-matrix API is the cheap way to catch this at capture
-  time and offer to replace rather than add.
-- **Consolidation and staleness sweep.** Near-duplicate detection catches the
-  collision at capture; nothing catches the pair that drifts apart afterwards.
-  A background sweep over the distance matrix flags two kinds of pair: near
-  identical, where the older one should be superseded rather than left to
-  compete, and same subject with a detail that disagrees — two artifacts giving
-  a different number, date, name or step for the same thing. The second is the
-  one that matters: much of what is worth keeping goes quietly out of date
-  within a year, and staleness is invisible today because a wrong artifact
-  ranks exactly as well as a right one. Flag, never delete: `superseded_by` on
-  the artifact row, a filter that hides superseded artifacts from search by
-  default, and a review queue on Ops. Deciding which of two contradictory
-  artifacts is current is a judgement the reader has to make.
-  `VectorStore::neighbours` is the query this is built from — one artifact at a
-  time today, batched over the collection for a sweep.
+- ~~**Near-duplicate detection on capture.**~~ Done — a bottom-k MinHash over
+  word shingles (`src/store/shingle.rs`) is computed at capture and compared
+  against every stored corpus. Above `consolidate.near_dupe_min` the capture is
+  stored verbatim and parked in `needs_review` rather than segmented, and Ops
+  offers replace / keep both / discard. Shingles rather than the distance-matrix
+  API as originally sketched: the collision is between *corpora*, which have no
+  vectors until synthesis has already been paid for, and a hash of the raw text
+  answers it before any of that is spent.
+- ~~**Consolidation and staleness sweep.**~~ Done — `Stage::Consolidate`
+  (`src/jobs/consolidate.rs`) runs on a timer, asks Qdrant's distance-matrix
+  API for near pairs in one round trip (`VectorStore::near_pairs`), and splits
+  them at two thresholds. At or above `auto_supersede` (0.95) the cluster
+  collapses onto its newest member: `superseded_by` on the losing rows, a
+  `superseded` payload flag that `SearchFilter` excludes by default, and an undo
+  on Ops. Clustered rather than resolved pairwise, or A loses to B and B then
+  loses to C, leaving A pointing at something hidden. Between `review_min`
+  (0.88) and that, the pair goes on the `artifact_pairs` queue instead — 0.88 is
+  where two genuinely distinct artifacts about one subsystem routinely sit.
+  The staleness half is the opt-in `consolidate.judge`: queued pairs are
+  filtered on fact-shaped tokens (`src/infer/facts.rs`) with no inference at
+  all, and only a pair whose values actually differ reaches the model, which is
+  asked one yes/no question under a per-sweep budget. Nothing is ever merged or
+  deleted, and which of two contradictory artifacts is current stays the
+  reader's judgement.
+- **Caveats on artifacts.** Done as part of the above, and worth naming
+  separately: the synthesis call now also returns the conditions under which an
+  artifact does not apply. It costs output tokens on a call already being made,
+  never another call. Stored and rendered, deliberately *not* embedded — see the
+  speculative query index below for why anything that changes what every vector
+  is built from waits for eval pairs.
 - **Corpus map.** The distance-matrix API gives pairwise distances over a
   filtered subset — the same call the two items above need, plus a real
   rendering of the neighbour graph the logo depicts.

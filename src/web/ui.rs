@@ -58,8 +58,7 @@ pub struct ArtifactView {
     pub embed_badge: &'static str,
 }
 
-/// A chunk beside the source lines it claims — the search pane, and the
-/// review surface for anything verification flagged.
+/// A chunk beside the source lines it claims.
 pub struct ArtifactDetail {
     pub id: String,
     pub title: String,
@@ -69,6 +68,11 @@ pub struct ArtifactDetail {
     pub tags: Vec<String>,
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
+    /// The artifact this one was hidden in favour of. Opening a hidden artifact
+    /// by link has to say why it is not in results, or it reads as a bug.
+    pub superseded_by: Option<String>,
+    /// Conditions the source stated under which this artifact does not apply.
+    pub caveats: Vec<String>,
     pub corpus_id: String,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
@@ -89,13 +93,44 @@ pub struct RelatedArtifact {
     pub snippet: String,
 }
 
-/// A chunk verification could not vouch for, and the window that produced it.
-pub struct FlaggedRow {
-    pub artifact_id: String,
-    pub corpus_id: String,
+/// Work that hit something and is waiting to try again by itself.
+pub struct RetryingRow {
+    pub stage: String,
+    pub target_id: String,
+    pub attempts: i64,
+    pub due: String,
+    pub last_error: String,
+}
+
+/// A parked capture, with enough of the corpus it resembles to decide without
+/// opening both.
+pub struct ParkedRow {
+    pub id: String,
     pub title: String,
-    pub detail: String,
-    pub segment_idx: Option<i64>,
+    pub bytes: usize,
+    pub other_id: String,
+    pub other_title: String,
+    pub percent: i64,
+}
+
+/// An artifact the sweep hid, with the one it lost to.
+pub struct SupersededRow {
+    pub id: String,
+    pub title: String,
+    pub winner_id: String,
+    pub winner_title: String,
+}
+
+/// A pair waiting on a person.
+pub struct PairRow {
+    pub id: i64,
+    pub percent: i64,
+    pub a_id: String,
+    pub a_title: String,
+    pub b_id: String,
+    pub b_title: String,
+    pub detail: Option<String>,
+    pub contradiction: bool,
 }
 
 pub struct TokenRow {
@@ -112,6 +147,9 @@ pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static st
         Ready => "badge-success",
         Partial => "badge-warning",
         Failed => "badge-danger",
+        // A parked capture is waiting on a person, not on a worker. It reads as
+        // a warning because nothing will advance it on its own.
+        NeedsReview => "badge-warning",
         Raw | Segmenting | Segmented | Embedding => "badge-accent",
     }
 }
@@ -122,6 +160,18 @@ pub fn embed_badge(state: &crate::store::artifacts::EmbedState) -> &'static str 
         Embedded => "badge-success",
         Failed => "badge-danger",
         Pending => "badge-muted",
+    }
+}
+
+/// A wait, coarsely. "in 4h" is the whole of what a reader needs from a backoff
+/// — the exact second is noise, and the point of the line is that nobody has to
+/// do anything about it.
+pub fn fmt_duration(secs: i64) -> String {
+    match secs {
+        s if s <= 0 => "now".into(),
+        s if s < 90 => format!("in {s}s"),
+        s if s < 5400 => format!("in {}m", (s + 59) / 60),
+        s => format!("in {}h", (s + 3599) / 3600),
     }
 }
 
@@ -176,6 +226,11 @@ struct CaptureTemplate {
 struct CapturedTemplate {
     id: String,
     duplicate: bool,
+    /// Set when the capture was parked as a near-duplicate. Without it the page
+    /// says "processing" for a capture that nothing will ever process, and the
+    /// only hint is a queue on Ops the writer has no reason to open.
+    near_dupe_of: Option<String>,
+    near_dupe_percent: i64,
 }
 
 #[derive(Template)]
@@ -248,8 +303,10 @@ struct OpsTemplate {
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
     vector_count: u64,
-    failed: Vec<crate::store::jobs::FailedJob>,
-    flagged: Vec<FlaggedRow>,
+    retrying: Vec<RetryingRow>,
+    parked: Vec<ParkedRow>,
+    superseded: Vec<SupersededRow>,
+    pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -298,6 +355,12 @@ async fn capture_submit(
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
+        near_dupe_percent: out
+            .near_duplicate
+            .as_ref()
+            .map(|n| (n.similarity * 100.0).round() as i64)
+            .unwrap_or(0),
+        near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
     })
     .into_response())
 }
@@ -579,34 +642,104 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         })
         .collect();
 
-    let flagged = st
+    // Not a queue of chores: work that hit something and is waiting to try
+    // again on its own. Nothing here needs a person.
+    let retrying: Vec<RetryingRow> = st
         .core
         .store
-        .flagged_artifacts(50)
+        .retrying_jobs(50)
         .await?
         .into_iter()
-        .map(|c| FlaggedRow {
-            title: c
-                .title
-                .clone()
-                .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
-            detail: c.flag_detail.clone().unwrap_or_else(|| c.flags.join(", ")),
-            segment_idx: c.segment_idx,
-            artifact_id: c.id,
-            corpus_id: c.corpus_id,
+        .map(|j| RetryingRow {
+            stage: j.stage,
+            target_id: j.target_id,
+            attempts: j.attempts,
+            due: fmt_duration(j.next_attempt_secs),
+            last_error: j.last_error.unwrap_or_else(|| "—".into()),
         })
         .collect();
 
+    // A parked capture is the one corpus state no worker advances. It has to be
+    // shown here or it sits unprocessed with nothing saying why.
+    let mut parked = Vec::new();
+    for c in st.core.store.parked_corpora(50).await? {
+        let other_id = c.near_dupe_of.clone().unwrap_or_default();
+        let other_title = match st.core.store.get_corpus(&other_id).await {
+            Ok(o) => o.title_hint.unwrap_or_else(|| "untitled".into()),
+            Err(_) => "(deleted)".into(),
+        };
+        parked.push(ParkedRow {
+            percent: (c.near_dupe_score.unwrap_or(0.0) * 100.0).round() as i64,
+            bytes: c.raw_text.len(),
+            title: c.title_hint.clone().unwrap_or_else(|| "untitled".into()),
+            id: c.id,
+            other_id,
+            other_title,
+        });
+    }
+
+    // A title is what makes two near-identical artifacts tellable apart at a
+    // glance; falling back to the opening of the body beats an id.
+    let title_of = |c: &crate::store::artifacts::Chunk| {
+        c.title
+            .clone()
+            .unwrap_or_else(|| c.text.chars().take(60).collect())
+    };
+
+    let mut superseded = Vec::new();
+    for c in st.core.store.superseded_artifacts(50).await? {
+        let winner_id = c.superseded_by.clone().unwrap_or_default();
+        let winner_title = match st.core.store.get_artifact(&winner_id).await {
+            Ok(w) => title_of(&w),
+            Err(_) => "(deleted)".to_string(),
+        };
+        superseded.push(SupersededRow {
+            title: title_of(&c),
+            id: c.id,
+            winner_id,
+            winner_title,
+        });
+    }
+
+    // Confirmed contradictions lead: they are the ones that mean something in
+    // the base is wrong rather than merely repeated.
+    let mut pairs = Vec::new();
+    for state in [
+        crate::store::pairs::PairState::Contradiction,
+        crate::store::pairs::PairState::Pending,
+    ] {
+        for p in st.core.store.pairs_by_state(state, 50).await? {
+            let (Ok(a), Ok(b)) = (
+                st.core.store.get_artifact(&p.a_id).await,
+                st.core.store.get_artifact(&p.b_id).await,
+            ) else {
+                continue;
+            };
+            pairs.push(PairRow {
+                id: p.id,
+                percent: (p.score * 100.0).round() as i64,
+                a_title: title_of(&a),
+                b_title: title_of(&b),
+                a_id: p.a_id,
+                b_id: p.b_id,
+                detail: p.detail,
+                contradiction: state == crate::store::pairs::PairState::Contradiction,
+            });
+        }
+    }
+
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
-        flagged,
+        retrying,
+        parked,
+        superseded,
+        pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         artifact_count,
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
-        failed: st.core.store.failed_jobs(50).await?,
         tokens,
     })
     .into_response())
@@ -641,17 +774,39 @@ async fn revoke_token_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-async fn retry_job(
+#[derive(serde::Deserialize)]
+struct ResolveForm {
+    action: crate::core::ingest::NearDupeAction,
+}
+
+async fn resolve_near_dupe_ui(
     State(st): State<AppState>,
     _id: Identity,
-    Path(job_id): Path<i64>,
+    Path(cid): Path<String>,
+    Form(form): Form<ResolveForm>,
 ) -> Result<Response> {
-    sqlx::query(
-        "UPDATE jobs SET state='pending', attempts=0, run_after=0, last_error=NULL WHERE id=?",
-    )
-    .bind(job_id)
-    .execute(&st.core.store.pool)
-    .await?;
+    st.core.resolve_near_duplicate(&cid, form.action).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn unsupersede_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    st.core.unsupersede(&aid).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn dismiss_pair_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+) -> Result<Response> {
+    st.core
+        .store
+        .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -738,6 +893,8 @@ pub(crate) async fn build_artifact_detail(
         tags: c.tags,
         flags: c.flags,
         flag_detail: c.flag_detail,
+        superseded_by: c.superseded_by,
+        caveats: c.caveats,
         corpus_id: c.corpus_id,
         segment_idx: c.segment_idx,
         slice_label: slice.label,
@@ -774,30 +931,6 @@ async fn artifact_detail(
     .into_response())
 }
 
-/// The action behind "re-segment this window": put the window back in the
-/// queue's path and make sure something will pick it up. Split out from the
-/// handler so it can be tested without a request.
-pub(crate) async fn resynthesize_segment_inner(
-    core: &crate::core::Core,
-    corpus_id: &str,
-    idx: i64,
-) -> Result<()> {
-    core.store.reset_segment(corpus_id, idx).await?;
-    core.store
-        .enqueue(crate::store::jobs::Stage::Synthesize, "corpus", corpus_id)
-        .await?;
-    Ok(())
-}
-
-async fn resynthesize_segment(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path((cid, idx)): Path<(String, i64)>,
-) -> Result<Response> {
-    resynthesize_segment_inner(&st.core, &cid, idx).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
-}
-
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
@@ -819,17 +952,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
-        .route(
-            "/ui/corpora/{cid}/segments/{idx}/resynthesize",
-            post(resynthesize_segment),
-        )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
-        .route("/ui/ops/jobs/{id}/retry", post(retry_job))
+        .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
+        .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
+        .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
 }
 
 #[cfg(test)]
@@ -944,7 +1075,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resegmenting_a_window_makes_it_pending_and_queues_the_job() {
+    async fn a_failed_segment_is_picked_up_without_anyone_asking() {
+        // What replaced the "re-synthesize segment" button. The sweep sees a
+        // segment that is not done, queues the corpus, and the run retries it.
         let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("first para\n\nsecond para", "web", None)
@@ -960,31 +1093,31 @@ mod tests {
             )
             .await
             .unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
 
-        super::resynthesize_segment_inner(&core, &out.id, 0)
-            .await
-            .unwrap();
-
-        let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
-        assert_eq!(w.state, crate::store::segments::SegmentState::Pending);
-        assert_eq!(w.attempts, 0);
-
+        assert_eq!(crate::jobs::reconcile::run(&core).await.unwrap(), 1);
         let mut found = false;
         while let Some(j) = core.store.claim_job().await.unwrap() {
             if j.stage == crate::store::jobs::Stage::Synthesize && j.target_id == out.id {
                 found = true;
             }
         }
-        assert!(found, "a segment job must be queued for the source");
+        assert!(found, "nothing would ever retry the segment");
     }
 
     async fn app_with_session() -> (axum::Router, String) {
+        let (app, cookie, _core) = app_session_and_core().await;
+        (app, cookie)
+    }
+
+    async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
         let cid = crate::store::new_id();
         core.store
             .insert_session(&cid, "user-1", None, 3600)
             .await
             .unwrap();
+        let handle = core.clone();
         let state = crate::web::state::AppState {
             core,
             auth: std::sync::Arc::new(crate::web::state::AuthContext {
@@ -995,7 +1128,11 @@ mod tests {
                 secure_cookies: false,
             }),
         };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        (
+            crate::web::router(state),
+            format!("engram_session={cid}"),
+            handle,
+        )
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -1267,15 +1404,20 @@ mod tests {
             "/ui/ask",
             "/ui/ops",
         ] {
+            // A plain GET is a browser loading a page, so a missing session
+            // sends it to sign in rather than showing it JSON it cannot act
+            // on. `redirect_unauthenticated_browsers` (web/mod.rs) is what
+            // rewrites the 401 into this.
             let res = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
+            assert_eq!(res.status(), StatusCode::SEE_OTHER, "{uri} was unprotected");
             assert_eq!(
-                res.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} was unprotected"
+                res.headers().get("location").unwrap(),
+                "/auth/login?go=1",
+                "{uri} did not send an unauthenticated page load to sign in"
             );
         }
         for uri in [
@@ -1283,7 +1425,7 @@ mod tests {
             "/ui/ops/tokens",
             "/ui/corpora/abc/delete",
             "/ui/corpora/abc/reprocess",
-            "/ui/ops/jobs/1/retry",
+            "/ui/ops/pairs/1/dismiss",
             "/ui/ask",
         ] {
             let res = app
@@ -1304,6 +1446,39 @@ mod tests {
                 "POST {uri} was unprotected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_parked_capture_says_so_instead_of_claiming_it_is_processing() {
+        // The confirmation is the only page the writer sees. Telling them a
+        // parked capture is "processing" means it silently never is.
+        let (app, cookie, core) = app_session_and_core().await;
+        let body: String = (0..200)
+            .map(|i| format!("step {i} run the mount command and read its output"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        core.ingest(&body, "web", None).await.unwrap();
+
+        // Hand-encoded rather than pulling in a dependency: the body is plain
+        // words, so spaces and newlines are all there is to escape.
+        let edited = body
+            .replacen("step 7 ", "step seven ", 1)
+            .replace(' ', "+")
+            .replace('\n', "%0A");
+        let res = app
+            .oneshot(form("/ui/capture", &cookie, &format!("text={edited}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = flat(&body_of(res).await);
+        assert!(
+            html.contains("waiting on a decision"),
+            "the parked capture rendered as an ordinary one: {html}"
+        );
+        assert!(
+            !html.contains("badge-accent\">processing"),
+            "a parked capture must not claim to be processing: {html}"
+        );
     }
 
     #[tokio::test]
@@ -1543,6 +1718,153 @@ mod tests {
         let html = body_of(res).await;
         assert!(html.contains("Queue"));
         assert!(html.contains("API tokens"));
+    }
+
+    #[tokio::test]
+    async fn ops_reports_what_is_retrying_rather_than_asking_for_a_click() {
+        let (app, cookie, core) = app_session_and_core().await;
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", "a1")
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        core.store
+            .fail_job(job.id, 9, "endpoint down")
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("Retrying"), "{html}");
+        assert!(html.contains("endpoint down"));
+        assert!(
+            !html.contains("Re-synthesize segment"),
+            "the review queue is still a to-do list"
+        );
+    }
+
+    /// One corpus with `n` artifacts, titled so the ops page can be searched
+    /// for them.
+    async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<String> {
+        let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+        let new: Vec<crate::store::artifacts::NewArtifact> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                ordinal: i as i64,
+                text: format!("body of {t}"),
+                corpus_span: None,
+                title: Some((*t).to_string()),
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        core.store
+            .insert_artifacts(&src.id, &new)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ops_lists_a_superseded_artifact_and_can_undo_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["the loser", "the keeper"]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("the loser") && html.contains("the keeper"),
+            "the superseded artifact is not listed"
+        );
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{}/unsupersede", ids[0]),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "undo did not clear the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_lists_a_pending_pair_and_can_dismiss_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("left one") && html.contains("right one"));
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/dismiss", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

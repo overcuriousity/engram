@@ -12,22 +12,29 @@
   <span class="badge badge-muted">vectors: {{ vector_count }}</span>
 </div>
 
-<h3>Failed jobs</h3>
-{% if failed.is_empty() %}
+<h3>Pairs worth a look</h3>
+{% if pairs.is_empty() %}
   <p class="muted">None.</p>
 {% else %}
+<p class="muted">
+  Two artifacts covering the same ground. Which one is current is a judgement
+  only you can make, so nothing here has been changed.
+</p>
 <table class="grid">
-  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Error</th><th></th></tr></thead>
+  <thead><tr><th>Match</th><th>One</th><th>The other</th><th>Finding</th><th></th></tr></thead>
   <tbody>
-  {% for f in failed %}
+  {% for p in pairs %}
     <tr>
-      <td class="mono">{{ f.stage }}</td>
-      <td class="mono">{{ f.target_id }}</td>
-      <td class="mono">{{ f.attempts }}</td>
-      <td class="muted">{% if let Some(e) = f.last_error %}{{ e }}{% else %}—{% endif %}</td>
+      <td class="mono">
+        {{ p.percent }}%
+        {% if p.contradiction %}<span class="badge badge-warning">disagrees</span>{% endif %}
+      </td>
+      <td><a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a></td>
+      <td><a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a></td>
+      <td class="muted">{% if let Some(d) = p.detail %}{{ d }}{% else %}—{% endif %}</td>
       <td>
-        <form method="post" action="/ui/ops/jobs/{{ f.id }}/retry">
-          <button class="btn btn-sm" type="submit">Retry</button>
+        <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
+          <button class="btn btn-sm" type="submit">Dismiss</button>
         </form>
       </td>
     </tr>
@@ -36,24 +43,76 @@
 </table>
 {% endif %}
 
-<h3>Needs review</h3>
-{% if flagged.is_empty() %}
-  <p class="muted">Nothing flagged. Every artifact reproduced its corpus.</p>
+<h3>Hidden as near-identical</h3>
+{% if superseded.is_empty() %}
+  <p class="muted">None.</p>
 {% else %}
+<p class="muted">Still stored and still readable; kept out of results only.</p>
 <table class="grid">
-  <thead><tr><th>Artifact</th><th>Problem</th><th></th></tr></thead>
+  <thead><tr><th>Hidden</th><th>Kept</th><th></th></tr></thead>
   <tbody>
-  {% for f in flagged %}
+  {% for s in superseded %}
     <tr>
-      <td><a href="/ui/artifacts/{{ f.artifact_id }}">{{ f.title }}</a></td>
-      <td class="mono muted">{{ f.detail }}</td>
+      <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
+      <td><a href="/ui/artifacts/{{ s.winner_id }}">{{ s.winner_title }}</a></td>
       <td>
-        {% if let Some(w) = f.segment_idx %}
-        <form method="post" action="/ui/corpora/{{ f.corpus_id }}/segments/{{ w }}/resynthesize">
-          <button class="btn btn-sm" type="submit">Re-synthesize segment</button>
+        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/unsupersede">
+          <button class="btn btn-sm" type="submit">Put it back</button>
         </form>
-        {% endif %}
       </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Captures waiting on a decision</h3>
+{% if parked.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">
+  Stored but not synthesised: each looks like a document already in the base.
+  Nothing is spent on them until you choose.
+</p>
+<table class="grid">
+  <thead><tr><th>Capture</th><th>Looks like</th><th>Match</th><th></th></tr></thead>
+  <tbody>
+  {% for p in parked %}
+    <tr>
+      <td>
+        <a href="/ui/corpora/{{ p.id }}">{{ p.title }}</a>
+        <span class="muted mono">{{ p.bytes }} B</span>
+      </td>
+      <td><a href="/ui/corpora/{{ p.other_id }}">{{ p.other_title }}</a></td>
+      <td class="mono">{{ p.percent }}%</td>
+      <td>
+        <form method="post" action="/ui/ops/corpora/{{ p.id }}/resolve" class="row" style="gap:0.25rem">
+          <button class="btn btn-sm" type="submit" name="action" value="replace">Replace the old one</button>
+          <button class="btn btn-sm" type="submit" name="action" value="keep_both">Keep both</button>
+          <button class="btn btn-sm" type="submit" name="action" value="discard">Discard this</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Retrying</h3>
+{% if retrying.is_empty() %}
+  <p class="muted">Nothing is stuck.</p>
+{% else %}
+<p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
+<table class="grid">
+  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Next</th><th>Last error</th></tr></thead>
+  <tbody>
+  {% for j in retrying %}
+    <tr>
+      <td class="mono">{{ j.stage }}</td>
+      <td class="mono">{{ j.target_id }}</td>
+      <td class="mono">{{ j.attempts }}</td>
+      <td class="mono">{{ j.due }}</td>
+      <td class="muted">{{ j.last_error }}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -8,6 +8,54 @@ pub struct Config {
     pub vector: VectorConfig,
     pub infer: InferConfig,
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub consolidate: ConsolidateConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ConsolidateConfig {
+    /// Whether the background sweep runs at all. Capture-time near-duplicate
+    /// detection is separate and always on: it costs a hash, not a query.
+    pub enabled: bool,
+    /// Estimated Jaccard over word shingles above which a capture is parked as
+    /// a near-duplicate of an existing corpus.
+    pub near_dupe_min: f64,
+    /// Cosine at or above which a pair is worth an operator's attention.
+    pub review_min: f32,
+    /// Cosine at or above which the older artifact is superseded without
+    /// asking. Deliberately far above `review_min`: two genuinely distinct
+    /// artifacts about one subsystem sit around 0.88 routinely, and superseding
+    /// at that score destroys knowledge rather than duplication.
+    pub auto_supersede: f32,
+    /// Points sampled from the collection per sweep by the matrix API.
+    pub sample: usize,
+    /// Neighbours considered per sampled point.
+    pub per_point: usize,
+    /// How often the sweep is queued.
+    pub interval_hours: u64,
+    /// Whether pairs in the review band that survive the fact-token prefilter
+    /// are sent to the completer. Off by default: it is the only part of
+    /// consolidation that costs inference.
+    pub judge: bool,
+    /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
+    pub max_judgements: usize,
+}
+
+impl Default for ConsolidateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            near_dupe_min: 0.90,
+            review_min: 0.88,
+            auto_supersede: 0.95,
+            sample: 2000,
+            per_point: 5,
+            interval_hours: 24,
+            judge: false,
+            max_judgements: 20,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -187,6 +235,13 @@ pub struct OidcConfig {
     pub allowed_subs: Vec<String>,
     #[serde(default)]
     pub allowed_emails: Vec<String>,
+    /// Group names from the provider's `groups` claim. Nextcloud's OIDC
+    /// provider app only sends this when the admin has turned on group
+    /// provisioning for the client; without it the claim is simply absent; and
+    /// a subject in a listed group is admitted the same as one listed by
+    /// subject or email.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
 }
 fn default_scopes() -> Vec<String> {
     vec!["openid".into(), "profile".into(), "email".into()]
@@ -202,6 +257,8 @@ pub struct LocalConfig {
 pub enum ConfigError {
     #[error("config: {0}")]
     Load(#[from] config::ConfigError),
+    #[error("config: {0}")]
+    Invalid(String),
 }
 
 impl Config {
@@ -220,8 +277,28 @@ impl Config {
             )
             .build()?;
         let cfg: Config = raw.try_deserialize()?;
+        cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         Ok(cfg)
+    }
+
+    /// Rules that a config can satisfy syntactically and still be wrong.
+    ///
+    /// The thresholds are the only ones so far, and they are worth refusing to
+    /// start over: `auto_supersede` at or below `review_min` means every pair
+    /// the sweep finds is hidden without asking, with no review band left at
+    /// all. That destroys knowledge quietly, and the operator who typed one
+    /// number would find out from search results going missing weeks later.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let c = &self.consolidate;
+        if c.auto_supersede <= c.review_min {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}), \
+                 or every pair found is hidden without review",
+                c.auto_supersede, c.review_min
+            )));
+        }
+        Ok(())
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file
@@ -367,6 +444,23 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             let cfg = Config::load(Some(&p)).unwrap();
             assert_eq!(cfg.infer.embed.dim, 768);
         });
+    }
+
+    #[test]
+    fn thresholds_that_leave_no_review_band_are_refused() {
+        // `auto_supersede` at or below `review_min` hides every pair the sweep
+        // finds without asking anyone. The operator would find out from search
+        // results going missing, weeks later.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nreview_min = 0.88\nauto_supersede = 0.85\n"),
+        );
+        assert!(matches!(
+            Config::load(Some(&p)),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 
     #[test]

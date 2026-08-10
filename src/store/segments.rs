@@ -84,10 +84,17 @@ impl Store {
         Ok(rows.iter().map(row_to_segment).collect())
     }
 
+    /// Segments still owed a model call: never tried, or tried and refused.
+    ///
+    /// `failed` is included on purpose. It records what went wrong last time,
+    /// not a verdict — an endpoint that was loading a model, or a machine that
+    /// was asleep, says nothing about the text. Excluding it made the next run
+    /// see a finished corpus and close the job, which is how a quarter of a
+    /// document stayed missing while the endpoint sat there answering.
     pub async fn pending_segments(&self, corpus_id: &str) -> Result<Vec<Segment>> {
         let rows = sqlx::query(
             "SELECT * FROM segments
-             WHERE corpus_id = ? AND state = 'pending' ORDER BY idx",
+             WHERE corpus_id = ? AND state != 'done' ORDER BY idx",
         )
         .bind(corpus_id)
         .fetch_all(&self.pool)

@@ -51,6 +51,7 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: 42,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -114,6 +115,7 @@ async fn filtered_search_uses_payload_indexes() {
     let f = SearchFilter {
         tags: vec!["forensics".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -125,6 +127,7 @@ async fn filtered_search_uses_payload_indexes() {
     let f = SearchFilter {
         tags: vec![],
         category: Some("concept".into()),
+        include_superseded: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -165,6 +168,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
     let f = SearchFilter {
         tags: vec!["linux".into(), "forensics".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -604,6 +608,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     let f = SearchFilter {
         tags: vec!["fresh".into()],
         category: None,
+        include_superseded: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -615,6 +620,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     let stale = SearchFilter {
         tags: vec!["old".into()],
         category: None,
+        include_superseded: false,
     };
     assert!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &stale)
@@ -645,6 +651,7 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             tags: vec![],
             created_at: 42,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -734,6 +741,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
     let f = SearchFilter {
         tags: vec!["keep".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 10, &f)
@@ -835,6 +843,7 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: now_secs() - days_old * 86_400,
             last_seen_at: None,
+            superseded: None,
         },
     }
 }
@@ -933,6 +942,7 @@ async fn scoring_leaves_the_filter_alone() {
     let f = SearchFilter {
         tags: vec!["keep".into()],
         category: None,
+        include_superseded: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -1329,5 +1339,198 @@ async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
     .await
     .unwrap();
     assert!(v.neighbours("never-embedded", 5).await.unwrap().is_empty());
+    v.drop_collection().await.unwrap();
+}
+
+// ── Consolidation ───────────────────────────────────────────────────────────
+//
+// The distance-matrix API and the payload flag it feeds. Both are Qdrant-side
+// behaviour that the in-memory store can only approximate: `near_pairs` speaks
+// to `/points/search/matrix/pairs` (Qdrant 1.12+) and has to map point ids back
+// to artifact ids through a payload lookup, and the superseded filter has to
+// keep matching points written before the key existed at all.
+
+#[tokio::test]
+#[ignore]
+async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
+    let v = fresh("engram_it_near_pairs", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
+        point("c", "s1", vec![0.0, 0.0, 1.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+
+    let pairs = v.near_pairs(100, 5, 0.9).await.unwrap();
+    assert_eq!(pairs.len(), 1, "expected one close pair, got {pairs:?}");
+    // Artifact ids, not point uuids: the mapping back through the payload is
+    // the part of this that cannot be unit-tested.
+    assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("a", "b"));
+    assert!(pairs[0].score >= 0.9, "{pairs:?}");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
+    // Hidden has to mean hidden everywhere a reader browses. A superseded
+    // artifact is near-identical to its keeper by construction, so it would
+    // lead the related pane of the artifact it lost to; and the forgotten list
+    // would hand back exactly the duplicates the sweep just took out of search.
+    let v = fresh("engram_it_superseded_browse", 4).await;
+    v.upsert(vec![
+        aged("keeper", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+        aged("hidden", vec![0.99, 0.01, 0.0, 0.0], 60, &[]),
+    ])
+    .await
+    .unwrap();
+    v.set_superseded("hidden", true).await.unwrap();
+
+    let cutoff = now_secs() - 31 * 86_400;
+    let old: Vec<String> = v
+        .resurface(10, cutoff, cutoff)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert_eq!(old, vec!["keeper".to_string()], "got {old:?}");
+
+    let near: Vec<String> = v
+        .neighbours("keeper", 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert!(near.is_empty(), "a hidden artifact was related: {near:?}");
+
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn near_pairs_skips_what_has_already_been_superseded() {
+    // Otherwise every sweep re-finds the pair it resolved last time, and the
+    // review queue never empties.
+    let v = fresh("engram_it_near_pairs_skip", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
+
+    v.set_superseded("b", true).await.unwrap();
+    assert!(
+        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
+        "a resolved pair came back"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_superseded_point_leaves_search_and_can_come_back() {
+    let v = fresh("engram_it_superseded", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+
+    let q = [1.0, 0.0, 0.0, 0.0];
+    // Points written before consolidation existed carry no `superseded` key at
+    // all. The default filter must not drop them, which is why the exclusion is
+    // `must_not` rather than a match on `false`.
+    assert_eq!(
+        v.search(&q, &Default::default(), 5, &SearchFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "a point with no `superseded` key was filtered out"
+    );
+
+    v.set_superseded("b", true).await.unwrap();
+    let hits = v
+        .search(&q, &Default::default(), 5, &SearchFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].payload.artifact_id, "a");
+
+    // Still reachable when asked for: the review queue and the undo need it.
+    assert_eq!(
+        v.search(
+            &q,
+            &Default::default(),
+            5,
+            &SearchFilter {
+                include_superseded: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len(),
+        2
+    );
+
+    v.set_superseded("b", false).await.unwrap();
+    assert_eq!(
+        v.search(&q, &Default::default(), 5, &SearchFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the undo did not put the point back"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_re_embed_does_not_revive_a_superseded_point() {
+    // `payload_of` in the embed job knows nothing about consolidation and
+    // leaves the flag unset. Unset has to mean "keep what is stored", or every
+    // re-embed would silently undo the sweep.
+    let v = fresh("engram_it_superseded_reembed", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &[],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    v.set_superseded("a", true).await.unwrap();
+
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &[],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+
+    assert!(
+        v.search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &Default::default(),
+            5,
+            &SearchFilter::default()
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "the re-embed revived a hidden point"
+    );
     v.drop_collection().await.unwrap();
 }
