@@ -51,7 +51,11 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: 42,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
         },
     }
 }
@@ -116,6 +120,7 @@ async fn filtered_search_uses_payload_indexes() {
         tags: vec!["forensics".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -128,6 +133,7 @@ async fn filtered_search_uses_payload_indexes() {
         tags: vec![],
         category: Some("concept".into()),
         include_superseded: false,
+        include_deprecated: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -169,6 +175,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
         tags: vec!["linux".into(), "forensics".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -609,6 +616,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         tags: vec!["fresh".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -621,6 +629,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         tags: vec!["old".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     assert!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &stale)
@@ -651,7 +660,11 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             tags: vec![],
             created_at: 42,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
         },
     }
 }
@@ -742,6 +755,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
         tags: vec!["keep".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 10, &f)
@@ -831,6 +845,7 @@ fn now_secs() -> i64 {
 }
 
 fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint {
+    let ts = now_secs() - days_old * 86_400;
     VectorPoint {
         vector: dense,
         sparse: Default::default(),
@@ -841,9 +856,16 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             title: None,
             category: Some("c".into()),
             tags: tags.iter().map(|s| s.to_string()).collect(),
-            created_at: now_secs() - days_old * 86_400,
+            created_at: ts,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            // Recency decay now reads `last_verified_at`, not `created_at` —
+            // this helper's whole point is controlling how "aged" a point
+            // scores, so it has to set the field the formula actually uses.
+            last_verified_at: Some(ts),
+            superseded_by: None,
         },
     }
 }
@@ -943,6 +965,7 @@ async fn scoring_leaves_the_filter_alone() {
         tags: vec!["keep".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -1471,6 +1494,7 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
             5,
             &SearchFilter {
                 include_superseded: true,
+                include_deprecated: false,
                 ..Default::default()
             },
         )

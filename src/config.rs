@@ -40,6 +40,16 @@ pub struct ConsolidateConfig {
     pub judge: bool,
     /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
     pub max_judgements: usize,
+    /// An active artifact not confirmed accurate (`last_verified_at`) in this
+    /// many days becomes a deprecation-review candidate — never anything more
+    /// automatic than that. See `stale_max_hits`.
+    pub stale_after_days: u32,
+    /// ...and retrieved at most this many times since. Both conditions must
+    /// hold: staleness alone is not suspicious for a rare topic, and
+    /// popularity alone says nothing about accuracy. This is read-only input
+    /// to the candidate list — it never feeds search scoring, or a frequently
+    /// shown result would keep boosting its own visibility.
+    pub stale_max_hits: i64,
 }
 
 impl Default for ConsolidateConfig {
@@ -54,6 +64,8 @@ impl Default for ConsolidateConfig {
             interval_hours: 24,
             judge: false,
             max_judgements: 20,
+            stale_after_days: 365,
+            stale_max_hits: 0,
         }
     }
 }

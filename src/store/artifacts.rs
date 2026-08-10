@@ -27,6 +27,33 @@ impl EmbedState {
     }
 }
 
+/// Where an artifact stands: still current, flagged stale with no named
+/// replacement, or hidden in favour of a specific `superseded_by` artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactStatus {
+    Active,
+    Deprecated,
+    Superseded,
+}
+
+impl ArtifactStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactStatus::Active => "active",
+            ArtifactStatus::Deprecated => "deprecated",
+            ArtifactStatus::Superseded => "superseded",
+        }
+    }
+    pub fn parse(s: &str) -> ArtifactStatus {
+        match s {
+            "deprecated" => ArtifactStatus::Deprecated,
+            "superseded" => ArtifactStatus::Superseded,
+            _ => ArtifactStatus::Active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CorpusSpan {
     pub start_line: i64,
@@ -65,6 +92,14 @@ pub struct Chunk {
     /// stated them. Deliberately not part of what gets embedded: changing what
     /// every vector is built from is a decision for the evaluation harness.
     pub caveats: Vec<String>,
+    /// Active, deprecated, or superseded. Kept in sync with `superseded_by`
+    /// by `set_superseded_by`; set directly by `set_artifact_status` for the
+    /// deprecate/reactivate actions, which have no artifact on the other end.
+    pub status: ArtifactStatus,
+    /// When this artifact was last confirmed accurate. Defaults to
+    /// `created_at` at insert; this, not `created_at`, is what search ranking
+    /// decays against.
+    pub last_verified_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +141,8 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .get::<Option<String>, _>("caveats")
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        status: ArtifactStatus::parse(r.get::<String, _>("status").as_str()),
+        last_verified_at: r.get("last_verified_at"),
     }
 }
 
@@ -118,6 +155,7 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let mut out = Vec::with_capacity(chunks.len());
         for nc in chunks {
+            let created_at = now();
             let c = Chunk {
                 id: new_id(),
                 corpus_id: corpus_id.to_string(),
@@ -129,17 +167,19 @@ impl Store {
                 tags: nc.tags.clone(),
                 embed_state: EmbedState::Pending,
                 embed_model: None,
-                created_at: now(),
+                created_at,
                 embed_rev: 0,
                 segment_idx: nc.segment_idx,
                 flags: vec![],
                 flag_detail: None,
                 superseded_by: None,
                 caveats: nc.caveats.clone(),
+                status: ArtifactStatus::Active,
+                last_verified_at: Some(created_at),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -153,6 +193,8 @@ impl Store {
             .bind(c.created_at)
             .bind(c.segment_idx)
             .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
+            .bind(c.status.as_str())
+            .bind(c.last_verified_at)
             .execute(&mut *tx)
             .await?;
             out.push(c);
@@ -379,9 +421,19 @@ impl Store {
     }
 
     /// Record that this artifact lost a near-identical pair. `None` undoes it.
+    /// `status` moves in lockstep: superseded when a winner is set, active
+    /// when it's cleared — the one place that keeps the two columns
+    /// consistent, so callers of `unsupersede`/`heal_dangling_supersessions`
+    /// need no changes of their own.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
-        let res = sqlx::query("UPDATE artifacts SET superseded_by = ? WHERE id = ?")
+        let status = if by.is_some() {
+            ArtifactStatus::Superseded
+        } else {
+            ArtifactStatus::Active
+        };
+        let res = sqlx::query("UPDATE artifacts SET superseded_by = ?, status = ? WHERE id = ?")
             .bind(by)
+            .bind(status.as_str())
             .bind(artifact_id)
             .execute(&self.pool)
             .await?;
@@ -389,6 +441,40 @@ impl Store {
             return Err(Error::NotFound);
         }
         Ok(())
+    }
+
+    /// Set an artifact's lifecycle status directly — used for deprecate and
+    /// reactivate, which (unlike supersede) have no winning artifact on the
+    /// other end. Does not touch `superseded_by`; callers that mean to clear
+    /// a supersession should use `set_superseded_by(id, None)` instead.
+    pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
+        self.expect_updated(
+            sqlx::query("UPDATE artifacts SET status = ? WHERE id = ?")
+                .bind(status.as_str())
+                .bind(id)
+                .execute(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Stamp an artifact as confirmed accurate now — what search ranking's
+    /// recency decay reads.
+    pub async fn set_last_verified_at(&self, id: &str, at: i64) -> Result<()> {
+        self.expect_updated(
+            sqlx::query("UPDATE artifacts SET last_verified_at = ? WHERE id = ?")
+                .bind(at)
+                .bind(id)
+                .execute(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Every artifact id, for the one-shot Qdrant lifecycle backfill.
+    pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT id FROM artifacts")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
     /// Artifacts hidden in favour of a keeper that no longer exists.
@@ -421,6 +507,24 @@ impl Store {
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL
               ORDER BY created_at DESC LIMIT ?",
         )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Artifacts currently carrying one lifecycle status, newest first. Used
+    /// for the Ops "deprecated" list — superseded artifacts have their own
+    /// query (`superseded_artifacts`) since that one also needs the winner.
+    pub async fn artifacts_by_status(
+        &self,
+        status: ArtifactStatus,
+        limit: i64,
+    ) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(status.as_str())
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;

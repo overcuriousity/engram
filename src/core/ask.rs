@@ -51,6 +51,8 @@ impl Core {
                     category: req.category.clone(),
                     // Asking a question is as deliberate as a search gets.
                     mark: true,
+                    include_deprecated: false,
+                    include_superseded: false,
                 },
                 None,
             )

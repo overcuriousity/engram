@@ -1,5 +1,6 @@
 use super::Core;
 use crate::error::{Error, Result};
+use crate::store::artifacts::ArtifactStatus;
 use crate::vector::SearchFilter;
 
 pub const DEFAULT_LIMIT: usize = 10;
@@ -29,6 +30,12 @@ pub struct SearchQuery {
     /// and so do the API and MCP paths, which are deliberate by construction.
     #[serde(default)]
     pub mark: bool,
+    /// Include deprecated artifacts, excluded by default.
+    #[serde(default)]
+    pub include_deprecated: bool,
+    /// Include superseded artifacts, excluded by default.
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 /// What a search cost, for the faint line under the rail.
@@ -47,6 +54,15 @@ pub struct SearchResult {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub score: f32,
+    /// Absent means active — see `VectorPayload::status`. Only worth reading
+    /// when the query opted into deprecated/superseded results; an ordinary
+    /// search never returns anything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ArtifactStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<i64>,
 }
 
 fn now_secs() -> i64 {
@@ -150,11 +166,46 @@ impl Core {
                 category: h.payload.category,
                 tags: h.payload.tags,
                 score: h.score,
+                status: h.payload.status,
+                superseded_by: h.payload.superseded_by,
+                last_verified_at: h.payload.last_verified_at,
             })
             .collect();
         // Surfacing counts as seeing, or the same chunks come back tomorrow.
         self.mark_seen(&results);
         Ok(results)
+    }
+
+    /// Active artifacts confirmed stale a while ago and rarely or never
+    /// retrieved since — candidates for an operator to review and deprecate,
+    /// never anything applied automatically. A one-way signal: it can only
+    /// surface a candidate, never rank anything higher, so it cannot create a
+    /// popularity feedback loop the way scoring on `hit_count` directly would.
+    pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
+        let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
+        let hits = self
+            .vectors
+            .stale_candidates(
+                cutoff,
+                self.consolidate.stale_max_hits,
+                limit.clamp(1, MAX_LIMIT),
+            )
+            .await?;
+        Ok(hits
+            .into_iter()
+            .map(|h| SearchResult {
+                artifact_id: h.payload.artifact_id,
+                corpus_id: h.payload.corpus_id,
+                title: h.payload.title,
+                text: h.payload.text,
+                category: h.payload.category,
+                tags: h.payload.tags,
+                score: h.score,
+                status: h.payload.status,
+                superseded_by: h.payload.superseded_by,
+                last_verified_at: h.payload.last_verified_at,
+            })
+            .collect())
     }
 
     /// The hot path. One embedding call, one vector search, and optionally one
@@ -224,9 +275,11 @@ impl Core {
         let filter = SearchFilter {
             tags: query.tags.clone(),
             category: query.category.clone(),
-            // Search never shows an artifact the sweep hid. It stays readable
-            // by id, which is what the review queue and the undo need.
-            include_superseded: false,
+            // Deprecated/superseded artifacts stay out of ordinary search by
+            // default; they remain readable by id either way, which is what
+            // the review queue and the undo need. A caller opts in explicitly.
+            include_superseded: query.include_superseded,
+            include_deprecated: query.include_deprecated,
         };
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
@@ -263,6 +316,9 @@ impl Core {
                 category: h.payload.category,
                 tags: h.payload.tags,
                 score: h.score,
+                status: h.payload.status,
+                superseded_by: h.payload.superseded_by,
+                last_verified_at: h.payload.last_verified_at,
             })
             .collect();
 
@@ -364,6 +420,8 @@ mod tests {
             // The default for these tests is the deliberate search the API and
             // MCP make; the incremental case is exercised explicitly below.
             mark: true,
+            include_deprecated: false,
+            include_superseded: false,
         }
     }
 
@@ -676,7 +734,11 @@ mod tests {
                 tags: vec![],
                 created_at: 0,
                 last_seen_at: None,
+                hit_count: None,
                 superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
             },
             score,
         };

@@ -28,13 +28,71 @@
       <td class="mono">
         {{ p.percent }}%
         {% if p.contradiction %}<span class="badge badge-warning">disagrees</span>{% endif %}
+        {% if let Some(t) = p.obsolete_title %}<span class="badge badge-accent">proposes superseding "{{ t }}"</span>{% endif %}
       </td>
       <td><a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a></td>
       <td><a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a></td>
       <td class="muted">{% if let Some(d) = p.detail %}{{ d }}{% else %}—{% endif %}</td>
-      <td>
+      <td class="row" style="gap:0.25rem">
+        {% if p.obsolete_title.is_some() %}
+        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede">
+          <button class="btn btn-sm" type="submit">Apply supersede</button>
+        </form>
+        {% endif %}
         <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
           <button class="btn btn-sm" type="submit">Dismiss</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Deprecated</h3>
+{% if deprecated.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">Flagged stale with no specific replacement. Still stored and still readable; kept out of results only.</p>
+<table class="grid">
+  <thead><tr><th>Artifact</th><th></th></tr></thead>
+  <tbody>
+  {% for d in deprecated %}
+    <tr>
+      <td><a href="/ui/artifacts/{{ d.id }}">{{ d.title }}</a></td>
+      <td>
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+          <button class="btn btn-sm" type="submit">Reactivate</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Worth a second look</h3>
+{% if stale.is_empty() %}
+  <p class="muted">None.</p>
+{% else %}
+<p class="muted">
+  Active, but not confirmed accurate in a while and rarely or never retrieved
+  since. A candidate list only — nothing here has been changed, and this never
+  affects search ranking.
+</p>
+<table class="grid">
+  <thead><tr><th>Artifact</th><th>Last verified</th><th></th></tr></thead>
+  <tbody>
+  {% for s in stale %}
+    <tr>
+      <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
+      <td class="muted mono">{{ s.last_verified }}</td>
+      <td class="row" style="gap:0.25rem">
+        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/verify">
+          <button class="btn btn-sm" type="submit">Still accurate</button>
+        </form>
+        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/deprecate">
+          <button class="btn btn-sm" type="submit">Deprecate</button>
         </form>
       </td>
     </tr>

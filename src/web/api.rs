@@ -251,6 +251,10 @@ pub struct SearchParams {
     pub limit: Option<usize>,
     pub tags: Option<String>,
     pub category: Option<String>,
+    #[serde(default)]
+    pub include_deprecated: bool,
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 async fn search(
@@ -275,8 +279,26 @@ async fn search(
         category: q.category.filter(|c| !c.is_empty()),
         // An API call is one deliberate question; only the typing UI opts out.
         mark: true,
+        include_deprecated: q.include_deprecated,
+        include_superseded: q.include_superseded,
     };
     Ok(Json(st.core.search(&query).await?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct StaleParams {
+    pub limit: Option<usize>,
+}
+
+/// Active artifacts nobody has confirmed or retrieved in a while — candidates
+/// for an operator to review and deprecate. Read-only: nothing here changes
+/// an artifact, and nothing here feeds search ranking.
+async fn stale(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<StaleParams>,
+) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+    Ok(Json(st.core.stale_candidates(p.limit.unwrap_or(20)).await?))
 }
 
 async fn ask(
@@ -386,7 +408,11 @@ async fn patch_artifact(
                 tags: chunk.tags.clone(),
                 created_at: chunk.created_at,
                 last_seen_at: None,
+                hit_count: None,
                 superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
             })
             .await?;
     }
@@ -446,6 +472,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
         .route("/consolidation", get(consolidation))
+        .route("/consolidation/stale", get(stale))
         .route(
             "/artifacts/{id}",
             get(get_artifact)
@@ -849,6 +876,7 @@ mod patch_tests {
                     tags: vec!["fresh".into()],
                     category: None,
                     include_superseded: false,
+                    include_deprecated: false,
                 },
             )
             .await

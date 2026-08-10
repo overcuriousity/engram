@@ -17,6 +17,29 @@
       </div>
     </div>
   </div>
+  {% else if d.status.as_str() == "deprecated" %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Deprecated</b>
+      <div>Flagged stale, with no specific replacement. Still stored and still
+        readable; kept out of results only.</div>
+      <div class="chips">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+          <button class="btn btn-sm" type="submit">Reactivate</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="chips">
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
+      <button class="btn btn-sm" type="submit">Confirm still accurate</button>
+    </form>
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
+      <button class="btn btn-sm" type="submit">Deprecate</button>
+    </form>
+  </div>
   {% endif %}
 
   {% if !d.flags.is_empty() %}

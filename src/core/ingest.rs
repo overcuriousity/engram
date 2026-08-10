@@ -1,7 +1,9 @@
 use super::Core;
 use crate::error::{Error, Result};
+use crate::store::artifacts::ArtifactStatus;
 use crate::store::corpora::{CorpusStatus, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
+use crate::store::now;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IngestOutcome {
@@ -173,10 +175,88 @@ impl Core {
     /// job. Clearing the row first loses the only page that offers the undo
     /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
-        self.vectors.set_superseded(artifact_id, false).await?;
+        self.vectors
+            .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
+            .await?;
         self.store.set_superseded_by(artifact_id, None).await?;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
+    }
+
+    /// Hide `loser_id` in favour of `winner_id`. Row before payload, matching
+    /// the sweep's existing auto-supersede order (`jobs::consolidate`): the
+    /// intermediate state after a partial failure is one an operator can act
+    /// on, since the artifact is already listed on Ops with its `superseded_by`
+    /// set, even if the search-side flag has not caught up yet.
+    pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        self.store
+            .set_superseded_by(loser_id, Some(winner_id))
+            .await?;
+        self.vectors
+            .set_lifecycle(loser_id, ArtifactStatus::Superseded, Some(winner_id))
+            .await?;
+        tracing::info!(loser_id, winner_id, "superseded an artifact");
+        Ok(())
+    }
+
+    /// Flag an artifact stale with no specific replacement. Unlike `supersede`,
+    /// there is no winning artifact on the other end — an operator judged the
+    /// content itself no longer current.
+    pub async fn deprecate(&self, id: &str) -> Result<()> {
+        self.store
+            .set_artifact_status(id, ArtifactStatus::Deprecated)
+            .await?;
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Deprecated, None)
+            .await?;
+        tracing::info!(artifact_id = id, "deprecated an artifact");
+        Ok(())
+    }
+
+    /// Move an artifact back to active. Does not touch `superseded_by` — an
+    /// artifact reactivated out of `Superseded` keeps pointing at what it lost
+    /// to, same as `unsupersede`; callers that mean to undo a supersession
+    /// specifically should use that instead.
+    pub async fn reactivate(&self, id: &str) -> Result<()> {
+        self.store
+            .set_artifact_status(id, ArtifactStatus::Active)
+            .await?;
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Active, None)
+            .await?;
+        tracing::info!(artifact_id = id, "reactivated an artifact");
+        Ok(())
+    }
+
+    /// Stamp an artifact as confirmed accurate now — what search ranking's
+    /// recency decay reads.
+    pub async fn verify(&self, id: &str) -> Result<()> {
+        let at = now();
+        self.store.set_last_verified_at(id, at).await?;
+        self.vectors.set_last_verified_at(id, at).await?;
+        tracing::info!(artifact_id = id, "verified an artifact");
+        Ok(())
+    }
+
+    /// One-shot: push every artifact's SQLite-side lifecycle state (source of
+    /// truth) into Qdrant. Run once after deploying the lifecycle migration —
+    /// existing points have no `status`/`last_verified_at` until this runs,
+    /// which every filter safely treats as active in the meantime, just not
+    /// yet filterable as deprecated.
+    pub async fn backfill_lifecycle(&self) -> Result<usize> {
+        let mut n = 0;
+        for id in self.store.list_all_artifact_ids().await? {
+            let c = self.store.get_artifact(&id).await?;
+            self.vectors
+                .set_lifecycle(&id, c.status, c.superseded_by.as_deref())
+                .await?;
+            self.vectors
+                .set_last_verified_at(&id, c.last_verified_at.unwrap_or(c.created_at))
+                .await?;
+            n += 1;
+        }
+        tracing::info!(n, "backfilled lifecycle fields into qdrant");
+        Ok(n)
     }
 
     /// Put back anything that was hidden in favour of an artifact which has
@@ -196,7 +276,11 @@ impl Core {
     pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
         let mut first_err = None;
         for id in self.store.dangling_superseded().await? {
-            if let Err(e) = self.vectors.set_superseded(&id, false).await {
+            if let Err(e) = self
+                .vectors
+                .set_lifecycle(&id, ArtifactStatus::Active, None)
+                .await
+            {
                 tracing::warn!(
                     artifact_id = %id,
                     error = %e,
@@ -561,7 +645,11 @@ mod tests {
                     tags: vec![],
                     created_at: 0,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             }])
             .await

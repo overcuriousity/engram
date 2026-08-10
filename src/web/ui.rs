@@ -71,6 +71,8 @@ pub struct ArtifactDetail {
     /// The artifact this one was hidden in favour of. Opening a hidden artifact
     /// by link has to say why it is not in results, or it reads as a bug.
     pub superseded_by: Option<String>,
+    pub status: crate::store::artifacts::ArtifactStatus,
+    pub last_verified_at: Option<i64>,
     /// Conditions the source stated under which this artifact does not apply.
     pub caveats: Vec<String>,
     pub corpus_id: String,
@@ -131,6 +133,23 @@ pub struct PairRow {
     pub b_title: String,
     pub detail: Option<String>,
     pub contradiction: bool,
+    /// Set when the judge named a direction with enough confidence to propose
+    /// a supersede — the pair's "apply supersede" button shows only then.
+    /// Applying it is a separate press; nothing here has hidden anything yet.
+    pub obsolete_title: Option<String>,
+}
+
+/// An artifact flagged stale with no specific replacement.
+pub struct DeprecatedRow {
+    pub id: String,
+    pub title: String,
+}
+
+/// An active artifact nobody has confirmed or retrieved in a while.
+pub struct StaleRow {
+    pub id: String,
+    pub title: String,
+    pub last_verified: String,
 }
 
 pub struct TokenRow {
@@ -306,6 +325,8 @@ struct OpsTemplate {
     retrying: Vec<RetryingRow>,
     parked: Vec<ParkedRow>,
     superseded: Vec<SupersededRow>,
+    deprecated: Vec<DeprecatedRow>,
+    stale: Vec<StaleRow>,
     pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
@@ -487,6 +508,8 @@ async fn search_results(
             category: p.category.filter(|c| !c.is_empty()),
             // Incremental: a prefix must not stamp what it happened to match.
             mark: false,
+            include_deprecated: false,
+            include_superseded: false,
         })
         .await?;
 
@@ -701,11 +724,13 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
-    // Confirmed contradictions lead: they are the ones that mean something in
-    // the base is wrong rather than merely repeated.
+    // Confirmed contradictions and judge-proposed supersedes lead: they are
+    // the ones that mean something in the base is wrong or stale, rather than
+    // merely repeated.
     let mut pairs = Vec::new();
     for state in [
         crate::store::pairs::PairState::Contradiction,
+        crate::store::pairs::PairState::Superseded,
         crate::store::pairs::PairState::Pending,
     ] {
         for p in st.core.store.pairs_by_state(state, 50).await? {
@@ -715,6 +740,13 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             ) else {
                 continue;
             };
+            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
+                if id == a.id {
+                    title_of(&a)
+                } else {
+                    title_of(&b)
+                }
+            });
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -724,15 +756,50 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 b_id: p.b_id,
                 detail: p.detail,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
+                obsolete_title,
             });
         }
     }
+
+    let deprecated = st
+        .core
+        .store
+        .artifacts_by_status(crate::store::artifacts::ArtifactStatus::Deprecated, 50)
+        .await?
+        .into_iter()
+        .map(|c| DeprecatedRow {
+            title: title_of(&c),
+            id: c.id,
+        })
+        .collect();
+
+    // Read-only candidates: nothing here has been changed, only listed.
+    let stale = st
+        .core
+        .stale_candidates(50)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "no stale candidates for ops");
+            vec![]
+        })
+        .into_iter()
+        .map(|r| StaleRow {
+            title: r.title.unwrap_or_else(|| markdown::snippet(&r.text, 60)),
+            id: r.artifact_id,
+            last_verified: r
+                .last_verified_at
+                .map(fmt_time)
+                .unwrap_or_else(|| "never".to_string()),
+        })
+        .collect();
 
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
         retrying,
         parked,
         superseded,
+        deprecated,
+        stale,
         pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
@@ -807,6 +874,56 @@ async fn dismiss_pair_ui(
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+/// The operator confirmation step for a judge-proposed supersede: the pair's
+/// `obsolete_id` becomes an actual `Core::supersede` call. Nothing before this
+/// press hides anything — see `jobs::consolidate::judge_pending`.
+async fn apply_pair_supersede_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+) -> Result<Response> {
+    let pair = st.core.store.get_pair(pid).await?;
+    let obsolete_id = pair.obsolete_id.ok_or(crate::error::Error::NotFound)?;
+    let winner_id = if obsolete_id == pair.a_id {
+        pair.b_id
+    } else {
+        pair.a_id
+    };
+    st.core.supersede(&obsolete_id, &winner_id).await?;
+    st.core
+        .store
+        .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn deprecate_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    st.core.deprecate(&aid).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn reactivate_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    st.core.reactivate(&aid).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn verify_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    st.core.verify(&aid).await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
@@ -894,6 +1011,8 @@ pub(crate) async fn build_artifact_detail(
         flags: c.flags,
         flag_detail: c.flag_detail,
         superseded_by: c.superseded_by,
+        status: c.status,
+        last_verified_at: c.last_verified_at,
         caveats: c.caveats,
         corpus_id: c.corpus_id,
         segment_idx: c.segment_idx,
@@ -960,7 +1079,14 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
+        .route("/ui/ops/artifacts/{id}/deprecate", post(deprecate_ui))
+        .route("/ui/ops/artifacts/{id}/reactivate", post(reactivate_ui))
+        .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
+        .route(
+            "/ui/ops/pairs/{id}/supersede",
+            post(apply_pair_supersede_ui),
+        )
 }
 
 #[cfg(test)]
@@ -1005,6 +1131,8 @@ mod tests {
                 tags: vec![],
                 category: None,
                 mark: false,
+                include_deprecated: false,
+                include_superseded: false,
             })
             .await
             .unwrap();

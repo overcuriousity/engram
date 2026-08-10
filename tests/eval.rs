@@ -110,6 +110,8 @@ async fn evaluate_retrieval() {
             // A benchmark must not stamp last_seen_at: resurfacing reads the
             // same field, and a scored run is not someone reading their notes.
             mark: false,
+            include_deprecated: false,
+            include_superseded: false,
         };
         let results = core.search_capped(&q, cap).await.expect("search failed");
         let rank = results.iter().position(|r| r.artifact_id == pair.expect);

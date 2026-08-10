@@ -3,6 +3,7 @@ pub mod qdrant;
 pub mod sparse;
 
 use crate::error::Result;
+use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -19,12 +20,37 @@ pub struct VectorPayload {
     /// know the stamp must leave the stored one alone rather than clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
-    /// Set when this artifact lost a near-identical pair to a newer one. Like
-    /// `last_seen_at`, it is omitted when unset so that a writer which does not
-    /// know the value — the embed job rebuilding a payload — leaves the stored
-    /// one alone rather than reviving a hidden artifact.
+    /// How many times this chunk has appeared in results, ever. Bumped
+    /// alongside `last_seen_at`. Read only by the deprecation-candidate query
+    /// (`stale_candidates`) — deliberately never a term in search scoring, or
+    /// a popular result would keep boosting itself further while a correct
+    /// but rarely-queried artifact never gets the chance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_count: Option<i64>,
+    /// Set when this artifact lost a near-identical pair to a newer one. Kept
+    /// for filter backward-compatibility now that `status` is the source of
+    /// truth for the same thing — see `SearchFilter`. Like `last_seen_at`, it
+    /// is omitted when unset so a writer which does not know the value — the
+    /// embed job rebuilding a payload — leaves the stored one alone rather
+    /// than reviving a hidden artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded: Option<bool>,
+    /// Active, deprecated, or superseded. Mirrors the SQLite source of truth
+    /// (`store::artifacts::Chunk::status`). Omitted when unset for the same
+    /// merge-write reason as `last_seen_at`; absent is treated as active by
+    /// every filter, so a point written before this field existed is not
+    /// hidden until backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ArtifactStatus>,
+    /// When this artifact was last confirmed accurate. What search ranking's
+    /// recency decay reads, in place of `created_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<i64>,
+    /// The artifact this one was superseded by, if any. Mirrors
+    /// `Chunk::superseded_by` so a search result can show the replacement
+    /// without a second lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,14 +71,22 @@ pub struct SearchFilter {
     /// still readable by id — keeping them out of ranking is the whole of what
     /// superseding does.
     pub include_superseded: bool,
+    /// Deprecated artifacts (flagged stale, no specific replacement) are
+    /// excluded by default, independently of `include_superseded` — the two
+    /// statuses mean different things and callers may want to audit one
+    /// without the other.
+    pub include_deprecated: bool,
 }
 
 impl SearchFilter {
-    /// Whether this filter narrows nothing. Excluding superseded points is
-    /// still a narrowing, so a filter that only does that is not empty — saying
-    /// otherwise would drop the clause on the way to Qdrant.
+    /// Whether this filter narrows nothing. Excluding superseded/deprecated
+    /// points is still a narrowing, so a filter that only does that is not
+    /// empty — saying otherwise would drop the clause on the way to Qdrant.
     pub fn is_empty(&self) -> bool {
-        self.tags.is_empty() && self.category.is_none() && self.include_superseded
+        self.tags.is_empty()
+            && self.category.is_none()
+            && self.include_superseded
+            && self.include_deprecated
     }
 }
 
@@ -113,6 +147,31 @@ pub trait VectorStore: Send + Sync {
     /// artifact won a near-identical pair changes nothing the embedding model
     /// saw.
     async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()>;
+    /// Set an artifact's lifecycle status (and, for `Superseded`, the winner
+    /// it was replaced by). A payload write, not a re-embed, for the same
+    /// reason as `set_superseded` — also derives and writes the legacy
+    /// `superseded: bool` flag so `build_filter`'s pre-backfill safety net
+    /// keeps working.
+    async fn set_lifecycle(
+        &self,
+        artifact_id: &str,
+        status: ArtifactStatus,
+        superseded_by: Option<&str>,
+    ) -> Result<()>;
+    /// Stamp an artifact as confirmed accurate now — what the recency-decay
+    /// scoring formula reads.
+    async fn set_last_verified_at(&self, artifact_id: &str, at: i64) -> Result<()>;
+    /// Active artifacts confirmed stale a while ago (`last_verified_at` older
+    /// than `older_than`) and rarely or never retrieved since (`hit_count` at
+    /// most `max_hits`) — candidates for an operator to review and deprecate.
+    /// A one-way signal: it can only surface a candidate, never rank anything
+    /// higher, so it cannot create a popularity feedback loop.
+    async fn stale_candidates(
+        &self,
+        older_than: i64,
+        max_hits: i64,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>>;
     /// `sparse` carries the query's BM25 terms. An empty one means the query
     /// held no indexable token, and the lexical half is skipped rather than
     /// asked to match nothing.

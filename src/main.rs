@@ -35,6 +35,13 @@ struct Args {
     /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
+    /// Push every artifact's SQLite-side lifecycle state (status,
+    /// last_verified_at, superseded_by) into Qdrant, then exit. Run once after
+    /// deploying the lifecycle migration: existing points have none of these
+    /// fields until this runs, which every filter treats as active in the
+    /// meantime, just not yet filterable as deprecated.
+    #[arg(long)]
+    backfill_lifecycle: bool,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
@@ -127,6 +134,16 @@ async fn main() -> anyhow::Result<()> {
             .reindex(cfg.infer.embed.dim, args.replace_legacy)
             .await?;
         println!("{} now serves `{}`", cfg.vector.collection, target);
+        return Ok(());
+    }
+
+    if args.backfill_lifecycle {
+        let store = engram::store::Store::connect(&cfg.store).await?;
+        let vectors: Arc<dyn engram::vector::VectorStore> =
+            Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
+        let core = Core::from_config(&cfg, vectors, store);
+        let n = core.backfill_lifecycle().await?;
+        println!("backfilled lifecycle fields for {n} artifacts");
         return Ok(());
     }
 

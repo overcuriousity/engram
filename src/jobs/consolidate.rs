@@ -132,7 +132,13 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             // artifact as hidden while every search still returned it. Finish
             // the write that was lost; it is idempotent and costs no inference.
             tracing::info!(artifact_id = %id, "re-applying a superseded flag the vector store is missing");
-            core.vectors.set_superseded(id, true).await?;
+            core.vectors
+                .set_lifecycle(
+                    id,
+                    crate::store::artifacts::ArtifactStatus::Superseded,
+                    c.superseded_by.as_deref(),
+                )
+                .await?;
             continue;
         }
         let root = clusters.find(id);
@@ -147,9 +153,9 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         let keep = keeper(group);
         for c in group.iter().filter(|c| c.id != keep.id) {
             // SQLite first: it is the source of truth, and a payload flag with
-            // no row behind it is a hidden artifact nothing can explain.
-            core.store.set_superseded_by(&c.id, Some(&keep.id)).await?;
-            core.vectors.set_superseded(&c.id, true).await?;
+            // no row behind it is a hidden artifact nothing can explain. See
+            // `Core::supersede`.
+            core.supersede(&c.id, &keep.id).await?;
             hidden.insert(c.id.clone());
             out.superseded += 1;
             tracing::info!(
@@ -193,10 +199,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 (&b, &a)
             };
             if contains_normalized(&long.text, &short.text) {
-                core.store
-                    .set_superseded_by(&short.id, Some(&long.id))
-                    .await?;
-                core.vectors.set_superseded(&short.id, true).await?;
+                core.supersede(&short.id, &long.id).await?;
                 out.superseded += 1;
                 tracing::info!(
                     superseded = %short.id,
@@ -336,18 +339,47 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         };
 
         match crate::infer::prompt::parse_judgement(&reply) {
-            Ok((true, detail)) => {
+            Ok((true, detail, obsolete)) => {
                 contradictions += 1;
-                core.store
-                    .set_pair_state(
-                        p.id,
-                        crate::store::pairs::PairState::Contradiction,
-                        detail.as_deref(),
-                    )
-                    .await?;
-                tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+                // Trust the judge's named direction only when it agrees with
+                // the sweep's own newest-wins bias (see `keeper`): a call that
+                // names the *newer* artifact obsolete is exactly the failure
+                // mode worth guarding against, since it would otherwise
+                // propose hiding the side more likely to be current.
+                let obsolete_id = obsolete.and_then(|side| {
+                    let (named, other) = match side {
+                        'a' => (&a, &b),
+                        _ => (&b, &a),
+                    };
+                    (named.created_at <= other.created_at).then(|| named.id.clone())
+                });
+                match obsolete_id {
+                    Some(obsolete_id) => {
+                        // Proposed, not applied: an operator confirms via the
+                        // pair's "apply supersede" action before anything is
+                        // actually hidden.
+                        core.store
+                            .set_pair_superseded(p.id, &obsolete_id, detail.as_deref())
+                            .await?;
+                        tracing::info!(
+                            pair = p.id,
+                            obsolete = %obsolete_id,
+                            "judge proposed a supersede, pending operator confirmation"
+                        );
+                    }
+                    None => {
+                        core.store
+                            .set_pair_state(
+                                p.id,
+                                crate::store::pairs::PairState::Contradiction,
+                                detail.as_deref(),
+                            )
+                            .await?;
+                        tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+                    }
+                }
             }
-            Ok((false, _)) => {
+            Ok((false, _, _)) => {
                 core.store
                     .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
                     .await?;
@@ -402,7 +434,11 @@ mod tests {
                     tags: vec![],
                     created_at: c.created_at,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             })
             .collect();
@@ -448,7 +484,11 @@ mod tests {
                     tags: vec![],
                     created_at: made[0].created_at,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             }])
             .await
@@ -738,6 +778,73 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].detail.as_deref(), Some("1.21.4 versus 1.30.0"));
+    }
+
+    #[tokio::test]
+    async fn a_confident_direction_proposes_a_supersede_but_does_not_apply_it() {
+        // The judge names a direction; an operator still has to confirm it.
+        // Nothing about either artifact changes here — only the pair.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":true,"detail":"old flag vs new flag","obsolete":"a"}"#.into(),
+        ]));
+        let ids = disagreeing(&core).await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!((out.judged, out.contradictions), (1, 1), "{out:?}");
+        let found = core
+            .store
+            .pairs_by_state(PairState::Superseded, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "the pair did not land as proposed");
+        assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
+
+        // Proposed, not applied.
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the judge's proposal must not hide anything by itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direction_naming_the_newer_artifact_is_not_trusted() {
+        // A miscalibrated call proposing to hide the *newer* side is exactly
+        // the failure mode the newest-wins guard exists to catch: it disagrees
+        // with the sweep's own bias, so it must fall back to a plain
+        // contradiction rather than being trusted.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        let ids = disagreeing(&core).await;
+        // Force `b` (ids[1]) strictly newer than `a`: `now()` is second-grained,
+        // so two rows inserted in the same test would otherwise tie, and a tie
+        // is meant to pass the guard. Naming the genuinely newer side obsolete
+        // disagrees with `keeper()`'s bias and must be rejected.
+        sqlx::query("UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?")
+            .bind(&ids[1])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":true,"detail":"x","obsolete":"b"}"#.into(),
+        ]));
+
+        run(&core).await.unwrap();
+        let superseded = core
+            .store
+            .pairs_by_state(PairState::Superseded, 10)
+            .await
+            .unwrap();
+        assert!(
+            superseded.is_empty(),
+            "a direction naming the newer artifact must not be trusted: {superseded:?}"
+        );
     }
 
     #[tokio::test]

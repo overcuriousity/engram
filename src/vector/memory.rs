@@ -1,5 +1,6 @@
 use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPoint, VectorStore, cosine};
 use crate::error::Result;
+use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -22,6 +23,17 @@ impl Default for MemoryVectors {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A payload's effective lifecycle status. Falls back to the legacy
+/// `superseded` boolean when `status` is unset, matching the Qdrant backend's
+/// dual-check `build_filter` so both implementations agree on points written
+/// before `status` existed.
+fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
+    payload.status.unwrap_or(match payload.superseded {
+        Some(true) => ArtifactStatus::Superseded,
+        _ => ArtifactStatus::Active,
+    })
 }
 
 /// Counts into chips, most frequent first. Ties break on the value so a
@@ -63,6 +75,26 @@ impl VectorStore for MemoryVectors {
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.superseded);
             }
+            if p.payload.hit_count.is_none() {
+                p.payload.hit_count = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.hit_count);
+            }
+            if p.payload.status.is_none() {
+                p.payload.status = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.status);
+            }
+            if p.payload.last_verified_at.is_none() {
+                p.payload.last_verified_at = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.last_verified_at);
+            }
+            if p.payload.superseded_by.is_none() {
+                p.payload.superseded_by = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.superseded_by.clone());
+            }
             w.insert(p.payload.artifact_id.clone(), p);
         }
         Ok(())
@@ -74,10 +106,21 @@ impl VectorStore for MemoryVectors {
             // A merge, matching Qdrant: an absent stamp means "unchanged", so
             // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
+            let hits = payload.hit_count.or(p.payload.hit_count);
             let sup = payload.superseded.or(p.payload.superseded);
+            let status = payload.status.or(p.payload.status);
+            let verified = payload.last_verified_at.or(p.payload.last_verified_at);
+            let superseded_by = payload
+                .superseded_by
+                .clone()
+                .or_else(|| p.payload.superseded_by.clone());
             p.payload = payload.clone();
             p.payload.last_seen_at = seen;
+            p.payload.hit_count = hits;
             p.payload.superseded = sup;
+            p.payload.status = status;
+            p.payload.last_verified_at = verified;
+            p.payload.superseded_by = superseded_by;
         }
         Ok(())
     }
@@ -90,11 +133,56 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
+    async fn set_lifecycle(
+        &self,
+        artifact_id: &str,
+        status: ArtifactStatus,
+        superseded_by: Option<&str>,
+    ) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        if let Some(p) = w.get_mut(artifact_id) {
+            p.payload.status = Some(status);
+            p.payload.superseded = Some(status != ArtifactStatus::Active);
+            p.payload.superseded_by = superseded_by.map(str::to_string);
+        }
+        Ok(())
+    }
+
+    async fn set_last_verified_at(&self, artifact_id: &str, at: i64) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        if let Some(p) = w.get_mut(artifact_id) {
+            p.payload.last_verified_at = Some(at);
+        }
+        Ok(())
+    }
+
+    async fn stale_candidates(
+        &self,
+        older_than: i64,
+        max_hits: i64,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let r = self.points.read().unwrap();
+        Ok(r.values()
+            .filter(|p| {
+                status_of(&p.payload) == ArtifactStatus::Active
+                    && p.payload.last_verified_at.unwrap_or(0) < older_than
+                    && p.payload.hit_count.unwrap_or(0) <= max_hits
+            })
+            .take(limit)
+            .map(|p| SearchHit {
+                payload: p.payload.clone(),
+                score: 0.0,
+            })
+            .collect())
+    }
+
     async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
         let mut w = self.points.write().unwrap();
         for id in artifact_ids {
             if let Some(p) = w.get_mut(id) {
                 p.payload.last_seen_at = Some(seen_at);
+                p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
             }
         }
         Ok(())
@@ -135,7 +223,9 @@ impl VectorStore for MemoryVectors {
         let mut hits: Vec<SearchHit> = r
             .values()
             .filter(|p| {
-                (filter.include_superseded || p.payload.superseded != Some(true))
+                let status = status_of(&p.payload);
+                (filter.include_superseded || status != ArtifactStatus::Superseded)
+                    && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
                     && filter.tags.iter().all(|t| p.payload.tags.contains(t))
                     && filter
                         .category
@@ -277,7 +367,11 @@ mod tests {
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 created_at: 0,
                 last_seen_at: None,
+                hit_count: None,
                 superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
             },
         }
     }
@@ -352,6 +446,7 @@ mod tests {
             tags: vec!["linux".into(), "forensics".into()],
             category: None,
             include_superseded: false,
+            include_deprecated: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -375,6 +470,7 @@ mod tests {
             tags: vec![],
             category: Some("concept".into()),
             include_superseded: false,
+            include_deprecated: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
