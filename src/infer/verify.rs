@@ -229,26 +229,60 @@ pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
     shared * 3 >= chunk.len()
 }
 
-/// Fraction of the source's non-blank lines that some chunk span covers.
-pub fn coverage(spans: &[(i64, i64)], raw_text: &str) -> f64 {
+/// A source line counts as covered when this share of its distinctive tokens
+/// appears in the artifacts made from the segment it belongs to.
+///
+/// Half, because synthesis rewrites: a line survives as its subject and its
+/// values, not as its wording. Demanding all of it would call every rewritten
+/// line lost, which is what the artifacts are supposed to be.
+const LINE_TOKEN_RECALL: f64 = 0.5;
+
+/// Fraction of the source that survived into some artifact.
+///
+/// Each entry is one segment's line range and the text of every artifact made
+/// from it. A line outside every range — a segment that failed, or one never
+/// attempted — is uncovered, which is exactly the case this number exists to
+/// make visible.
+///
+/// This asks whether the *content* arrived, not whether an artifact claimed the
+/// line. Claims were the earlier measure and they answer a different question:
+/// the model omits `corpus_lines` more often than not, and a span recovered by
+/// matching verbatim text finds only the quarter of an artifact that was not
+/// rewritten. A faithfully rewritten chapter therefore scored near zero, which
+/// read exactly like a chapter that had been dropped.
+pub fn content_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> f64 {
     let lines: Vec<&str> = raw_text.lines().collect();
     let total = lines.iter().filter(|l| !l.trim().is_empty()).count();
     if total == 0 {
         return 0.0;
     }
-    let mut covered = vec![false; lines.len()];
-    for (start, end) in spans {
-        let first = (*start).max(1);
-        let last = (*end).min(lines.len() as i64);
-        for n in first..=last {
-            covered[(n - 1) as usize] = true;
+    let indexed: Vec<(i64, i64, std::collections::HashSet<String>)> = segments
+        .iter()
+        .map(|(a, b, text)| (*a, *b, distinctive_tokens(text)))
+        .collect();
+
+    let mut hit = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let n = i as i64 + 1;
+        let Some((_, _, made)) = indexed.iter().find(|(a, b, _)| *a <= n && n <= *b) else {
+            continue;
+        };
+        let want = distinctive_tokens(line);
+        // A line with nothing distinctive on it — a page number, a rule of
+        // dashes — cannot be looked for and must not be counted against the
+        // document. PDF exports are full of them.
+        if want.is_empty() {
+            hit += 1;
+            continue;
+        }
+        let found = want.iter().filter(|t| made.contains(*t)).count();
+        if found as f64 >= want.len() as f64 * LINE_TOKEN_RECALL {
+            hit += 1;
         }
     }
-    let hit = lines
-        .iter()
-        .enumerate()
-        .filter(|(i, l)| !l.trim().is_empty() && covered[*i])
-        .count();
     hit as f64 / total as f64
 }
 
@@ -418,12 +452,42 @@ Die Markierung End of File (EOF) zeigt das Dateiende an.";
     }
 
     #[test]
-    fn coverage_is_the_fraction_of_non_blank_lines_claimed() {
-        let raw = "one\n\ntwo\nthree\nfour"; // four non-blank lines
-        assert!((coverage(&[(1, 1), (3, 3)], raw) - 0.5).abs() < 1e-6);
-        assert!((coverage(&[(1, 5)], raw) - 1.0).abs() < 1e-6);
-        assert_eq!(coverage(&[], raw), 0.0);
-        // Overlapping spans must not push coverage above one.
-        assert!((coverage(&[(1, 5), (2, 4)], raw) - 1.0).abs() < 1e-6);
+    fn coverage_counts_a_line_whose_content_reached_an_artifact() {
+        let raw =
+            "Mount the filesystem first.\n\nThe timeout is 30 seconds.\nUnrelated trailing note.";
+        // One artifact carrying both subjects, rewritten rather than copied.
+        let made = "Mount the filesystem before anything else. A timeout of 30 seconds applies.";
+        let cov = content_coverage(raw, &[(1, 4, made.into())]);
+        assert!((cov - 2.0 / 3.0).abs() < 1e-6, "{cov}");
+    }
+
+    #[test]
+    fn a_segment_that_produced_nothing_is_uncovered() {
+        // The case the number exists for: a segment the model refused leaves
+        // its lines out of every artifact, and that must be visible.
+        let raw = "alpha bravo charlie\ndelta echo foxtrot";
+        assert_eq!(content_coverage(raw, &[]), 0.0);
+        assert_eq!(
+            content_coverage(raw, &[(1, 1, "alpha bravo charlie".into())]),
+            0.5
+        );
+    }
+
+    #[test]
+    fn a_rewritten_line_still_counts() {
+        // The failure this replaced: an artifact that reproduces a line's
+        // subject and values in its own words scored zero, because no span
+        // could be matched back to it.
+        let raw = "Der Startcluster steht im Verzeichniseintrag.";
+        let made = "Verzeichniseintrag: hier steht der Startcluster der Datei.";
+        assert_eq!(content_coverage(raw, &[(1, 1, made.into())]), 1.0);
+    }
+
+    #[test]
+    fn a_line_with_nothing_distinctive_on_it_is_not_held_against_the_document() {
+        // A page number from a PDF export. Nothing can be looked for, so
+        // counting it lost would make every handout read as half-dropped.
+        let raw = "32";
+        assert_eq!(content_coverage(raw, &[(1, 1, String::new())]), 1.0);
     }
 }

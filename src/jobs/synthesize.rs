@@ -245,10 +245,54 @@ async fn flag_unverified(
     Ok(())
 }
 
+/// Measure how much of a corpus survived into its artifacts, and store it.
+///
+/// Pure local work over rows that are already there — no inference and no
+/// vector call — so it can be re-run over a whole base whenever the measure
+/// itself changes, rather than re-synthesising documents that are fine.
+pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
+    let segments = core.store.segments_for_corpus(corpus_id).await?;
+
+    let made: Vec<(i64, i64, String)> = segments
+        .iter()
+        .map(|w| {
+            let text = chunks
+                .iter()
+                .filter(|c| c.segment_idx == Some(w.idx))
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (w.start_line, w.end_line, text)
+        })
+        .collect();
+
+    // A corpus segmented before per-segment windows existed has no ranges to
+    // group by; measure it as one.
+    let made = if made.is_empty() {
+        vec![(
+            1,
+            src.raw_text.lines().count() as i64,
+            chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )]
+    } else {
+        made
+    };
+
+    let cov = crate::infer::verify::content_coverage(&src.raw_text, &made);
+    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    Ok(cov)
+}
+
 /// Everything that can only be decided once every window has resolved:
 /// continuous ordinals, the source's status, and the single batched embed job.
 pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
-    let src = core.store.get_corpus(corpus_id).await?;
+    core.store.get_corpus(corpus_id).await?;
     core.store.renumber_artifacts(corpus_id).await?;
     let windows = core.store.segments_for_corpus(corpus_id).await?;
     let degraded = windows.iter().any(|w| w.state != SegmentState::Done);
@@ -263,12 +307,7 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // How much of the source ended up inside a chunk. A source where the
     // segmenter quietly dropped half a chapter used to look identical to one
     // where it did not.
-    let spans: Vec<(i64, i64)> = chunks
-        .iter()
-        .filter_map(|c| c.corpus_span.as_ref().map(|s| (s.start_line, s.end_line)))
-        .collect();
-    let cov = crate::infer::verify::coverage(&spans, &src.raw_text);
-    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    let cov = recompute_coverage(core, corpus_id).await?;
     if cov < crate::infer::verify::LOW_COVERAGE {
         tracing::warn!(
             corpus_id,

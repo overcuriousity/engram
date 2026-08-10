@@ -181,10 +181,19 @@ Each segment is checked before its artifacts are stored.
   omit `corpus_lines` more often than not; when that happens the span is
   recovered by finding the artifact's own verbatim lines in the segment, and only a
   span the model actually asserted is ever doubted.
-- **Coverage.** The fraction of a corpus's lines that ended up inside some
-  artifact is recorded and shown on Browse. Below 60% it reads as a warning — a
+- **Coverage.** The fraction of a corpus's lines whose content reached some
+  artifact, recorded and shown on Browse. Below 60% it reads as a warning — a
   corpus where synthesis dropped half a chapter used to look identical to
-  one where it did not.
+  one where it did not. A line counts when half its distinctive tokens appear
+  in the artifacts made from its segment, so a line that was rewritten still
+  counts and a line inside a segment that failed does not. Asking instead
+  which lines an artifact *claimed* — the obvious measure, and the one this
+  replaced — answers a different question: the model omits `corpus_lines` more
+  often than not, and a span recovered by matching verbatim text finds only
+  the part of an artifact that was not rewritten, so a faithful chapter scored
+  like a missing one. Coverage is computed when a corpus finishes segmenting;
+  `--recompute-coverage` re-measures every corpus from the artifacts already
+  stored, which costs no inference and re-synthesises nothing.
 
 Flagged artifacts are listed on Ops with two actions: re-synthesise that one segment,
 or mark the artifact reviewed.
