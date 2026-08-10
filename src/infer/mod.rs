@@ -1,4 +1,5 @@
 pub mod budget;
+pub mod facts;
 pub mod fake;
 pub mod openai;
 pub mod prompt;
