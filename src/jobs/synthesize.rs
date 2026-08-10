@@ -347,11 +347,16 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
 /// "spent every attempt", because the attempt count belongs to the job, which
 /// covers the whole source.
 ///
-/// Returns whether windows are still waiting for the model, which the caller
-/// answers with a fresh job. It cannot be enqueued here: the caller's own job
-/// row is keyed `(stage, target_id)`, so enqueuing the same source would reuse
-/// that row and the `complete_job` that follows would close it again — the
+/// Returns whether windows are still waiting for their first attempt, which the
+/// caller answers with a fresh job. It cannot be enqueued here: the caller's own
+/// job row is keyed `(stage, target_id)`, so enqueuing the same source would
+/// reuse that row and the `complete_job` that follows would close it again — the
 /// untried windows would be left with nothing to come back to.
+///
+/// Either way the source is settled for now: whatever windows did succeed are
+/// embedded and the corpus reports `partial`. Settled is not finished — a failed
+/// window is still owed a model call, and the caller queues one at the backoff's
+/// distance.
 pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -> Result<bool> {
     let pending = core.store.pending_segments(corpus_id).await?;
     if pending.is_empty() {
@@ -359,7 +364,9 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
         return Ok(false);
     }
 
-    let (tried, untried): (Vec<_>, Vec<_>) = pending.into_iter().partition(|w| w.attempts > 0);
+    let (tried, untried): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|w| w.attempts > 0 || w.state == SegmentState::Failed);
 
     if !untried.is_empty() {
         tracing::info!(
@@ -386,9 +393,17 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
             "window could not be segmented; its lines have no chunk"
         );
     }
-    // Windows still waiting for their own attempts mean the source is not
+    // Windows still waiting for their first attempt mean the source is not
     // settled yet; finishing here would enqueue embedding for half a document.
-    if core.store.pending_segments(corpus_id).await?.is_empty() {
+    // A window already marked failed does not hold it up — it is owed another
+    // call, not a first one, and the next job brings that.
+    let untried_left = core
+        .store
+        .pending_segments(corpus_id)
+        .await?
+        .into_iter()
+        .any(|w| w.state == SegmentState::Pending);
+    if !untried_left {
         finish(core, corpus_id).await?;
         return Ok(false);
     }
@@ -423,7 +438,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
-    use crate::store::jobs::Stage;
+    use crate::store::jobs::{MAX_ATTEMPTS, Stage};
 
     /// A body several windows long under the fake synthesizer's budget.
     fn multi_segment_body() -> String {
@@ -494,6 +509,43 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.ordinal, i as i64, "ordinals must not restart per window");
         }
+    }
+
+    #[tokio::test]
+    async fn a_segment_the_endpoint_refused_is_queued_again() {
+        // The failure that lost a quarter of a document: the endpoint was
+        // loading a model and returned 502 for ten minutes, the job spent its
+        // attempts inside the first minute, and nothing ever tried the segment
+        // again. `failed` has to mean "waiting to be tried", not "gone".
+        let core = test_core_with_failing_synthesizer().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+
+        for _ in 0..MAX_ATTEMPTS + 2 {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            crate::jobs::run_one(&core).await.unwrap();
+        }
+
+        assert!(
+            core.store.failed_jobs(10).await.unwrap().is_empty(),
+            "the corpus was abandoned"
+        );
+        // Directly, because `finish` also queues an embed job for the corpus
+        // and `claim_job` may hand that one over first.
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs
+              WHERE stage = 'synthesize' AND target_id = ? AND state = 'pending'",
+        )
+        .bind(&out.id)
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "no job is left to retry the segment");
     }
 
     #[tokio::test]

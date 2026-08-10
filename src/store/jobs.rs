@@ -93,6 +93,38 @@ impl Store {
         Ok(())
     }
 
+    /// Queue work that has already been tried, so the next attempt waits.
+    ///
+    /// `enqueue` resets `attempts` to zero, which is right for a reprocess a
+    /// person asked for and wrong for a stage re-arming itself: a synthesize
+    /// job that keeps failing would come straight back with a two-second
+    /// delay and hammer an endpoint that is down. This keeps the attempt count
+    /// climbing so the backoff means something.
+    pub async fn enqueue_after(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        attempts: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?)
+             ON CONFLICT(stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = excluded.attempts,
+               run_after = excluded.run_after, claimed_at = NULL",
+        )
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(attempts)
+        .bind(now() + backoff_secs(attempts))
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
