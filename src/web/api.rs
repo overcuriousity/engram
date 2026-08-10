@@ -394,6 +394,10 @@ async fn delete_artifact(
         .delete_artifacts(std::slice::from_ref(&cid))
         .await?;
     st.core.store.delete_artifact(&cid).await?;
+    // This artifact may have been the reason another one is hidden, and a
+    // keeper that no longer exists leaves its loser out of search in favour of
+    // nothing. Deleting a whole corpus heals for the same reason.
+    st.core.heal_dangling_supersessions().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -767,7 +771,8 @@ mod patch_tests {
     use super::tests::*;
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     /// One embedded chunk, and the app that can edit it.
@@ -1017,6 +1022,64 @@ mod patch_tests {
         .await
         .unwrap();
         assert_eq!(core.store.get_artifact(&cid).await.unwrap().title, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_artifact_frees_whatever_it_was_hiding() {
+        // Deleting a corpus heals for this reason; deleting one artifact left
+        // its loser hidden in favour of an id that no longer exists until the
+        // next sweep — which is never, with `consolidate.enabled = false`.
+        let (app, token, core, keeper) = one_artifact().await;
+        let src = core
+            .store
+            .insert_corpus("other", "web", None)
+            .await
+            .unwrap();
+        let hidden = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "the older copy".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .set_superseded_by(&hidden, Some(&keeper))
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/artifacts/{keeper}"))
+                    .method("DELETE")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store
+                .get_artifact(&hidden)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the artifact is still hidden in favour of a deleted one"
+        );
     }
 
     #[tokio::test]

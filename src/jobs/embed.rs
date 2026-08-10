@@ -358,6 +358,10 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
         .await?;
+    // The parent is gone, so anything it was hiding is now hidden in favour of
+    // an artifact that does not exist. The siblings are not a substitute: they
+    // are new ids nothing points at.
+    core.heal_dangling_supersessions().await?;
 
     for c in &inserted {
         core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;

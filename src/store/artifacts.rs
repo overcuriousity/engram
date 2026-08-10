@@ -391,22 +391,24 @@ impl Store {
         Ok(())
     }
 
-    /// Clear every `superseded_by` that names an artifact which no longer
-    /// exists, and say which artifacts were freed.
+    /// Artifacts hidden in favour of a keeper that no longer exists.
     ///
     /// `superseded_by` is a plain column with no foreign key, so deleting a
     /// corpus — or reprocessing one, which deletes and re-creates every
     /// artifact under new ids — can leave the losing side of a pair pointing at
     /// nothing. That artifact is hidden from search forever, in favour of a
     /// copy that is gone: the surviving text becomes invisible, which is the
-    /// exact loss consolidation exists to avoid. The caller clears the matching
-    /// payload flags.
-    pub async fn clear_dangling_superseded(&self) -> Result<Vec<String>> {
+    /// exact loss consolidation exists to avoid.
+    ///
+    /// A read, not a write: the caller clears the vector payload before the
+    /// row, so that a failure between the two leaves the artifact listed on Ops
+    /// rather than hidden with nothing pointing at it. See
+    /// `Core::heal_dangling_supersessions`.
+    pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
         let rows = sqlx::query(
-            "UPDATE artifacts SET superseded_by = NULL
+            "SELECT id FROM artifacts
               WHERE superseded_by IS NOT NULL
-                AND superseded_by NOT IN (SELECT id FROM artifacts)
-              RETURNING id",
+                AND superseded_by NOT IN (SELECT id FROM artifacts)",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -655,6 +657,52 @@ mod tests {
         s.mark_embed_failed(&made[1].id).await.unwrap();
         assert_eq!(s.pending_embed_count(&src.id).await.unwrap(), 0);
         assert_eq!(s.failed_embed_count(&src.id).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn listing_dangling_supersessions_does_not_clear_them() {
+        // The healing order depends on this being a read. If listing also
+        // cleared the rows, a vector write that then failed would leave the
+        // artifact hidden with `superseded_by` already NULL: off the Ops list,
+        // past the sweep's self-heal branch, and unreachable by any button.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "loser".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        s.set_superseded_by(&made[0].id, Some("an-artifact-that-is-gone"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.dangling_superseded().await.unwrap(),
+            vec![made[0].id.clone()]
+        );
+        assert_eq!(
+            s.dangling_superseded().await.unwrap(),
+            vec![made[0].id.clone()],
+            "the second call came back empty, so the first one wrote"
+        );
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
     }
 
     #[tokio::test]

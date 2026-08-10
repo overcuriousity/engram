@@ -180,17 +180,41 @@ impl Core {
     }
 
     /// Put back anything that was hidden in favour of an artifact which has
-    /// since been deleted. Cheap — one statement, and vector writes only for
-    /// rows it actually freed — so it runs after every deletion.
+    /// since been deleted. Cheap — one query, and vector writes only for the
+    /// rows it actually frees — so it runs after every deletion.
+    ///
+    /// Payload before row, exactly as `unsupersede` does it, and for the same
+    /// reason. Clearing the rows first would leave every artifact whose vector
+    /// write then failed hidden from search with `superseded_by` already NULL:
+    /// off the Ops list, past the sweep's self-heal branch — which only repairs
+    /// the opposite skew — and unreachable by any button. This runs first in a
+    /// sweep, when Qdrant being unavailable is precisely the case at hand.
+    ///
+    /// One failure does not abandon the rest: each artifact is independent, and
+    /// the ones that can be freed should be. The state a failure leaves behind
+    /// is the recoverable one, so the next deletion or sweep finishes the job.
     pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
-        for id in self.store.clear_dangling_superseded().await? {
-            self.vectors.set_superseded(&id, false).await?;
+        let mut first_err = None;
+        for id in self.store.dangling_superseded().await? {
+            if let Err(e) = self.vectors.set_superseded(&id, false).await {
+                tracing::warn!(
+                    artifact_id = %id,
+                    error = %e,
+                    "could not clear the hidden flag; the artifact stays listed on Ops"
+                );
+                first_err.get_or_insert(e);
+                continue;
+            }
+            self.store.set_superseded_by(&id, None).await?;
             tracing::info!(
                 artifact_id = %id,
                 "restored an artifact whose surviving copy was deleted"
             );
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Vectors first: an orphaned row is invisible, but an orphaned vector is
