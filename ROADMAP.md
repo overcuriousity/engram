@@ -31,9 +31,7 @@ The evaluation harness is built and is not on this list: `cargo test --test
 eval` scores hand-written query/artifact pairs against a corpus that stays on
 the operator's own machine. It is unpopulated by design — writing pairs and
 freezing a corpus costs real GPU time, and it is worth spending only when a
-decision actually turns on the answer. The speculative query index and the
-term-id change below are exactly such decisions: both change what is in the
-index, and adding to an index always looks like it is helping.
+decision actually turns on the answer.
 
 ## [Retrieval]
 
@@ -52,8 +50,7 @@ index, and adding to an index always looks like it is helping.
      token per artifact wrecks storage and memory in Qdrant and adds a model
      dependency, to win against a baseline that is already strong: atomic,
      LLM-synthesised artifacts make single-vector hybrid search (dense + sparse,
-     RRF-fused in one round trip) precise enough. Speculative queries buy more
-     recall per byte. -->
+     RRF-fused in one round trip) precise enough. -->
 
 ## [Write-Time Inference & Hygiene]
 
@@ -63,23 +60,6 @@ Speculation about *access* is what the reader will be holding when they come
 looking. Both are paid for once, in the background, and neither adds anything
 to the query path.
 
-- **A speculative query index.** The gap the evaluation pairs are meant to
-  expose is a vocabulary gap. An artifact is written in the language of whoever
-  wrote the corpus — a clause in a lease, a step in a recipe, a passage of case
-  law, a line of a shell session — and the reader arrives with the words they
-  happen to have, which are the words of the situation, not of the document.
-  Close the gap at write time. The segment job already has the model warm on
-  the artifact it just produced, so have the same call also emit three to five
-  questions the artifact answers, plus the other names for whatever it is about
-  — the everyday word for a term of art, the term of art for an everyday word.
-  Embed those as extra points resolving to the same `artifact_id`, dedupe by
-  `artifact_id` after retrieval, and score an artifact by its best-matching
-  point. Speculative points are an access path only: they are never rendered
-  and never returned as text, so the artifact the reader sees stays the exact
-  one that was stored. Costs vectors and one longer synthesis reply; costs the
-  query path nothing. Needs the per-corpus cap and grouping to work on artifact
-  identity rather than point identity, and wants eval pairs written first —
-  this is the change most likely to look good and rank worse.
 - ~~**Near-duplicate detection on capture.**~~ Done — a bottom-k MinHash over
   word shingles (`src/store/shingle.rs`) is computed at capture and compared
   against every stored corpus. Above `consolidate.near_dupe_min` the capture is
@@ -118,8 +98,7 @@ to the query path.
      artifact competes with — and was written to beat — the exact source wording
      it was derived from. That is fidelity loss by design, and it buys back only
      latency the write-time thesis already spends. It also costs a second
-     write-time LLM pass and a regeneration cascade on every member edit.
-     Speculative queries reach the same artifacts without inventing text. -->
+     write-time LLM pass and a regeneration cascade on every member edit. -->
 
 ## [Core Platform & Tooling]
 
@@ -140,12 +119,6 @@ to the query path.
   from the vectors. The SQLite index was never read by any production path and
   charged three triggers on every artifact write to stay current. It was
   external-content, so no text was lost with it.
-- **Term-id collisions.** Sparse dimensions are `u32` and terms are hashed into
-  them, so a large enough vocabulary conflates two terms into one dimension and
-  a document matches a word it does not contain. `sparse::term_id` is the only
-  place ids are derived, so replacing it with a vocabulary table is a contained
-  change plus a `--reindex`. Build it only if the eval harness shows the
-  collisions costing real hits — nothing else answers that.
 - **OAuth 2.1 for `/mcp`.** OIDC login for the web UI is built
   (`src/auth/oidc.rs`: discovery, PKCE, nonce, subject/email allowlist); the
   MCP surface still authenticates on its own terms.
