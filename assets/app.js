@@ -144,4 +144,25 @@
     items[next].focus();
     e.preventDefault();
   });
+  // Judging has to cost about five seconds, or it will not happen. Digits pick
+  // an option, N/S/X take the three ways out. Ignored while a text field has
+  // focus, so typing in the assignment search does not fire a verdict.
+  document.addEventListener('keydown', function (e) {
+    var card = document.querySelector('.judge-card');
+    if (!card || e.metaKey || e.ctrlKey || e.altKey) return;
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+    if (/^[1-9]$/.test(e.key)) {
+      var pick = card.querySelectorAll('.judge-option')[Number(e.key) - 1];
+      if (pick) { e.preventDefault(); pick.click(); }
+      return;
+    }
+    var outs = { n: 0, s: 1, x: 2 };
+    var idx = outs[e.key.toLowerCase()];
+    if (idx !== undefined) {
+      var row = card.querySelectorAll('.judge-outs button');
+      if (row[idx]) { e.preventDefault(); row[idx].click(); }
+    }
+  });
 })();

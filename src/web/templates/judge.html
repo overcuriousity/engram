@@ -1,0 +1,42 @@
+{% extends "layout.html" %}
+{% block title %}Judge — engram{% endblock %}
+{% block content %}
+{# The header is the real measurement, not a score standing in for one: both
+   figures are read from the ranks the searches actually gave, so every verdict
+   moves the number it is measured by. #}
+<div class="judge-header">
+  <div class="row">
+    <span class="mono">{{ stats.judged }} judged</span>
+    <span class="spacer"></span>
+    <span class="mono">recall@10 {{ recall }}</span>
+    <span class="mono">MRR {{ mrr }}</span>
+  </div>
+  <div class="progress" role="progressbar" aria-valuenow="{{ stats.judged }}"
+       aria-valuemin="0" aria-valuemax="{{ target }}">
+    <span style="width:{{ progress_pct }}%"></span>
+  </div>
+  <p class="muted hint">{{ stats.judged }} / {{ target }} until the first sweep</p>
+  <p class="muted mono">
+    {{ stats.hits }} hits · {{ stats.finds }} finds · {{ stats.gaps }} gaps ·
+    {{ stats.discards }} discarded
+  </p>
+</div>
+
+{% if !misses.is_empty() %}
+<details class="misses">
+  <summary class="muted">{{ misses.len() }} queries the ranking got wrong</summary>
+  <ul class="mono">
+    {% for m in misses %}
+    <li>{{ m.query }} —
+      {% match m.rank %}
+      {% when Some with (r) %}position {{ r + 1 }}
+      {% when None %}never offered
+      {% endmatch %}
+    </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+
+<div id="card">{% include "_judge_card.html" %}</div>
+{% endblock %}
