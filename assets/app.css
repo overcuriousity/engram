@@ -168,10 +168,13 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .input::placeholder, .textarea::placeholder { color: var(--color-fg-muted); }
 .input:focus, .textarea:focus, .select:focus { outline: none; border-color: var(--color-accent); }
 
+/* `nowrap`, because a badge is a label rather than a paragraph: "100% covered"
+   broke across two lines inside its own border and made every table row a
+   different height. */
 .badge {
   display: inline-flex; align-items: center; padding: 2px 6px;
   font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.2;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm); white-space: nowrap;
   background: var(--color-bg-active); color: var(--color-fg-secondary);
   border: 1px solid var(--color-border-strong);
 }
@@ -242,6 +245,18 @@ nav.top a.brand img { display: block; }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
 @media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
+
+/* A grid child defaults to `min-width: auto`, which resolves to min-content:
+   one unwrappable line of source then widens the column instead of scrolling
+   inside `.raw`, and takes the document's width with it. `.pane` had this; its
+   siblings did not, so the source pane escaped to the right at every width. */
+.workspace > *, .split > *, .rail-head { min-width: 0; }
+.raw { max-width: 100%; }
+/* Titles and snippets are prose, not source: they break rather than push. */
+.rail-title, .rail-snippet, .card-title { overflow-wrap: anywhere; }
+/* A backstop. If something new overflows, it scrolls in its own box rather
+   than dragging the document sideways. */
+body { overflow-x: hidden; }
 
 .pane-label {
   display: flex; gap: 0.5rem; align-items: baseline;
