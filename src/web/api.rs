@@ -433,16 +433,9 @@ async fn delete_artifact(
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
-    st.core.store.get_artifact(&cid).await?;
-    st.core
-        .vectors
-        .delete_artifacts(std::slice::from_ref(&cid))
-        .await?;
-    st.core.store.delete_artifact(&cid).await?;
-    // This artifact may have been the reason another one is hidden, and a
-    // keeper that no longer exists leaves its loser out of search in favour of
-    // nothing. Deleting a whole corpus heals for the same reason.
-    st.core.heal_dangling_supersessions().await?;
+    // Both stores, in the order that survives an interruption — see
+    // `Core::delete_artifact`, which the UI button posts to as well.
+    st.core.delete_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

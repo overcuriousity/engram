@@ -200,8 +200,34 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // Deletions clear these as they happen; the sweep repeats it because a
     // hidden artifact pointing at nothing is invisible to search and to every
     // page that could put it back, and nothing else would ever notice.
-    core.heal_dangling_supersessions().await?;
-    repair_lifecycle_drift(core).await?;
+    // Neither repair is allowed to take the sweep with it. Both are maintenance
+    // over state the rest of the sweep does not read, both are retried on every
+    // sweep, and both are most likely to fail on exactly the base that needs
+    // them most — the one that drifted far enough to make the repair large.
+    // Propagating the error stopped consolidation *permanently*: the next sweep
+    // reached the same call and failed the same way, so near-duplicate
+    // detection and judging never ran again.
+    if let Err(e) = core.heal_dangling_supersessions().await {
+        tracing::warn!(
+            error = %e,
+            "could not restore every artifact whose winner was deleted; retrying on the next sweep"
+        );
+    }
+    if let Err(e) = repair_lifecycle_drift(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile lifecycle state with the vector store; retrying on the next sweep"
+        );
+    }
+    // Startup heals too, but a process that stays up for weeks is exactly the
+    // one whose stores drift: every interrupted write between the two happens
+    // while it is running, not while it is starting.
+    if let Err(e) = core.heal_store_drift().await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile which artifacts the two stores hold; retrying on the next sweep"
+        );
+    }
 
     let pairs = core
         .vectors
@@ -253,7 +279,22 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             // SQLite first: it is the source of truth, and a payload flag with
             // no row behind it is a hidden artifact nothing can explain. See
             // `Core::supersede`.
-            core.supersede(&c.id, &keep.id).await?;
+            //
+            // One failure does not abandon the rest, as in
+            // `heal_dangling_supersessions`. `supersede` refuses a side that is
+            // no longer active, and these statuses were read earlier in this
+            // same sweep — so an operator deprecating one of them from Ops in
+            // the meantime is an ordinary race, not a reason to abandon the
+            // remaining clusters, the judge pass, and every pair below.
+            if let Err(e) = core.supersede(&c.id, &keep.id).await {
+                tracing::warn!(
+                    superseded = %c.id,
+                    by = %keep.id,
+                    error = %e,
+                    "could not hide a near-identical artifact; it stays active"
+                );
+                continue;
+            }
             hidden.insert(c.id.clone());
             out.superseded += 1;
             tracing::info!(
@@ -303,7 +344,16 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 (&b, &a)
             };
             if contains_normalized(&long.text, &short.text) {
-                core.supersede(&short.id, &long.id).await?;
+                // Same race, same treatment as the cluster pass above.
+                if let Err(e) = core.supersede(&short.id, &long.id).await {
+                    tracing::warn!(
+                        superseded = %short.id,
+                        by = %long.id,
+                        error = %e,
+                        "could not hide a duplicated passage; it stays active"
+                    );
+                    continue;
+                }
                 out.superseded += 1;
                 tracing::info!(
                     superseded = %short.id,

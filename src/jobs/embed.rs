@@ -1,6 +1,6 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::artifacts::{Chunk, NewArtifact};
+use crate::store::artifacts::{ArtifactStatus, Chunk, NewArtifact};
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::vector::{VectorPayload, VectorPoint};
@@ -383,10 +383,29 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // chunk look forgotten.
         last_seen_at: None,
         hit_count: None,
-        // Unset for the same reason, and it matters more: writing `false` here
-        // would revive an artifact the sweep hid, on every re-embed.
-        superseded: None,
-        status: None,
+        // Retired state is written; active state is deferred. The asymmetry is
+        // the point.
+        //
+        // Deferring unconditionally loses the state outright on a *first*
+        // embed: there is no stored value to carry forward, so an artifact
+        // deprecated while its embed job was still pending — the detail page
+        // offers the button whatever the embed state — lands as a point with no
+        // `status` at all and is back in ordinary results. Nothing notices until
+        // the next sweep's `repair_lifecycle_drift`, and nothing ever does if
+        // consolidation is disabled.
+        //
+        // Writing unconditionally has the opposite failure: `false`/`active` on
+        // every re-embed would revive an artifact the sweep hid, because the row
+        // is read here before the embedding call and an operator can retire the
+        // artifact while that call is in flight.
+        //
+        // Writing only the retired values takes neither. SQLite is the source of
+        // truth (`set_superseded_by` maintains `status` alongside
+        // `superseded_by`), so a row that says retired is a fact worth writing;
+        // a row that says active cannot distinguish "still active" from "stale
+        // read", so it defers to the stored value as before.
+        superseded: (chunk.superseded_by.is_some()).then_some(true),
+        status: (chunk.status != ArtifactStatus::Active).then_some(chunk.status),
         // Written, not deferred: a brand-new point has no stored stamp to carry
         // forward, and the scoring formula reads a missing `last_verified_at`
         // as epoch — so leaving it unset would rank every freshly ingested
@@ -396,7 +415,10 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // The `created_at` fallback covers any row written before the column
         // existed.
         last_verified_at: chunk.last_verified_at.or(Some(chunk.created_at)),
-        superseded_by: None,
+        // Same rule as `status` directly above, and it has to be the same rule:
+        // a point that says superseded while naming no winner is a hidden
+        // artifact whose replacement the UI cannot show.
+        superseded_by: chunk.superseded_by.clone(),
     }
 }
 
@@ -423,6 +445,49 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_artifact_retired_before_its_first_embed_lands_retired() {
+        // The detail page offers Deprecate whatever the embed state, so this is
+        // reachable by pressing it on a freshly captured artifact. The payload
+        // deferred `status` to whatever was already stored — and on a first
+        // embed nothing is, so the point arrived with no status at all and the
+        // deprecated artifact was back in ordinary results. Nothing noticed
+        // until the next sweep, and nothing ever did with consolidation off.
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "a stale instruction".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        core.deprecate(&made[0].id).await.unwrap();
+
+        run(&core, &made[0].id).await.unwrap();
+
+        let stored = core
+            .vectors
+            .payloads_of(&[made[0].id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            stored[&made[0].id].status,
+            Some(crate::store::artifacts::ArtifactStatus::Deprecated),
+            "the first embed put a deprecated artifact back into results"
+        );
+    }
 
     #[tokio::test]
     async fn a_chunk_the_endpoint_refuses_is_split_rather_than_retried() {

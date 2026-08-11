@@ -1,4 +1,6 @@
-use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPoint, VectorStore, cosine};
+use super::{
+    FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore, cosine,
+};
 use crate::error::Result;
 use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
@@ -222,6 +224,14 @@ impl VectorStore for MemoryVectors {
             .collect())
     }
 
+    async fn payloads_of(&self, artifact_ids: &[String]) -> Result<HashMap<String, VectorPayload>> {
+        let r = self.points.read().unwrap();
+        Ok(artifact_ids
+            .iter()
+            .filter_map(|id| Some((id.clone(), r.get(id)?.payload.clone())))
+            .collect())
+    }
+
     async fn all_artifact_ids(&self) -> Result<Vec<String>> {
         let r = self.points.read().unwrap();
         let mut out: Vec<String> = r.keys().cloned().collect();
@@ -237,18 +247,33 @@ impl VectorStore for MemoryVectors {
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let r = self.points.read().unwrap();
-        Ok(r.values()
+        let mut found: Vec<&VectorPayload> = r
+            .values()
+            .map(|p| &p.payload)
             .filter(|p| {
-                status_of(&p.payload) == ArtifactStatus::Active
+                status_of(p) == ArtifactStatus::Active
                     // Present and old. An unstamped point is unbackfilled, not
                     // stale — see the trait doc. A missing `hit_count` is the
                     // other way round: never retrieved is what it means.
-                    && p.payload.last_verified_at.is_some_and(|v| v < older_than)
-                    && p.payload.hit_count.unwrap_or(0) <= max_hits
+                    && p.last_verified_at.is_some_and(|v| v < older_than)
+                    && p.hit_count.unwrap_or(0) <= max_hits
             })
+            .collect();
+        // Sorted before truncating, and sorted at all: this backs a work queue
+        // an operator returns to after every action, and `values()` iterates a
+        // HashMap in an order that is neither stable nor meaningful. Stalest
+        // first, id as the tiebreak — see the Qdrant implementation, whose order
+        // this has to match for the two to be testable against each other.
+        found.sort_by(|a, b| {
+            a.last_verified_at
+                .cmp(&b.last_verified_at)
+                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
+        });
+        Ok(found
+            .into_iter()
             .take(limit)
-            .map(|p| SearchHit {
-                payload: p.payload.clone(),
+            .map(|payload| SearchHit {
+                payload: payload.clone(),
                 score: 0.0,
             })
             .collect())

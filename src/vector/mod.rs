@@ -279,6 +279,15 @@ pub trait VectorStore: Send + Sync {
     /// How many points carry no `last_verified_at`, i.e. still need the
     /// lifecycle backfill. Startup reads this to decide whether to run it,
     /// rather than making an operator remember a flag.
+    ///
+    /// Points with no `artifact_id` are excluded, and that exclusion is what
+    /// makes "run the backfill once" true. The backfill stamps artifacts, so a
+    /// point naming none can never be stamped by it — counting those meant the
+    /// number never reached zero and every process start kicked off another
+    /// full-base rewrite. Such a point can come from a hand-populated
+    /// collection or a `--reindex` over one, it is invisible to search anyway
+    /// (its payload will not parse as a chunk), and it is left alone rather than
+    /// deleted: nothing here knows what it is.
     async fn unstamped_count(&self) -> Result<u64>;
     /// Artifact ids whose payload says deprecated or superseded, capped at
     /// `limit`. The sweep compares these against SQLite — the source of truth —
@@ -297,9 +306,23 @@ pub trait VectorStore: Send + Sync {
         artifact_ids: &[String],
     ) -> Result<std::collections::HashMap<String, StoredLifecycle>>;
     /// Every artifact id the store holds a point for. Unbounded on purpose:
-    /// the one caller is the backfill, which is already a pass over the whole
-    /// base and uses this to find points whose SQLite row is gone.
+    /// the one caller is the heal, which is already a pass over the whole base
+    /// and compares this against SQLite in both directions.
+    ///
+    /// A point whose payload carries no `artifact_id` at all cannot appear here
+    /// and is not counted by `unstamped_count` either — see that method. It is
+    /// not an engram point and nothing can be said about it.
     async fn all_artifact_ids(&self) -> Result<Vec<String>>;
+    /// The full stored payloads for these ids. Ids with no point are absent
+    /// from the answer.
+    ///
+    /// This is what the heal restores an artifact row from, so unlike
+    /// `lifecycle_of` it has to hand back everything the payload holds — the
+    /// text, the title, the tags — not just the lifecycle fields.
+    async fn payloads_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, VectorPayload>>;
     /// A random sample of chunks captured before `older_than` and not shown
     /// since `unseen_since`. Random rather than ranked: there is no query here,
     /// only the question of what has been forgotten.

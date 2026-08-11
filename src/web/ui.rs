@@ -76,6 +76,12 @@ pub struct ArtifactDetail {
     /// Conditions the source stated under which this artifact does not apply.
     pub caveats: Vec<String>,
     pub corpus_id: String,
+    /// True when this artifact's source was never captured here — the artifact
+    /// was restored from the vector store and its corpus row is a placeholder.
+    /// The pane shows the source beside the artifact, so it has to say when what
+    /// it is showing is the artifact's own text reflected back rather than the
+    /// document it was drawn from.
+    pub corpus_restored: bool,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -293,6 +299,12 @@ struct CorpusTemplate {
     status: String,
     badge: &'static str,
     artifacts: Vec<ArtifactView>,
+    /// This row is a placeholder for a source that was never captured here, so
+    /// `raw_text` is its restored artifacts joined rather than a document. The
+    /// page has to say so: it otherwise presents reconstructed fragments under
+    /// the same "Raw corpus" heading as a real capture, and offers to
+    /// re-segment them.
+    restored: bool,
 }
 
 #[derive(Template)]
@@ -588,6 +600,7 @@ async fn corpus_detail(
         raw_text: s.raw_text,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
+        restored: s.restored_at.is_some(),
         artifacts,
     })
     .into_response())
@@ -627,6 +640,26 @@ async fn delete_corpus_ui(
 ) -> Result<Response> {
     st.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/browse").into_response())
+}
+
+/// Remove an artifact from both stores, from the page that shows it.
+///
+/// The deliberate counterpart to what `Core::heal_store_drift` stopped doing on
+/// its own. A background pass cannot tell an artifact deleted on purpose from
+/// one whose row a crash lost, so it now restores both and this button is the
+/// only thing that removes anything — a person who can see the artifact deciding
+/// it should go.
+///
+/// Lands on the source afterwards rather than back here, which would be a page
+/// for an artifact that no longer exists.
+async fn delete_artifact_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    let corpus_id = st.core.store.get_artifact(&aid).await?.corpus_id;
+    st.core.delete_artifact(&aid).await?;
+    Ok(Redirect::to(&format!("/ui/corpora/{corpus_id}")).into_response())
 }
 
 async fn reprocess_ui(
@@ -1050,6 +1083,7 @@ pub(crate) async fn build_artifact_detail(
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
         corpus_id: c.corpus_id,
+        corpus_restored: src.restored_at.is_some(),
         segment_idx: c.segment_idx,
         slice_label: slice.label,
         slice_lines: slice.lines,
@@ -1108,6 +1142,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
+        .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))

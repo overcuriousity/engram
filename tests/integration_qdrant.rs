@@ -1941,3 +1941,130 @@ async fn all_artifact_ids_pages_past_one_scroll() {
     assert_eq!(ids.len(), 1_100, "the scroll stopped at its first page");
     v.drop_collection().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
+    // It used to be a random sample. Acting on a candidate redirects back to
+    // Ops, which re-drew — so the queue an operator was working reshuffled under
+    // them on every press, and on a base with more candidates than the limit a
+    // given artifact might take many page loads to come back.
+    let v = fresh("engram_it_stale_order", 4).await;
+    let points: Vec<VectorPoint> = (0..40)
+        .map(|i| {
+            point(
+                &format!("a{i:02}"),
+                "s1",
+                vec![1.0, 0.0, 0.0, 0.0],
+                &[],
+                "c",
+            )
+        })
+        .collect();
+    v.upsert(points).await.unwrap();
+    // Stamped in the opposite order to the ids, so "stalest first" and "id
+    // order" cannot be confused for one another.
+    for i in 0..40 {
+        v.set_last_verified_at(&format!("a{i:02}"), 10_000 - i, false)
+            .await
+            .unwrap();
+    }
+
+    let first: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    let again: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+
+    assert_eq!(first, again, "the queue reshuffled between two renders");
+    let expected: Vec<String> = (0..10).map(|i| format!("a{:02}", 39 - i)).collect();
+    assert_eq!(first, expected, "the queue did not lead with the stalest");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
+    // What `Core::heal_store_drift` restores an artifact from. Unlike
+    // `lifecycle_of` it has to carry the text, title, tags and category, or the
+    // restored row is an empty artifact with the right id.
+    let v = fresh("engram_it_payloads_of", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["t1", "t2"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    v.set_lifecycle("a", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    let found = v
+        .payloads_of(&["a".to_string(), "never-existed".to_string()])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        found.len(),
+        1,
+        "an id with no point must be absent, not empty"
+    );
+    let p = &found["a"];
+    assert_eq!(p.text, "text a");
+    assert_eq!(p.corpus_id, "s1");
+    assert_eq!(p.title.as_deref(), Some("a"));
+    assert_eq!(p.category.as_deref(), Some("procedure"));
+    assert_eq!(p.tags, vec!["t1".to_string(), "t2".to_string()]);
+    assert_eq!(p.created_at, 42);
+    assert_eq!(
+        p.status,
+        Some(ArtifactStatus::Deprecated),
+        "a restored artifact would come back active and searchable"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_point_naming_no_artifact_does_not_keep_the_backfill_running_forever() {
+    // The backfill stamps artifacts, so a point naming none can never be
+    // stamped by it — and startup decides whether to run the backfill by
+    // counting unstamped points. Counting these meant the number never reached
+    // zero and every process start kicked off another full-base rewrite.
+    let v = fresh("engram_it_unkeyed", 4).await;
+    v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
+        .await
+        .unwrap();
+    raw(
+        reqwest::Method::PUT,
+        "/collections/engram_it_unkeyed/points?wait=true",
+        Some(serde_json::json!({
+            "points": [{
+                "id": "11111111-1111-1111-1111-111111111111",
+                "vector": { "dense": [0.0, 0.0, 0.0, 1.0] },
+                "payload": { "something": "else" },
+            }],
+        })),
+    )
+    .await;
+    v.set_last_verified_at("a", 1, false).await.unwrap();
+
+    assert_eq!(
+        v.unstamped_count().await.unwrap(),
+        0,
+        "startup would run the whole backfill again on every single start"
+    );
+    v.drop_collection().await.unwrap();
+}

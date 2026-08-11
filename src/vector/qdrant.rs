@@ -1220,26 +1220,37 @@ impl VectorStore for QdrantVectors {
         // stamps artifacts it knows nothing about, and zeroing every retrieval
         // counter in the base is not a migration step. See `Core::verify` for
         // the case that does reset it.
-        let ops: Vec<Value> = rows
-            .iter()
-            .map(|r| {
-                let mut payload = lifecycle_payload(r.status, r.superseded_by.as_deref());
-                payload["last_verified_at"] = json!(r.last_verified_at);
-                json!({
-                    "set_payload": {
-                        "payload": payload,
-                        "points": [ point_uuid(&r.artifact_id) ],
-                    }
+        //
+        // Capped per request for the same reason `lifecycle_of` caps its
+        // retrieves: one operation per artifact means an unbounded caller
+        // produces an unbounded request body, and Qdrant may well refuse it.
+        // The callers that most need this pass are the ones with the most to
+        // write — a full backfill, or a drift repair over a base that drifted
+        // badly — so the largest request is exactly the one that must not be
+        // the one that fails.
+        const BATCH: usize = 512;
+        for group in rows.chunks(BATCH) {
+            let ops: Vec<Value> = group
+                .iter()
+                .map(|r| {
+                    let mut payload = lifecycle_payload(r.status, r.superseded_by.as_deref());
+                    payload["last_verified_at"] = json!(r.last_verified_at);
+                    json!({
+                        "set_payload": {
+                            "payload": payload,
+                            "points": [ point_uuid(&r.artifact_id) ],
+                        }
+                    })
                 })
-            })
-            .collect();
-        let _: Value = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/batch?wait=true", self.alias),
-                Some(json!({ "operations": ops })),
-            )
-            .await?;
+                .collect();
+            let _: Value = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/batch?wait=true", self.alias),
+                    Some(json!({ "operations": ops })),
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -1250,7 +1261,13 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/count", self.alias),
                 Some(json!({
                     "exact": true,
-                    "filter": { "must": [ { "is_empty": { "key": "last_verified_at" } } ] },
+                    "filter": {
+                        "must": [ { "is_empty": { "key": "last_verified_at" } } ],
+                        // A point naming no artifact is not backfillable — see
+                        // the trait doc. Counting it kept this above zero
+                        // forever.
+                        "must_not": [ { "is_empty": { "key": "artifact_id" } } ],
+                    },
                 })),
             )
             .await?;
@@ -1286,6 +1303,45 @@ impl VectorStore for QdrantVectors {
                     .map(str::to_string)
             })
             .collect())
+    }
+
+    async fn payloads_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, VectorPayload>> {
+        let mut out = std::collections::HashMap::new();
+        if artifact_ids.is_empty() {
+            return Ok(out);
+        }
+        // Batched for the same reason as `lifecycle_of` below, and with more
+        // reason: these retrieves carry the full payload, text included.
+        const BATCH: usize = 256;
+        for batch in artifact_ids.chunks(BATCH) {
+            let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(json!({
+                        "ids": ids,
+                        "with_payload": true,
+                        "with_vector": false,
+                    })),
+                )
+                .await?;
+            for p in found {
+                match serde_json::from_value::<VectorPayload>(p.payload) {
+                    Ok(payload) => {
+                        out.insert(payload.artifact_id.clone(), payload);
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "skipping a point whose payload is not an engram chunk"
+                    ),
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn lifecycle_of(
@@ -1372,42 +1428,108 @@ impl VectorStore for QdrantVectors {
         Ok(out)
     }
 
+    /// Scrolled and sorted rather than sampled, because this list is a work
+    /// queue.
+    ///
+    /// A random draw meant every render of Ops produced a different set: acting
+    /// on a candidate redirects back to the page, which re-drew, so an operator
+    /// could not work the queue down and a given artifact might take many page
+    /// loads to reappear. A scroll is deterministic (Qdrant returns points in id
+    /// order), so the same base with the same threshold yields the same queue,
+    /// and answering a candidate is what removes it — verifying restamps it out
+    /// of the range, deprecating filters it out.
+    ///
+    /// The scroll is capped: the filtered set is "everything stale enough", with
+    /// no upper bound on a neglected base, and this runs on a page render. The
+    /// cap costs nothing an operator can perceive, since the whole point is to
+    /// hand back `limit` rows and `limit` is small — it only means that on a
+    /// base with more than `STALE_SCAN` stale artifacts, the queue is drawn from
+    /// the first window in point-id order rather than the true global worst.
     async fn stale_candidates(
         &self,
         older_than: i64,
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let res: QueryResult = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/query", self.alias),
-                Some(json!({
-                    "query": { "sample": "random" },
-                    "filter": {
-                      "must_not": [
-                        { "key": "status", "match": { "value": "deprecated" } },
-                        { "key": "status", "match": { "value": "superseded" } },
-                        { "key": "superseded", "match": { "value": true } },
-                      ],
-                      "must": [
-                        // Present *and* old. A point with no stamp is not a
-                        // stale candidate, it is an unbackfilled one — see the
-                        // trait doc. `hit_count` below is the opposite case:
-                        // absent legitimately means never retrieved.
-                        { "key": "last_verified_at", "range": { "lt": older_than } },
-                        { "should": [
-                            { "key": "hit_count", "range": { "lte": max_hits } },
-                            { "is_empty": { "key": "hit_count" } },
-                        ] },
-                      ],
-                    },
-                    "limit": limit,
-                    "with_payload": true,
-                })),
-            )
-            .await?;
-        Ok(hits_of(res))
+        /// How many matching points the queue is drawn from.
+        const STALE_SCAN: usize = 10_000;
+        const PAGE: usize = 1_000;
+
+        let filter = json!({
+            "must_not": [
+                { "key": "status", "match": { "value": "deprecated" } },
+                { "key": "status", "match": { "value": "superseded" } },
+                { "key": "superseded", "match": { "value": true } },
+            ],
+            "must": [
+                // Present *and* old. A point with no stamp is not a stale
+                // candidate, it is an unbackfilled one — see the trait doc.
+                // `hit_count` below is the opposite case: absent legitimately
+                // means never retrieved.
+                { "key": "last_verified_at", "range": { "lt": older_than } },
+                { "should": [
+                    { "key": "hit_count", "range": { "lte": max_hits } },
+                    { "is_empty": { "key": "hit_count" } },
+                ] },
+            ],
+        });
+
+        let mut found: Vec<VectorPayload> = Vec::new();
+        let mut offset = Value::Null;
+        while found.len() < STALE_SCAN {
+            let mut body = json!({
+                "filter": filter,
+                "limit": PAGE.min(STALE_SCAN - found.len()),
+                "with_payload": true,
+                "with_vector": false,
+            });
+            if !offset.is_null() {
+                body["offset"] = offset.clone();
+            }
+            let page: ScrollResult = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/scroll", self.alias),
+                    Some(body),
+                )
+                .await?;
+            if page.points.is_empty() {
+                break;
+            }
+            for p in page.points {
+                match serde_json::from_value::<VectorPayload>(p.payload) {
+                    Ok(payload) => found.push(payload),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "skipping a point whose payload is not an engram chunk"
+                    ),
+                }
+            }
+            offset = page.next_page_offset;
+            if offset.is_null() {
+                break;
+            }
+        }
+
+        // Stalest first, so the queue leads with the artifacts most worth an
+        // operator's attention rather than with whichever ids sort lowest. The
+        // id tiebreak keeps the order total: two artifacts stamped in the same
+        // second must not swap places between one render and the next.
+        found.sort_by(|a, b| {
+            a.last_verified_at
+                .cmp(&b.last_verified_at)
+                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
+        });
+        found.truncate(limit);
+        Ok(found
+            .into_iter()
+            .map(|payload| SearchHit {
+                payload,
+                // No query to be similar to. The caller ranks this list by
+                // staleness, which the order above already carries.
+                score: 0.0,
+            })
+            .collect())
     }
 
     async fn search(

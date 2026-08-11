@@ -101,10 +101,22 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     //
     // "Once" depends on the pass being able to stamp everything this count sees.
     // It is driven by SQLite and the count is not, so a point whose row is gone
-    // used to keep the number above zero forever and rerun the whole rewrite on
-    // every single start — which is why the backfill also deletes those.
+    // would keep the number above zero forever and rerun the whole rewrite on
+    // every single start — which is why the backfill finishes by healing the
+    // drift, and why the count ignores points that name no artifact at all.
     match core.vectors.unstamped_count().await {
-        Ok(0) => {}
+        Ok(0) => {
+            // No backfill to run, so nothing else would look at the two stores.
+            // They can still disagree — a crash between the two writes, a
+            // restore of one from a backup taken at a different moment — and
+            // until something notices, one side's artifacts are simply missing.
+            let worker = core.clone();
+            core.background.spawn(async move {
+                if let Err(e) = worker.heal_store_drift().await {
+                    tracing::warn!(error = %e, "could not reconcile the two stores; the next sweep retries");
+                }
+            });
+        }
         Ok(n) => {
             tracing::info!(
                 unstamped = n,

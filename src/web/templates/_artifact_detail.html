@@ -48,6 +48,31 @@
   </div>
   {% endif %}
 
+  {# Deprecating hides an artifact and keeps it; this removes it from both
+     stores and cannot be undone, which is why it sits apart from the lifecycle
+     buttons above and is offered whatever the artifact's status. Nothing
+     deletes an artifact except this press — see `Core::heal_store_drift`. #}
+  <div class="chips">
+    <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
+          onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
+      <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+    </form>
+  </div>
+
+  {% if d.corpus_restored %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Source not stored</b>
+      <div>This artifact was restored from the vector store after its row went
+        missing, and the document it came from was not in the database to
+        restore. The source shown beside it is the restored artifacts joined
+        together, not the original — line numbers and the highlighted span mean
+        nothing here, and re-segmenting would not reproduce this artifact.</div>
+    </div>
+  </div>
+  {% endif %}
+
   {% if !d.flags.is_empty() %}
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>

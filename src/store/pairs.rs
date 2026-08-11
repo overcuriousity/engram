@@ -155,18 +155,29 @@ impl Store {
         Ok(rows.iter().map(row_to_pair).collect())
     }
 
+    /// Move a pair to any state other than `Superseded`, clearing the judge's
+    /// proposed direction along with it.
+    ///
+    /// `obsolete_id` is cleared rather than left alone because it belongs to the
+    /// `Superseded` state and to nothing else — see `set_pair_superseded`, the
+    /// only path that writes it. A pair the judge proposed a winner for and an
+    /// operator then dismissed would otherwise keep naming a supersede that was
+    /// explicitly rejected, and any later listing of dismissed pairs would offer
+    /// to apply it.
     pub async fn set_pair_state(
         &self,
         id: i64,
         state: PairState,
         detail: Option<&str>,
     ) -> Result<()> {
-        let res = sqlx::query("UPDATE artifact_pairs SET state = ?, detail = ? WHERE id = ?")
-            .bind(state.as_str())
-            .bind(detail)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = ?, detail = ?, obsolete_id = NULL WHERE id = ?",
+        )
+        .bind(state.as_str())
+        .bind(detail)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         // A dismiss from a stale Ops page names a pair that is no longer there
         // — its artifacts were deleted, or the row never existed. Redirecting
         // as though it worked tells the operator the queue is one shorter than
@@ -350,6 +361,39 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_the_superseded_state_drops_the_judge_s_proposal() {
+        // `obsolete_id` belongs to `Superseded` and to no other state. A pair
+        // the judge proposed a winner for and an operator then dismissed used to
+        // keep naming that winner, so any listing of dismissed pairs would offer
+        // to apply a supersede that had been explicitly rejected.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        s.set_pair_superseded(p.id, &a, Some("a is stale"))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(p.id).await.unwrap().obsolete_id.as_deref(),
+            Some(a.as_str())
+        );
+
+        s.set_pair_state(p.id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.get_pair(p.id).await.unwrap().obsolete_id,
+            None,
+            "a dismissed pair still carries the supersede that was rejected"
         );
     }
 

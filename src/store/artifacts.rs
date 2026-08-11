@@ -114,6 +114,27 @@ pub struct NewArtifact {
     pub caveats: Vec<String>,
 }
 
+/// An artifact rebuilt from a vector payload, keeping its original id.
+///
+/// Separate from `NewArtifact` because the two are opposites: that one describes
+/// an artifact being created, and the store assigns its id, while this one
+/// describes an artifact that already existed and whose id is the one thing that
+/// must not change. Only the fields a `VectorPayload` actually carries are here
+/// — see `Store::restore_artifact` for what is left neutral and why.
+#[derive(Debug, Clone)]
+pub struct RestoredArtifact {
+    pub id: String,
+    pub corpus_id: String,
+    pub text: String,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub created_at: i64,
+    pub status: ArtifactStatus,
+    pub last_verified_at: Option<i64>,
+    pub superseded_by: Option<String>,
+}
+
 fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     let tags_json: String = r.get("tags");
     let span_json: Option<String> = r.get("corpus_span");
@@ -201,6 +222,46 @@ impl Store {
         }
         tx.commit().await?;
         Ok(out)
+    }
+
+    /// Re-create an artifact row from what the vector store still holds about
+    /// it, keeping the original id. Returns whether a row was written; an id
+    /// that already exists is left exactly as it is.
+    ///
+    /// This is the SQLite half of the two-way heal (`Core::heal_store_drift`),
+    /// so it is deliberately not `insert_artifacts`: that mints a new id, and a
+    /// restored artifact that does not keep its own is a second copy rather than
+    /// the same artifact — its point would still be an orphan, and the next heal
+    /// would restore it again.
+    ///
+    /// What the payload cannot supply is left at its neutral value rather than
+    /// guessed. `ordinal` is 0 and `corpus_span` NULL because a payload records
+    /// neither, so a restored artifact has no position within its source; the
+    /// same goes for `segment_idx`, `caveats`, and `flags`. `embed_state` is
+    /// `pending` on purpose even though a vector demonstrably exists: the stored
+    /// vector may have been written by a different embedding model than the
+    /// collection now uses, and a restored row that claims `done` would keep
+    /// that mismatch permanently invisible. Re-embedding costs one call and
+    /// makes `embed_model` true.
+    pub async fn restore_artifact(&self, c: &RestoredArtifact) -> Result<bool> {
+        let res = sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, superseded_by)
+             VALUES (?, ?, 0, ?, NULL, ?, ?, ?, 'pending', NULL, ?, NULL, '[]', ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(&c.id)
+        .bind(&c.corpus_id)
+        .bind(&c.text)
+        .bind(&c.title)
+        .bind(&c.category)
+        .bind(serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()))
+        .bind(c.created_at)
+        .bind(c.status.as_str())
+        .bind(c.last_verified_at)
+        .bind(&c.superseded_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
@@ -486,6 +547,22 @@ impl Store {
     /// Every artifact id, for the one-shot Qdrant lifecycle backfill.
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT id FROM artifacts")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// Ids of artifacts whose row claims a vector was written for them.
+    ///
+    /// The heal uses this rather than `list_all_artifact_ids` for the
+    /// SQLite-has-it/vectors-do-not direction, because an artifact still waiting
+    /// on its embed job has no point *correctly* — that is the normal state of
+    /// everything just ingested, not drift. Nor is a `failed` row: the embedder
+    /// refused that text, and re-queueing it every sweep is a retry loop with no
+    /// end. Only a row that says `embedded` while the vector store holds nothing
+    /// is a write that went missing.
+    pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT id FROM artifacts WHERE embed_state = 'embedded'")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())

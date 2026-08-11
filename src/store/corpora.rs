@@ -68,6 +68,12 @@ pub struct Corpus {
     /// Both cleared when an operator chooses to keep both.
     pub near_dupe_of: Option<String>,
     pub near_dupe_score: Option<f64>,
+    /// Set when this row is a placeholder for a corpus that was never captured
+    /// here — its artifacts came back from the vector store and needed a parent
+    /// to hang from. `raw_text` is then those artifacts joined, not the source
+    /// document, so nothing that reasons about the original text should trust
+    /// it. `None` for every ordinary capture.
+    pub restored_at: Option<i64>,
 }
 
 /// A stored corpus that a new capture looks like.
@@ -99,6 +105,7 @@ fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
             .unwrap_or_default(),
         near_dupe_of: r.get("near_dupe_of"),
         near_dupe_score: r.get("near_dupe_score"),
+        restored_at: r.get("restored_at"),
     }
 }
 
@@ -140,6 +147,8 @@ impl Store {
             shingles,
             near_dupe_of: None,
             near_dupe_score: None,
+            // A capture, not a placeholder. See `ensure_restored_corpus`.
+            restored_at: None,
         };
         sqlx::query(
             "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles)
@@ -157,6 +166,47 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(src)
+    }
+
+    /// Insert the placeholder parent a restored artifact needs, if it is not
+    /// already there. Returns whether a row was created.
+    ///
+    /// `artifacts.corpus_id` is NOT NULL and references this table, so an
+    /// artifact whose corpus row is gone — the whole-database-lost case this
+    /// exists for — cannot be restored without one. Everything here is derived
+    /// rather than invented where that is possible at all: the id is the one the
+    /// vector payload named, and `raw_text` is the restored artifacts joined,
+    /// which is genuinely all of that document still in the system.
+    ///
+    /// `content_hash` is seeded from the id rather than from `raw_text` because
+    /// the column is UNIQUE and this is not a capture: two stubs whose artifacts
+    /// happen to hold identical text are still two different sources, and
+    /// hashing the reconstructed text would make the second insert fail. Seeding
+    /// from the id also keeps a stub from ever colliding with a real capture of
+    /// the same text, which would silently attach these artifacts to it.
+    ///
+    /// `Partial` is the honest status: some of this source is present, and how
+    /// much is unknowable. `shingles` stays empty so the near-duplicate
+    /// comparison skips it — the reconstructed text is not the document, and
+    /// letting it be compared would report near-duplicates that do not exist.
+    pub async fn ensure_restored_corpus(&self, id: &str, raw_text: &str) -> Result<bool> {
+        let at = now();
+        let res = sqlx::query(
+            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, restored_at)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, '', ?)
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(raw_text)
+        .bind("restored:vector-store")
+        .bind(content_hash(&format!("restored:{id}")))
+        .bind(CorpusStatus::Partial.as_str())
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {

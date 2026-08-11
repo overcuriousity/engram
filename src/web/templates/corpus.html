@@ -4,17 +4,36 @@
 <div class="row" style="margin-bottom:1rem">
   <span class="badge {{ badge }}">{{ status }}</span>
   <span class="spacer"></span>
+  {# Re-segmenting a placeholder would delete the restored artifacts and pay the
+     model to re-derive them from their own text. Nothing to re-segment. #}
+  {% if !restored %}
   <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline">
     <button class="btn btn-sm" type="submit">Re-segment</button>
   </form>
+  {% endif %}
   <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
         onsubmit="return confirm('Delete this corpus and all its artifacts?')">
     <button class="btn btn-sm btn-danger" type="submit">Delete</button>
   </form>
 </div>
 
+{% if restored %}
+<div class="flag" role="status">
+  <div aria-hidden="true">⚠</div>
+  <div>
+    <b>Placeholder source</b>
+    <div>This source was never captured here. Its artifacts were restored from
+      the vector store after their rows went missing, and every artifact needs a
+      source to belong to, so this row was written to hold them. The text below
+      is those artifacts joined together — not the original document.</div>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
-  <div class="card-head"><span class="card-title">Raw corpus</span></div>
+  <div class="card-head">
+    <span class="card-title">{% if restored %}Restored artifacts{% else %}Raw corpus{% endif %}</span>
+  </div>
   <pre class="mono" style="white-space:pre-wrap;font-size:0.8125rem;margin:0">{{ raw_text }}</pre>
 </div>
 
