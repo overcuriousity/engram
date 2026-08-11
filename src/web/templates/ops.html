@@ -33,15 +33,38 @@
       <td><a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a></td>
       <td><a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a></td>
       <td class="muted">{% if let Some(d) = p.detail %}{{ d }}{% else %}—{% endif %}</td>
-      <td class="row" style="gap:0.25rem">
-        {% if p.obsolete_title.is_some() %}
-        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede">
-          <button class="btn btn-sm" type="submit">Apply supersede</button>
+      {# Resolving a pair means saying which artifact is current. Both sides are
+         offered for every pair, not only the ones the judge could call: a pair
+         flagged as disagreeing with no proposed direction used to offer nothing
+         but Dismiss, so the only way to clear it was to declare the
+         disagreement uninteresting and leave both artifacts in results.
+
+         The judge's pick, when it has one, is the accented button rather than a
+         separate action — a recommendation about which of these two to press,
+         not a third thing to do. #}
+      {# The flex container is a div inside the cell, not the cell itself:
+         `display:flex` on a <td> takes it out of the table layout, so it stops
+         sizing with its column and its buttons spill past the row's rule. #}
+      <td>
+      <div class="row" style="gap:0.25rem;flex-wrap:wrap">
+        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
+              onsubmit="return confirm('Keep &quot;{{ p.a_title }}&quot; and hide the other? You can undo this from Ops.')">
+          <input type="hidden" name="keep" value="{{ p.a_id }}">
+          <button class="btn btn-sm {% if p.keeps_a %}btn-accent{% endif %}" type="submit">
+            Keep one
+          </button>
         </form>
-        {% endif %}
+        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
+              onsubmit="return confirm('Keep &quot;{{ p.b_title }}&quot; and hide the other? You can undo this from Ops.')">
+          <input type="hidden" name="keep" value="{{ p.b_id }}">
+          <button class="btn btn-sm {% if p.keeps_b %}btn-accent{% endif %}" type="submit">
+            Keep the other
+          </button>
+        </form>
         <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
-          <button class="btn btn-sm" type="submit">Dismiss</button>
+          <button class="btn btn-sm btn-ghost" type="submit">Dismiss</button>
         </form>
+      </div>
       </td>
     </tr>
   {% endfor %}
@@ -87,13 +110,25 @@
     <tr>
       <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
       <td class="muted mono">{{ s.last_verified }}</td>
-      <td class="row" style="gap:0.25rem">
-        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/verify">
-          <button class="btn btn-sm" type="submit">Still accurate</button>
-        </form>
-        <form method="post" action="/ui/ops/artifacts/{{ s.id }}/deprecate">
-          <button class="btn btn-sm" type="submit">Deprecate</button>
-        </form>
+      {# Same icons as the artifact pane, and a div rather than a flex <td> for
+         the same reason as the pairs table above. Fifty rows of two labelled
+         buttons is a wall of repeated words; the meaning is in the column. #}
+      <td>
+        <div class="row" style="gap:0.25rem">
+          <form method="post" action="/ui/ops/artifacts/{{ s.id }}/verify">
+            <button class="btn-icon" type="submit"
+                    title="Confirm still accurate" aria-label="Confirm still accurate">
+              {% include "_icon_check.html" %}
+            </button>
+          </form>
+          <form method="post" action="/ui/ops/artifacts/{{ s.id }}/deprecate">
+            <button class="btn-icon" type="submit"
+                    title="Deprecate — hide from results, keep the artifact"
+                    aria-label="Deprecate: hide from results, keep the artifact">
+              {% include "_icon_hide.html" %}
+            </button>
+          </form>
+        </div>
       </td>
     </tr>
   {% endfor %}

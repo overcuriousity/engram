@@ -2068,3 +2068,33 @@ async fn a_point_naming_no_artifact_does_not_keep_the_backfill_running_forever()
     );
     v.drop_collection().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn an_unstamped_point_is_never_a_stale_candidate() {
+    // The list says "not confirmed accurate in a while", so a point that was
+    // never stamped at all must not appear: missing means unknown, not stale,
+    // and every point predates the backfill until it runs. A row reading
+    // "last verified: never" is this invariant breaking.
+    let v = fresh("engram_it_stale_unstamped", 4).await;
+    v.upsert(vec![
+        point("stamped", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("unstamped", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    v.set_last_verified_at("stamped", 1_000, false)
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+
+    assert_eq!(ids, vec!["stamped".to_string()], "{ids:?}");
+    v.drop_collection().await.unwrap();
+}

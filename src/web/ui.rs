@@ -140,9 +140,14 @@ pub struct PairRow {
     pub detail: Option<String>,
     pub contradiction: bool,
     /// Set when the judge named a direction with enough confidence to propose
-    /// a supersede — the pair's "apply supersede" button shows only then.
-    /// Applying it is a separate press; nothing here has hidden anything yet.
+    /// a supersede. A recommendation only: nothing here has hidden anything,
+    /// and either side can still be kept.
     pub obsolete_title: Option<String>,
+    /// Which side the judge's proposal amounts to keeping, so the row can
+    /// accent that button. Both false when it made no proposal — every pair is
+    /// still resolvable, just with nothing recommended.
+    pub keeps_a: bool,
+    pub keeps_b: bool,
 }
 
 /// An artifact flagged stale with no specific replacement.
@@ -790,6 +795,10 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                     title_of(&b)
                 }
             });
+            // Keeping one side is superseding the other, so the judge naming
+            // `a` obsolete is a recommendation to keep `b`.
+            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
+            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -800,6 +809,8 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 detail: p.detail,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
                 obsolete_title,
+                keeps_a,
+                keeps_b,
             });
         }
     }
@@ -945,16 +956,51 @@ async fn dismiss_pair_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-/// The operator confirmation step for a judge-proposed supersede: the pair's
-/// `obsolete_id` becomes an actual `Core::supersede` call. Nothing before this
-/// press hides anything — see `jobs::consolidate::judge_pending`.
+/// Which artifact of a pair the operator is keeping. Absent means "whichever
+/// the judge proposed", which is what the confirmation button on a proposed
+/// supersede sends.
+#[derive(serde::Deserialize, Default)]
+struct KeepForm {
+    keep: Option<String>,
+}
+
+/// Resolve a pair by naming the artifact that survives; the other is superseded
+/// by it.
+///
+/// Two callers, one action. The judge's proposal is a suggestion an operator
+/// confirms, and a contradiction the judge could not call is the same decision
+/// with nobody suggesting anything — so both are "keep this one", and only the
+/// default differs. Before this, a pair the judge flagged as disagreeing but
+/// could not rule on offered nothing except Dismiss: the operator could see two
+/// artifacts stating different things and had no way to say which was right,
+/// so the only way out of the queue was to declare the disagreement uninteresting
+/// and leave both in results.
+///
+/// Nothing before this press hides anything — see `jobs::consolidate::judge_pending`.
 async fn apply_pair_supersede_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(pid): Path<i64>,
+    Form(f): Form<KeepForm>,
 ) -> Result<Response> {
     let pair = st.core.store.get_pair(pid).await?;
-    let obsolete_id = pair.obsolete_id.ok_or(crate::error::Error::NotFound)?;
+    // The winner has to be one of this pair's own artifacts. A form field is
+    // user input, and superseding an arbitrary id because it arrived in a POST
+    // would hide an artifact that has nothing to do with the row that was
+    // pressed.
+    let obsolete_id = match f.keep {
+        Some(keep) if keep == pair.a_id => pair.b_id.clone(),
+        Some(keep) if keep == pair.b_id => pair.a_id.clone(),
+        Some(_) => {
+            return Err(crate::error::Error::Validation(
+                "the artifact to keep is not part of this pair".into(),
+            ));
+        }
+        None => pair
+            .obsolete_id
+            .clone()
+            .ok_or(crate::error::Error::NotFound)?,
+    };
     let winner_id = if obsolete_id == pair.a_id {
         pair.b_id
     } else {
@@ -2112,6 +2158,93 @@ mod tests {
                 .is_none(),
             "undo did not clear the flag"
         );
+    }
+
+    #[tokio::test]
+    async fn a_contradiction_the_judge_could_not_call_is_still_resolvable() {
+        // The dead end this fixes: the judge finds two artifacts stating a
+        // detail differently but names no winner, so `obsolete_id` is NULL. The
+        // row then offered nothing but Dismiss — an operator who could see which
+        // one was right had no way to say so, and clearing the queue meant
+        // declaring the disagreement uninteresting and leaving both in results.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("they disagree about the tag"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_pair(pair.id)
+                .await
+                .unwrap()
+                .obsolete_id
+                .is_none(),
+            "this test is only meaningful with no judge proposal to fall back on"
+        );
+
+        // Keep the first; the second is the one that gets hidden.
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/supersede", pair.id),
+                &cookie,
+                &format!("keep={}", pair.a_id),
+            ))
+            .await
+            .unwrap();
+
+        let kept = core.store.get_artifact(&pair.a_id).await.unwrap();
+        let hidden = core.store.get_artifact(&pair.b_id).await.unwrap();
+        assert_eq!(kept.status, crate::store::artifacts::ArtifactStatus::Active);
+        assert_eq!(
+            hidden.status,
+            crate::store::artifacts::ArtifactStatus::Superseded
+        );
+        assert_eq!(hidden.superseded_by.as_deref(), Some(pair.a_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn keeping_an_artifact_from_outside_the_pair_is_refused() {
+        // `keep` is a form field, so it is user input. Superseding whatever id
+        // arrives would hide an artifact that has nothing to do with the row
+        // that was pressed.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one", "unrelated"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/supersede", pair.id),
+                &cookie,
+                &format!("keep={}", ids[2]),
+            ))
+            .await
+            .unwrap();
+
+        for id in &ids {
+            assert_eq!(
+                core.store.get_artifact(id).await.unwrap().status,
+                crate::store::artifacts::ArtifactStatus::Active,
+                "an artifact outside the pair was touched"
+            );
+        }
     }
 
     #[tokio::test]
