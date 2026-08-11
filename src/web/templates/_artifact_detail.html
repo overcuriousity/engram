@@ -35,27 +35,43 @@
       </div>
     </div>
   </div>
-  {% else %}
+  {% endif %}
+
+  {# Icons rather than labels: controls that belong to the artifact, not
+     sentences competing with it. Each carries its meaning in `title` and
+     `aria-label`, so the tooltip and the screen reader say the same thing.
+
+     Verify and deprecate only apply to an artifact that is actually in results
+     — the flag above already offers the way back for one that is not — but
+     delete is offered whatever the status, because "get rid of this" is a
+     decision that does not depend on whether it is currently hidden. #}
   <div class="chips">
+    {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-      <button class="btn btn-sm" type="submit">Confirm still accurate</button>
+      <button class="btn-icon" type="submit"
+              title="Confirm still accurate" aria-label="Confirm still accurate">
+        {% include "_icon_check.html" %}
+      </button>
     </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-      <button class="btn btn-sm" type="submit">Deprecate</button>
+      <button class="btn-icon" type="submit"
+              title="Deprecate — hide from results, keep the artifact"
+              aria-label="Deprecate: hide from results, keep the artifact">
+        {% include "_icon_hide.html" %}
+      </button>
     </form>
-  </div>
-  {% endif %}
-
-  {# Deprecating hides an artifact and keeps it; this removes it from both
-     stores and cannot be undone, which is why it sits apart from the lifecycle
-     buttons above and is offered whatever the artifact's status. Nothing
-     deletes an artifact except this press — see `Core::heal_store_drift`. #}
-  <div class="chips">
+    {% endif %}
+    {# Deprecating hides an artifact and keeps it; this removes it from both
+       stores and cannot be undone. Nothing else deletes an artifact — see
+       `Core::heal_store_drift`. #}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
           onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
-      <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+      <button class="btn-icon btn-icon-danger" type="submit"
+              title="Delete permanently" aria-label="Delete artifact permanently">
+        {% include "_icon_trash.html" %}
+      </button>
     </form>
   </div>
 

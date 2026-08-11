@@ -4,20 +4,36 @@
 {% else %}
 <div data-terms="{{ terms }}">
   {% for r in results %}
-  <a class="rail-item" role="option" aria-selected="false"
-     href="/ui/artifacts/{{ r.artifact_id }}"
-     hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
-     hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
-    <div class="rail-head">
-      <span class="rail-rank mono">{{ r.rank }}</span>
-      <span class="rail-title">{{ r.title }}</span>
+  {# The delete control is a sibling of the link rather than a child: a button
+     inside an anchor is invalid, and the anchor must keep being the
+     `.rail-item` the arrow keys move between. #}
+  <div class="rail-row">
+    <a class="rail-item" role="option" aria-selected="false"
+       href="/ui/artifacts/{{ r.artifact_id }}"
+       hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
+       hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
+      <div class="rail-head">
+        <span class="rail-rank mono">{{ r.rank }}</span>
+        <span class="rail-title">{{ r.title }}</span>
+      </div>
+      <div class="rail-snippet">{{ r.snippet }}</div>
+      <div class="chips">
+        {% if let Some(c) = r.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
+        {% for t in r.tags %}<span class="badge">{{ t }}</span>{% endfor %}
+      </div>
+    </a>
+    {# Swaps its own row out and leaves the rest of the results alone, so the
+       search you were reading is still on screen afterwards. #}
+    <div class="rail-del">
+      <button class="btn-icon btn-icon-danger" title="Delete artifact"
+              aria-label="Delete artifact"
+              hx-post="/ui/artifacts/{{ r.artifact_id }}/delete"
+              hx-target="closest .rail-row" hx-swap="outerHTML"
+              hx-confirm="Delete this artifact for good? Deprecating hides it instead and can be undone.">
+        {% include "_icon_trash.html" %}
+      </button>
     </div>
-    <div class="rail-snippet">{{ r.snippet }}</div>
-    <div class="chips">
-      {% if let Some(c) = r.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
-      {% for t in r.tags %}<span class="badge">{{ t }}</span>{% endfor %}
-    </div>
-  </a>
+  </div>
   {% endfor %}
 </div>
 {% endif %}

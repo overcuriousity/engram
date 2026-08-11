@@ -138,6 +138,24 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .btn-danger:hover { background: var(--color-danger); color: #fff; }
 .btn-sm { height: 32px; padding: 0 0.75rem; font-size: 0.75rem; }
 
+/* Icon-only actions: verify, deprecate, delete.
+   The label lives in `aria-label` and `title` rather than in visible text, so a
+   row of controls stays small enough to sit beside an artifact without
+   competing with it for attention. Square, so the three read as one set. */
+.btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; cursor: pointer;
+  border-radius: var(--radius-sm); font-family: inherit;
+  background: transparent; border: 1px solid var(--color-border);
+  color: var(--color-fg-secondary);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn-icon:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+.btn-icon svg { width: 16px; height: 16px; display: block; }
+.btn-icon-danger:hover {
+  background: var(--color-danger); border-color: var(--color-danger); color: #fff;
+}
+
 .input, .textarea, .select {
   width: 100%; font-size: 0.875rem; font-family: inherit;
   color: var(--color-fg-primary); background: var(--color-bg-elevated);
@@ -271,6 +289,23 @@ nav.top a.brand img { display: block; }
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
 }
 .rail-item:hover { background: var(--color-bg-hover); }
+
+/* A result row is the link plus a delete control *beside* it, not inside it: a
+   <button> nested in an <a> is invalid HTML, and the anchor has to stay the
+   `.rail-item` because that is the element the arrow-key navigation focuses.
+   The control is held out of the way until the row is hovered or something
+   inside it takes focus, so the rail still reads as a list of results rather
+   than a list of delete buttons. Keyboard users reach it by tabbing, which
+   `:focus-within` reveals; a touch screen has no hover, so there it is simply
+   always visible. */
+.rail-row { position: relative; }
+.rail-row .rail-item { padding-right: 2.75rem; }
+.rail-del {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.rail-row:hover .rail-del, .rail-del:focus-within { opacity: 1; }
+@media (hover: none) { .rail-del { opacity: 1; } }
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }

@@ -650,15 +650,25 @@ async fn delete_corpus_ui(
 /// only thing that removes anything — a person who can see the artifact deciding
 /// it should go.
 ///
-/// Lands on the source afterwards rather than back here, which would be a page
-/// for an artifact that no longer exists.
+/// Two callers, two right answers. Pressed in a list — a search result, a card
+/// on the source page — the answer is nothing at all: htmx swaps the row that
+/// was pressed out of the list, and the page the operator was reading stays
+/// where it was. Pressed in the pane, where the whole view *is* the artifact,
+/// there is nothing left to stay on, so it lands on the source.
+///
+/// An empty 200 rather than a 204: htmx treats no-content as "swap nothing",
+/// which would leave the deleted artifact on screen until a reload.
 async fn delete_artifact_ui(
     State(st): State<AppState>,
     _id: Identity,
+    headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
 ) -> Result<Response> {
     let corpus_id = st.core.store.get_artifact(&aid).await?.corpus_id;
     st.core.delete_artifact(&aid).await?;
+    if headers.contains_key("hx-request") {
+        return Ok(axum::response::Html(String::new()).into_response());
+    }
     Ok(Redirect::to(&format!("/ui/corpora/{corpus_id}")).into_response())
 }
 
