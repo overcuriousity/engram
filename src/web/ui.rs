@@ -57,6 +57,11 @@ pub struct QueueRow {
     /// Still on its way through the pipeline. Only these announce themselves;
     /// a finished capture is a title and a count.
     pub in_flight: bool,
+    /// Read, and read successfully. False covers both halves of "not moving
+    /// and not done" — failed, parked, partial — which are the states a count
+    /// of artifacts describes least well, because it is usually zero and looks
+    /// exactly like a finished capture that produced nothing.
+    pub settled: bool,
     /// Waiting to be named. Shown differently from a capture that simply has
     /// no title, because this one is about to get one.
     pub unnamed: bool,
@@ -271,6 +276,9 @@ struct CaptureTemplate {
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
     pairs: Vec<PairRow>,
+    /// How many more are behind the ones shown. Said once under the list, so a
+    /// short list does not read as an empty queue when it is a capped one.
+    more_pairs: i64,
 }
 
 #[derive(Template)]
@@ -398,9 +406,11 @@ struct AnswerTemplate {
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    let (pairs, more_pairs) = pair_rows(&st).await?;
     Ok(HtmlTemplate(CaptureTemplate {
         theme: "light".into(),
-        pairs: pair_rows(&st).await?,
+        pairs,
+        more_pairs,
     })
     .into_response())
 }
@@ -625,21 +635,21 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
                 .map(|c| format!("{:.0}%", c * 100.0))
                 .unwrap_or_else(|| "—".into()),
             low_coverage,
-            // A capture on its way is called what it is until synthesis names
-            // it; one that has stopped moving falls back to its opening words,
-            // which is all anything knows about it.
-            label: s.title_hint.clone().unwrap_or_else(|| {
-                if in_flight {
-                    "Untitled capture".to_string()
-                } else {
-                    markdown::snippet(&s.raw_text, 60)
-                }
-            }),
+            // Until synthesis names it, a capture is called by its opening
+            // words — the only thing anything knows about it, and the only
+            // thing that tells three captures pasted in a row apart. `unnamed`
+            // is what says the name is still coming; the label itself is not
+            // the place to say it.
+            label: s
+                .title_hint
+                .clone()
+                .unwrap_or_else(|| markdown::snippet(&s.raw_text, 60)),
             unnamed: s.title_hint.is_none() && in_flight,
             in_flight,
+            settled: matches!(s.status, CorpusStatus::Ready),
             badge: status_badge(&s.status),
             status: s.status.as_str().to_string(),
-            artifact_count: st.core.store.artifacts_for_corpus(&s.id).await?.len() as i64,
+            artifact_count: st.core.store.count_artifacts_for_corpus(&s.id).await?,
             created: fmt_time(s.created_at),
             id: s.id,
         });
@@ -787,23 +797,44 @@ fn title_of(c: &crate::store::artifacts::Chunk) -> String {
         .unwrap_or_else(|| c.text.chars().take(60).collect())
 }
 
-/// The pairs still waiting on a judgement.
+/// How many decisions Capture offers at once, and the order it looks for them
+/// in. Confirmed contradictions and judge-proposed supersedes lead: they are
+/// the ones that mean something in the base is wrong or stale, rather than
+/// merely repeated.
 ///
-/// Shared by Capture, which shows them because that is where the work arrives,
+/// A rolling window rather than the whole backlog. This is now the app's start
+/// page, so every open paid for three fifty-row queries and two point lookups
+/// per pair, and a base with real overlap in it rendered a screen of warning
+/// boxes above the captures. Deciding one of these makes the next appear, so
+/// the cap strands nothing — there is no second page to go and find the rest
+/// on, which is the point: Housekeeping is reference, not work.
+const PAIR_LIMIT: usize = 5;
+const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
+    crate::store::pairs::PairState::Contradiction,
+    crate::store::pairs::PairState::Superseded,
+    crate::store::pairs::PairState::Pending,
+];
+
+/// The first `PAIR_LIMIT` pairs still waiting on a judgement, and how many more
+/// there are behind them.
+///
+/// Used by Capture, which shows them because that is where the work arrives,
 /// and by nothing else: Housekeeping is what is left over once the only part of
 /// Ops that needs a person has moved to the page people actually open.
-///
-/// Confirmed contradictions and judge-proposed supersedes lead: they are the
-/// ones that mean something in the base is wrong or stale, rather than merely
-/// repeated.
-async fn pair_rows(st: &AppState) -> Result<Vec<PairRow>> {
+async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
+    let mut waiting = 0i64;
+    for state in PAIR_STATES {
+        waiting += st.core.store.count_pairs_by_state(state).await?;
+    }
+
     let mut pairs = Vec::new();
-    for state in [
-        crate::store::pairs::PairState::Contradiction,
-        crate::store::pairs::PairState::Superseded,
-        crate::store::pairs::PairState::Pending,
-    ] {
-        for p in st.core.store.pairs_by_state(state, 50).await? {
+    'fill: for state in PAIR_STATES {
+        for p in st
+            .core
+            .store
+            .pairs_by_state(state, PAIR_LIMIT as i64)
+            .await?
+        {
             let (Ok(a), Ok(b)) = (
                 st.core.store.get_artifact(&p.a_id).await,
                 st.core.store.get_artifact(&p.b_id).await,
@@ -834,9 +865,17 @@ async fn pair_rows(st: &AppState) -> Result<Vec<PairRow>> {
                 keeps_a,
                 keeps_b,
             });
+            if pairs.len() == PAIR_LIMIT {
+                break 'fill;
+            }
         }
     }
-    Ok(pairs)
+
+    // Counted from the states rather than from the rows, so a pair whose
+    // artifacts have since gone missing — skipped above — is not announced as
+    // something waiting that never appears.
+    let more = (waiting - pairs.len() as i64).max(0);
+    Ok((pairs, more))
 }
 
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
@@ -2009,6 +2048,19 @@ mod tests {
         let html = body_of(res).await;
         assert!(html.contains("<textarea"));
         assert!(html.contains("hx-post=\"/ui/capture\""));
+        // The two halves of "a capture appears under Recent without a reload":
+        // the form announces the capture, the queue below is listening. The
+        // form only swaps its own result card, so without the event a capture
+        // pasted onto an idle page leaves the list below it stale.
+        assert!(
+            html.contains("htmx.trigger(document.body, 'captured')"),
+            "a successful capture announces nothing for the queue to hear"
+        );
+        assert!(
+            !html.contains("autofocus"),
+            "this page is the app's start_url: autofocus opens the software \
+             keyboard over the page the moment the installed app launches"
+        );
     }
 
     #[tokio::test]
@@ -2158,13 +2210,14 @@ mod tests {
             .unwrap();
 
         // Freshly captured and still queued: the fragment has to ask to be
-        // refreshed, or the row would sit at "Untitled capture" forever.
+        // refreshed, or the row would sit at its opening words forever.
         let body = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
-            body.contains("Untitled capture"),
-            "a capture nothing has read yet still gets a row"
+            body.contains("alpha line"),
+            "a capture nothing has read yet is called by its opening words, \
+             which is what tells two of them apart"
         );
-        assert!(body.contains("hx-trigger"), "work in flight keeps polling");
+        assert!(body.contains("every 3s"), "work in flight keeps polling");
 
         crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
         crate::jobs::embed::run_corpus(&core, &out.id)
@@ -2177,8 +2230,83 @@ mod tests {
             "once synthesis names it, the row is called what it is"
         );
         assert!(
-            !body.contains("hx-trigger"),
+            !body.contains("every 3s"),
             "an idle queue stops polling itself"
+        );
+        assert!(
+            body.contains("captured from:body"),
+            "an idle queue still listens, or a capture pasted onto it never \
+             appears without a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_stopped_without_finishing_says_which_way() {
+        // Failed, parked and partial are all "not moving and not done", and
+        // all three usually have no artifacts — so the count that describes a
+        // finished capture described these as `0 artifacts · —`, which is
+        // exactly what a capture that was read and yielded nothing looks like.
+        // The only list of captures there now is must distinguish them.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+
+        for (status, badge) in [
+            (crate::store::corpora::CorpusStatus::Failed, "badge-danger"),
+            (
+                crate::store::corpora::CorpusStatus::NeedsReview,
+                "badge-warning",
+            ),
+            (
+                crate::store::corpora::CorpusStatus::Partial,
+                "badge-warning",
+            ),
+        ] {
+            let name = status.as_str();
+            core.store.set_corpus_status(&out.id, status).await.unwrap();
+            let body = get_body(&app, &cookie, "/ui/queue").await;
+            assert!(
+                body.contains(badge) && body.contains(name),
+                "{name} renders no status of its own"
+            );
+            assert!(
+                !body.contains("0 artifacts"),
+                "{name} reads as a finished capture that produced nothing"
+            );
+            assert!(
+                !body.contains("every 3s"),
+                "{name} waits on a person or on nobody; polling it changes nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_offers_a_few_decisions_and_counts_the_rest() {
+        // The whole backlog used to render here, on what is now the app's
+        // start page: three fifty-row queries and two point lookups per pair
+        // on every open, and a screen of warning boxes above the captures.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &[
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+            ],
+        )
+        .await;
+        for w in ids.chunks(2) {
+            core.store.record_pair(&w[0], &w[1], 0.9).await.unwrap();
+        }
+
+        let body = get_body(&app, &cookie, "/ui/capture").await;
+        assert_eq!(
+            body.matches("/supersede").count(),
+            super::PAIR_LIMIT * 2,
+            "five pairs, both sides offered for each, and nothing beyond that"
+        );
+        // Seven pairs, five shown. Said on the page, because there is no
+        // second page to go and find the other two on.
+        assert!(
+            body.contains("2 more waiting"),
+            "a capped list that does not say it is capped reads as an empty queue"
         );
     }
 

@@ -1,8 +1,20 @@
 <div data-terms="{{ d.terms }}">
   {# The way back to the list, for a narrow window where opening a result hides
      it. An installed app has no back button to fall back on. Hidden above
-     40rem, where the rail is still on screen beside this. #}
-  <a class="back" href="/ui/search">← Results</a>
+     60rem, where the rail is still on screen beside this — the same width that
+     hides it, not the phone breakpoint.
+
+     Inside the workspace the rail is only hidden by a class, so back is "show
+     the list again" rather than a navigation: dropping the class puts the
+     results back exactly as they were, and `history.back()` follows to undo
+     the URL the click pushed. The plain href is what runs on the standalone
+     artifact page, which has no workspace and no results to return to —
+     `/ui/search` cannot carry the query, because what this page is given is
+     the stripped highlight terms rather than what was typed. #}
+  <a class="back" href="/ui/search"
+     onclick="var w = document.querySelector('.workspace');
+              if (!w) return true;
+              w.classList.remove('has-selection'); history.back(); return false;">← Results</a>
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">

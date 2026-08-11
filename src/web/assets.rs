@@ -304,6 +304,23 @@ mod tests {
         assert_ne!(res.status(), StatusCode::OK);
     }
 
+    /// The manifest paints `#f8f6f1` behind a launch. An offline page that
+    /// opens dark is the same flash of the wrong colour that moving the
+    /// manifest off the dark palette was meant to remove.
+    #[test]
+    fn the_offline_page_opens_in_the_colour_the_manifest_paints() {
+        let js = Assets::get("sw.js").expect("sw.js must be embedded");
+        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
+        assert!(
+            js.contains("html{background:#f8f6f1"),
+            "the offline page does not start from the app's light base colour"
+        );
+        assert!(
+            js.contains("prefers-color-scheme:dark"),
+            "a device set to dark gets no dark offline page"
+        );
+    }
+
     #[test]
     fn the_stylesheet_carries_both_themes_and_the_ported_palette() {
         let css = Assets::get("app.css").expect("app.css must be embedded");

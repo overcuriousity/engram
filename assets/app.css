@@ -431,9 +431,14 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 /* ── An artifact's own controls ──────────────────────────────────────────── */
 
 /* Delete is not one of the other two. It sits at the far end so the control
-   that cannot be undone is never flush against two that can. */
+   that cannot be undone is never flush against two that can.
+
+   `form + form`, because a superseded or deprecated artifact renders neither
+   verify nor deprecate: delete is then the only form in the row, and pushing
+   it away from siblings it does not have just stranded a lone trash button at
+   the far side of an empty row. */
 .actions { display: flex; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; }
-.actions > form:last-of-type { margin-left: auto; }
+.actions > form + form:last-of-type { margin-left: auto; }
 
 /* The open card drops its snippet: the pane beside it is showing that text in
    full. Only the open one — the rest of the list still needs its two lines. */
@@ -472,10 +477,26 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 
 /* ── Phone ───────────────────────────────────────────────────────────────── */
 
-/* Above 40rem the top row carries the destinations and the rail stays on
-   screen beside an open result, so neither of these has anything to do. */
+/* Above 40rem the top row carries the destinations, so the tab bar has nothing
+   to do. The back link answers a different width and gets its own block
+   below. */
 .tabbar { display: none; }
 .back { display: none; }
+
+/* Paired with `.workspace.has-selection .rail { display: none }` above, which
+   is what makes a back link necessary — so it has to appear at the same width
+   that hides the rail, not at the phone breakpoint. Between the two, a
+   half-screen desktop window opened a result, lost the list, and offered
+   nothing on the page to get back to it. */
+@media (max-width: 60rem) {
+  .back {
+    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
+    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
+    font-size: 0.875rem; font-weight: 500; text-decoration: none;
+    color: var(--color-fg-secondary);
+  }
+  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+}
 
 @media (max-width: 40rem) {
   .shell {
@@ -523,16 +544,6 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
      survived. What a capture is called matters more here than when it
      arrived, and the corpus page still says when. */
   .qtime { display: none; }
-
-  /* Opening a result hides the list it came from, and an installed window
-     shows no back button. */
-  .back {
-    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
-    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
-    font-size: 0.875rem; font-weight: 500; text-decoration: none;
-    color: var(--color-fg-secondary);
-  }
-  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 
   /* A row of five cells, most of them empty, is a card here instead. */
   table.grid, table.grid tbody, table.grid tr, table.grid td { display: block; }

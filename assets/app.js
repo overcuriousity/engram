@@ -120,11 +120,12 @@
   });
 
   // Focused only where a pointer says there is a hardware keyboard. On a touch
-  // screen the software keyboard covers the results the page was opened to
-  // show, and in an installed window there is no URL bar to dismiss it from.
-  // This is why the input carries no `autofocus` attribute.
-  var q = document.querySelector('input[name="q"]');
-  if (q && window.matchMedia('(hover: hover)').matches) q.focus();
+  // screen the software keyboard covers what the page was opened to show — the
+  // results on Search, the pending decisions and recent captures on Capture,
+  // which is the app's start page — and in an installed window there is no URL
+  // bar to dismiss it from. This is why neither field carries `autofocus`.
+  var field = document.querySelector('input[name="q"], textarea[name="text"]');
+  if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
   // The rail is a list: arrows move through it, Enter opens what is focused.
   document.addEventListener('keydown', function (e) {

@@ -281,6 +281,21 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
+    /// How many chunks a source produced, without loading any of them.
+    ///
+    /// The queue fragment wants the number and nothing else, and it asks for
+    /// ten sources every three seconds while anything is in flight — reading
+    /// every artifact's full text to call `.len()` on the result was the bulk
+    /// of that poll.
+    pub async fn count_artifacts_for_corpus(&self, corpus_id: &str) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?")
+                .bind(corpus_id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     /// Chunks of a source still waiting for a vector. The embed job batches
     /// these into one inference call, so it needs them as rows, not a count.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {

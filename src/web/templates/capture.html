@@ -1,14 +1,25 @@
 {% extends "layout.html" %}
 {% block title %}Capture — engram{% endblock %}
 {% block content %}
+{# The `captured` event is what puts the new capture under "Recent": this form
+   swaps only its own result card, and the queue below listens for the event to
+   fetch itself again. Fired on the body rather than aimed at the queue, so the
+   form does not have to know whether the fragment currently on screen is the
+   polling one or the idle one. #}
 <form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
-      hx-on::after-request="if(event.detail.successful) this.reset()" class="stack">
+      hx-on::after-request="if (event.detail.successful) { this.reset(); htmx.trigger(document.body, 'captured') }"
+      class="stack">
   {# One line. The segment-count hint below the box says the expensive part,
      and says it only once it is true. #}
   <p class="muted" style="margin:0">
     Paste a chapter at a time — long text is split into segments, one model call each.
   </p>
-  <textarea class="textarea" name="text" placeholder="Paste anything worth keeping." autofocus></textarea>
+  {# No `autofocus`: this page is the app's `start_url`, so on a phone the
+     attribute opened the software keyboard over "Needs you" and "Recent" the
+     moment the app launched, with no URL bar to dismiss it from. app.js
+     focuses it where a pointer says there is a hardware keyboard already —
+     the same rule the search box follows. #}
+  <textarea class="textarea" name="text" placeholder="Paste anything worth keeping."></textarea>
   <p id="size-hint" class="muted" hidden></p>
   <div class="row">
     <button class="btn btn-accent" type="submit">Capture</button>
@@ -20,6 +31,12 @@
 {% if !pairs.is_empty() %}
 <h3>Needs you</h3>
 {% include "_decide.html" %}
+{# A capped list, said once underneath rather than as a link somewhere else:
+   there is no other page these live on. Clearing one of the five above brings
+   the next one up, so the number falls as the work gets done. #}
+{% if more_pairs > 0 %}
+<p class="muted">{{ more_pairs }} more waiting — the next comes up as you clear these.</p>
+{% endif %}
 {% endif %}
 
 <h3>Recent</h3>
