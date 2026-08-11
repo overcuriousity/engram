@@ -135,7 +135,6 @@ impl Store {
         }))
     }
 
-    /// Sliding expiry: an active session keeps renewing itself.
     pub async fn extend_session(&self, id: &str, ttl: i64) -> Result<()> {
         sqlx::query("UPDATE sessions SET expires_at = ? WHERE id = ?")
             .bind(now() + ttl)

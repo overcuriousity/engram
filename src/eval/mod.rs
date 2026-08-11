@@ -1,35 +1,17 @@
-//! Retrieval evaluation: the on-disk format and the metrics.
-//!
-//! Ranking has several knobs — fusion, the per-source cap, recency weight,
-//! reranking — and hand-testing cannot judge them, because the queries anyone
-//! thinks to type reuse words they remember from the passage they are looking
-//! for. Written-down pairs are how a knob change becomes a number that moved.
-//!
-//! The corpus this measures is not in the repository and must not be: it is
-//! whatever documents the operator actually wants to search. What lives here is
-//! the shape of the files and the arithmetic over ranks.
-
 pub mod metrics;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the corpus, the frozen artifacts and the pairs live. Outside the
-/// repository by default; the in-repo fallback exists so an error message can
-/// name a concrete path, and it is gitignored.
 pub fn eval_dir() -> PathBuf {
     std::env::var("ENGRAM_EVAL_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("eval-data"))
 }
 
-/// One artifact as the segmenter produced it, frozen so a benchmark run costs no
-/// completions and two runs rank exactly the same text.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrozenArtifact {
     pub id: String,
-    /// Corpus file this came from. Also what the per-source cap groups by, so
-    /// it has to survive the freeze.
     pub source: String,
     pub text: String,
     pub title: Option<String>,
@@ -38,15 +20,9 @@ pub struct FrozenArtifact {
     pub tags: Vec<String>,
 }
 
-/// A query and the artifact that should answer it.
-///
-/// The query is meant to be phrased as a situation, in the words a reader
-/// happens to have — not in the vocabulary of the artifact. A pair that shares the
-/// artifact's terminology measures nothing: every retrieval system passes it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvalPair {
     pub query: String,
-    /// `FrozenArtifact::id` of the expected answer.
     pub expect: String,
     #[serde(default)]
     pub note: Option<String>,

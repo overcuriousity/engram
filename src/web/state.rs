@@ -8,7 +8,6 @@ pub struct AuthContext {
     pub local: Option<LocalConfig>,
     pub oidc: Option<OidcClient>,
     pub pending: PendingStore,
-    /// Whether to set the `Secure` flag on session cookies.
     pub secure_cookies: bool,
 }
 

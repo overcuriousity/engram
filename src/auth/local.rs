@@ -15,8 +15,6 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> Option<Identity> {
     if username != cfg.username {
-        // Still run the hash so a wrong username and a wrong password take
-        // the same time.
         let _ = verify_secret(password, &cfg.password_hash);
         return None;
     }
@@ -30,11 +28,6 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
     }
 }
 
-/// Local mode is a development shortcut: a single username and password with
-/// no identity provider behind it. Exposing it on a routable interface turns
-/// it into the production authentication mechanism by accident, so a
-/// non-loopback bind is refused unless the operator opts in on the command
-/// line.
 pub fn assert_bind_is_safe(bind: &str, override_flag: bool) -> Result<()> {
     if override_flag {
         tracing::warn!(
@@ -90,8 +83,6 @@ mod tests {
 
     #[test]
     fn local_mode_refuses_a_non_loopback_bind() {
-        // A dev shortcut reachable from the network is production auth by
-        // accident. Refuse rather than warn.
         assert!(assert_bind_is_safe("0.0.0.0:8080", false).is_err());
         assert!(assert_bind_is_safe("192.168.1.10:8080", false).is_err());
         assert!(assert_bind_is_safe("[::]:8080", false).is_err());
@@ -116,7 +107,6 @@ mod tests {
 
     #[test]
     fn a_hostname_that_merely_starts_with_localhost_is_not_loopback() {
-        // "localhost.evil.com" resolves wherever its owner wants.
         assert!(assert_bind_is_safe("localhost.evil.com:8080", false).is_err());
     }
 }

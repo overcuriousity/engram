@@ -2,10 +2,6 @@ use super::Store;
 use crate::error::Result;
 use sqlx::Row;
 
-/// Where one window of a source stands. `Failed` means the synthesizer never
-/// succeeded here and the lines are represented by no chunk at all — the model
-/// is a hard dependency, so an unsegmentable window leaves a hole that the
-/// source's coverage measures, and the reason it ends up `partial`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SegmentState {
@@ -55,8 +51,6 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
 }
 
 impl Store {
-    /// Record the windowing of a source. Idempotent by design: a retried job
-    /// re-derives the same spans and must not undo the windows that finished.
     pub async fn upsert_segments(&self, corpus_id: &str, spans: &[(i64, i64)]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for (idx, (start, end)) in spans.iter().enumerate() {
@@ -84,13 +78,6 @@ impl Store {
         Ok(rows.iter().map(row_to_segment).collect())
     }
 
-    /// Segments still owed a model call: never tried, or tried and refused.
-    ///
-    /// `failed` is included on purpose. It records what went wrong last time,
-    /// not a verdict — an endpoint that was loading a model, or a machine that
-    /// was asleep, says nothing about the text. Excluding it made the next run
-    /// see a finished corpus and close the job, which is how a quarter of a
-    /// document stayed missing while the endpoint sat there answering.
     pub async fn pending_segments(&self, corpus_id: &str) -> Result<Vec<Segment>> {
         let rows = sqlx::query(
             "SELECT * FROM segments
@@ -139,8 +126,6 @@ impl Store {
         Ok(row.get("attempts"))
     }
 
-    /// Put a window back in the queue's path. The operator's "re-segment this
-    /// window" button, and nothing else, calls this.
     pub async fn reset_segment(&self, corpus_id: &str, idx: i64) -> Result<()> {
         sqlx::query(
             "UPDATE segments SET state = 'pending', attempts = 0, last_error = NULL
@@ -153,8 +138,6 @@ impl Store {
         Ok(())
     }
 
-    /// `(resolved, total)`, where resolved counts both a clean window and one
-    /// the model gave up on. Both are settled; neither is still owed work.
     pub async fn segment_progress(&self, corpus_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS total,
@@ -169,8 +152,6 @@ impl Store {
         Ok((resolved.unwrap_or(0), total))
     }
 
-    /// Drop the windowing entirely. Re-segmenting a source from scratch has to
-    /// re-window it, because the text or the model's budget may have changed.
     pub async fn clear_segments(&self, corpus_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM segments WHERE corpus_id = ?")
             .bind(corpus_id)
@@ -199,7 +180,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A second call must not reset the window that already finished.
         s.upsert_segments(&src.id, &[(1, 10), (11, 20), (21, 30)])
             .await
             .unwrap();

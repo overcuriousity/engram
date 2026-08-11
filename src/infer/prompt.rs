@@ -51,19 +51,10 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
     )
 }
 
-/// The judge is asked one question and given no room to be helpful.
-///
-/// It is not asked which artifact is right, nor to merge them, nor to rewrite
-/// anything. Deciding which of two contradictory artifacts is current needs
-/// context the base does not hold — what the reader is actually running — and
-/// is a judgement only they can make. All this call does is tell them there is
-/// a judgement waiting.
 pub const TITLE_SYSTEM: &str = r#"You name documents. Given the opening of a document and the titles of the notes taken from it, reply with one short title — at most eight words, no quotes, no trailing punctuation, no preamble.
 
 Name what the document is about, not what it is. Never "Document", "Notes", "Guide", "Untitled"."#;
 
-/// The opening rather than the whole document: a title needs the subject, and
-/// the artifact titles already say what the rest of it turned out to cover.
 pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     let opening: String = text.chars().take(2000).collect();
     format!(
@@ -95,14 +86,6 @@ Reply with JSON only, no commentary, in exactly this shape:
 - detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false.
 - obsolete: "a" or "b" — only when you are confident one artifact plainly replaces the other (a deprecated flag, step, or default versus its current replacement), not merely that they differ. Omit this field whenever the direction is unclear, the two describe genuinely different but still-valid options, or you are not sure."#;
 
-/// The two artifacts, each under its title.
-///
-/// The title is not decoration here, it is the subject. Synthesis writes a body
-/// that stands on its own within its segment, which is not the same as naming
-/// what it is about: a section headed "FAT32" becomes an artifact whose text
-/// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
-/// alone, the model saw two anonymous spec lists with different numbers and
-/// called them a contradiction — correctly, on the evidence it was given.
 pub fn judge_prompt(a: (&str, &str), b: (&str, &str)) -> String {
     format!(
         "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
@@ -119,17 +102,6 @@ struct Judgement {
     obsolete: Option<String>,
 }
 
-/// A reply that cannot be read is an error, not a verdict.
-///
-/// Defaulting to "contradicts" would fill the review queue with noise an
-/// operator has to clear by hand; defaulting to "no" would quietly close real
-/// conflicts. Failing leaves the pair pending, and the next sweep asks again.
-///
-/// The third element is which side the judge named obsolete — `'a'` or
-/// `'b'` — when it named one with confidence. Anything else the model wrote
-/// there (a stray word, a full sentence) is treated the same as omitting it:
-/// an unreadable direction must not fail the whole reply, since the
-/// contradiction verdict itself may still be perfectly readable.
 pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>, Option<char>)> {
     let j: Judgement = serde_json::from_str(extract_json(body)).map_err(|e| {
         Error::MalformedLlmOutput(format!("judge reply was not the expected JSON: {e}"))
@@ -166,8 +138,6 @@ struct RawArtifact {
     caveats: Vec<String>,
 }
 
-/// Models wrap JSON in fences and preface it with prose no matter what the
-/// prompt says, so slice from the first `{` to the last `}` before parsing.
 fn extract_json(body: &str) -> &str {
     let start = body.find('{');
     let end = body.rfind('}');
@@ -177,16 +147,6 @@ fn extract_json(body: &str) -> &str {
     }
 }
 
-/// Recover the artifact objects a truncated response did finish.
-///
-/// A small local model told to rewrite a segment routinely runs out of output
-/// budget mid-list, and the segment it was working on is otherwise lost: the
-/// parse fails, a repair call costs another minute or more on consumer
-/// hardware, and that reply is just as likely to be cut off. The objects
-/// before the cut are complete and correct, so scan the array and keep every
-/// one that closed.
-///
-/// Returns `None` when nothing complete can be salvaged.
 fn salvage_truncated(json: &str) -> Option<String> {
     let start = json.find("\"artifacts\"")?;
     let open = json[start..].find('[')? + start;
@@ -218,21 +178,6 @@ fn salvage_truncated(json: &str) -> Option<String> {
     Some(format!("{}]}}", &json[..=end]))
 }
 
-/// Recover the artifact objects a *malformed* reply still got right.
-///
-/// Truncation is the tidy failure: everything before the cut is valid, so
-/// `salvage_truncated` can repair the envelope and reparse. A bad object in the
-/// middle is the untidy one — a missing comma, an unescaped quote in a passage
-/// that itself quotes something — and it fails the whole list however complete
-/// the rest is. Losing nine good artifacts to one bad one is the worst trade
-/// in the write path: it costs a segment of someone's corpus, and re-running
-/// it means minutes of a local model's time for a reply just as likely to
-/// stumble in the same place.
-///
-/// So parse the objects one at a time and keep the ones that stand up. A fault
-/// that also derails the scanner's idea of where strings end makes everything
-/// after it unreliable, which is why this returns what it could read rather
-/// than claiming completeness — the caller flags the result as degraded.
 fn salvage_objects(json: &str) -> Vec<RawArtifact> {
     let Some(start) = json.find("\"artifacts\"") else {
         return Vec::new();
@@ -275,9 +220,6 @@ fn salvage_objects(json: &str) -> Vec<RawArtifact> {
     out
 }
 
-/// Characters of an unparsable reply kept for diagnosis. Enough to see the
-/// shape and the first offending construct without pasting a whole segment of
-/// someone's corpus into a log file.
 const RAW_ON_FAILURE: usize = 800;
 
 pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
@@ -285,8 +227,6 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     let env: Envelope = match serde_json::from_str(json) {
         Ok(env) => env,
         Err(e) => {
-            // Salvage before giving up: a truncated list still holds whole
-            // artifacts, and asking a slow model to try again is expensive.
             let salvaged = salvage_truncated(json)
                 .and_then(|repaired| serde_json::from_str::<Envelope>(&repaired).ok());
             match salvaged {
@@ -298,17 +238,9 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                     );
                     env
                 }
-                // Not a clean cut, so read the list object by object and keep
-                // whatever stands up on its own.
                 None => {
                     let objects = salvage_objects(json);
                     if objects.is_empty() {
-                        // The parser's complaint names an offset into a reply
-                        // nobody kept, which is not enough to tell a truncated
-                        // list from a bad escape from prose where JSON was
-                        // asked for. Debug rather than warn: this is model
-                        // output, so it carries corpus text, and it belongs in
-                        // a log only when someone has gone looking.
                         tracing::debug!(
                             error = %e,
                             raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
@@ -344,9 +276,6 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
             },
-            // Capped at the three the prompt asks for: a model that starts
-            // listing general advice must not turn one artifact into a page of
-            // it, and the tail is the least source-grounded part of the list.
             caveats: c
                 .caveats
                 .into_iter()
@@ -371,11 +300,6 @@ mod tests {
 
     #[test]
     fn the_judge_is_told_what_each_artifact_is_about() {
-        // The real case this fixes: an artifact headed "FAT32 Specifications"
-        // whose body opens "32 Bit Clusternummern" and never says FAT32 again.
-        // Given the bodies alone, the model saw two anonymous spec lists with
-        // different numbers and called them a contradiction — which was the
-        // only honest answer to the question it was actually asked.
         let p = judge_prompt(
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
@@ -387,18 +311,12 @@ mod tests {
 
     #[test]
     fn the_judge_is_told_that_different_subjects_are_not_a_conflict() {
-        // Two sections of one reference document are near-identical in form and
-        // deliberately different in content, so similarity puts them in a pair
-        // and every number in them differs. Without this rule the feature fires
-        // hardest exactly where it is most wrong.
         assert!(JUDGE_SYSTEM.contains("same subject"));
         assert!(JUDGE_SYSTEM.contains("Answer false and stop."));
     }
 
     #[test]
     fn a_truncated_list_keeps_the_artifacts_that_finished() {
-        // Exactly what a small local model emits when it runs out of output
-        // budget: two complete objects, then a third cut mid-string.
         let cut = r###"{"artifacts":[
           {"text":"first complete","title":"one","tags":[],"corpus_lines":[1,2]},
           {"text":"second complete","title":"two","tags":[]},
@@ -427,10 +345,6 @@ mod tests {
 
     #[test]
     fn one_malformed_object_costs_only_itself() {
-        // The list is complete and the outer shape is fine; the middle object
-        // is missing a comma. Whole-document loss over one bad object is the
-        // failure this salvage exists to prevent — a legal text with unusual
-        // punctuation took down every artifact in its segment this way.
         let broken = r###"{"artifacts":[
           {"text":"first good","title":"one","tags":[]},
           {"text":"middle bad" "title":"two","tags":[]},
@@ -444,9 +358,6 @@ mod tests {
 
     #[test]
     fn a_bad_escape_does_not_cost_the_objects_before_it() {
-        // An unescaped quote also derails the scanner's idea of where strings
-        // end, so what comes after is unreliable. What must hold is that the
-        // objects it had already closed are still returned.
         let broken = r###"{"artifacts":[
           {"text":"first good","title":"one","tags":[]},
           {"text":"he said "stop" here","title":"two","tags":[]}
@@ -458,9 +369,6 @@ mod tests {
 
     #[test]
     fn a_reply_with_no_parsable_object_is_still_an_error() {
-        // Salvage must not turn prose into an empty success: a segment that
-        // produced nothing has to fail so the artifact is recorded as missing
-        // rather than silently dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
     }
@@ -484,7 +392,6 @@ mod tests {
 
     #[test]
     fn a_judgement_wrapped_in_prose_and_fences_still_parses() {
-        // The same models that fence the synthesis reply fence this one.
         let (yes, ..) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
         assert!(yes);
     }
@@ -501,8 +408,6 @@ mod tests {
 
     #[test]
     fn an_unreadable_obsolete_value_is_treated_as_absent() {
-        // An unparsable direction must not fail the whole reply — the
-        // contradiction verdict itself is still readable.
         let (yes, _, obsolete) =
             parse_judgement(r#"{"contradicts":true,"obsolete":"not sure honestly"}"#).unwrap();
         assert!(yes);
@@ -511,9 +416,6 @@ mod tests {
 
     #[test]
     fn an_unparsable_judgement_is_an_error_not_a_yes() {
-        // Defaulting to "contradicts" would fill the review queue with noise;
-        // defaulting to "no" would hide real conflicts. Neither: it fails, the
-        // pair stays pending, and the next sweep tries again.
         assert!(parse_judgement("I could not decide.").is_err());
     }
 
@@ -540,8 +442,6 @@ mod tests {
 
     #[test]
     fn an_artifact_without_caveats_parses_to_an_empty_list() {
-        // Most models will omit the field most of the time, and a missing
-        // field must never fail a segment that is otherwise fine.
         let body = r#"{"artifacts":[{"text":"plain","title":"t","category":"c","tags":[]}]}"#;
         assert!(parse_response(body).unwrap()[0].caveats.is_empty());
     }
@@ -555,8 +455,6 @@ mod tests {
         );
     }
 
-    // r###: the JSON contains the sequence `"##` (a quoted markdown H2),
-    // which would terminate both an r#"..."# and an r##"..."## literal.
     const GOOD: &str = r###"{"artifacts":[
       {"text":"## Mount an image\nRun `ewfmount evidence.E01 /mnt/ewf`.",
        "title":"Mount an E01 image","category":"procedure",
@@ -600,7 +498,6 @@ mod tests {
 
     #[test]
     fn empty_chunk_list_is_rejected() {
-        // Silently accepting this would lose the whole source.
         assert!(parse_response(r#"{"artifacts":[]}"#).is_err());
     }
 
@@ -613,8 +510,6 @@ mod tests {
 
     #[test]
     fn code_fences_inside_artifact_text_survive_extraction() {
-        // The `}` inside a fenced snippet must not confuse the brace slicing,
-        // and the code itself must come through byte-for-byte.
         let body =
             r#"{"artifacts":[{"text":"Run:\n```bash\nawk '{print $1}' file\n```","title":"awk"}]}"#;
         let out = parse_response(body).unwrap();
@@ -633,7 +528,6 @@ mod tests {
 
     #[test]
     fn system_prompt_states_the_hard_rules() {
-        // These instructions are the guardrail against paraphrased commands.
         assert!(SYNTHESIZER_SYSTEM.contains("VERBATIM"));
         assert!(SYNTHESIZER_SYSTEM.contains("markdown"));
         assert!(SYNTHESIZER_SYSTEM.contains("H1") || SYNTHESIZER_SYSTEM.contains("`#`"));

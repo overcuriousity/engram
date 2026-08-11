@@ -3,13 +3,8 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-/// Hashes text into a fixed-dimension unit vector. Identical text gives an
-/// identical vector and different text gives a different one, which is all the
-/// retrieval tests need from an embedding model.
 pub struct FakeEmbedder {
     dim: usize,
-    /// How many times the endpoint was called. Batching is invisible in the
-    /// output — only the call count shows whether it happened.
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -61,8 +56,6 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 pub struct FakeSynthesizer {
     fail_with: Option<String>,
-    /// Fail only on windows containing this marker. Lets a test model the
-    /// realistic case — some windows succeed, one does not.
     fail_on_marker: Option<String>,
 }
 
@@ -122,9 +115,6 @@ impl Synthesizer for FakeSynthesizer {
         }
     }
 
-    /// Deterministic and obviously synthetic, so a test can assert on it. A
-    /// configured failure applies here too: naming is a model call like any
-    /// other, and the caller has to survive it failing.
     async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
         if let Some(m) = &self.fail_with {
             return Err(Error::Inference {
@@ -143,13 +133,9 @@ impl Synthesizer for FakeSynthesizer {
     }
 }
 
-/// Drops a token from the first window it sees and reproduces it faithfully
-/// afterwards. Models the case the retry exists for: a one-off paraphrase that
-/// a second attempt gets right.
 pub struct ParaphrasingSynthesizer {
     drop_token: String,
     calls: std::sync::atomic::AtomicUsize,
-    /// Keep paraphrasing forever rather than recovering on the retry.
     persistent: bool,
 }
 
@@ -204,8 +190,6 @@ impl Synthesizer for ParaphrasingSynthesizer {
     }
 }
 
-/// Segments like `FakeSynthesizer` but reports a cooldown, so a test can assert
-/// the job actually paces itself instead of running flat out.
 pub struct PacedSynthesizer {
     inner: FakeSynthesizer,
     cooldown: std::time::Duration,
@@ -233,8 +217,6 @@ impl Synthesizer for PacedSynthesizer {
     }
 }
 
-/// Claims every chunk came from lines far outside its window. The span check
-/// exists because the model's line numbers are taken on trust.
 #[derive(Default)]
 pub struct LyingSpanSynthesizer;
 
@@ -259,8 +241,6 @@ impl Synthesizer for LyingSpanSynthesizer {
     }
 }
 
-/// Returns text that appears nowhere in its window, with a bogus span. The
-/// case where nothing can be recovered and the reader has to be told.
 #[derive(Default)]
 pub struct HallucinatingSynthesizer;
 
@@ -285,10 +265,6 @@ impl Synthesizer for HallucinatingSynthesizer {
     }
 }
 
-/// Reverses the candidate order. Deliberately not identity: a test asserting
-/// rerank ran can only tell the difference if the order actually changes.
-/// Refuses any single input over `limit` tokens the way llama.cpp does, with
-/// its physical-batch message. The configured ceiling cannot see this limit.
 pub struct StrictEmbedder {
     inner: FakeEmbedder,
     limit: usize,
@@ -310,8 +286,6 @@ impl StrictEmbedder {
 impl Embedder for StrictEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         for t in texts {
-            // The same crude estimate the budget code uses, so the test does
-            // not depend on a tokenizer.
             let tokens = t.len() / 4;
             if tokens > self.limit {
                 return Err(Error::Inference {
@@ -333,16 +307,12 @@ impl Embedder for StrictEmbedder {
         "strict-embed"
     }
     fn max_input_tokens(&self) -> usize {
-        // Deliberately a lie, as a misconfigured deployment is.
         8192
     }
 }
 
 #[derive(Default)]
 pub struct FakeReranker {
-    /// How many documents the last call was handed. A reranker can only promote
-    /// what it is given, so a test about over-fetching has to look at this
-    /// rather than at the answer.
     saw: std::sync::atomic::AtomicUsize,
 }
 
@@ -391,12 +361,6 @@ impl Completer for FakeCompleter {
     }
 }
 
-/// A completer that answers with the prompt it was handed.
-///
-/// What `ask` puts in front of the model is the whole of what the model can
-/// use, and it is otherwise invisible: the reply is a fake, so a test asserting
-/// on it proves nothing about the excerpts. This makes the prompt the thing
-/// under test.
 #[derive(Default)]
 pub struct EchoCompleter;
 
@@ -410,10 +374,6 @@ impl Completer for EchoCompleter {
     }
 }
 
-/// A completer that answers from a script and counts how often it was asked.
-///
-/// The consolidation tests are largely about *not* calling the model, so what
-/// they assert on is the call count as much as the reply.
 pub struct ScriptedCompleter {
     replies: std::sync::Mutex<std::collections::VecDeque<String>>,
     calls: std::sync::atomic::AtomicUsize,

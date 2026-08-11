@@ -1,27 +1,16 @@
-//! How the right-hand pane gets at the text a chunk claims to come from.
-//!
-//! A trait rather than a function because the answer depends on what the
-//! source is. Today every source is raw text and `TextLines` answers all of
-//! them. A PDF source will implement the same trait — its label reads
-//! `page 42` and its lines come from extracted text — and nothing in the pane
-//! needs to know which implementation answered.
-
 use crate::store::artifacts::CorpusSpan;
 use crate::store::corpora::Corpus;
 
-/// Lines shown without a span are context, not the claim itself.
 const HEADLESS_PREVIEW_LINES: usize = 40;
 
 pub struct CorpusLine {
     pub number: i64,
     pub text: String,
-    /// Inside the chunk's span, as opposed to the context around it.
     pub in_span: bool,
 }
 
 pub struct CorpusSlice {
     pub lines: Vec<CorpusLine>,
-    /// What to call this range in the UI: `lines 118–141`, later `page 42`.
     pub label: String,
 }
 
@@ -71,8 +60,6 @@ impl CorpusView for TextLines {
     }
 }
 
-/// The view for a source. One implementation today; this is where a PDF source
-/// will branch.
 pub fn for_corpus(_source: &Corpus) -> Box<dyn CorpusView> {
     Box::new(TextLines)
 }

@@ -7,10 +7,6 @@ use sqlx::Row;
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
     Raw,
-    /// Captured, stored, and deliberately not queued for synthesis: something
-    /// near-identical is already in the base, and segmenting it would pay a
-    /// model to produce artifacts that compete with ones that already exist.
-    /// An operator resolves it on Ops.
     NeedsReview,
     Segmenting,
     Segmented,
@@ -57,26 +53,14 @@ pub struct Corpus {
     pub status: CorpusStatus,
     pub created_at: i64,
     pub updated_at: i64,
-    /// Fraction of this source's non-blank lines that ended up inside some
-    /// chunk. `None` for sources segmented before the check existed.
     pub coverage: Option<f64>,
-    /// Bottom-k shingle hashes of `raw_text`. Empty for corpora captured before
-    /// the signature existed, which simply are not compared.
     #[serde(skip)]
     pub shingles: Vec<u64>,
-    /// The corpus this one looked like at capture, and how alike they were.
-    /// Both cleared when an operator chooses to keep both.
     pub near_dupe_of: Option<String>,
     pub near_dupe_score: Option<f64>,
-    /// Set when this row is a placeholder for a corpus that was never captured
-    /// here — its artifacts came back from the vector store and needed a parent
-    /// to hang from. `raw_text` is then those artifacts joined, not the source
-    /// document, so nothing that reasons about the original text should trust
-    /// it. `None` for every ordinary capture.
     pub restored_at: Option<i64>,
 }
 
-/// A stored corpus that a new capture looks like.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NearDuplicate {
     pub corpus_id: String,
@@ -121,12 +105,6 @@ impl Store {
             .await
     }
 
-    /// Insert a capture whose shingle signature the caller already computed.
-    ///
-    /// Ingest needs the signature before the row exists, to ask whether this is
-    /// a near-duplicate of something already stored. Handing it over rather
-    /// than recomputing it here is what makes that one pass over the document
-    /// instead of two.
     pub async fn insert_corpus_with_signature(
         &self,
         raw_text: &str,
@@ -147,7 +125,6 @@ impl Store {
             shingles,
             near_dupe_of: None,
             near_dupe_score: None,
-            // A capture, not a placeholder. See `ensure_restored_corpus`.
             restored_at: None,
         };
         sqlx::query(
@@ -168,27 +145,6 @@ impl Store {
         Ok(src)
     }
 
-    /// Insert the placeholder parent a restored artifact needs, if it is not
-    /// already there. Returns whether a row was created.
-    ///
-    /// `artifacts.corpus_id` is NOT NULL and references this table, so an
-    /// artifact whose corpus row is gone — the whole-database-lost case this
-    /// exists for — cannot be restored without one. Everything here is derived
-    /// rather than invented where that is possible at all: the id is the one the
-    /// vector payload named, and `raw_text` is the restored artifacts joined,
-    /// which is genuinely all of that document still in the system.
-    ///
-    /// `content_hash` is seeded from the id rather than from `raw_text` because
-    /// the column is UNIQUE and this is not a capture: two stubs whose artifacts
-    /// happen to hold identical text are still two different sources, and
-    /// hashing the reconstructed text would make the second insert fail. Seeding
-    /// from the id also keeps a stub from ever colliding with a real capture of
-    /// the same text, which would silently attach these artifacts to it.
-    ///
-    /// `Partial` is the honest status: some of this source is present, and how
-    /// much is unknowable. `shingles` stays empty so the near-duplicate
-    /// comparison skips it — the reconstructed text is not the document, and
-    /// letting it be compared would report near-duplicates that do not exist.
     pub async fn ensure_restored_corpus(&self, id: &str, raw_text: &str) -> Result<bool> {
         let at = now();
         let res = sqlx::query(
@@ -236,9 +192,6 @@ impl Store {
         Ok(())
     }
 
-    /// Names a corpus after the fact. Capture makes no inference call by
-    /// design, so the name arrives later — once synthesis has read the document
-    /// and knows what it is about.
     pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
         sqlx::query("UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?")
             .bind(title)
@@ -249,9 +202,6 @@ impl Store {
         Ok(())
     }
 
-    /// How much of this source ended up inside a chunk. Written once every
-    /// window has resolved; a low number means the segmenter dropped part of
-    /// the document, which nothing used to notice.
     pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: f64) -> Result<()> {
         sqlx::query("UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?")
             .bind(coverage)
@@ -262,13 +212,6 @@ impl Store {
         Ok(())
     }
 
-    /// The stored corpus most like this signature, if any clears `min`.
-    ///
-    /// A full scan of the signature column. A single-operator base holds
-    /// hundreds of corpora, each with a signature of a couple of kilobytes, so
-    /// this is a few milliseconds of memory bandwidth on a path that already
-    /// writes the whole document to disk. An index over MinHash bands is the
-    /// answer at a scale this design does not target.
     pub async fn find_near_duplicate(
         &self,
         sig: &[u64],
@@ -318,9 +261,6 @@ impl Store {
         Ok(())
     }
 
-    /// Captures waiting on a near-duplicate decision, newest first. They are
-    /// the one corpus state nothing else advances, so Ops has to show them or
-    /// they sit unprocessed with no indication why.
     pub async fn parked_corpora(&self, limit: i64) -> Result<Vec<Corpus>> {
         let rows = sqlx::query(
             "SELECT * FROM corpora WHERE near_dupe_of IS NOT NULL
@@ -376,8 +316,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_title_can_be_written_after_the_fact() {
-        // Capture no longer asks for a label, so the only way a corpus gets a
-        // name is a write once synthesis has read the document.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("some text", "web", None).await.unwrap();
         assert!(src.title_hint.is_none());
@@ -441,7 +379,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_consolidation_schema_is_present() {
-        // Migrations run on connect, so this failing means 0009 did not apply.
         let s = Store::memory().await.unwrap();
         for sql in [
             "SELECT shingles, near_dupe_of, near_dupe_score FROM corpora LIMIT 1",
@@ -457,8 +394,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_is_recorded_once_whichever_order_it_is_found_in() {
-        // The sweep sees (a,b) on one run and (b,a) on the next. Without a
-        // canonical order the review queue fills with the same pair twice.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("x", "web", None).await.unwrap();
         let made = s
@@ -565,7 +500,6 @@ mod tests {
         assert_eq!(got.near_dupe_of.as_deref(), Some("other-id"));
         assert!((got.near_dupe_score.unwrap() - 0.94).abs() < 1e-9);
 
-        // Clearing it is what "keep both" does, and it must actually clear.
         s.set_near_dupe(&src.id, None, None).await.unwrap();
         assert!(s.get_corpus(&src.id).await.unwrap().near_dupe_of.is_none());
     }

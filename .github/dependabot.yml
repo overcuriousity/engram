@@ -1,12 +1,6 @@
 version: 2
 
 updates:
-  # Rust dependencies.
-  #
-  # Grouped deliberately: this project pins exact versions and several of its
-  # crates (qdrant-client, openidconnect, rmcp) change API shape between minor
-  # releases. One grouped PR per week that CI can validate as a unit is far more
-  # useful than a dozen separate ones that each need the same manual check.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -18,8 +12,6 @@ updates:
         update-types:
           - patch
           - minor
-      # Majors stay separate: for this dependency set a major bump usually
-      # means real API work, not a version-number edit.
       major:
         update-types:
           - major
@@ -28,7 +20,6 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # The workflows themselves.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -39,9 +30,6 @@ updates:
         patterns:
           - "*"
     ignore:
-      # The msrv job pins this to the floor README and Cargo.toml promise, so
-      # dependabot reads the pin as an outdated version. Bumping it to the
-      # latest Rust would silently erase the promise the job exists to check.
       - dependency-name: dtolnay/rust-toolchain
     labels:
       - dependencies

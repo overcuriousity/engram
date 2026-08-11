@@ -1,17 +1,3 @@
-//! Consolidation: what to do about two artifacts the index says are the same.
-//!
-//! Three thresholds and three outcomes. At or above `auto_supersede` the pair
-//! is near enough to identical that the older one is hidden — it is still
-//! stored, still readable, and one write undoes it. Between `review_min` and
-//! that, the pair goes on a queue for a person, because two genuinely distinct
-//! artifacts about one subsystem sit at 0.88 routinely and acting on that score
-//! destroys knowledge rather than duplication. Below `review_min`, nothing.
-//!
-//! Nothing here rewrites an artifact. A merged artifact would be synthetic text
-//! standing where a stored passage used to, with no segment to verify it
-//! against and no corpus lines to show beside it, which is the one failure mode
-//! this design exists to avoid.
-
 use crate::core::Core;
 use crate::error::Result;
 use crate::store::artifacts::{ArtifactStatus, Chunk};
@@ -22,21 +8,11 @@ pub struct Outcome {
     pub examined: usize,
     pub superseded: usize,
     pub queued: usize,
-    /// Pairs settled without asking anyone, because the two artifacts state no
-    /// value differently and so have nothing to disagree about.
     pub closed: usize,
     pub judged: usize,
     pub contradictions: usize,
 }
 
-/// Disjoint-set over artifact ids, so a run of near-identical pairs collapses
-/// into the clusters it actually describes.
-///
-/// Resolving the pairs one at a time does not work, and the way it fails is
-/// quiet: A loses to B, then B loses to C, and A is left pointing at an
-/// artifact that is itself hidden. Nothing in the UI can follow that, and the
-/// reader who opens A is sent to a dead end. Grouping first means every member
-/// of a cluster points at the one survivor.
 #[derive(Default)]
 struct Clusters {
     parent: HashMap<String, String>,
@@ -61,17 +37,6 @@ impl Clusters {
     }
 }
 
-/// Which artifact of a cluster survives.
-///
-/// The newest by capture time, with the id as a tie-break so the answer does
-/// not depend on clock resolution. Newer is the right default because the thing
-/// most often re-captured is a document that has since been updated — and Ops
-/// has an undo for when it is not.
-/// Is the whole of one artifact inside the other, whitespace aside?
-///
-/// Not a similarity — containment. A score says two texts are alike; this says
-/// one of them adds nothing, which is the only ground on which the sweep hides
-/// something below `auto_supersede`.
 fn contains_normalized(long: &str, short: &str) -> bool {
     let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     !short.trim().is_empty() && n(long).contains(&n(short))
@@ -84,9 +49,6 @@ fn keeper(members: &[Chunk]) -> &Chunk {
         .expect("a cluster has at least one member")
 }
 
-/// How many hidden artifacts the drift repair compares per sweep, from either
-/// side. A base with more than this many hidden artifacts drifting at once is
-/// not a case worth unbounded scanning for; the next sweep continues.
 const DRIFT_SCAN: usize = 5_000;
 
 fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
@@ -98,40 +60,11 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
     }
 }
 
-/// Make the vector store's lifecycle payloads agree with SQLite, which is the
-/// source of truth for all of them.
-///
-/// Every lifecycle change is two writes to two stores that cannot be written
-/// atomically, so each of `deprecate`, `reactivate`, `supersede` and
-/// `unsupersede` can be interrupted halfway. Both resulting skews are silent
-/// and neither self-corrects: a row that says deprecated behind a payload that
-/// does not leaves the artifact in search results while Ops calls it retired,
-/// and a payload that says deprecated behind an active row leaves it out of
-/// search with no page listing it and no button that reaches it. The pair of
-/// scans below is the only thing in the system that notices either.
-///
-/// Broader than `heal_dangling_supersessions`, which repairs one specific case
-/// (a winner that has since been deleted) in the SQLite direction only.
-///
-/// Returns how many artifacts it rewrote, which is a number worth asserting on:
-/// a repair that fires on a base in agreement is a bug that hides behind a
-/// correct end state.
 async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     repair_lifecycle_drift_scanning(core, DRIFT_SCAN).await
 }
 
-/// The above with its cap as a parameter, so a test can reproduce what the two
-/// truncated scans do to each other without seeding `DRIFT_SCAN` artifacts.
 async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usize> {
-    // Both scans are capped, and neither cap lines up with the other:
-    // `list_non_active_artifacts` returns the newest rows while `non_active_ids`
-    // scrolls in point-id order. So set membership across the two proves
-    // nothing — on a base with more hidden artifacts than `DRIFT_SCAN` the lists
-    // barely intersect, and treating "missing from the other list" as drift
-    // reported the whole scan as broken every sweep and rewrote every payload in
-    // it. The union of the two scans names the artifacts worth *looking at*;
-    // what each store actually says about them is then read per id, and only a
-    // real disagreement is repaired.
     let store_hidden = core.store.list_non_active_artifacts(scan).await?;
     let payload_hidden = core.vectors.non_active_ids(scan).await?;
 
@@ -145,13 +78,9 @@ async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usi
 
     let mut rows = Vec::new();
     for id in &ids {
-        // The row is already in hand for everything the SQLite scan returned;
-        // only an id that came from the payload side alone costs a read.
         let fetched;
         let chunk = match known.get(id.as_str()) {
             Some(c) => *c,
-            // An id the vector store still lists but SQLite has dropped is
-            // ordinary — a delete can lag a sweep — and not an error.
             None => match core.store.get_artifact(id).await {
                 Ok(c) => {
                     fetched = c;
@@ -163,15 +92,9 @@ async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usi
                 }
             },
         };
-        // No point at all is not drift: a freshly captured artifact is hidden
-        // in SQLite before its embedding job has written anything to hide.
         let Some(p) = stored.get(id) else {
             continue;
         };
-        // SQLite is the source of truth for both fields. Comparing them rather
-        // than just "hidden or not" also catches the subtler skew — a payload
-        // that says superseded behind a row that says deprecated, or one
-        // pointing at a winner the row no longer names.
         if p.status != chunk.status || p.superseded_by != chunk.superseded_by {
             rows.push(lifecycle_row_of(chunk));
         }
@@ -193,20 +116,8 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         return Ok(Outcome::default());
     }
 
-    // Finish what was started before looking for duplicates: a sweep over a
-    // half-ingested corpus is judging a base that is not there yet.
     crate::jobs::reconcile::run(core).await?;
 
-    // Deletions clear these as they happen; the sweep repeats it because a
-    // hidden artifact pointing at nothing is invisible to search and to every
-    // page that could put it back, and nothing else would ever notice.
-    // Neither repair is allowed to take the sweep with it. Both are maintenance
-    // over state the rest of the sweep does not read, both are retried on every
-    // sweep, and both are most likely to fail on exactly the base that needs
-    // them most — the one that drifted far enough to make the repair large.
-    // Propagating the error stopped consolidation *permanently*: the next sweep
-    // reached the same call and failed the same way, so near-duplicate
-    // detection and judging never ran again.
     if let Err(e) = core.heal_dangling_supersessions().await {
         tracing::warn!(
             error = %e,
@@ -219,9 +130,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             "could not reconcile lifecycle state with the vector store; retrying on the next sweep"
         );
     }
-    // Startup heals too, but a process that stays up for weeks is exactly the
-    // one whose stores drift: every interrupted write between the two happens
-    // while it is running, not while it is starting.
     if let Err(e) = core.heal_store_drift().await {
         tracing::warn!(
             error = %e,
@@ -238,7 +146,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         ..Default::default()
     };
 
-    // Group everything near-identical first, and only then decide who wins.
     let mut clusters = Clusters::default();
     let mut in_a_cluster: HashSet<String> = HashSet::new();
     for p in pairs.iter().filter(|p| p.score >= cfg.auto_supersede) {
@@ -249,19 +156,11 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 
     let mut members: HashMap<String, Vec<Chunk>> = HashMap::new();
     for id in &in_a_cluster {
-        // An artifact the vector store still lists but SQLite has dropped is
-        // ordinary: a delete can lag a sweep. It is not an error.
         let Ok(c) = core.store.get_artifact(id).await else {
             tracing::debug!(artifact_id = %id, "pair names an artifact that is gone");
             continue;
         };
         if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
-            // The row says hidden but the vector store still offered this point
-            // as a pair candidate, so its payload never caught up — the write
-            // was interrupted, and `repair_lifecycle_drift` at the top of this
-            // sweep has already re-issued it. Either way the artifact takes no
-            // part in this run: a retired artifact must not win a cluster and
-            // hide a live one, and a resolved pair has nothing left to decide.
             tracing::debug!(artifact_id = %id, status = c.status.as_str(), "skipping a hidden artifact");
             continue;
         }
@@ -276,16 +175,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
         let keep = keeper(group);
         for c in group.iter().filter(|c| c.id != keep.id) {
-            // SQLite first: it is the source of truth, and a payload flag with
-            // no row behind it is a hidden artifact nothing can explain. See
-            // `Core::supersede`.
-            //
-            // One failure does not abandon the rest, as in
-            // `heal_dangling_supersessions`. `supersede` refuses a side that is
-            // no longer active, and these statuses were read earlier in this
-            // same sweep — so an operator deprecating one of them from Ops in
-            // the meantime is an ordinary race, not a reason to abandon the
-            // remaining clusters, the judge pass, and every pair below.
             if let Err(e) = core.supersede(&c.id, &keep.id).await {
                 tracing::warn!(
                     superseded = %c.id,
@@ -305,9 +194,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    // The review band. A pair whose members were just hidden has already been
-    // answered, and queueing it would ask an operator to rule on an artifact
-    // that is no longer in results.
     for p in pairs.iter().filter(|p| p.score < cfg.auto_supersede) {
         if hidden.contains(&p.a) || hidden.contains(&p.b) {
             continue;
@@ -318,9 +204,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         ) else {
             continue;
         };
-        // Same rule as the cluster pass: only two live artifacts have a
-        // question worth a queue slot, an inference call, or a containment
-        // supersede below.
         if [&a, &b]
             .iter()
             .any(|c| c.status != ArtifactStatus::Active || c.superseded_by.is_some())
@@ -328,15 +211,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             continue;
         }
 
-        // One synthesis call emitting the same passage twice: the shorter text
-        // is wholly inside the longer, and both came out of the same document.
-        // That is a defect in one artifact rather than two sources saying
-        // different things, and nothing is lost by hiding it — the survivor
-        // says everything it said, Ops lists it, and one press undoes it.
-        //
-        // Same corpus is the whole of the condition. Two documents that share a
-        // sentence are two sources, and hiding one of those on a 0.9 similarity
-        // is what `auto_supersede` deliberately refuses to do.
         if a.corpus_id == b.corpus_id {
             let (long, short) = if a.text.len() >= b.text.len() {
                 (&a, &b)
@@ -344,7 +218,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 (&b, &a)
             };
             if contains_normalized(&long.text, &short.text) {
-                // Same race, same treatment as the cluster pass above.
                 if let Err(e) = core.supersede(&short.id, &long.id).await {
                     tracing::warn!(
                         superseded = %short.id,
@@ -364,15 +237,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             }
         }
 
-        // Two artifacts that state no value differently have nothing for a
-        // person to rule on, and asking anyway is what turned this queue into a
-        // list of chores. The pair is filed as settled — the sweep re-finds it
-        // every run, so it has to be remembered — and both artifacts stay
-        // exactly where they are. Closing a question is not hiding an answer.
-        //
-        // The prefilter used to run only when the judge was enabled, which it
-        // is not by default, so the cheap answer was reached only by bases
-        // already paying for the expensive one.
         if !crate::infer::facts::may_disagree(&a.text, &b.text) {
             if core
                 .store
@@ -415,12 +279,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     Ok(out)
 }
 
-/// Ask the model about pending pairs, but only the ones that could possibly
-/// disagree, and only up to the sweep's budget.
-///
-/// Returns how many calls were made and how many found a contradiction. A
-/// failed call leaves its pair pending on purpose: a dead endpoint must never
-/// look like a clean bill of health.
 async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
     let pending = core.store.pairs_to_judge(200).await?;
 
@@ -440,17 +298,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         };
 
-        // A pair queued in the review band can have a member retired after the
-        // fact: superseded by a later sweep once a re-embed moves the score
-        // above `auto_supersede`, or deprecated by an operator. Judging it would
-        // spend the scarcest thing here — a model call — to post a
-        // contradiction about an artifact that is no longer in results.
-        //
-        // The status half matters beyond the wasted call. A judgement can
-        // propose a supersede, which Ops renders as an "apply supersede" button
-        // — and `Core::supersede` refuses a deprecated side, so pressing it
-        // returns a validation error and the pair stays pending forever. The
-        // same guard runs in `run`'s cluster pass and review band.
         if a.status != ArtifactStatus::Active
             || b.status != ArtifactStatus::Active
             || a.superseded_by.is_some()
@@ -462,8 +309,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         }
 
-        // The whole economic argument: most near pairs have no value in common
-        // to disagree about, and a model call is minutes on this hardware.
         if !crate::infer::facts::may_disagree(&a.text, &b.text) {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
@@ -472,9 +317,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         }
 
         judged += 1;
-        // Counted before the call and regardless of how it goes, so a pair the
-        // model keeps failing on drops behind the rest of the queue instead of
-        // absorbing this budget again on the next sweep.
         core.store.record_judge_attempt(p.id).await?;
         let reply = match core
             .completer
@@ -488,10 +330,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             .await
         {
             Ok(r) => r,
-            // A transport failure is a statement about the endpoint, not about
-            // this pair: the next nineteen calls would fail the same way, and
-            // each one costs a full timeout. Stop, keep the pairs pending, and
-            // let the next sweep find out whether anything changed.
             Err(e) => {
                 tracing::warn!(
                     pair = p.id,
@@ -505,11 +343,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         match crate::infer::prompt::parse_judgement(&reply) {
             Ok((true, detail, obsolete)) => {
                 contradictions += 1;
-                // Trust the judge's named direction only when it agrees with
-                // the sweep's own newest-wins bias (see `keeper`): a call that
-                // names the *newer* artifact obsolete is exactly the failure
-                // mode worth guarding against, since it would otherwise
-                // propose hiding the side more likely to be current.
                 let obsolete_id = obsolete.and_then(|side| {
                     let (named, other) = match side {
                         'a' => (&a, &b),
@@ -519,9 +352,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
                 });
                 match obsolete_id {
                     Some(obsolete_id) => {
-                        // Proposed, not applied: an operator confirms via the
-                        // pair's "apply supersede" action before anything is
-                        // actually hidden.
                         core.store
                             .set_pair_superseded(p.id, &obsolete_id, detail.as_deref())
                             .await?;
@@ -564,8 +394,6 @@ mod tests {
     use crate::store::pairs::PairState;
     use crate::vector::{VectorPayload, VectorPoint};
 
-    /// Seed artifacts with hand-placed vectors, so the test controls the exact
-    /// similarity rather than depending on what the fake embedder produces.
     async fn seed(core: &crate::core::Core, vectors: &[(&str, [f32; 2])]) -> Vec<String> {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = vectors
@@ -610,8 +438,6 @@ mod tests {
         made.into_iter().map(|c| c.id).collect()
     }
 
-    /// One artifact under a corpus of its own, for the cases where "same
-    /// document" is the thing under test.
     async fn seed_into_new_corpus(
         core: &crate::core::Core,
         text: &str,
@@ -668,13 +494,11 @@ mod tests {
         let out = run(&core).await.unwrap();
         assert_eq!(out.superseded, 1, "{out:?}");
 
-        // The older one loses: ordinal 0 was inserted first.
         let older = core.store.get_artifact(&ids[0]).await.unwrap();
         let newer = core.store.get_artifact(&ids[1]).await.unwrap();
         assert_eq!(older.superseded_by.as_deref(), Some(ids[1].as_str()));
         assert!(newer.superseded_by.is_none());
 
-        // And it is out of search, which is the whole point.
         let hits = core
             .vectors
             .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
@@ -686,13 +510,6 @@ mod tests {
 
     #[tokio::test]
     async fn reactivating_a_superseded_artifact_survives_the_next_sweep() {
-        // Flipping the status without clearing `superseded_by` left the row
-        // still pointing at its winner, so the next sweep re-applied the
-        // superseded flag and the operator's decision quietly disappeared.
-        // The pair sits in the review band, below `auto_supersede`, so nothing
-        // here is a near-identical copy the sweep would re-hide on merit. The
-        // supersession is an applied judge proposal, which is the case an
-        // operator would reverse.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -727,11 +544,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_finishes_a_supersession_whose_payload_write_was_lost() {
-        // The row and the payload cannot be written atomically. A crash between
-        // them used to be permanent: the next sweep skipped the artifact
-        // because its row said hidden, so the flag never landed and the
-        // artifact stayed listed as hidden on Ops while every search returned
-        // it, forever.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.store
@@ -759,11 +571,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deprecated_artifact_never_wins_a_cluster() {
-        // The newest member of a cluster wins, so a *newer* artifact an
-        // operator retired used to be handed the win over a live older one:
-        // the loser went superseded, the winner stayed deprecated, and the
-        // knowledge left search entirely. It also overwrote the operator's
-        // `deprecated` status with `superseded` on the way past.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.deprecate(&ids[1]).await.unwrap();
@@ -796,10 +603,6 @@ mod tests {
 
     #[tokio::test]
     async fn superseding_refuses_to_overwrite_a_deprecation() {
-        // `set_superseded_by` writes `status = 'superseded'` unconditionally,
-        // so this is the guard that keeps an applied judge proposal from
-        // erasing what an operator decided, with nothing left to tell the two
-        // apart afterwards.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -817,10 +620,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweep_finishes_a_deprecation_whose_payload_write_was_lost() {
-        // Row written, payload not: Ops lists the artifact as deprecated while
-        // every search still returns it, and the only button that row offers is
-        // "Reactivate". Nothing used to notice — the old self-heal branch fired
-        // only on `superseded_by`.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.store
@@ -843,10 +642,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweep_frees_an_artifact_hidden_by_a_payload_alone() {
-        // The other skew, and the worse one: the payload says deprecated but
-        // the row says active, so the artifact is out of search, off the Ops
-        // deprecated list, and out of reach of every button — invisible and
-        // unrecoverable until something reconciles the two stores.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.vectors
@@ -869,10 +664,6 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_the_survivor_puts_the_artifact_it_hid_back() {
-        // `superseded_by` has no foreign key behind it. Deleting the keeper
-        // left the loser pointing at nothing, hidden from search in favour of a
-        // copy that no longer exists — the surviving text becomes invisible,
-        // which is the loss this whole feature exists to prevent.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         run(&core).await.unwrap();
@@ -919,14 +710,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_whose_member_was_since_hidden_never_reaches_the_model() {
-        // A model call is the scarcest thing in this system. Spending one to
-        // rule on an artifact that is no longer in results buys nothing, and
-        // posts a contradiction about something nobody can see.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
         core.completer = completer.clone();
-        // Queue the pair with the judge off, so the only call this test can
-        // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
         core.consolidate.judge = true;
@@ -939,8 +725,6 @@ mod tests {
             1
         );
 
-        // A later sweep hides one member, as a re-embed moving the score above
-        // `auto_supersede` would.
         core.store
             .set_superseded_by(&ids[0], Some(&ids[1]))
             .await
@@ -962,12 +746,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_whose_member_was_deprecated_never_reaches_the_judge() {
-        // The other half of the same rule, and the one that leaves a button
-        // nothing can press: a judgement can propose a supersede, Ops renders
-        // "Apply supersede" for it, and `Core::supersede` refuses a deprecated
-        // side — so the operator gets a validation error and the pair stays
-        // pending forever. The dismissal guard used to check `superseded_by`
-        // only, which a deprecation never sets.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
         core.completer = completer.clone();
@@ -996,12 +774,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_drift_repair_rewrites_nothing_when_the_two_stores_agree() {
-        // Both scans are capped and neither cap lines up with the other, so
-        // "missing from the other list" used to read as drift. On a base with
-        // more hidden artifacts than one scan returns, that reported the whole
-        // scan as broken every sweep and rewrote every payload in it — a
-        // permanent false alarm with write amplification behind it. Only a real
-        // disagreement counts.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1012,8 +784,6 @@ mod tests {
             ],
         )
         .await;
-        // One hidden each way, both written through the paths that keep the two
-        // stores in step.
         core.deprecate(&ids[0]).await.unwrap();
         core.supersede(&ids[1], &ids[2]).await.unwrap();
 
@@ -1026,12 +796,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_scan_cap_reached_from_both_sides_is_not_drift() {
-        // The bug in miniature. The two scans are capped independently and
-        // ordered differently — newest rows on one side, point order on the
-        // other — so past the cap they name largely different artifacts. Reading
-        // "absent from the other list" as drift then reports both whole scans as
-        // broken on every sweep and rewrites every payload in them. Two hidden
-        // artifacts and a cap of one reproduces exactly that.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -1046,9 +810,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_drift_repair_notices_a_payload_naming_the_wrong_status() {
-        // Not just hidden-or-not: a payload that says superseded behind a row
-        // that says deprecated is drift too, and comparing set membership alone
-        // never saw it.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -1069,11 +830,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_in_the_review_band_is_queued_not_superseded() {
-        // 0.88 is where two genuinely distinct artifacts about one subsystem
-        // routinely sit. Acting on that score destroys knowledge.
-        //
-        // The two state a value differently, which is what keeps them on the
-        // queue at all: a pair with nothing to disagree about closes itself.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1117,8 +873,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_sweep_changes_nothing() {
-        // The sweep runs on a timer. If it were not idempotent it would churn
-        // the queue and the payload flags on every tick.
         let core = test_core().await;
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         run(&core).await.unwrap();
@@ -1128,9 +882,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_is_never_superseded_twice() {
-        // Three near-identical artifacts. Whatever survives, exactly one must,
-        // and no artifact may point at one that is itself superseded — that is
-        // a chain the UI cannot resolve and the reader cannot follow.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1161,7 +912,6 @@ mod tests {
         assert_eq!(live, 1, "exactly one artifact should have survived");
     }
 
-    /// Two artifacts about the same thing that give a different version.
     async fn disagreeing(core: &crate::core::Core) -> Vec<String> {
         seed(
             core,
@@ -1204,8 +954,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_confident_direction_proposes_a_supersede_but_does_not_apply_it() {
-        // The judge names a direction; an operator still has to confirm it.
-        // Nothing about either artifact changes here — only the pair.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
@@ -1223,7 +971,6 @@ mod tests {
         assert_eq!(found.len(), 1, "the pair did not land as proposed");
         assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
 
-        // Proposed, not applied.
         assert!(
             core.store
                 .get_artifact(&ids[0])
@@ -1237,17 +984,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_direction_naming_the_newer_artifact_is_not_trusted() {
-        // A miscalibrated call proposing to hide the *newer* side is exactly
-        // the failure mode the newest-wins guard exists to catch: it disagrees
-        // with the sweep's own bias, so it must fall back to a plain
-        // contradiction rather than being trusted.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         let ids = disagreeing(&core).await;
-        // Force `b` (ids[1]) strictly newer than `a`: `now()` is second-grained,
-        // so two rows inserted in the same test would otherwise tie, and a tie
-        // is meant to pass the guard. Naming the genuinely newer side obsolete
-        // disagrees with `keeper()`'s bias and must be rejected.
         sqlx::query("UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?")
             .bind(&ids[1])
             .execute(&core.store.pool)
@@ -1271,8 +1010,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_with_no_facts_to_disagree_about_never_reaches_the_model() {
-        // The prefilter is the whole economic argument for this feature: a
-        // model call is minutes, and most near pairs have nothing to judge.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
@@ -1306,7 +1043,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_judge_stops_at_its_budget() {
-        // One sweep must not be able to occupy the GPU for an hour.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         core.consolidate.max_judgements = 1;
@@ -1332,7 +1068,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_judgement_leaves_the_pair_pending() {
-        // A dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
@@ -1353,9 +1088,6 @@ mod tests {
 
     #[tokio::test]
     async fn one_synthesis_call_emitting_a_passage_twice_resolves_itself() {
-        // Same corpus, same call, one text wholly inside the other. That is a
-        // defect in one artifact rather than two sources disagreeing, and it
-        // sat on the review queue because it scores below auto_supersede.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1384,8 +1116,6 @@ mod tests {
 
     #[tokio::test]
     async fn containment_across_two_corpora_is_left_alone() {
-        // Two documents that happen to share a sentence are two sources, and
-        // this is exactly the case auto_supersede refuses to act on below 0.95.
         let core = test_core().await;
         let a = seed(
             &core,
@@ -1418,10 +1148,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_with_nothing_to_disagree_about_never_reaches_the_queue() {
-        // The prefilter already knows these two state no differing value, but
-        // it only ran when the judge was enabled — and the judge is off by
-        // default. So every near pair became a question for a person, which is
-        // a question with no answer to give.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1442,7 +1168,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // Closing a question is not hiding an answer.
         for id in &ids {
             assert!(
                 core.store
@@ -1472,15 +1197,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_endpoint_stops_the_judge_instead_of_spending_the_budget_on_it() {
-        // Every call would fail the same way, and each one costs a full
-        // timeout. The pairs stay pending either way; what this saves is
-        // twenty consecutive waits on an endpoint that is not there.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
         core.completer = completer.clone();
-        // Two pairs, each inside the review band and nowhere near the other, so
-        // there really is a second call for the judge to skip.
         seed(
             &core,
             &[
@@ -1512,9 +1232,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_the_model_keeps_failing_on_goes_to_the_back_of_the_queue() {
-        // An unreadable reply leaves the pair pending on purpose. Ordered by
-        // score alone, the same top-scoring pair would then absorb every
-        // sweep's budget forever and the rest would never be judged at all.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         core.consolidate.max_judgements = 1;

@@ -1,12 +1,6 @@
-// Client-side because none of it may touch the sanitized HTML on the server.
-// Every function here walks text nodes only: it can wrap what is already
-// rendered, and it can never introduce an element the sanitizer disallowed.
 (function () {
   'use strict';
 
-  // Registering the worker is what makes the browser offer to install engram
-  // rather than bookmark it. Guarded on both the API and a secure context,
-  // because plain HTTP on a LAN address has neither and must still work.
   if ('serviceWorker' in navigator && window.isSecureContext) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('/sw.js').catch(function (e) {
@@ -60,8 +54,6 @@
     });
   }
 
-  // Clamping is visual only. The text is never truncated, so a fenced command
-  // is never cut in half — expanding reveals what was always there.
   function clamp(root) {
     root.querySelectorAll('.clampable:not([data-clamped])').forEach(function (el) {
       el.setAttribute('data-clamped', 'yes');
@@ -113,21 +105,14 @@
     enhance(document.body);
     document.body.addEventListener('htmx:afterSwap', function (e) {
       enhance(e.target);
-      // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.workspace');
       if (ws && e.target.id === 'pane') ws.classList.add('has-selection');
     });
   });
 
-  // Focused only where a pointer says there is a hardware keyboard. On a touch
-  // screen the software keyboard covers what the page was opened to show — the
-  // results on Search, the pending decisions and recent captures on Capture,
-  // which is the app's start page — and in an installed window there is no URL
-  // bar to dismiss it from. This is why neither field carries `autofocus`.
   var field = document.querySelector('input[name="q"], textarea[name="text"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
-  // The rail is a list: arrows move through it, Enter opens what is focused.
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     var items = Array.prototype.slice.call(document.querySelectorAll('.rail-item'));

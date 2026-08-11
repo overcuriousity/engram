@@ -5,16 +5,10 @@ use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::vector::{VectorPayload, VectorPoint};
 
-/// Fraction of the embedder's hard limit a chunk is allowed to occupy. The
-/// remaining headroom absorbs tokenizer estimation error.
 const SAFETY: f32 = 0.8;
 
-/// Chunks sent to the embedder in one request. Bounded because a long source
-/// can hold hundreds of chunks and endpoints cap how many inputs they accept.
 const BATCH: usize = 32;
 
-/// Text for the embedding carries the title: it holds topical signal the body
-/// often leaves implicit.
 fn embed_text(chunk: &Chunk) -> String {
     match &chunk.title {
         Some(t) => format!("{t}\n{}", chunk.text),
@@ -30,14 +24,6 @@ fn default_limit(core: &Core) -> usize {
     (core.embedder.max_input_tokens() as f32 * SAFETY) as usize
 }
 
-/// Does this error mean the input itself is too big, rather than the endpoint
-/// being unwell?
-///
-/// A local inference server has a hard physical batch size — llama.cpp answers
-/// `input (1030 tokens) is too large to process` — and no amount of retrying
-/// changes that. Configuration is meant to keep chunks under it, but the
-/// configured ceiling is a claim about the model while this is the server's
-/// real limit, and the two disagree more often than not.
 fn input_too_large(e: &Error) -> bool {
     let Error::Inference {
         role: "embed",
@@ -59,18 +45,12 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     let text = embed_text(&chunk);
 
     if core.counter.count(&text) > limit {
-        // Our own estimate, which can be wrong in either direction. Do not
-        // shred the chunk on a guess.
         return split_oversize(core, &chunk, limit, false).await;
     }
 
     match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
         Ok(()) => {}
         Err(e) if input_too_large(&e) => {
-            // The endpoint's real ceiling is lower than the configured one, so
-            // halving the configured limit would change nothing. Halve what the
-            // chunk actually measures instead: that shrinks on every refusal
-            // and converges on whatever the server will take.
             let measured = core.counter.count(&text);
             let smaller = (measured / 2).max(crate::infer::budget::MIN_SEGMENT_TOKENS);
             tracing::warn!(
@@ -80,8 +60,6 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
                 error = %e,
                 "endpoint refused the chunk as too large; splitting instead of retrying"
             );
-            // The server said no. That is a fact rather than an estimate, so
-            // this split has to succeed whatever the text looks like.
             return split_oversize(core, &chunk, smaller, true).await;
         }
         Err(e) => return Err(e),
@@ -89,11 +67,6 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     settle_corpus(core, &chunk.corpus_id).await
 }
 
-/// Embed every chunk of a source that is still waiting, in as few inference
-/// calls as the batch size allows.
-///
-/// One call per source rather than per chunk is the whole point: the embedding
-/// endpoint is the slow, rate-limited, and often paid part of ingest.
 pub async fn run_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     run_corpus_with_limit(core, corpus_id, default_limit(core)).await
 }
@@ -101,8 +74,6 @@ pub async fn run_corpus(core: &Core, corpus_id: &str) -> Result<()> {
 pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -> Result<()> {
     let pending = core.store.pending_artifacts_for_corpus(corpus_id).await?;
 
-    // An oversize chunk becomes siblings instead of a vector, so it cannot ride
-    // along in a batch. It leaves behind its own per-chunk jobs.
     let mut batch: Vec<Chunk> = Vec::with_capacity(pending.len());
     let mut texts: Vec<String> = Vec::with_capacity(pending.len());
     for chunk in pending {
@@ -118,8 +89,6 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     for (chunks, texts) in batch.chunks(BATCH).zip(texts.chunks(BATCH)) {
         match embed_batch(core, chunks, texts.to_vec()).await {
             Ok(()) => {}
-            // One oversize chunk fails the whole batch, and the batch cannot
-            // say which. Per-chunk jobs isolate it, and that path splits it.
             Err(e) if input_too_large(&e) => {
                 tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
                 return split_into_artifact_jobs(core, corpus_id).await;
@@ -130,9 +99,6 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     settle_corpus(core, corpus_id).await
 }
 
-/// One inference call and one upsert for the whole slice. Chunks are marked
-/// embedded only once Qdrant has durably accepted their vectors, so a crash
-/// leaves work to redo rather than a chunk that claims to be searchable.
 async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Result<()> {
     if chunks.is_empty() {
         return Ok(());
@@ -156,8 +122,6 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
         .zip(vectors)
         .map(|((c, text), vector)| VectorPoint {
             vector,
-            // The same text the embedder saw, so the lexical and the semantic
-            // half of a hit always describe the same thing.
             sparse: crate::vector::sparse::encode_document(text),
             payload: payload_of(c),
         })
@@ -170,11 +134,6 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
     Ok(())
 }
 
-/// Report a chunk indexed, unless it was edited while it was being embedded.
-///
-/// The revision is the one read before the inference call, so an edit that
-/// landed in between wins: the mark does not apply, the chunk stays pending,
-/// and the job the editor queued embeds the text that is actually there.
 async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     let landed = core
         .store
@@ -189,9 +148,6 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     Ok(())
 }
 
-/// Fall back from one job per source to one job per chunk. A batch that has
-/// exhausted its retries may be failing on a single chunk the embedder rejects,
-/// and one bad chunk must not keep its siblings out of search.
 pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()> {
     let pending = core.store.pending_artifacts_for_corpus(corpus_id).await?;
     for c in &pending {
@@ -205,9 +161,6 @@ pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()
     Ok(())
 }
 
-/// A chunk larger than the embedder accepts becomes several sibling chunks
-/// split at a paragraph boundary. Truncating would silently discard knowledge,
-/// and one vector per fragment keeps the data model unchanged.
 async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) -> Result<()> {
     let paragraphs: Vec<&str> = chunk
         .text
@@ -216,19 +169,12 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         .collect();
 
     if paragraphs.len() < 2 {
-        // No blank line to cut on. Code, tables and reference entries look like
-        // this, and they are exactly what a local embedding server refuses for
-        // exceeding its physical batch — so when the refusal is real, cut on
-        // lines and then on characters rather than trying the same thing again.
         if hard {
             let parts = split_by_lines(&chunk.text, limit, &core.counter);
             if parts.len() > 1 {
                 return replace_with_siblings(core, chunk, parts).await;
             }
         }
-        // Optimism, once: our token estimate may simply be wrong, and one
-        // over-long vector beats shredding a chunk on a guess. But if the
-        // server refuses it, the guess is settled and the text has to be cut.
         tracing::warn!(artifact_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
         let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
             Ok(v) => v,
@@ -275,9 +221,6 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     replace_with_siblings(core, chunk, parts).await
 }
 
-/// Cut text that has no paragraph breaks. Lines first, and a single line that
-/// still will not fit is cut on character count — the point is that this always
-/// returns something smaller than it was given.
 fn split_by_lines(
     text: &str,
     limit: usize,
@@ -302,9 +245,6 @@ fn split_by_lines(
         parts.push(current);
     }
 
-    // One line longer than the limit on its own: a minified blob or a very long
-    // command. Characters are the last resort, and four per token is the same
-    // conservative ratio the budget estimate uses.
     let max_chars = limit.saturating_mul(4).max(64);
     parts
         .into_iter()
@@ -325,10 +265,6 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     tracing::info!(artifact_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
-    // Make the siblings' room before numbering them. Numbering them apart from
-    // their neighbours instead — `base * 1000 + i` — sorts chunk 2's siblings
-    // after chunks 3 onward rather than before them, and the next segmentation
-    // pass renumbers that wrong order into place permanently.
     core.store
         .make_room_after(&chunk.corpus_id, base, parts.len() as i64 - 1)
         .await?;
@@ -336,19 +272,13 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         .iter()
         .enumerate()
         .map(|(i, text)| NewArtifact {
-            // Siblings sort after the original position and before the next
-            // original chunk, which keeps reading order intact.
             ordinal: base + i as i64,
             text: text.clone(),
             corpus_span: chunk.corpus_span.clone(),
             title: chunk.title.clone(),
             category: chunk.category.clone(),
-            // A caveat applies to the whole passage the parent held, so every
-            // fragment of it inherits the warning rather than losing it.
             caveats: chunk.caveats.clone(),
             tags: chunk.tags.clone(),
-            // Siblings belong to the window their parent came from, or a
-            // re-segmentation of that window would leave them behind.
             segment_idx: chunk.segment_idx,
         })
         .collect();
@@ -358,9 +288,6 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
         .await?;
-    // The parent is gone, so anything it was hiding is now hidden in favour of
-    // an artifact that does not exist. The siblings are not a substitute: they
-    // are new ids nothing points at.
     core.heal_dangling_supersessions().await?;
 
     for c in &inserted {
@@ -378,52 +305,15 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         category: chunk.category.clone(),
         tags: chunk.tags.clone(),
         created_at: chunk.created_at,
-        // Unset means "whatever is already stored": the vector store carries
-        // the existing stamp forward rather than letting a re-embed make a
-        // chunk look forgotten.
         last_seen_at: None,
         hit_count: None,
-        // Retired state is written; active state is deferred. The asymmetry is
-        // the point.
-        //
-        // Deferring unconditionally loses the state outright on a *first*
-        // embed: there is no stored value to carry forward, so an artifact
-        // deprecated while its embed job was still pending — the detail page
-        // offers the button whatever the embed state — lands as a point with no
-        // `status` at all and is back in ordinary results. Nothing notices until
-        // the next sweep's `repair_lifecycle_drift`, and nothing ever does if
-        // consolidation is disabled.
-        //
-        // Writing unconditionally has the opposite failure: `false`/`active` on
-        // every re-embed would revive an artifact the sweep hid, because the row
-        // is read here before the embedding call and an operator can retire the
-        // artifact while that call is in flight.
-        //
-        // Writing only the retired values takes neither. SQLite is the source of
-        // truth (`set_superseded_by` maintains `status` alongside
-        // `superseded_by`), so a row that says retired is a fact worth writing;
-        // a row that says active cannot distinguish "still active" from "stale
-        // read", so it defers to the stored value as before.
         superseded: (chunk.superseded_by.is_some()).then_some(true),
         status: (chunk.status != ArtifactStatus::Active).then_some(chunk.status),
-        // Written, not deferred: a brand-new point has no stored stamp to carry
-        // forward, and the scoring formula reads a missing `last_verified_at`
-        // as epoch — so leaving it unset would rank every freshly ingested
-        // artifact as maximally stale and put it straight on the
-        // deprecation-review list. SQLite is the source of truth here (set at
-        // insert, updated by `Core::verify`), so this is the current value.
-        // The `created_at` fallback covers any row written before the column
-        // existed.
         last_verified_at: chunk.last_verified_at.or(Some(chunk.created_at)),
-        // Same rule as `status` directly above, and it has to be the same rule:
-        // a point that says superseded while naming no winner is a hidden
-        // artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
     }
 }
 
-/// Advance the parent source once no chunk is still pending: `ready` if every
-/// chunk embedded, `partial` if any gave up.
 pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     if core.store.pending_embed_count(corpus_id).await? > 0 {
         return Ok(());
@@ -431,9 +321,6 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     let status = if core.store.failed_embed_count(corpus_id).await? > 0 {
         CorpusStatus::Partial
     } else if core.store.get_corpus(corpus_id).await?.status == CorpusStatus::Partial {
-        // A source with a window the model refused is already partial. Its
-        // chunks embedding cleanly does not fill the hole those lines left,
-        // and reporting `ready` would hide it.
         CorpusStatus::Partial
     } else {
         CorpusStatus::Ready
@@ -448,12 +335,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_retired_before_its_first_embed_lands_retired() {
-        // The detail page offers Deprecate whatever the embed state, so this is
-        // reachable by pressing it on a freshly captured artifact. The payload
-        // deferred `status` to whatever was already stored — and on a first
-        // embed nothing is, so the point arrived with no status at all and the
-        // deprecated artifact was back in ordinary results. Nothing noticed
-        // until the next sweep, and nothing ever did with consolidation off.
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -491,9 +372,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_the_endpoint_refuses_is_split_rather_than_retried() {
-        // The deployment that produced this: config claimed 8192 input tokens,
-        // llama.cpp's physical batch was 1024, and the chunk in between failed
-        // five identical times before anyone looked.
         let mut core = crate::core::test_support::test_core().await;
         let strict = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
             crate::core::test_support::TEST_DIM,
@@ -502,7 +380,6 @@ mod tests {
         core.embedder = strict.clone();
 
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        // Several paragraphs, comfortably over the endpoint's real ceiling.
         let body = (0..40)
             .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
             .collect::<Vec<_>>()
@@ -525,7 +402,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The configured limit is the lie; the endpoint's is what bites.
         run_with_limit(&core, &made[0].id, 8192).await.unwrap();
 
         let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
@@ -542,9 +418,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_with_no_paragraph_breaks_is_still_split() {
-        // Code, tables and reference entries have no blank lines, and they are
-        // exactly what a local embedding server refuses for exceeding its
-        // physical batch. Giving up on them meant retrying forever.
         let mut core = crate::core::test_support::test_core().await;
         core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
             crate::core::test_support::TEST_DIM,
@@ -586,9 +459,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_during_the_as_is_attempt_still_ends_in_a_split() {
-        // The trap this closes: the estimate says the chunk is oversize, there
-        // is no paragraph to cut on, so it is embedded whole — and the server
-        // refuses it, forever, because nothing along that path can shrink it.
         let mut core = crate::core::test_support::test_core().await;
         core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
             crate::core::test_support::TEST_DIM,
@@ -618,8 +488,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A limit low enough that the proactive path runs, which is the path
-        // that used to dead-end.
         run_with_limit(&core, &made[0].id, 100).await.unwrap();
 
         let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
@@ -629,7 +497,6 @@ mod tests {
     #[test]
     fn splitting_by_lines_always_returns_something_smaller() {
         let counter = crate::infer::budget::TokenCounter::Estimate;
-        // A single line far over the limit, with no whitespace to cut on.
         let blob = "x".repeat(4000);
         let parts = split_by_lines(&blob, 100, &counter);
         assert!(parts.len() > 1, "a long single line must still be cut");
@@ -650,8 +517,6 @@ mod tests {
         };
         assert!(input_too_large(&too_big));
 
-        // A transient failure must stay retryable, or a flaky local server
-        // would start shredding chunks instead of waiting for it to recover.
         let flaky = Error::Inference {
             role: "embed",
             detail: "error sending request".into(),
@@ -703,7 +568,6 @@ mod tests {
         assert_eq!(c.embed_model.as_deref(), Some("fake-embed"));
         assert_eq!(core.vectors.count().await.unwrap(), 1);
 
-        // The payload must carry enough to render a result without touching SQLite.
         let q = core
             .embedder
             .embed(&["t0\n## A\nthe body".to_string()])
@@ -752,8 +616,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_whole_source_is_embedded_in_one_inference_call() {
-        // The embedding endpoint is the slow, rate-limited part of ingest.
-        // Five chunks must cost one call, not five.
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         let (src_id, ids) = seed(&core, &["one", "two", "three", "four", "five"]).await;
 
@@ -775,7 +637,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_larger_than_the_request_limit_is_split_across_calls() {
-        // Endpoints cap how many inputs they accept, so the batch is bounded.
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         let texts: Vec<String> = (0..BATCH + 5).map(|i| format!("chunk {i}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -789,8 +650,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_source_with_nothing_pending_still_settles() {
-        // Re-running a finished job must not leave the source stuck in
-        // `embedding` forever.
         let core = test_core().await;
         let (src_id, _) = seed(&core, &["one"]).await;
         run_corpus(&core, &src_id).await.unwrap();
@@ -803,8 +662,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversize_chunk_does_not_block_its_siblings() {
-        // It becomes siblings rather than a vector, so it cannot ride along in
-        // the batch. The rest of the source must still be embedded.
         let core = test_core().await;
         let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
         let (src_id, _) = seed(&core, &["small one", &big, "small two"]).await;
@@ -825,9 +682,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_partially_segmented_source_is_not_promoted_to_ready() {
-        // `partial` records that segmentation was degraded. Every chunk
-        // embedding cleanly does not undo that, and reporting `ready` would
-        // hide it.
         let core = test_core().await;
         let (src_id, _) = seed(&core, &["one", "two"]).await;
         core.store
@@ -864,8 +718,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_paragraph_oversize_chunk_is_still_embedded() {
-        // No paragraph boundary to split on. Better one over-long vector than
-        // a chunk that never becomes searchable at all.
         let core = test_core().await;
         let big = "alpha ".repeat(800);
         let (_src, ids) = seed(&core, &[&big]).await;
@@ -875,9 +727,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_edited_mid_embed_is_not_reported_as_indexed() {
-        // The job read the chunk, called a slow endpoint, and is about to write
-        // back "indexed". An edit that landed in that window must win, or the
-        // vector describes text that no longer exists and nothing says so.
         let core = test_core().await;
         let (_src, ids) = seed(&core, &["one"]).await;
         let stale = core.store.get_artifact(&ids[0]).await.unwrap();
@@ -887,7 +736,6 @@ mod tests {
             .await
             .unwrap();
 
-        // What the in-flight job would have done, with the revision it read.
         assert!(
             !core
                 .store
@@ -902,7 +750,6 @@ mod tests {
             "the chunk must stay queued for the text that is actually there"
         );
 
-        // And the retry, reading the current row, does land.
         run(&core, &ids[0]).await.unwrap();
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().embed_state,
@@ -912,8 +759,6 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_a_source_outlives_a_worker_already_embedding_it() {
-        // `reset_embed_state` and an in-flight batch race by construction: both
-        // write the same chunk, and only the revision says which is current.
         let core = test_core().await;
         let (src_id, ids) = seed(&core, &["one", "two"]).await;
         let inflight: Vec<_> = core
@@ -942,9 +787,6 @@ mod tests {
 
     #[tokio::test]
     async fn re_embedding_does_not_make_a_chunk_look_forgotten() {
-        // A point write replaces the payload rather than merging it, so a
-        // re-embed built from the chunk row used to clear `last_seen_at` — and
-        // `resurface` would offer a chunk read yesterday as forgotten.
         let core = test_core().await;
         let (_src, ids) = seed(&core, &["text"]).await;
         run(&core, &ids[0]).await.unwrap();
@@ -972,8 +814,6 @@ mod tests {
 
     #[tokio::test]
     async fn split_siblings_keep_the_reading_order_of_the_chunk_they_replace() {
-        // `base * 1000 + i` put chunk 1's siblings after chunks 2 onward, and
-        // the next segmentation pass renumbered that order into place for good.
         let core = test_core().await;
         let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
         let (src_id, ids) = seed(&core, &["first", &big, "last"]).await;

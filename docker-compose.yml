@@ -3,7 +3,7 @@ services:
     image: qdrant/qdrant:v1.19.0
     container_name: engram-qdrant
     ports:
-      - "127.0.0.1:6333:6333"   # REST — the only port engram uses
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
 volumes:

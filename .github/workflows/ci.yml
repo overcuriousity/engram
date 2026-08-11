@@ -4,17 +4,12 @@ on:
   push:
   pull_request:
 
-# A newer push makes an in-flight run irrelevant. Cancelling keeps queue times
-# down without weakening what lands on the default branch.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # Note: deliberately NOT setting `RUSTFLAGS: -D warnings` globally. It would
-  # apply to dependency compilation too, so any warning in a third-party crate
-  # would fail our build. Our own code is held to -D warnings via clippy below.
 
 permissions:
   contents: read
@@ -31,8 +26,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      # Everything here runs without infrastructure: inference roles and the
-      # vector store sit behind traits with deterministic fakes.
       - run: cargo test --locked
 
   msrv:
@@ -40,9 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Pinned to the version README and Cargo.toml promise. The floor is set
-      # by sqlx 0.9, which requires 1.94 — higher than the 1.88 our own
-      # let-chains need. This job is what stops that promise drifting silently.
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,7 +68,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # audit-check reports findings as a check run.
       checks: write
     steps:
       - uses: actions/checkout@v7

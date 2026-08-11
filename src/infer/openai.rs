@@ -6,12 +6,6 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
 
-/// One client per role, so a slow model only widens its own patience.
-///
-/// A timeout here looks exactly like a dead endpoint to the job runner: the
-/// call fails, the job retries, and it fails again at the same wall. A local
-/// reasoning model can spend well over three minutes on one segmentation
-/// window, so the ceiling is configurable per role.
 fn client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -48,8 +42,6 @@ async fn post_json(
 
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        // Truncate: an upstream error page can be megabytes, and this string
-        // ends up in a job's last_error column.
         let detail: String = body.chars().take(400).collect();
         return Err(Error::Inference {
             role,
@@ -61,8 +53,6 @@ async fn post_json(
         detail: e.to_string(),
     })
 }
-
-// ── Synthesizer ──────────────────────────────────────────────────────────────────
 
 pub struct HttpSynthesizer {
     client: reqwest::Client,
@@ -93,8 +83,6 @@ impl HttpSynthesizer {
         }
     }
 
-    /// Caps chunk size so the embedder never receives an oversized chunk.
-    /// Set from `embed.max_input_tokens * 0.8` during wiring.
     pub fn with_max_artifact_tokens(mut self, n: usize) -> Self {
         self.max_artifact_tokens = n;
         self
@@ -110,9 +98,6 @@ impl HttpSynthesizer {
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
-        // Segmentation is the slow half of ingest on local hardware — minutes
-        // per window, not seconds. Logging the cost of each call is what makes
-        // a long wait distinguishable from a hang.
         let started = std::time::Instant::now();
         let v = post_json(
             "chunk",
@@ -151,8 +136,6 @@ impl Synthesizer for HttpSynthesizer {
         match prompt::parse_response(&first) {
             Ok(chunks) => Ok(chunks),
             Err(e) => {
-                // One repair attempt with the parser error fed back. Beyond
-                // that the caller falls back to a structural split.
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let second = self
@@ -183,14 +166,10 @@ impl Synthesizer for HttpSynthesizer {
                 {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
             ]))
             .await?;
-        // A model that ignores "no quotes" should not put them on the screen,
-        // and a model that answers with an essay should not become a title.
         let t = out.trim().trim_matches('"').trim();
         Ok((!t.is_empty()).then(|| t.chars().take(120).collect()))
     }
 }
-
-// ── Embedder ─────────────────────────────────────────────────────────────────
 
 pub struct HttpEmbedder {
     client: reqwest::Client,
@@ -220,10 +199,6 @@ impl Embedder for HttpEmbedder {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        // `encoding_format` is optional in OpenAI's own API and defaults to
-        // float there, but proxies in front of llama.cpp-style servers pass the
-        // absent field through as null and the backend rejects it. Sending it
-        // explicitly costs nothing and keeps those endpoints usable.
         let body = json!({
             "model": self.model,
             "input": texts,
@@ -294,8 +269,6 @@ impl Embedder for HttpEmbedder {
     }
 }
 
-// ── Reranker ─────────────────────────────────────────────────────────────────
-
 pub struct HttpReranker {
     client: reqwest::Client,
     base_url: String,
@@ -324,8 +297,6 @@ impl Reranker for HttpReranker {
         docs: &[String],
         top_n: usize,
     ) -> Result<Vec<(usize, f32)>> {
-        // There is no OpenAI-standard rerank endpoint; each server shapes it
-        // differently, so the style is configured rather than guessed.
         let (path, body) = match self.style {
             RerankStyle::Tei => ("rerank", json!({ "query": query, "texts": docs })),
             RerankStyle::Cohere => (
@@ -346,7 +317,6 @@ impl Reranker for HttpReranker {
         )
         .await?;
 
-        // TEI replies with a bare array; Cohere and vLLM wrap it in `results`.
         let arr = v
             .as_array()
             .cloned()
@@ -374,8 +344,6 @@ impl Reranker for HttpReranker {
         Ok(out)
     }
 }
-
-// ── Completer ────────────────────────────────────────────────────────────────
 
 pub struct HttpCompleter {
     client: reqwest::Client,
@@ -430,8 +398,6 @@ impl Completer for HttpCompleter {
     }
 }
 
-/// One cheap reachability check per role at startup. Failure is a warning, not
-/// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
     let c = client(crate::config::DEFAULT_TIMEOUT_SECS);
     let mut req = c.get(url(base_url, "models"));
@@ -491,8 +457,6 @@ mod tests {
     async fn synthesizer_posts_chat_completions_and_parses_artifacts() {
         let server = MockServer::start().await;
         let reply = serde_json::json!({
-            // r###: the payload contains `"##` (a quoted markdown H2), which
-            // terminates both r#"..."# and r##"..."## literals.
             "choices":[{"message":{"content":
                 r###"{"artifacts":[{"text":"## A\nbody","title":"A","category":"note","tags":["t"]}]}"###}}]
         });
@@ -512,8 +476,6 @@ mod tests {
     #[tokio::test]
     async fn synthesizer_retries_once_with_a_repair_prompt() {
         let server = MockServer::start().await;
-        // First call garbage, second valid. `up_to_n_times` makes the first
-        // mock retire after one hit so the second takes over.
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -587,10 +549,6 @@ mod tests {
 
     #[tokio::test]
     async fn embedder_asks_for_float_encoding_explicitly() {
-        // A litellm proxy in front of a llama.cpp-style server forwards the
-        // absent field as null, and the backend answers 500 with
-        // "type must be string, but is null". Every embed call fails against
-        // such an endpoint unless the field is sent.
         use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -614,8 +572,6 @@ mod tests {
     #[tokio::test]
     async fn embedder_sends_a_batch_and_orders_results_by_index() {
         let server = MockServer::start().await;
-        // Deliberately out of order: the API contract is that `index` is
-        // authoritative, not array position.
         let reply = serde_json::json!({"data":[
             {"index":1,"embedding":[1.0,0.0,0.0,0.0]},
             {"index":0,"embedding":[0.0,1.0,0.0,0.0]}
@@ -641,8 +597,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(reply))
             .mount(&server)
             .await;
-        // Config says dim 4, server returned 2. Writing this to Qdrant would
-        // corrupt the collection.
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
             .embed(&["x".into()])
             .await
@@ -653,8 +607,6 @@ mod tests {
     #[tokio::test]
     async fn embedder_rejects_a_short_batch() {
         let server = MockServer::start().await;
-        // Two inputs, one embedding back. Accepting this would silently pair
-        // the wrong vector with the wrong chunk.
         let reply = serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]});
         Mock::given(method("POST"))
             .and(path("/embeddings"))
@@ -724,7 +676,6 @@ mod tests {
     #[tokio::test]
     async fn reranker_drops_out_of_range_indexes() {
         let server = MockServer::start().await;
-        // A malformed index must not panic on the caller's `results.get(idx)`.
         let reply = serde_json::json!([{"index":99,"score":0.9},{"index":0,"score":0.4}]);
         Mock::given(method("POST"))
             .and(path("/rerank"))

@@ -26,11 +26,7 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
     }
 }
 
-/// Mint a token. The plaintext is returned exactly once; only its argon2id
-/// hash is persisted, so a database read cannot recover working credentials.
 pub async fn mint(store: &Store, name: &str, subject: &str) -> Result<(ApiToken, String)> {
-    // OsRng from the rand_core that argon2 re-exports, avoiding a second rand
-    // major version in the tree.
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let plaintext = format!(
@@ -45,12 +41,6 @@ pub async fn mint(store: &Store, name: &str, subject: &str) -> Result<(ApiToken,
     Ok((row, plaintext))
 }
 
-/// Verify a presented bearer token.
-///
-/// Argon2 is deliberately slow, so every active token has to be hashed on each
-/// request. With a single-operator install the token count is tiny and that is
-/// acceptable; if it ever grows, add a fast lookup key rather than weakening
-/// the hash.
 pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
     if !presented.starts_with(TOKEN_PREFIX) {
         return Err(Error::Unauthorized);
@@ -91,7 +81,6 @@ mod tests {
         let id = verify(&s, &plaintext).await.unwrap();
         assert_eq!(id.subject, "user-1");
 
-        // Only the hash is stored, and it is not the token.
         let stored = s.list_tokens().await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, row.id);
@@ -155,7 +144,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_belonging_to_another_subject_carries_that_subject() {
-        // Identity must come from the stored row, never from the request.
         let s = Store::memory().await.unwrap();
         let (_, a) = mint(&s, "one", "alice").await.unwrap();
         let (_, b) = mint(&s, "two", "bob").await.unwrap();

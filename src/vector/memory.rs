@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// Brute-force cosine over a HashMap. Lets the entire ingest-to-search path be
-/// tested without running Qdrant.
 pub struct MemoryVectors {
     points: RwLock<HashMap<String, VectorPoint>>,
 }
@@ -27,10 +25,6 @@ impl Default for MemoryVectors {
     }
 }
 
-/// A payload's effective lifecycle status. Falls back to the legacy
-/// `superseded` boolean when `status` is unset, matching the Qdrant backend's
-/// dual-check `build_filter` so both implementations agree on points written
-/// before `status` existed.
 fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
     payload.status.unwrap_or(match payload.superseded {
         Some(true) => ArtifactStatus::Superseded,
@@ -38,8 +32,6 @@ fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
     })
 }
 
-/// Counts into chips, most frequent first. Ties break on the value so a
-/// HashMap's iteration order never leaks into what the page renders.
 fn ranked(counts: HashMap<&str, u64>, limit: usize) -> Vec<FacetCount> {
     let mut out: Vec<FacetCount> = counts
         .into_iter()
@@ -62,16 +54,11 @@ impl VectorStore for MemoryVectors {
     async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
         let mut w = self.points.write().unwrap();
         for mut p in points {
-            // Matching the Qdrant path: a re-embed rebuilds the payload without
-            // knowing when the chunk was last shown, and clearing the stamp
-            // would make a chunk read yesterday look forgotten.
             if p.payload.last_seen_at.is_none() {
                 p.payload.last_seen_at = w
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.last_seen_at);
             }
-            // Same rule, same reason: an unset flag means "whatever is already
-            // stored", so a re-embed cannot revive an artifact the sweep hid.
             if p.payload.superseded.is_none() {
                 p.payload.superseded = w
                     .get(&p.payload.artifact_id)
@@ -105,8 +92,6 @@ impl VectorStore for MemoryVectors {
     async fn set_payload(&self, payload: &super::VectorPayload) -> Result<()> {
         let mut w = self.points.write().unwrap();
         if let Some(p) = w.get_mut(&payload.artifact_id) {
-            // A merge, matching Qdrant: an absent stamp means "unchanged", so
-            // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
             let hits = payload.hit_count.or(p.payload.hit_count);
             let sup = payload.superseded.or(p.payload.superseded);
@@ -144,11 +129,6 @@ impl VectorStore for MemoryVectors {
         let mut w = self.points.write().unwrap();
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.status = Some(status);
-            // Tracks `Superseded` specifically, matching the Qdrant backend:
-            // the legacy flag feeds a `must_not superseded == true` net that is
-            // active whenever superseded results are excluded, so setting it
-            // for a deprecated artifact would make `include_deprecated`
-            // unable to surface anything.
             p.payload.superseded = Some(status == ArtifactStatus::Superseded);
             p.payload.superseded_by = superseded_by.map(str::to_string);
         }
@@ -198,7 +178,6 @@ impl VectorStore for MemoryVectors {
             .filter(|p| status_of(&p.payload) != ArtifactStatus::Active)
             .map(|p| p.payload.artifact_id.clone())
             .collect();
-        // Deterministic, so a test never depends on HashMap iteration order.
         out.sort();
         out.truncate(limit);
         Ok(out)
@@ -235,7 +214,6 @@ impl VectorStore for MemoryVectors {
     async fn all_artifact_ids(&self) -> Result<Vec<String>> {
         let r = self.points.read().unwrap();
         let mut out: Vec<String> = r.keys().cloned().collect();
-        // Deterministic, so a test never depends on HashMap iteration order.
         out.sort();
         Ok(out)
     }
@@ -252,18 +230,10 @@ impl VectorStore for MemoryVectors {
             .map(|p| &p.payload)
             .filter(|p| {
                 status_of(p) == ArtifactStatus::Active
-                    // Present and old. An unstamped point is unbackfilled, not
-                    // stale — see the trait doc. A missing `hit_count` is the
-                    // other way round: never retrieved is what it means.
                     && p.last_verified_at.is_some_and(|v| v < older_than)
                     && p.hit_count.unwrap_or(0) <= max_hits
             })
             .collect();
-        // Sorted before truncating, and sorted at all: this backs a work queue
-        // an operator returns to after every action, and `values()` iterates a
-        // HashMap in an order that is neither stable nor meaningful. Stalest
-        // first, id as the tiebreak — see the Qdrant implementation, whose order
-        // this has to match for the two to be testable against each other.
         found.sort_by(|a, b| {
             a.last_verified_at
                 .cmp(&b.last_verified_at)
@@ -275,7 +245,6 @@ impl VectorStore for MemoryVectors {
             .map(|payload| SearchHit {
                 payload: payload.clone(),
                 score: 0.0,
-                // No query vector to be similar to; this is a listing.
                 similarity: None,
             })
             .collect())
@@ -284,13 +253,8 @@ impl VectorStore for MemoryVectors {
     async fn touch(&self, targets: &[super::Touch], seen_at: i64) -> Result<()> {
         let mut w = self.points.write().unwrap();
         for t in targets {
-            // The count the caller passed is ignored here on purpose: this
-            // store holds the authoritative value already, and reading it is
-            // free. The Qdrant path uses the caller's copy to skip a round
-            // trip, which is a network optimisation, not a semantic one.
             if let Some(p) = w.get_mut(&t.artifact_id) {
                 p.payload.last_seen_at = Some(seen_at);
-                // Only a search result counts as a retrieval; see `Touch`.
                 if t.counts_as_hit {
                     p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
                 }
@@ -308,10 +272,6 @@ impl VectorStore for MemoryVectors {
         let r = self.points.read().unwrap();
         Ok(r.values()
             .filter(|p| {
-                // Anything not active is out, matching the Qdrant backend: a
-                // deprecated artifact is old and by definition unseen, which
-                // makes it a prime candidate for a list of things nobody has
-                // looked at — and it has just been retired on purpose.
                 status_of(&p.payload) == ArtifactStatus::Active
                     && p.payload.created_at < older_than
                     && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
@@ -320,15 +280,11 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: 0.0,
-                // Drawn at random rather than matched; nothing to be close to.
                 similarity: None,
             })
             .collect())
     }
 
-    /// Dense only. Hybrid fusion is a Qdrant feature; reimplementing BM25
-    /// scoring here would test this file rather than the real retrieval path,
-    /// which the integration suite covers instead.
     async fn search(
         &self,
         vector: &[f32],
@@ -350,9 +306,6 @@ impl VectorStore for MemoryVectors {
                         .is_none_or(|c| p.payload.category.as_ref() == Some(c))
             })
             .map(|p| {
-                // Dense only here, so the ranking score *is* the similarity.
-                // The Qdrant store has to fetch it separately because fusion
-                // throws the magnitude away.
                 let similarity = cosine(vector, &p.vector);
                 SearchHit {
                     payload: p.payload.clone(),
@@ -361,8 +314,6 @@ impl VectorStore for MemoryVectors {
                 }
             })
             .collect();
-        // Tie-break on artifact_id so equal scores produce a stable order rather
-        // than whatever the HashMap iterated this time.
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -397,8 +348,6 @@ impl VectorStore for MemoryVectors {
         };
         let mut hits: Vec<SearchHit> = r
             .values()
-            // Anything out of search is out of the related pane too, matching
-            // the Qdrant backend.
             .filter(|p| {
                 p.payload.artifact_id != artifact_id
                     && status_of(&p.payload) == ArtifactStatus::Active
@@ -406,8 +355,6 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: cosine(&seed.vector, &p.vector),
-                // The seed is an artifact, not a query. "Loosely related" is
-                // the honest description of every neighbour list.
                 similarity: None,
             })
             .collect();
@@ -427,9 +374,6 @@ impl VectorStore for MemoryVectors {
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
         let r = self.points.read().unwrap();
-        // Active only, matching the Qdrant backend: a deprecated artifact must
-        // not enter the sweep, where being newer would let it win a cluster and
-        // hide a live one.
         let live: Vec<&VectorPoint> = r
             .values()
             .filter(|p| status_of(&p.payload) == ArtifactStatus::Active)
@@ -454,7 +398,6 @@ impl VectorStore for MemoryVectors {
             mine.truncate(per_point);
             out.extend(mine);
         }
-        // Deterministic order, so a test never depends on HashMap iteration.
         out.sort_by(|x, y| {
             y.score
                 .total_cmp(&x.score)
@@ -513,9 +456,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_point_with_no_stamp_is_unknown_rather_than_stale() {
-        // Every point predates the lifecycle backfill until it runs. Reading a
-        // missing `last_verified_at` as the epoch made the whole base a
-        // deprecation candidate and asked an operator to act on it.
         let v = MemoryVectors::new();
         let mut stamped = point("stamped", "s1", vec![1.0], &[], "note");
         stamped.payload.last_verified_at = Some(10);
@@ -538,8 +478,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deprecated_point_is_no_longer_a_consolidation_candidate() {
-        // A deprecated artifact entering the sweep can win a cluster on being
-        // newer and hide a live one, leaving the knowledge in neither.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("live", "s1", vec![1.0, 0.0], &[], "note"),
@@ -556,10 +494,6 @@ mod tests {
 
     #[tokio::test]
     async fn search_reports_the_similarity_it_ranked_by() {
-        // The store has to say how close each hit actually was, not only where
-        // it placed. Here they are the same number because this store is dense
-        // only; the Qdrant one fuses ranks and has to fetch the similarity
-        // separately, and both must report it the same way.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("near", "s1", vec![1.0, 0.0, 0.0], &[], "c"),
@@ -765,8 +699,6 @@ mod tests {
 
     #[tokio::test]
     async fn equal_scores_return_a_stable_order() {
-        // Ranking must not depend on HashMap iteration order, or the same
-        // query would shuffle its results between calls.
         let v = MemoryVectors::new();
         v.ensure_collection(3).await.unwrap();
         v.upsert(
@@ -929,8 +861,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_is_reported_once_not_twice() {
-        // (a,b) and (b,a) are the same pair. Reporting both doubles the review
-        // queue and makes the sweep supersede an artifact twice.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("a", "s1", vec![1.0, 0.0], &[], "note"),
@@ -943,8 +873,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_superseded_artifact_is_not_paired_again() {
-        // Otherwise every sweep re-finds the pair it resolved last time and
-        // the review queue never empties.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("a", "s1", vec![1.0, 0.0], &[], "note"),
@@ -1000,10 +928,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_superseded_artifact_is_offered_neither_as_forgotten_nor_as_related() {
-        // Hidden means hidden everywhere a reader browses. A superseded
-        // artifact is by construction near-identical to its keeper, so it would
-        // lead the related pane of the very artifact it lost to, and the
-        // forgotten list would offer exactly what the sweep just took out.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("a", "s1", vec![1.0, 0.0], &[], "note"),
@@ -1027,8 +951,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_superseded_artifact_is_still_reachable_when_asked_for() {
-        // Superseding hides an artifact from ranking. It must not make it
-        // unreadable: the review queue and the undo both need to see it.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("a", "s1", vec![1.0, 0.0], &[], "note"),
@@ -1070,9 +992,6 @@ mod tests {
 
     #[tokio::test]
     async fn re_embedding_does_not_un_supersede_an_artifact() {
-        // `payload_of` in the embed job knows nothing about consolidation, so
-        // it leaves the field unset — and unset must mean "keep what is
-        // stored", or every re-embed would silently revive a hidden artifact.
         let v = MemoryVectors::new();
         v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "note")])
             .await

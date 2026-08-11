@@ -11,7 +11,6 @@ pub struct Assets;
 
 fn content_type(path: &str) -> String {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
-    // Browsers need the charset on text types or non-ASCII renders as mojibake.
     if mime.type_() == "text" {
         format!("{}; charset=utf-8", mime.essence_str())
     } else {
@@ -20,8 +19,6 @@ fn content_type(path: &str) -> String {
 }
 
 async fn serve(Path(path): Path<String>) -> Response {
-    // rust-embed matches on exact stored paths, so a traversal attempt simply
-    // finds nothing. Reject it explicitly anyway rather than relying on that.
     if path.contains("..") {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -38,13 +35,6 @@ async fn serve(Path(path): Path<String>) -> Response {
     }
 }
 
-/// How long a browser may keep an asset.
-///
-/// A year for everything the page references by name, because those are
-/// rebuilt with the binary. The manifest is the exception, for the same reason
-/// the service worker is: it is read once at install time and then held by the
-/// installed app, so a year-long copy of a stale `start_url` or a stale icon
-/// set outlives several deployments.
 fn cache_control(path: &str) -> &'static str {
     if path.ends_with(".webmanifest") {
         "public, max-age=3600"
@@ -53,13 +43,6 @@ fn cache_control(path: &str) -> &'static str {
     }
 }
 
-/// The service worker, from the root rather than from `/assets`.
-///
-/// Two reasons it cannot be an ordinary asset. A worker may only control paths
-/// under the directory it was served from, so one under `/assets` could not see
-/// a navigation to `/ui/search`. And it must not carry the year-long `max-age`
-/// the other assets do: an update has to be able to reach a phone that already
-/// installed the app.
 async fn service_worker() -> Response {
     match Assets::get("sw.js") {
         Some(file) => (
@@ -87,7 +70,6 @@ pub fn assets_router() -> Router<AppState> {
     routes()
 }
 
-/// Same routes with no state, for tests.
 #[cfg(test)]
 pub fn assets_router_standalone() -> Router {
     routes()
@@ -121,8 +103,6 @@ mod tests {
 
     #[tokio::test]
     async fn assets_are_public_and_cacheable() {
-        // Static assets carry no data, so they need no auth, and a long
-        // max-age keeps the UI snappy.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -143,8 +123,6 @@ mod tests {
 
     #[test]
     fn fonts_are_embedded_in_the_binary() {
-        // No CDN at runtime: an external font request would leak usage and
-        // break offline use.
         for f in [
             "inter-400.woff2",
             "inter-500.woff2",
@@ -160,8 +138,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_manifest_is_served_as_a_manifest() {
-        // A manifest sent as text/plain is ignored, and the install prompt
-        // never appears.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -173,8 +149,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()["content-type"], "application/manifest+json");
-        // Not the year the other assets get: an installed app re-reads this,
-        // and a stale copy would outlive several deployments.
         assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
     }
 
@@ -187,20 +161,12 @@ mod tests {
         assert_eq!(m["name"], "engram");
         assert_eq!(m["display"], "standalone");
         assert_eq!(m["start_url"], "/ui/capture");
-        // `id` stays what it always was even though `start_url` moved: a
-        // browser keys an installed app on `id`, and changing it turns an
-        // update into a second app sitting beside the first.
         assert_eq!(m["id"], "/ui/search");
         assert_eq!(m["scope"], "/", "the worker controls the whole origin");
-        // The splash matches the page it opens into. These were the dark
-        // palette while the app serves light, so an install flashed a dark
-        // screen and then repainted cream.
         assert_eq!(m["background_color"], "#f8f6f1");
         assert_eq!(m["theme_color"], "#f8f6f1");
 
         let icons = m["icons"].as_array().unwrap();
-        // Android will not offer to install without both of these sizes, and
-        // will not round the icon without a maskable one.
         for size in ["192x192", "512x512"] {
             assert!(
                 icons.iter().any(|i| i["sizes"] == size),
@@ -212,8 +178,6 @@ mod tests {
             "no maskable icon in the manifest"
         );
         for i in icons {
-            // Manifest paths are URLs; the embed is rooted at `assets/`, so the
-            // mount point comes off before the lookup.
             let src = i["src"].as_str().unwrap();
             let embedded = src
                 .strip_prefix("/assets/")
@@ -227,9 +191,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_service_worker_is_served_from_the_root_and_is_not_cached() {
-        // Under /assets it could not control /ui, and with the year-long
-        // max-age the other assets carry, an update could never reach a phone
-        // that already installed the app.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -251,9 +212,6 @@ mod tests {
 
     #[test]
     fn the_service_worker_handles_fetch_and_caches_no_asset() {
-        // The fetch handler is the part a browser checks for before it treats
-        // the site as installable. The absence of asset caching is the part
-        // that keeps it from serving yesterday's HTML.
         let js = Assets::get("sw.js").expect("sw.js must be embedded");
         let js = std::str::from_utf8(js.data.as_ref()).unwrap();
         assert!(js.contains("addEventListener('fetch'"));
@@ -304,9 +262,6 @@ mod tests {
         assert_ne!(res.status(), StatusCode::OK);
     }
 
-    /// The manifest paints `#f8f6f1` behind a launch. An offline page that
-    /// opens dark is the same flash of the wrong colour that moving the
-    /// manifest off the dark palette was meant to remove.
     #[test]
     fn the_offline_page_opens_in_the_colour_the_manifest_paints() {
         let js = Assets::get("sw.js").expect("sw.js must be embedded");
@@ -350,7 +305,6 @@ mod tests {
 
     #[test]
     fn the_stylesheet_makes_no_external_requests() {
-        // A CDN url here would defeat embedding the fonts.
         let css = Assets::get("app.css").unwrap();
         let css = std::str::from_utf8(css.data.as_ref()).unwrap();
         assert!(!css.contains("https://"), "external url in stylesheet");

@@ -12,11 +12,6 @@ fn is_heading(line: &str) -> bool {
     t.starts_with('#') && t.trim_start_matches('#').starts_with(' ')
 }
 
-/// Split `text` into windows that each fit `segment_tokens`.
-///
-/// Boundary preference is headings, then blank lines, then a hard cut. Each
-/// window after the first repeats the most recent heading, so a procedure
-/// split across windows still tells the model what it belongs to.
 pub fn split_into_segments(
     text: &str,
     counter: &TokenCounter,
@@ -44,24 +39,18 @@ pub fn split_into_segments(
 
     for (idx, line) in lines.iter().enumerate() {
         let line_no = idx as i64 + 1;
-        let line_tokens = counter.count(line) + 1; // +1 for the newline
+        let line_tokens = counter.count(line) + 1;
         let at_boundary = is_heading(line) || line.trim().is_empty();
 
-        // Flush when the line would overflow the window. Prefer to break at a
-        // heading or blank line; if the buffer has grown well past the budget
-        // with no boundary in sight, cut anyway rather than emit one huge window.
         let overflows = !buf.is_empty() && buf_tokens + line_tokens > segment_tokens;
         let blank = line.trim().is_empty();
 
         if overflows && (at_boundary || buf_tokens >= segment_tokens) {
             if blank {
-                // A blank line separates; it closes the window it follows
-                // rather than opening the next one with an empty first line.
                 buf.push(line);
                 flush(&mut windows, &mut buf, start_line, line_no, &carry);
                 start_line = line_no + 1;
             } else {
-                // A heading opens the window it introduces.
                 flush(&mut windows, &mut buf, start_line, line_no - 1, &carry);
                 start_line = line_no;
                 if is_heading(line) {
@@ -102,8 +91,6 @@ fn flush(
     }
     let body = buf.join("\n");
     let text = match carry {
-        // Only prepend context when the window does not already open with a
-        // heading of its own.
         Some(h) if !body.trim_start().starts_with('#') => format!("{h}\n{body}"),
         _ => body,
     };
@@ -115,11 +102,6 @@ fn flush(
     buf.clear();
 }
 
-/// The exact lines of a stored window, one-based and inclusive.
-///
-/// Takes line numbers rather than a `Window` because windows live in the
-/// database between job runs: the row may be stale, and clamping beats
-/// panicking on data.
 pub fn segment_text(text: &str, start_line: i64, end_line: i64) -> String {
     if start_line < 1 || end_line < start_line {
         return String::new();
@@ -206,8 +188,6 @@ mod tests {
 
     #[test]
     fn every_line_of_the_source_survives_windowing() {
-        // Windowing must lose nothing. Carried headings may duplicate, but no
-        // original line may go missing.
         let text = (1..=300)
             .map(|i| {
                 if i % 25 == 0 {
@@ -238,8 +218,6 @@ mod tests {
     fn window_text_returns_exactly_the_lines_a_window_claims() {
         let src = "one\ntwo\nthree\nfour\nfive";
         assert_eq!(segment_text(src, 2, 4), "two\nthree\nfour");
-        // Out-of-range ends clamp rather than panic: the stored window is data,
-        // and data can be stale.
         assert_eq!(segment_text(src, 4, 99), "four\nfive");
         assert_eq!(segment_text(src, 99, 120), "");
     }

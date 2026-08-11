@@ -3,10 +3,6 @@
   <p class="muted">No matches.</p>
 {% else %}
 <div data-terms="{{ terms }}">
-  {# Said once, above the list, rather than repeated on every card: when the
-     whole answer is loose the useful statement is about the search, not about
-     each result. Retrieval always returns its best candidates however bad they
-     are, so without this a typo comes back looking like an answer. #}
   {% if all_weak %}
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>
@@ -19,9 +15,6 @@
   </div>
   {% endif %}
   {% for r in results %}
-  {# The delete control is a sibling of the link rather than a child: a button
-     inside an anchor is invalid, and the anchor must keep being the
-     `.rail-item` the arrow keys move between. #}
   <div class="rail-row">
     <a class="rail-item" role="option" aria-selected="false"
        href="/ui/artifacts/{{ r.artifact_id }}"
@@ -35,14 +28,8 @@
         {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
-      {# Rank, title, two lines. No tags: the pane beside this lists them in
-         full, so the card was echoing it — and the chips were what made the
-         rail heavy enough to need a scrollbar of its own. The facets above
-         narrow by tag, which is what the chips were being read for. #}
       <div class="rail-snippet">{{ r.snippet }}</div>
     </a>
-    {# Swaps its own row out and leaves the rest of the results alone, so the
-       search you were reading is still on screen afterwards. #}
     <div class="rail-del">
       <button class="btn-icon btn-icon-danger" title="Delete artifact"
               aria-label="Delete artifact"

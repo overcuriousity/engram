@@ -1,15 +1,3 @@
-//! Detached writes that still have to finish.
-//!
-//! Some work must not sit on the request path but must not be lost either.
-//! Recording which chunks a search showed is the case that exists today: a
-//! search must not get slower, or fail, because a bookkeeping write did — and
-//! yet a stamp dropped at shutdown is a chunk that looks forgotten when it is
-//! not.
-//!
-//! `tokio::spawn` alone gives the first half and not the second: the runtime
-//! drops outstanding tasks when `main` returns. This counts them, so shutdown
-//! can wait, and so tests can await the effect instead of sleeping and hoping.
-
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,9 +9,6 @@ pub struct Background {
     idle: Notify,
 }
 
-/// Decrements on drop rather than after the await, so a task that panics or is
-/// cancelled releases its slot. Decrementing at the end of the future body
-/// would wedge every later shutdown behind a task that is already gone.
 struct Slot(Arc<Background>);
 
 impl Drop for Slot {
@@ -35,11 +20,6 @@ impl Drop for Slot {
 }
 
 impl Background {
-    /// Run `task` detached, counted until it finishes.
-    ///
-    /// The count is incremented here rather than inside the spawned future, so
-    /// a `wait_idle` racing a `spawn` cannot observe zero for work that has
-    /// already been handed over.
     pub fn spawn<F>(self: &Arc<Self>, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -56,16 +36,8 @@ impl Background {
         self.inflight.load(Ordering::SeqCst)
     }
 
-    /// Resolve once nothing is outstanding.
-    ///
-    /// Waiting for work spawned *after* this returns is not the contract:
-    /// callers stop accepting requests first, then drain.
     pub async fn wait_idle(&self) {
         loop {
-            // Registered before the count is read, because `notify_waiters`
-            // wakes only what is already waiting. Checking first would lose a
-            // task that finished in between and wait for a wake-up that has
-            // already happened.
             let notified = self.idle.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -78,17 +50,8 @@ impl Background {
     }
 }
 
-/// The sweep's job target. A constant rather than a corpus id: consolidation
-/// looks at the whole collection, and the `UNIQUE(stage, target_id)` on `jobs`
-/// then guarantees at most one queued sweep however often the ticker fires.
 pub const CONSOLIDATE_TARGET: &str = "collection";
 
-/// Queue a consolidation sweep now and every `interval_hours` after.
-///
-/// A timer rather than a trigger on write: a sweep after every capture would
-/// re-examine the whole collection for one new artifact, and the pairs it finds
-/// do not become interesting the instant they are written. The first tick fires
-/// immediately, so a restart picks the work up rather than waiting a day.
 pub fn spawn_consolidation_ticker(
     core: crate::core::Core,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -132,9 +95,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_ticker_queues_exactly_one_sweep() {
-        // `jobs` is unique on (stage, target), so a ticker that fires while a
-        // sweep is still queued must collapse onto the same row rather than
-        // stacking sweeps behind a slow one.
         let core = crate::core::test_support::test_core().await;
         for _ in 0..3 {
             core.store
@@ -169,13 +129,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_ticker_queues_a_sweep_as_soon_as_it_starts() {
-        // `tokio::time::interval` fires immediately on its first tick, which is
-        // what makes a restart pick consolidation up rather than waiting a day.
         let core = crate::core::test_support::test_core().await;
         let (tx, rx) = tokio::sync::watch::channel(false);
         let h = spawn_consolidation_ticker(core.clone(), rx);
 
-        // Give the first tick a chance to land, then stop the ticker.
         for _ in 0..50 {
             if core
                 .store
@@ -234,8 +191,6 @@ mod tests {
         for i in 0..50 {
             let c = count.clone();
             bg.spawn(async move {
-                // Staggered, so a wait that resolves early is caught rather
-                // than passing because everything happened to finish at once.
                 tokio::time::sleep(Duration::from_millis(i % 7)).await;
                 c.fetch_add(1, Ordering::SeqCst);
             });
@@ -246,8 +201,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_task_does_not_wedge_shutdown() {
-        // A background write that panics must still release its slot, or every
-        // later shutdown hangs waiting for a task that is already gone.
         let bg = Arc::new(Background::default());
         bg.spawn(async { panic!("the write failed") });
 

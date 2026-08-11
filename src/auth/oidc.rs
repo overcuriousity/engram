@@ -4,8 +4,6 @@ use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// A login attempt older than this is abandoned. Long enough for a slow
-/// identity provider, short enough that a leaked state value is useless.
 pub const PENDING_TTL_SECS: i64 = 600;
 
 #[derive(Debug, Clone)]
@@ -16,8 +14,6 @@ pub struct PendingAuth {
     pub created_at: i64,
 }
 
-/// In-memory, single-use, expiring store of in-flight login attempts. Not
-/// persisted: a restart mid-login just means logging in again.
 pub struct PendingStore {
     inner: Mutex<HashMap<String, PendingAuth>>,
 }
@@ -36,8 +32,6 @@ impl PendingStore {
         m.insert(p.csrf.clone(), p);
     }
 
-    /// Removes and returns the attempt. Single use: a replayed `state` value
-    /// finds nothing.
     pub fn take(&self, csrf: &str) -> Option<PendingAuth> {
         let mut m = self.inner.lock().unwrap();
         let p = m.remove(csrf)?;
@@ -54,9 +48,6 @@ impl Default for PendingStore {
     }
 }
 
-/// Who may sign in. An empty allowlist denies everyone by design: without it,
-/// every account the identity provider knows about could read the knowledge
-/// base.
 pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: &[String]) -> bool {
     if cfg.allowed_subs.iter().any(|s| s == subject) {
         return true;
@@ -81,11 +72,6 @@ pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: 
     false
 }
 
-/// The one claim this reads beyond the OIDC standard set: which groups the
-/// provider says the subject belongs to. A provider that never sends it — the
-/// common case, since Nextcloud's OIDC provider app only includes `groups`
-/// when an admin turns on group provisioning for the client — simply
-/// deserializes to an empty list rather than failing the claim parse.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct GroupClaims {
     #[serde(default)]
@@ -103,10 +89,6 @@ type EngramIdTokenFields = openidconnect::IdTokenFields<
 type EngramTokenResponse =
     openidconnect::StandardTokenResponse<EngramIdTokenFields, openidconnect::core::CoreTokenType>;
 
-/// `openidconnect::core::CoreClient` with its additional-claims parameter
-/// swapped from `EmptyAdditionalClaims` to [`GroupClaims`], so the `groups`
-/// claim decodes rather than being discarded. Otherwise identical to `Core*`
-/// — same algorithms, same error and token types.
 type EngramClient<
     HasAuthUrl = openidconnect::EndpointNotSet,
     HasDeviceAuthUrl = openidconnect::EndpointNotSet,
@@ -135,13 +117,6 @@ type EngramClient<
 >;
 
 pub struct OidcClient {
-    /// Discovery result, fetched once at startup.
-    ///
-    /// The constructed client is deliberately NOT stored: openidconnect
-    /// encodes which endpoints are configured in a seventeen-parameter
-    /// typestate, and naming that type in a struct field pins us to one patch
-    /// release. Rebuilding per call costs nothing (no I/O) and lets inference
-    /// carry the type.
     metadata: openidconnect::core::CoreProviderMetadata,
     http: openidconnect::reqwest::Client,
     cfg: OidcConfig,
@@ -164,12 +139,6 @@ impl OidcClient {
         }
 
         let http = openidconnect::reqwest::ClientBuilder::new()
-            // Nextcloud's documented nginx recipe 301s the bare .well-known
-            // path to /index.php/.well-known/...; issuer_url stays the bare
-            // domain, since that is what the discovery document itself
-            // declares as `issuer` and what ID tokens carry as `iss`. A bounded
-            // hop count, not zero: this still refuses to be walked anywhere
-            // unbounded, matching what a typical OIDC client allows by default.
             .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|e| Error::Validation(e.to_string()))?;
@@ -227,9 +196,6 @@ impl OidcClient {
         ))
     }
 
-    /// Exchange the authorization code and validate the ID token. The
-    /// openidconnect crate verifies the signature, issuer, audience and
-    /// expiry; the nonce and the allowlist are checked here.
     pub async fn exchange(
         &self,
         pending: &PendingAuth,
@@ -277,16 +243,6 @@ impl OidcClient {
         let mut email = claims.email().map(|e| e.to_string());
         let mut groups = claims.additional_claims().groups.clone();
 
-        // Nextcloud's OIDC provider app does not put `email` (or `groups`) in
-        // the ID token even when the scope is granted — they only appear from
-        // the userinfo endpoint. Without this, an allowlist keyed on either
-        // always sees nothing and every sign-in is refused, however correctly
-        // the config names the account.
-        //
-        // Best-effort: the subject from the ID token is already verified by
-        // its signature, so an endpoint that is absent or unreachable must
-        // not turn into a failed sign-in for someone the ID token itself
-        // vouches for.
         if email.is_none() || groups.is_empty() {
             match client.user_info(
                 tokens.access_token().clone(),
@@ -349,8 +305,6 @@ mod tests {
 
     #[test]
     fn an_empty_allowlist_denies_everyone() {
-        // Defaulting open would hand the knowledge base to every account in
-        // the identity provider.
         assert!(!is_allowed(
             &cfg(&[], &[]),
             "sub-1",

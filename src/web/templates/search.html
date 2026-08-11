@@ -1,13 +1,6 @@
 {% extends "layout.html" %}
 {% block title %}Search — engram{% endblock %}
 {% block content %}
-{# One form around the box and the chips, so a chip carries the query with it
-   and the query carries the chips. `change` fires for the chips, `keyup` only
-   for the box: a radio does not need a debounce and the box does. `change` is
-   scoped to the radios because it bubbles, and the box fires its own on blur,
-   which would repeat the search a second time for nothing. `submit` is listed
-   so htmx cancels it: a single-field form submits implicitly on Enter, and a
-   full page load would throw away the open pane. #}
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
       hx-trigger="change from:#filters input[type=radio],
                   keyup changed delay:250ms from:input[name=q],
@@ -15,18 +8,11 @@
                   submit{% if !q.is_empty() %},
                   load{% endif %}"
       hx-indicator="#search-spinner">
-  {# No `autofocus` attribute: on a touch screen it opens the keyboard over the
-     results the page was opened to show. app.js focuses it where a pointer says
-     there is a hardware keyboard already. #}
   <input class="input" type="search" name="q" placeholder="Search by meaning…"
          value="{{ q }}">
 
   {% if !facets.categories.is_empty() || !facets.tags.is_empty() %}
   <div class="facets">
-    {# Labelled in the page, not only in `aria-label`: two unlabelled rows both
-       starting with "All" left the same word appearing in both with different
-       numbers beside it, which read as a contradiction rather than as a kind
-       and a tag. #}
     {% if !facets.categories.is_empty() %}
     <div class="facet-row">
     <span class="facet-label">Kind</span>

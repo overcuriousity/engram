@@ -1,16 +1,3 @@
-//! Freeze the evaluation corpus: synthesise every `corpus/*.txt` once with the
-//! real model and write the result to `artifacts.json`.
-//!
-//! Run deliberately, not per benchmark. Synthesising on every run would cost a
-//! completion per segment and return slightly different artifacts each time, so
-//! a two percent ranking change would be indistinguishable from model noise.
-//!
-//! Chunk ids change on every run, so re-running invalidates `pairs.json` and
-//! the pairs have to be re-checked against the new ids. That is the reason
-//! this is a separate command rather than a step of the harness.
-//!
-//!   ENGRAM_EVAL_DIR=~/engram-eval cargo run --bin eval-prepare
-
 use anyhow::{Context, Result, bail};
 use engram::config::Config;
 use engram::core::Core;
@@ -19,10 +6,6 @@ use engram::store::Store;
 use engram::vector::memory::MemoryVectors;
 use std::sync::Arc;
 
-/// How many times the whole corpus is driven before its remaining segments are
-/// called hopeless. `synthesize::run` resumes from the first pending segment, so
-/// a pass is one attempt at each segment still outstanding — this stands in for
-/// the job runner's own attempt budget.
 const MAX_PASSES: usize = 4;
 
 #[tokio::main]
@@ -44,8 +27,6 @@ async fn main() -> Result<()> {
     }
 
     let cfg = Config::load(None).context("loading config.toml")?;
-    // A throwaway in-memory store and vector index: this run produces a JSON
-    // file, not a searchable instance.
     let store = Store::memory().await?;
     let core = Core::from_config(&cfg, Arc::new(MemoryVectors::new()), store);
 
@@ -53,7 +34,6 @@ async fn main() -> Result<()> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "txt"))
         .collect();
-    // Sorted so the frozen file is stable between runs on different machines.
     files.sort();
     if files.is_empty() {
         bail!("no .txt files in {}", corpus.display());
@@ -72,9 +52,6 @@ async fn main() -> Result<()> {
         tracing::info!(file = %name, bytes = text.len(), "synthesising");
         let out = core.ingest(&text, "eval", Some(&name)).await?;
 
-        // Stand in for the job runner: `synthesize::run` resumes from the first
-        // pending segment, so repeating it is what drives a multi-segment corpus
-        // to completion.
         let mut passes = 0;
         loop {
             if let Err(e) = engram::jobs::synthesize::run(&core, &out.id).await {

@@ -12,18 +12,8 @@ use crate::vector::VectorStore;
 use background::Background;
 use std::sync::Arc;
 
-/// Entries kept in the query embedding cache.
 pub const QUERY_CACHE_CAPACITY: usize = 256;
 
-/// Bounded cache of query embeddings.
-///
-/// Search-as-you-type asks for `d`, `dd`, `dd i`, `dd if` inside one search,
-/// and the same questions come back across sessions. Each of those is a remote
-/// call before the vector store is touched at all, which for a local embedder
-/// is the dominant term in the latency the user feels.
-///
-/// Insertion-ordered rather than a true LRU: at this size the difference does
-/// not pay for the bookkeeping.
 pub struct QueryCache {
     capacity: usize,
     entries: std::collections::VecDeque<(String, Vec<f32>)>,
@@ -61,27 +51,14 @@ pub struct Core {
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
     pub counter: Arc<TokenCounter>,
-    /// Writes that run off the request path. Shared by every clone of `Core`,
-    /// so draining one drains them all.
     pub background: Arc<Background>,
-    /// Shared by every clone of `Core`, like the background queue.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
-    /// Thresholds and budgets for duplicate hygiene. Read on the capture path
-    /// and by the sweep, so it lives here rather than being passed down.
     pub consolidate: crate::config::ConsolidateConfig,
-    /// Cosine similarity below which a result is reported as only loosely
-    /// related. See `VectorConfig::weak_below`.
     pub weak_below: f32,
 }
 
 impl Core {
-    /// Build the running core from configuration. Lives here rather than in
-    /// `main`, so the evaluation harness drives exactly the `Core` the binary
-    /// does — a benchmark against a differently wired core measures the wrong
-    /// program.
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
-        // Chunk size is capped by what the embedder accepts, with headroom for
-        // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
         Core {
@@ -129,16 +106,12 @@ pub mod test_support {
         test_core_counting_reranked_docs().await.0
     }
 
-    /// A core plus a handle on its reranker, for asserting how wide the
-    /// candidate pool it was handed actually was.
     pub async fn test_core_counting_reranked_docs() -> (Core, Arc<FakeReranker>) {
         let reranker = Arc::new(FakeReranker::default());
         let core = build(Arc::new(FakeSynthesizer::default()), Some(reranker.clone())).await;
         (core, reranker)
     }
 
-    /// A core plus a handle on its embedder, for asserting how many times the
-    /// endpoint was called rather than only what came back.
     pub async fn test_core_counting_embed_calls() -> (Core, Arc<FakeEmbedder>) {
         let embedder = Arc::new(FakeEmbedder::new(TEST_DIM));
         let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
@@ -159,10 +132,6 @@ pub mod test_support {
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
-            // The fake embedder's vectors are not a semantic space, so a
-            // realistic threshold would mark arbitrary results weak and every
-            // search test would be asserting against noise. Tests that care
-            // about the labelling set it themselves.
             weak_below: 0.0,
         }
     }
@@ -173,9 +142,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    /// The one wiring decision `from_config` makes that is not a straight
-    /// field copy: rerank is optional, and an absent block must leave search
-    /// in vector order rather than defaulting to an endpoint.
     #[tokio::test]
     async fn the_example_config_carries_the_consolidation_defaults() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
@@ -195,9 +161,6 @@ mod tests {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
 
-        // `Config` has no `Default`, and adding one just for a test would put
-        // a fake endpoint in the type. The committed example file is a real
-        // config and costs nothing to read.
         let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert!(
             cfg.infer.rerank.is_none(),

@@ -9,7 +9,6 @@ say so plainly rather than guessing. Cite excerpts by their number. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
 
-/// Reserve part of the context for the answer itself.
 const ANSWER_RESERVE_TOKENS: usize = 1024;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -26,10 +25,7 @@ pub struct AskRequest {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AskResponse {
     pub answer: String,
-    /// Exactly the excerpts the model saw.
     pub citations: Vec<SearchResult>,
-    /// Retrieved but left out for budget. Reported so a missing citation is
-    /// visible rather than silent.
     pub dropped: usize,
 }
 
@@ -39,9 +35,6 @@ impl Core {
             return Err(Error::Validation("question is empty".into()));
         }
 
-        // No per-source cap: an answer often lives in one document, and
-        // withholding its paragraphs to keep the citation list varied would
-        // make the answer worse, not fairer.
         let hits = self
             .search_capped(
                 &SearchQuery {
@@ -49,7 +42,6 @@ impl Core {
                     limit: req.limit.unwrap_or(8),
                     tags: req.tags.clone(),
                     category: req.category.clone(),
-                    // Asking a question is as deliberate as a search gets.
                     mark: true,
                     include_deprecated: false,
                     include_superseded: false,
@@ -59,8 +51,6 @@ impl Core {
             .await?;
 
         if hits.is_empty() {
-            // No retrieval, no completion: spending a model call to say
-            // "nothing found" is pure latency.
             return Ok(AskResponse {
                 answer: "Nothing in the knowledge base matches that question.".into(),
                 citations: vec![],
@@ -68,13 +58,6 @@ impl Core {
             });
         }
 
-        // Caveats are the conditions under which an excerpt does not apply, and
-        // an answer that quotes "run `mkfs` on the device" without "destroys
-        // everything already on it" is worse than no answer. They are not in
-        // the vector payload — what gets embedded is a separate decision — so
-        // they are read from the store, which costs one cheap SQLite lookup per
-        // hit and no inference. An excerpt whose row has since been deleted
-        // simply carries none.
         let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
         for (i, h) in hits.iter().enumerate() {
             let caveats = self
@@ -103,7 +86,6 @@ impl Core {
             .saturating_sub(self.counter.count(&req.q))
             .saturating_sub(ANSWER_RESERVE_TOKENS);
 
-        // Highest score first, so what gets cut is what mattered least.
         let kept = pack_by_budget(&blocks, &self.counter, budget);
         let dropped = blocks.len() - kept;
         if dropped > 0 {
@@ -183,10 +165,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_is_shown_the_caveats_of_every_excerpt() {
-        // A caveat is the condition under which an artifact does not apply, and
-        // an answer that quotes a destructive command without it is worse than
-        // no answer. Caveats are not in the vector payload, so this asserts the
-        // store lookup that puts them back.
         let mut core = test_core().await;
         core.completer = std::sync::Arc::new(crate::infer::fake::EchoCompleter);
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -221,8 +199,6 @@ mod tests {
     #[tokio::test]
     async fn ask_reports_chunks_dropped_for_budget() {
         let core = test_core().await;
-        // FakeCompleter reports a 4096-token context; oversized excerpts force
-        // some to be left out.
         seed(&core, 20, 400).await;
         let out = core.ask(&req("anything")).await.unwrap();
         assert!(

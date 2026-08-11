@@ -1,15 +1,3 @@
-//! Qdrant backend, spoken over its REST API.
-//!
-//! REST rather than gRPC because REST is the port operators actually expose —
-//! typically behind a TLS reverse proxy on 443 — and because the feature set is
-//! identical. `reqwest` was already a dependency, so this costs no new crates
-//! and saves the whole `tonic`/`prost` tree.
-//!
-//! `vector.collection` names an *alias*, never a collection. The data lives in
-//! `{alias}_v1`, `_v2`, … and the alias points at whichever generation is
-//! current. Changing the embedding model or the index schema is then a
-//! background rebuild followed by an atomic swap, rather than an outage.
-
 use super::sparse::SparseVector;
 use super::{
     FacetCount, Facets, LifecycleRow, SearchFilter, SearchHit, Touch, VectorPayload, VectorPoint,
@@ -26,31 +14,17 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Generous enough for a cold HNSW segment load, short enough that a wedged
-/// server surfaces as a retryable job failure rather than a hung worker.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The named dense vector. Named rather than default because a collection
-/// cannot gain named vectors later without being rebuilt, and the sparse half
-/// of hybrid search needs the namespace.
 pub const DENSE: &str = "dense";
 
-/// The sparse (BM25) vector slot. Declared from the first generation onwards so
-/// that turning hybrid search on is a code change, not a migration.
 pub const SPARSE: &str = "text";
 
-/// Points copied per scroll page during a rebuild.
 const REINDEX_BATCH: usize = 256;
 
-/// How long to wait for a collection another process just created to answer
-/// for itself: five attempts backing off 200ms, 400ms, … — three seconds in
-/// total, which is startup-shaped rather than request-shaped.
 const READY_ATTEMPTS: u32 = 5;
 const READY_BACKOFF: Duration = Duration::from_millis(200);
 
-/// A chunk carrying this tag is boosted past the decay curve. A tag rather than
-/// a column: `PATCH /api/v1/artifacts/{id}` already edits tags without
-/// re-embedding, and the payload index that makes it filterable already exists.
 pub const PINNED_TAG: &str = "pinned";
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -58,7 +32,6 @@ const SECONDS_PER_DAY: u64 = 86_400;
 pub struct QdrantVectors {
     http: Client,
     base: String,
-    /// The alias clients read and write through, from `vector.collection`.
     alias: String,
     api_key: Option<String>,
     recency_weight: f32,
@@ -77,12 +50,6 @@ pub fn dimension_mismatch(collection: &str, configured: usize, existing: usize) 
     ))
 }
 
-/// A collection named exactly like the alias predates the aliased layout. It
-/// still holds every vector, so the fix is a rebuild, never a bare delete.
-///
-/// Qdrant refuses an alias whose name collides with an existing collection, so
-/// unlike a generational rebuild this one cannot keep its source. That makes it
-/// destructive, and destructive steps are opt-in.
 fn legacy_layout(alias: &str) -> Error {
     Error::Vector(format!(
         "`{alias}` is a plain collection, but engram now addresses vectors through an alias of \
@@ -93,9 +60,6 @@ fn legacy_layout(alias: &str) -> Error {
     ))
 }
 
-/// Qdrant point ids must be an unsigned integer or a UUID. Chunk ids are
-/// already UUIDv7 strings, so they pass through; anything else is hashed into
-/// a deterministic UUID so the mapping stays stable across restarts.
 pub fn point_uuid(artifact_id: &str) -> String {
     match uuid::Uuid::parse_str(artifact_id) {
         Ok(u) => u.to_string(),
@@ -108,24 +72,14 @@ pub fn point_uuid(artifact_id: &str) -> String {
     }
 }
 
-/// Strip trailing slashes so path joining never produces a double slash, which
-/// some proxies answer with a redirect instead of the resource.
 fn normalize_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-/// The physical collection backing generation `n` of an alias.
 fn generation_name(alias: &str, n: u32) -> String {
     format!("{alias}_v{n}")
 }
 
-/// Read the generation number back out of a physical collection name, if it
-/// carries one at all.
-///
-/// `None` is what separates `chunks_v2` from `chunks_verbose`: a prefix match
-/// alone would claim any collection whose name happens to start the same way,
-/// and this answer decides what `drop_collection` deletes and what
-/// `ensure_collection` adopts.
 fn generation_number(alias: &str, collection: &str) -> Option<u32> {
     collection
         .strip_prefix(&format!("{alias}_v"))
@@ -133,14 +87,10 @@ fn generation_number(alias: &str, collection: &str) -> Option<u32> {
         .and_then(|n| n.parse().ok())
 }
 
-/// The generation a rebuild would count from. A pre-alias collection carries no
-/// number, so the next one lands on `_v1`.
 fn generation_of(alias: &str, collection: &str) -> u32 {
     generation_number(alias, collection).unwrap_or(0)
 }
 
-/// Qdrant answers `{"must": [...]}` with an implicit AND. An empty condition
-/// list would match nothing, so callers must skip the filter entirely instead.
 fn build_filter(filter: &SearchFilter) -> Option<Value> {
     if filter.is_empty() {
         return None;
@@ -153,22 +103,13 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
         must.push(json!({ "key": "category", "match": { "value": c } }));
     }
 
-    // `must` is omitted rather than sent empty. A search that only excludes
-    // superseded points has no positive condition, and an empty condition list
-    // is not something to hand Qdrant and hope it reads as "no constraint".
     let mut body = json!({});
     if !must.is_empty() {
         body["must"] = json!(must);
     }
-    // Excluded with `must_not` rather than by matching `false`: a point written
-    // before consolidation existed carries no `status`/`superseded` key at
-    // all, and a `match: false` clause would drop every one of them from
-    // search.
     let mut must_not: Vec<Value> = Vec::new();
     if !filter.include_superseded {
         must_not.push(json!({ "key": "status", "match": { "value": "superseded" } }));
-        // Legacy flag, kept as a safety net for points written before the
-        // `status` field existed and not yet caught up by a backfill pass.
         must_not.push(json!({ "key": "superseded", "match": { "value": true } }));
     }
     if !filter.include_deprecated {
@@ -180,15 +121,6 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     Some(body)
 }
 
-/// The payload `set_lifecycle` merges into a point.
-///
-/// The legacy `superseded` boolean is derived and written alongside `status` so
-/// `build_filter`'s pre-backfill safety net and any reader that still checks it
-/// stay correct. It tracks `Superseded` specifically and *not* "anything not
-/// active": that net is a `must_not superseded == true` which `build_filter`
-/// emits whenever `include_superseded` is false, so writing `true` for a
-/// deprecated artifact would make `include_deprecated` unable to surface
-/// anything at all.
 fn lifecycle_payload(status: ArtifactStatus, superseded_by: Option<&str>) -> Value {
     json!({
         "status": status.as_str(),
@@ -197,10 +129,6 @@ fn lifecycle_payload(status: ArtifactStatus, superseded_by: Option<&str>) -> Val
     })
 }
 
-/// What a stored payload says its lifecycle status is, read the way every
-/// filter reads it: an absent `status` falls back to the legacy `superseded`
-/// flag, and an absent flag means active — which is every point written before
-/// lifecycle tracking existed.
 fn stored_status(payload: &Value) -> ArtifactStatus {
     match payload.get("status").and_then(Value::as_str) {
         Some(s) => ArtifactStatus::parse(s),
@@ -211,12 +139,6 @@ fn stored_status(payload: &Value) -> ArtifactStatus {
     }
 }
 
-/// The payload `set_last_verified_at` merges into a point.
-///
-/// `reset_hits` zeroes `hit_count` in the same write, because `stale_max_hits`
-/// counts retrievals *since* the last verification — see `Core::verify`. The
-/// backfill pass leaves it alone: it stamps every artifact and must not wipe
-/// every counter.
 fn verified_payload(at: i64, reset_hits: bool) -> Value {
     let mut p = json!({ "last_verified_at": at });
     if reset_hits {
@@ -225,8 +147,6 @@ fn verified_payload(at: i64, reset_hits: bool) -> Value {
     p
 }
 
-/// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
-/// which is why `near_pairs` follows this with a payload lookup.
 #[derive(Deserialize)]
 struct MatrixPairs {
     pairs: Vec<MatrixPair>,
@@ -239,7 +159,6 @@ struct MatrixPair {
     score: f32,
 }
 
-/// The schema every generation is created with.
 fn collection_body(dim: usize) -> Value {
     json!({
         "vectors": { DENSE: { "size": dim, "distance": "Cosine" } },
@@ -247,9 +166,6 @@ fn collection_body(dim: usize) -> Value {
     })
 }
 
-/// The sparse half of a stored point, as Qdrant wants it. Skipped entirely when
-/// the text held no indexable term, because a sparse vector with no dimensions
-/// is not the same as no sparse vector.
 fn sparse_body(sparse: &SparseVector) -> Option<Value> {
     if sparse.is_empty() {
         return None;
@@ -257,13 +173,6 @@ fn sparse_body(sparse: &SparseVector) -> Option<Value> {
     Some(json!({ "indices": sparse.indices, "values": sparse.values }))
 }
 
-/// Bring a payload written before the taxonomy rename up to the current key
-/// names.
-///
-/// This is what makes `--reindex` the migration for it: the vectors are already
-/// correct, and paying an embedding endpoint to change two key names would be
-/// absurd. A payload that already uses the new names passes through untouched,
-/// so running a rebuild twice is safe.
 fn renamed_payload(payload: &Value) -> Value {
     let mut out = payload.clone();
     let Some(obj) = out.as_object_mut() else {
@@ -277,9 +186,6 @@ fn renamed_payload(payload: &Value) -> Value {
     out
 }
 
-/// Rebuild a point's terms from its payload. A rebuild has the text but not the
-/// artifact row, and this must match what the embed job indexed: title then
-/// body.
 fn sparse_of_payload(payload: &Value) -> SparseVector {
     let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
     match payload.get("title").and_then(Value::as_str) {
@@ -288,36 +194,6 @@ fn sparse_of_payload(payload: &Value) -> SparseVector {
     }
 }
 
-/// The score adjustment applied on top of retrieval: newer wins ties, and a
-/// pinned chunk wins outright.
-///
-/// `$score` here is the fused rank from the prefetch below it, which lands
-/// between roughly 0.1 and 1.0. `exp_decay` returns 1.0 for something captured
-/// now and 0.5 at one half-life old, so the recency term is a small nudge
-/// rather than a second ranking.
-///
-/// `defaults` is not optional politeness: a single point whose payload lacks
-/// `last_verified_at` fails the *whole* query with
-/// `Expected number value for last_verified_at in the payload and/or in the
-/// formula defaults`, not just its own scoring. Every point engram writes
-/// carries the key, but `--reindex` copies payloads verbatim from whatever was
-/// in the source collection, so one hand-written point would otherwise take
-/// search down.
-///
-/// The default is `now`, not the epoch. A missing stamp means unknown, not
-/// stale, and the difference is the whole collection on the day the lifecycle
-/// migration lands: every pre-existing point lacks the key until the backfill
-/// has run, and defaulting to the epoch would collapse the recency term to
-/// zero for all of them at once — a base-wide reranking nobody asked for.
-/// Defaulting to `now` leaves the term neutral (`exp_decay` returns 1.0), so an
-/// unstamped point ranks exactly as it did before this field existed.
-///
-/// Decays against `last_verified_at` rather than `created_at`, deliberately:
-/// an artifact confirmed correct last week should outrank one merely written
-/// last week and never looked at since. Nothing here reads `hit_count` — a
-/// popularity term would let a frequently-shown result keep boosting itself
-/// further, at the expense of a correct but rarely-queried one that never
-/// gets the chance to accumulate hits.
 fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> Value {
     let mut terms = vec![json!("$score")];
     if recency > 0.0 {
@@ -328,8 +204,6 @@ fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> 
         }));
     }
     if pinned > 0.0 {
-        // A filter condition evaluates to 1.0 for a point that matches it, and
-        // needs no default: a point without tags simply does not match.
         terms.push(json!({
             "mult": [pinned, { "key": "tags", "match": { "value": PINNED_TAG } }]
         }));
@@ -340,8 +214,6 @@ fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> 
     })
 }
 
-/// A stored point's dense vector, whether the collection uses named vectors or
-/// is a pre-alias collection with a single default one.
 fn dense_of(vector: &Value) -> Option<&Value> {
     match vector {
         Value::Array(_) => Some(vector),
@@ -350,8 +222,6 @@ fn dense_of(vector: &Value) -> Option<&Value> {
     }
 }
 
-/// Every Qdrant response is wrapped in this. `result` is absent on failures,
-/// which is why it is optional rather than required.
 #[derive(Deserialize)]
 struct Envelope<T> {
     result: Option<T>,
@@ -386,9 +256,6 @@ struct FacetResult {
     hits: Vec<FacetHit>,
 }
 
-/// Qdrant reports a facet value as whatever type the field holds. Only keyword
-/// fields are facetted here, so anything that is not a string is not a value
-/// this collection can be filtered by and is dropped.
 #[derive(Deserialize)]
 struct FacetHit {
     value: Value,
@@ -426,9 +293,6 @@ struct ScrollResult {
     next_page_offset: Value,
 }
 
-/// The payload keys a point write must not clobber, as currently stored.
-/// `None` means the key is absent, which for `superseded`/`status` is every
-/// point written before consolidation/lifecycle tracking existed.
 #[derive(Debug, Clone, Default)]
 struct StoredBookkeeping {
     last_seen_at: Option<i64>,
@@ -450,8 +314,6 @@ struct ScrolledPoint {
 
 impl QdrantVectors {
     pub async fn connect(cfg: &VectorConfig) -> Result<QdrantVectors> {
-        // 6334 is the gRPC port. Pointing the REST client at it fails in a way
-        // that reads like a network problem, so name the real cause up front.
         if cfg.url.trim_end_matches('/').ends_with(":6334") {
             tracing::warn!(
                 url = %cfg.url,
@@ -475,8 +337,6 @@ impl QdrantVectors {
         })
     }
 
-    /// Drop the alias and every generation behind it. Used by the integration
-    /// suite to start clean.
     pub async fn drop_collection(&self) -> Result<()> {
         if self.resolve_alias().await?.is_some() {
             let _: Result<Value> = self
@@ -497,11 +357,7 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// The physical collection the alias currently points at, if the alias
-    /// exists at all.
     pub async fn resolve_alias(&self) -> Result<Option<String>> {
-        // Listing is `/aliases`; only the update action lives under
-        // `/collections/aliases`, which otherwise reads as a collection name.
         let list: AliasList = self.call(Method::GET, "/aliases", None).await?;
         Ok(list
             .aliases
@@ -510,12 +366,6 @@ impl QdrantVectors {
             .map(|a| a.collection_name))
     }
 
-    /// Every collection belonging to this alias: the numbered generations, plus
-    /// a pre-alias collection named exactly like it if one is still around.
-    ///
-    /// Membership is by parsed generation number, never by prefix. A collection
-    /// called `{alias}_vault` belongs to whoever made it, and this list is what
-    /// `drop_collection` deletes.
     async fn generations(&self) -> Result<Vec<String>> {
         let list: CollectionList = self.call(Method::GET, "/collections", None).await?;
         Ok(list
@@ -526,8 +376,6 @@ impl QdrantVectors {
             .collect())
     }
 
-    /// The highest-numbered generation that exists, ignoring any pre-alias
-    /// collection sharing the alias name.
     async fn newest_generation(&self) -> Result<Option<String>> {
         Ok(self
             .generations()
@@ -554,9 +402,6 @@ impl QdrantVectors {
             )
             .await
         {
-            // Two processes starting together both find no alias and both try
-            // to build the first generation. Losing that race is not a failure,
-            // but inheriting a collection of the wrong width would be.
             if !self.collection_exists(name).await? {
                 return Err(e);
             }
@@ -572,15 +417,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Create every payload index this codebase filters on, tolerating ones
-    /// that already exist (Qdrant treats an identical index as a no-op).
-    ///
-    /// Called on every path that adopts a collection, not only on the one that
-    /// creates it. A field added to this list by a later release exists in no
-    /// collection created before it — and `build_filter` starts emitting a
-    /// clause on it immediately — so a deployment that only ever ran the
-    /// creation path once would run every filtered search as a full scan until
-    /// someone thought to `--reindex`.
     async fn ensure_payload_indexes(&self, name: &str) -> Result<()> {
         for (field, schema) in [
             ("tags", "keyword"),
@@ -604,9 +440,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Point the alias at `collection`, replacing any previous target. Qdrant
-    /// applies both actions in one transaction, so no request ever observes an
-    /// alias that resolves to nothing.
     async fn point_alias_at(&self, collection: &str, replacing: bool) -> Result<()> {
         let mut actions = Vec::new();
         if replacing {
@@ -627,12 +460,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Create the alias, tolerating a process that got there first.
-    ///
-    /// Startup reads the alias, finds none, and writes one. Two processes
-    /// starting together both do that, and Qdrant refuses the second. Losing
-    /// that race is the outcome we wanted; the only thing worth failing on is
-    /// an alias pointing somewhere that cannot serve our vectors.
     async fn claim_alias(&self, collection: &str, dim: usize) -> Result<()> {
         let Err(e) = self.point_alias_at(collection, false).await else {
             return Ok(());
@@ -652,13 +479,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// The dimension of a collection that may still be coming up.
-    ///
-    /// A collection another process created a moment ago answers
-    /// `Service internal error: 0 of 0 read operations failed` until its shards
-    /// are ready. That is a state to wait out, not a startup to abort — but
-    /// only briefly, because the same message is what a genuinely broken
-    /// collection returns forever.
     async fn await_readable(&self, collection: &str) -> Result<u64> {
         let mut last = None;
         for attempt in 0..READY_ATTEMPTS {
@@ -669,8 +489,6 @@ impl QdrantVectors {
                     last = Some(e);
                 }
             }
-            // No backoff after the last attempt: there is nothing left to wait
-            // for, and the caller is holding up a startup.
             if attempt + 1 < READY_ATTEMPTS {
                 tokio::time::sleep(READY_BACKOFF * (attempt + 1)).await;
             }
@@ -683,16 +501,12 @@ impl QdrantVectors {
         let info: Value = self
             .call(Method::GET, &format!("/collections/{collection}"), None)
             .await?;
-        // Named vectors nest one level deeper than a pre-alias collection's
-        // single default vector; accept either so a rebuild can read its source.
         info.pointer(&format!("/config/params/vectors/{DENSE}/size"))
             .or_else(|| info.pointer("/config/params/vectors/size"))
             .and_then(Value::as_u64)
             .ok_or_else(|| Error::Vector("could not read collection vector dimension".into()))
     }
 
-    /// `exact` because the collection-info counter is allowed to lag behind an
-    /// accepted write, and both callers act on the number.
     async fn exact_count(&self, collection: &str) -> Result<u64> {
         let res: CountResult = self
             .call(
@@ -704,15 +518,6 @@ impl QdrantVectors {
         Ok(res.count)
     }
 
-    /// The bookkeeping keys already stored for these chunks: when the chunk was
-    /// last shown, how often, and its lifecycle status.
-    ///
-    /// Each is written by code that knows nothing about the others — `touch`
-    /// sets the first two, the sweep or an operator action sets the rest, and
-    /// the embed job rebuilding a payload knows none of them. Only asked for
-    /// when a caller is about to overwrite payloads it built without them, and
-    /// only for those keys, so this is a small read next to the write it
-    /// protects.
     async fn stored_bookkeeping(
         &self,
         points: &[VectorPoint],
@@ -785,10 +590,6 @@ impl QdrantVectors {
         Ok(out)
     }
 
-    /// Counts for one keyword field, straight from its payload index. Approximate
-    /// by default in Qdrant, which is the right trade for a row of chips: an
-    /// exact count would scan the collection to change a number nobody reads as
-    /// a total.
     async fn facet(&self, key: &str, limit: usize) -> Result<Vec<FacetCount>> {
         let res: FacetResult = self
             .call(
@@ -812,11 +613,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Copy every point into a fresh generation and swap the alias onto it.
-    ///
-    /// Dense vectors are copied as they are, so a rebuild costs no embedding
-    /// calls. The previous generation is left in place: it is the only rollback
-    /// that exists, and deleting it is a decision for whoever ran this.
     pub async fn reindex(&self, dim: usize, replace_legacy: bool) -> Result<String> {
         let source = match self.resolve_alias().await? {
             Some(c) => c,
@@ -830,8 +626,6 @@ impl QdrantVectors {
         };
         let replacing = source != self.alias;
 
-        // Refuse before creating anything, so a run without consent leaves no
-        // half-built generation behind for the next one to trip over.
         if !replacing && !replace_legacy {
             return Err(legacy_layout(&self.alias));
         }
@@ -880,9 +674,6 @@ impl QdrantVectors {
                 let dense = dense_of(&p.vector).ok_or_else(|| {
                     Error::Vector(format!("point {} in `{source}` has no dense vector", p.id))
                 })?;
-                // Dense vectors are copied; sparse ones are recomputed, which
-                // is free and lets a rebuild add the lexical half to a
-                // generation written before it existed.
                 let mut vector = json!({ DENSE: dense });
                 if let Some(sp) = sparse_body(&sparse_of_payload(&p.payload)) {
                     vector[SPARSE] = sp;
@@ -912,9 +703,6 @@ impl QdrantVectors {
                 "reindex complete; the previous generation was left in place"
             );
         } else {
-            // The alias needs the name the source is holding. Count both sides
-            // first: deleting the only copy on the strength of an unverified
-            // loop is not a trade worth making.
             let (before, after) = (
                 self.exact_count(&source).await?,
                 self.exact_count(&target).await?,
@@ -940,14 +728,6 @@ impl QdrantVectors {
     }
 }
 
-/// Turn a query response into hits, skipping any point whose payload is not
-/// one of ours.
-///
-/// A collection can hold points engram did not write — a rebuild copies
-/// payloads verbatim, and nothing stops an operator from inserting their own.
-/// Failing the whole result set over one of them would mean a single foreign
-/// point takes search down, which is a worse answer than a shorter list and a
-/// log line naming what was skipped.
 fn hits_of(res: QueryResult) -> Vec<SearchHit> {
     let mut out = Vec::with_capacity(res.points.len());
     for p in res.points {
@@ -955,8 +735,6 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
             Ok(payload) => out.push(SearchHit {
                 payload,
                 score: p.score,
-                // Filled in by `search` from the batched dense lookup; every
-                // other caller of this helper is a listing with no query.
                 similarity: None,
             }),
             Err(e) => tracing::warn!(
@@ -968,9 +746,6 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
     out
 }
 
-/// Facet hits as chips, most frequent first. Qdrant already sorts by count, but
-/// the order is restated here so ties do not depend on it, and non-string values
-/// are dropped: only a keyword field can be filtered by what the chip carries.
 fn facet_counts(res: FacetResult) -> Vec<FacetCount> {
     let mut out: Vec<FacetCount> = res
         .hits
@@ -986,7 +761,6 @@ fn facet_counts(res: FacetResult) -> Vec<FacetCount> {
     out
 }
 
-/// Seconds since the epoch, the unit `created_at` is stored in.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -994,9 +768,6 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Qdrant reports failures as `{"status": {"error": "..."}}`. Fall back to the
-/// raw body when it does not, but never dump an unbounded response into a log
-/// line or an error message.
 fn describe_failure(status: StatusCode, body: &str) -> String {
     let detail = serde_json::from_str::<Value>(body)
         .ok()
@@ -1011,8 +782,6 @@ fn describe_failure(status: StatusCode, body: &str) -> String {
 }
 
 impl QdrantVectors {
-    /// The single place a Qdrant response turns into either a value or an
-    /// `Error::Vector`, so no call site has to reason about the envelope.
     async fn call<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -1032,9 +801,6 @@ impl QdrantVectors {
         let text = res.text().await.map_err(|e| Error::Vector(e.to_string()))?;
 
         if !status.is_success() {
-            // The path is part of the message because several requests can fail
-            // the same way, and "which one" is the first thing anyone reading
-            // the log needs.
             return Err(Error::Vector(format!(
                 "{path}: {}",
                 describe_failure(status, &text)
@@ -1056,21 +822,14 @@ impl VectorStore for QdrantVectors {
             if existing as usize != dim {
                 return Err(dimension_mismatch(&current, dim, existing as usize));
             }
-            // An already-serving collection predates any index this release
-            // added, so this is the path that matters most.
             self.ensure_payload_indexes(&current).await?;
             return Ok(());
         }
 
-        // A collection sitting where the alias should be holds real vectors.
-        // Refusing here is what keeps `--reindex` from being a data-loss step.
         if self.collection_exists(&self.alias).await? {
             return Err(legacy_layout(&self.alias));
         }
 
-        // Generations with no alias mean a rebuild died between deleting the
-        // old collection and creating the alias. The vectors are all there;
-        // adopting the newest generation is repair, not guesswork.
         if let Some(orphan) = self.newest_generation().await? {
             let existing = self.vector_dim(&orphan).await?;
             if existing as usize != dim {
@@ -1097,14 +856,6 @@ impl VectorStore for QdrantVectors {
         if points.is_empty() {
             return Ok(());
         }
-        // A point write replaces the whole payload, unlike `set_payload` and
-        // `touch`, which merge. A writer that does not know when the chunk was
-        // last shown would therefore clear the stamp, and `resurface` would
-        // offer a chunk read yesterday as forgotten. The same hazard applies to
-        // `superseded`/`status`, and costs more: clearing it puts an artifact
-        // the sweep hid straight back into results, on every re-embed. So
-        // carry every bookkeeping key forward for every point that arrives
-        // without it.
         let stored = self.stored_bookkeeping(&points).await?;
         let mut body = Vec::with_capacity(points.len());
         for p in points {
@@ -1214,24 +965,6 @@ impl VectorStore for QdrantVectors {
         if rows.is_empty() {
             return Ok(());
         }
-        // One request per batch, not two writes per artifact. The backfill runs
-        // over every artifact in the base, and at two round trips each — both
-        // with `wait=true` — it was slow enough that an operator would be
-        // tempted to skip it, which is the failure this batching is really
-        // preventing.
-        //
-        // `last_verified_at` is merged without touching `hit_count`: this pass
-        // stamps artifacts it knows nothing about, and zeroing every retrieval
-        // counter in the base is not a migration step. See `Core::verify` for
-        // the case that does reset it.
-        //
-        // Capped per request for the same reason `lifecycle_of` caps its
-        // retrieves: one operation per artifact means an unbounded caller
-        // produces an unbounded request body, and Qdrant may well refuse it.
-        // The callers that most need this pass are the ones with the most to
-        // write — a full backfill, or a drift repair over a base that drifted
-        // badly — so the largest request is exactly the one that must not be
-        // the one that fails.
         const BATCH: usize = 512;
         for group in rows.chunks(BATCH) {
             let ops: Vec<Value> = group
@@ -1267,9 +1000,6 @@ impl VectorStore for QdrantVectors {
                     "exact": true,
                     "filter": {
                         "must": [ { "is_empty": { "key": "last_verified_at" } } ],
-                        // A point naming no artifact is not backfillable — see
-                        // the trait doc. Counting it kept this above zero
-                        // forever.
                         "must_not": [ { "is_empty": { "key": "artifact_id" } } ],
                     },
                 })),
@@ -1279,8 +1009,6 @@ impl VectorStore for QdrantVectors {
     }
 
     async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
-        // `point_uuid` is one-way, so the artifact id has to come out of the
-        // payload rather than the point id.
         let page: ScrollResult = self
             .call(
                 Method::POST,
@@ -1317,8 +1045,6 @@ impl VectorStore for QdrantVectors {
         if artifact_ids.is_empty() {
             return Ok(out);
         }
-        // Batched for the same reason as `lifecycle_of` below, and with more
-        // reason: these retrieves carry the full payload, text included.
         const BATCH: usize = 256;
         for batch in artifact_ids.chunks(BATCH) {
             let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
@@ -1356,9 +1082,6 @@ impl VectorStore for QdrantVectors {
         if artifact_ids.is_empty() {
             return Ok(out);
         }
-        // Batched, because the drift repair asks about every hidden artifact it
-        // found and a single retrieve of thousands of ids is a request body
-        // Qdrant may well refuse.
         const BATCH: usize = 512;
         for batch in artifact_ids.chunks(BATCH) {
             let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
@@ -1368,8 +1091,6 @@ impl VectorStore for QdrantVectors {
                     &format!("/collections/{}/points", self.alias),
                     Some(json!({
                         "ids": ids,
-                        // `point_uuid` is one-way, so the artifact id has to
-                        // come back from the payload.
                         "with_payload": ["artifact_id", "status", "superseded", "superseded_by"],
                         "with_vector": false,
                     })),
@@ -1432,30 +1153,12 @@ impl VectorStore for QdrantVectors {
         Ok(out)
     }
 
-    /// Scrolled and sorted rather than sampled, because this list is a work
-    /// queue.
-    ///
-    /// A random draw meant every render of Ops produced a different set: acting
-    /// on a candidate redirects back to the page, which re-drew, so an operator
-    /// could not work the queue down and a given artifact might take many page
-    /// loads to reappear. A scroll is deterministic (Qdrant returns points in id
-    /// order), so the same base with the same threshold yields the same queue,
-    /// and answering a candidate is what removes it — verifying restamps it out
-    /// of the range, deprecating filters it out.
-    ///
-    /// The scroll is capped: the filtered set is "everything stale enough", with
-    /// no upper bound on a neglected base, and this runs on a page render. The
-    /// cap costs nothing an operator can perceive, since the whole point is to
-    /// hand back `limit` rows and `limit` is small — it only means that on a
-    /// base with more than `STALE_SCAN` stale artifacts, the queue is drawn from
-    /// the first window in point-id order rather than the true global worst.
     async fn stale_candidates(
         &self,
         older_than: i64,
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        /// How many matching points the queue is drawn from.
         const STALE_SCAN: usize = 10_000;
         const PAGE: usize = 1_000;
 
@@ -1466,10 +1169,6 @@ impl VectorStore for QdrantVectors {
                 { "key": "superseded", "match": { "value": true } },
             ],
             "must": [
-                // Present *and* old. A point with no stamp is not a stale
-                // candidate, it is an unbackfilled one — see the trait doc.
-                // `hit_count` below is the opposite case: absent legitimately
-                // means never retrieved.
                 { "key": "last_verified_at", "range": { "lt": older_than } },
                 { "should": [
                     { "key": "hit_count", "range": { "lte": max_hits } },
@@ -1515,10 +1214,6 @@ impl VectorStore for QdrantVectors {
             }
         }
 
-        // Stalest first, so the queue leads with the artifacts most worth an
-        // operator's attention rather than with whichever ids sort lowest. The
-        // id tiebreak keeps the order total: two artifacts stamped in the same
-        // second must not swap places between one render and the next.
         found.sort_by(|a, b| {
             a.last_verified_at
                 .cmp(&b.last_verified_at)
@@ -1529,8 +1224,6 @@ impl VectorStore for QdrantVectors {
             .into_iter()
             .map(|payload| SearchHit {
                 payload,
-                // No query to be similar to. The caller ranks this list by
-                // staleness, which the order above already carries.
                 score: 0.0,
                 similarity: None,
             })
@@ -1547,15 +1240,9 @@ impl VectorStore for QdrantVectors {
         let f = build_filter(filter);
 
         let mut body = match sparse_body(sparse) {
-            // Hybrid: both halves run as prefetch branches and Qdrant fuses
-            // their ranks. Reciprocal rank fusion needs no score calibration
-            // between a cosine similarity and a BM25 weight, which is exactly
-            // why it is the right combiner here.
             Some(terms) => {
                 let mut dense_branch = json!({ "query": vector, "using": DENSE, "limit": limit });
                 let mut sparse_branch = json!({ "query": terms, "using": SPARSE, "limit": limit });
-                // The filter has to be repeated per branch: it narrows what
-                // each half retrieves, not what the fusion returns.
                 if let Some(f) = &f {
                     dense_branch["filter"] = f.clone();
                     sparse_branch["filter"] = f.clone();
@@ -1567,9 +1254,6 @@ impl VectorStore for QdrantVectors {
                     "with_payload": true,
                 })
             }
-            // No indexable term in the query, so there is nothing for the
-            // lexical branch to match and asking it to would only cost a round
-            // trip through an empty index.
             None => json!({
                 "query": vector,
                 "using": DENSE,
@@ -1583,14 +1267,8 @@ impl VectorStore for QdrantVectors {
             body["filter"] = f.clone();
         }
 
-        // Recency and pinning are applied as a final scoring stage over
-        // whatever retrieval returned, so they reorder results without
-        // changing which ones were retrieved.
         if self.recency_weight > 0.0 || self.pinned_boost > 0.0 {
             let mut prefetch = std::mem::replace(&mut body, Value::Null);
-            // The payload is fetched once, by the outer stage. Asking the
-            // prefetch for it too would carry every candidate's full text
-            // through a stage that only reorders ids.
             if let Some(m) = prefetch.as_object_mut() {
                 m.remove("with_payload");
             }
@@ -1607,18 +1285,6 @@ impl VectorStore for QdrantVectors {
             });
         }
 
-        // The second half of the request: the same dense vector, on its own,
-        // with no fusion and no recency stage over it. That returns raw cosine
-        // similarity, which is the only number in this whole path that means
-        // the same thing from one query to the next — the ranking score above
-        // is a fused rank, so the top hit for a typo scores like the top hit for
-        // a perfect match.
-        //
-        // Batched rather than sent after, so the confidence costs a round trip
-        // of nothing. `limit` matches the ranking query's, so every hit the
-        // dense branch contributed is covered; a hit only the lexical branch
-        // found is absent from this set and gets no similarity, which is
-        // correct — it contains the query's terms verbatim.
         let mut confidence = json!({
             "query": vector,
             "using": DENSE,
@@ -1664,24 +1330,6 @@ impl VectorStore for QdrantVectors {
         if targets.is_empty() {
             return Ok(());
         }
-        // `last_seen_at` is the same value for the whole batch. `hit_count` is
-        // not — each point's next value depends on its own current one, and
-        // Qdrant has no atomic increment — so the current value has to come
-        // from somewhere. A marked search has just read every hit's payload and
-        // passes the counts in, which is the common case and costs no round
-        // trip; a caller that counts a hit while knowing nothing but an id pays
-        // for a read, and only for its own points.
-        //
-        // Both stay off the request path (the caller backgrounds this call),
-        // and this still waits: the shutdown drain exists to keep these stamps,
-        // and an acknowledged-but-unapplied write is exactly the loss it is
-        // meant to prevent. A count missed under a rare concurrent double-touch
-        // is an acceptable soft-counter race — it only ever feeds the one-way
-        // stale-candidate query, never live scoring.
-        //
-        // A target that does not count as a hit needs no count at all: it only
-        // stamps `last_seen_at`, so it neither joins the read below nor carries
-        // a `hit_count` key into the write.
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut ids: Vec<(String, bool)> = Vec::with_capacity(targets.len());
         let mut unknown: Vec<String> = Vec::new();
@@ -1756,13 +1404,6 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/query", self.alias),
                 Some(json!({
                     "query": { "sample": "random" },
-                    // `must_not` for the same reason as in `build_filter`: a
-                    // point written before consolidation existed carries no
-                    // `superseded` key, and matching `false` would drop it.
-                    // Without this the forgotten list offers exactly the
-                    // duplicates the sweep just took out of search — and, since
-                    // a deprecated artifact is old and by definition unseen,
-                    // exactly the artifacts an operator has just retired.
                     "filter": {
                       "must_not": [
                         { "key": "status", "match": { "value": "superseded" } },
@@ -1771,9 +1412,6 @@ impl VectorStore for QdrantVectors {
                       ],
                       "must": [
                         { "key": "created_at", "range": { "lt": older_than } },
-                        // Nested so this reads as AND-of-OR. A chunk written
-                        // before the stamp existed has no `last_seen_at` at
-                        // all, and has certainly not been seen.
                         { "should": [
                             { "key": "last_seen_at", "range": { "lt": unseen_since } },
                             { "is_empty": { "key": "last_seen_at" } },
@@ -1824,21 +1462,10 @@ impl VectorStore for QdrantVectors {
     }
 
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // The query is a point that is already in the index, so Qdrant looks
-        // its vector up itself and this costs no embedding call. It may return
-        // the reference point, hence one extra result and the filter below.
         let body = json!({
             "query": point_uuid(artifact_id),
             "using": DENSE,
             "limit": limit + 1,
-            // Anything out of search is out of the related pane too. A
-            // superseded artifact is by construction near-identical to its
-            // keeper, so it would lead that list on every artifact it was
-            // hidden in favour of; a deprecated one is content an operator
-            // retired, and linking to it from a live artifact presents it as
-            // current. `status` and the legacy flag are both matched because a
-            // deprecation deliberately writes `superseded: false` — see
-            // `lifecycle_payload` — so the legacy net alone never catches it.
             "filter": { "must_not": [
                 { "key": "status", "match": { "value": "superseded" } },
                 { "key": "status", "match": { "value": "deprecated" } },
@@ -1855,10 +1482,6 @@ impl VectorStore for QdrantVectors {
             .await
         {
             Ok(r) => r,
-            // An artifact whose embedding job has not run yet is not in the
-            // collection, and Qdrant answers that with an error. It is an
-            // ordinary state for a freshly captured artifact, so the detail
-            // pane loses its related list rather than failing to open.
             Err(e) => {
                 tracing::warn!(artifact_id, error = %e, "no neighbours for this artifact");
                 return Ok(vec![]);
@@ -1876,14 +1499,6 @@ impl VectorStore for QdrantVectors {
         per_point: usize,
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
-        // Anything not active is excluded at the source. Superseded points
-        // would hand the sweep pairs it has already resolved, on every single
-        // run. Deprecated points are worse than redundant: the sweep's `keeper`
-        // picks the newest member of a cluster, so a newer artifact an operator
-        // retired would *win* against a live older one and hide it — leaving
-        // one artifact deprecated, the other superseded, and the knowledge in
-        // neither reachable by search. `supersede` would also overwrite the
-        // operator's `deprecated` status with `superseded` on the way past.
         let res: MatrixPairs = self
             .call(
                 Method::POST,
@@ -1906,8 +1521,6 @@ impl VectorStore for QdrantVectors {
             if p.score < min_score {
                 continue;
             }
-            // Ids come back as JSON strings for UUID points. Anything else is a
-            // point this collection did not get from engram.
             let (Some(a), Some(b)) = (p.a.as_str(), p.b.as_str()) else {
                 continue;
             };
@@ -1920,13 +1533,6 @@ impl VectorStore for QdrantVectors {
         ids.sort_unstable();
         ids.dedup();
 
-        // `point_uuid` is one-way, so the artifact id has to come back from the
-        // payload. One retrieve for the whole sweep, asking for the single key
-        // rather than dragging every candidate's text across the wire.
-        //
-        // `call` already unwraps the `result` envelope, so this deserializes
-        // straight into the point list — reaching for `result` again here is
-        // what made every lookup miss and the sweep return nothing at all.
         let found: Vec<ScrolledPoint> = self
             .call(
                 Method::POST,
@@ -1953,10 +1559,6 @@ impl VectorStore for QdrantVectors {
             .filter_map(|p| {
                 let a = by_uuid.get(p.a.as_str()?)?;
                 let b = by_uuid.get(p.b.as_str()?)?;
-                // A point cannot be a duplicate of itself, however the matrix
-                // reports it. The matrix also reports (a,b) and (b,a) as
-                // separate rows, which `NearPair::new` plus the dedup below
-                // collapse into one.
                 (a != b).then(|| super::NearPair::new(a, b, p.score))
             })
             .collect();
@@ -2005,9 +1607,6 @@ mod tests {
 
     #[test]
     fn a_facet_value_that_is_not_a_keyword_is_not_a_chip() {
-        // Nothing can be filtered by a number the chip cannot put in a URL, so
-        // a non-string value is dropped rather than stringified into a filter
-        // that would match nothing.
         let res: FacetResult = serde_json::from_value(json!({
             "hits": [{ "value": 7, "count": 3 }, { "value": "procedure", "count": 1 }]
         }))
@@ -2031,15 +1630,12 @@ mod tests {
         assert_eq!(new["corpus_id"], "s1");
         assert!(new.get("chunk_id").is_none());
         assert!(new.get("source_id").is_none());
-        // Everything else survives: a rebuild copies payloads it does not
-        // understand, and dropping one would lose data no re-embed restores.
         assert_eq!(new["text"], "t");
         assert_eq!(new["created_at"], 1);
     }
 
     #[test]
     fn renaming_a_current_payload_changes_nothing() {
-        // A rebuild run twice must not disturb what the first one produced.
         let current = json!({ "artifact_id": "a1", "corpus_id": "c1", "text": "t" });
         assert_eq!(renamed_payload(&current), current);
     }
@@ -2055,8 +1651,6 @@ mod tests {
 
     #[test]
     fn dimension_mismatch_does_not_promise_a_rebuild() {
-        // A rebuild copies vectors, so it can never resolve a width change.
-        // Suggesting it would send the reader in a circle.
         let msg = dimension_mismatch("chunks_v1", 768, 1024).to_string();
         assert!(msg.contains("cannot change their width"), "{msg}");
         assert!(msg.contains("embed again"), "no way forward offered: {msg}");
@@ -2064,8 +1658,6 @@ mod tests {
 
     #[test]
     fn chunk_ids_map_to_stable_point_ids() {
-        // The same chunk must always hit the same Qdrant point, otherwise
-        // re-embedding leaves an orphaned vector behind.
         let a = point_uuid("chunk-abc");
         let b = point_uuid("chunk-abc");
         let c = point_uuid("chunk-xyz");
@@ -2075,23 +1667,18 @@ mod tests {
 
     #[test]
     fn uuid_chunk_ids_pass_through_unchanged() {
-        // Real chunk ids are UUIDv7 already; hashing them would waste the
-        // time-ordering Qdrant can otherwise exploit.
         let id = uuid::Uuid::now_v7().to_string();
         assert_eq!(point_uuid(&id), id);
     }
 
     #[test]
     fn hashed_point_ids_are_valid_uuids() {
-        // Qdrant rejects a point id that is neither an integer nor a UUID.
         let got = point_uuid("not-a-uuid");
         assert!(uuid::Uuid::parse_str(&got).is_ok(), "got {got}");
     }
 
     #[test]
     fn base_url_loses_its_trailing_slash() {
-        // `{base}/collections` with a trailing slash becomes `//collections`,
-        // which a reverse proxy may answer with a redirect rather than JSON.
         assert_eq!(
             normalize_base("http://localhost:6333/"),
             "http://localhost:6333"
@@ -2123,10 +1710,6 @@ mod tests {
 
     #[test]
     fn a_filter_that_narrows_nothing_produces_no_filter_at_all() {
-        // `{"must": []}` matches nothing in Qdrant, so a search that narrows
-        // nothing must omit the key rather than send an empty condition list.
-        // Asking for superseded and deprecated points back is what "narrows
-        // nothing" means now.
         assert!(
             build_filter(&SearchFilter {
                 include_superseded: true,
@@ -2139,8 +1722,6 @@ mod tests {
 
     #[test]
     fn the_default_filter_excludes_superseded_and_deprecated_points() {
-        // The default is what every ordinary search sends, and superseding /
-        // deprecating is only meaningful if it keeps an artifact out of that.
         let f = build_filter(&SearchFilter::default()).unwrap();
         assert!(
             f.get("must").is_none(),
@@ -2158,8 +1739,6 @@ mod tests {
 
     #[test]
     fn every_tag_becomes_its_own_must_condition() {
-        // Tags are an AND. One condition per tag is what makes that true;
-        // a single condition with a list would be an OR.
         let f = build_filter(&SearchFilter {
             tags: vec!["linux".into(), "forensics".into()],
             category: Some("procedure".into()),
@@ -2202,8 +1781,6 @@ mod tests {
 
     #[test]
     fn a_pre_alias_collection_rebuilds_into_generation_one() {
-        // A collection named exactly like the alias carries no generation, so
-        // the next one must be _v1 rather than _v0 or a parse failure.
         assert_eq!(generation_of("chunks", "chunks"), 0);
         assert_eq!(
             generation_name("chunks", generation_of("chunks", "chunks") + 1),
@@ -2219,26 +1796,18 @@ mod tests {
 
     #[test]
     fn only_a_numeric_suffix_makes_a_collection_ours() {
-        // `drop_collection` deletes everything this claims, so a neighbouring
-        // collection that merely starts the same way must not be claimed.
         assert_eq!(generation_number("chunks", "chunks_v3"), Some(3));
         assert_eq!(generation_number("chunks", "chunks_verbose"), None);
         assert_eq!(generation_number("chunks", "chunks_vault"), None);
         assert_eq!(generation_number("chunks", "chunks_v"), None);
         assert_eq!(generation_number("chunks", "chunks_v1x"), None);
         assert_eq!(generation_number("chunks", "chunks"), None);
-        // `+1` and `1_0` parse as numbers in Rust but are not names we write.
         assert_eq!(generation_number("chunks", "chunks_v+1"), None);
         assert_eq!(generation_number("chunks", "chunks_v1_0"), None);
     }
 
     #[test]
     fn the_scoring_formula_survives_a_point_without_a_last_verified_at() {
-        // Qdrant fails the entire query, not just the offending point, when a
-        // formula reads a key the payload does not have. The default is `now`,
-        // not the epoch: every point predates the lifecycle backfill until it
-        // runs, and defaulting to the epoch would zero the recency term for the
-        // whole collection at once. `now` leaves it neutral.
         let f = scoring_formula(1_700_000_000, 86_400, 0.05, 0.15);
         assert_eq!(
             f["defaults"]["last_verified_at"], 1_700_000_000,
@@ -2248,10 +1817,6 @@ mod tests {
 
     #[test]
     fn deprecating_does_not_set_the_legacy_superseded_flag() {
-        // `build_filter` excludes `superseded == true` whenever superseded
-        // results are not asked for, which is the normal case for a caller that
-        // only set `include_deprecated`. Writing the flag for a deprecation
-        // would make that request unable to return anything.
         let p = lifecycle_payload(ArtifactStatus::Deprecated, None);
         assert_eq!(p["status"], "deprecated");
         assert_eq!(p["superseded"], false, "deprecated is not superseded: {p}");
@@ -2266,8 +1831,6 @@ mod tests {
 
     #[test]
     fn only_a_verify_resets_the_hit_counter() {
-        // The backfill pass stamps every artifact; resetting there would wipe
-        // every retrieval count in the base.
         let verified = verified_payload(42, true);
         assert_eq!(verified["last_verified_at"], 42);
         assert_eq!(verified["hit_count"], 0);
@@ -2282,8 +1845,6 @@ mod tests {
 
     #[test]
     fn a_disabled_weight_contributes_no_term() {
-        // Zero weights must drop out of the formula rather than multiply by
-        // zero, so an operator turning recency off stops paying for it.
         let f = scoring_formula(0, 86_400, 0.0, 0.0);
         assert_eq!(f["formula"]["sum"].as_array().unwrap().len(), 1);
         assert_eq!(f["formula"]["sum"][0], "$score");
@@ -2291,8 +1852,6 @@ mod tests {
 
     #[test]
     fn new_collections_declare_both_a_dense_and_a_sparse_vector() {
-        // The sparse slot is unused until hybrid search lands, but adding it
-        // later would mean another rebuild for every deployment.
         let body = collection_body(768);
         assert_eq!(body["vectors"][DENSE]["size"], 768);
         assert_eq!(body["vectors"][DENSE]["distance"], "Cosine");
@@ -2301,8 +1860,6 @@ mod tests {
 
     #[test]
     fn a_dense_vector_is_found_in_either_storage_layout() {
-        // A rebuild reads from the previous generation, which may predate
-        // named vectors.
         let named = json!({ DENSE: [1.0, 0.0], "other": [9.0] });
         assert_eq!(dense_of(&named).unwrap(), &json!([1.0, 0.0]));
 

@@ -15,40 +15,16 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ConsolidateConfig {
-    /// Whether the background sweep runs at all. Capture-time near-duplicate
-    /// detection is separate and always on: it costs a hash, not a query.
     pub enabled: bool,
-    /// Estimated Jaccard over word shingles above which a capture is parked as
-    /// a near-duplicate of an existing corpus.
     pub near_dupe_min: f64,
-    /// Cosine at or above which a pair is worth an operator's attention.
     pub review_min: f32,
-    /// Cosine at or above which the older artifact is superseded without
-    /// asking. Deliberately far above `review_min`: two genuinely distinct
-    /// artifacts about one subsystem sit around 0.88 routinely, and superseding
-    /// at that score destroys knowledge rather than duplication.
     pub auto_supersede: f32,
-    /// Points sampled from the collection per sweep by the matrix API.
     pub sample: usize,
-    /// Neighbours considered per sampled point.
     pub per_point: usize,
-    /// How often the sweep is queued.
     pub interval_hours: u64,
-    /// Whether pairs in the review band that survive the fact-token prefilter
-    /// are sent to the completer. Off by default: it is the only part of
-    /// consolidation that costs inference.
     pub judge: bool,
-    /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
     pub max_judgements: usize,
-    /// An active artifact not confirmed accurate (`last_verified_at`) in this
-    /// many days becomes a deprecation-review candidate — never anything more
-    /// automatic than that. See `stale_max_hits`.
     pub stale_after_days: u32,
-    /// ...and retrieved at most this many times since. Both conditions must
-    /// hold: staleness alone is not suspicious for a rare topic, and
-    /// popularity alone says nothing about accuracy. This is read-only input
-    /// to the candidate list — it never feeds search scoring, or a frequently
-    /// shown result would keep boosting its own visibility.
     pub stale_max_hits: i64,
 }
 
@@ -91,32 +67,12 @@ pub struct VectorConfig {
     pub collection: String,
     #[serde(default)]
     pub api_key: Option<String>,
-    /// How much a result's age counts against it. Fused ranks land between
-    /// roughly 0.1 and 1.0, so the default breaks near-ties in favour of the
-    /// newer note without ever overturning a clearly better match. `0.0` turns
-    /// recency off entirely.
     #[serde(default = "default_recency_weight")]
     pub recency_weight: f32,
-    /// Age at which a chunk has lost half of that boost.
     #[serde(default = "default_recency_half_life_days")]
     pub recency_half_life_days: u32,
-    /// Extra score for a chunk carrying the `pinned` tag, so something you
-    /// decided matters can outrank the decay curve.
     #[serde(default = "default_pinned_boost")]
     pub pinned_boost: f32,
-    /// Cosine similarity below which a result is only loosely related to the
-    /// query, and is labelled as such rather than presented like a real answer.
-    ///
-    /// This is a similarity, not a rank: hybrid retrieval returns reciprocal
-    /// rank fusion values, which say where a result placed and nothing about
-    /// how close it was, so the top hit for a typo scores exactly like the top
-    /// hit for a perfect match. The similarity is read separately — see
-    /// `VectorStore::search` — and compared here.
-    ///
-    /// Normalised embeddings put unrelated text around 0.0–0.2 and genuinely
-    /// related text well above 0.4, so the default sits between them. Raise it
-    /// to be told more often that nothing really matched; `0.0` turns the
-    /// labelling off.
     #[serde(default = "default_weak_below")]
     pub weak_below: f32,
 }
@@ -142,19 +98,6 @@ pub struct InferConfig {
     pub rerank: Option<RerankRole>,
 }
 
-/// Seconds an inference request may take before the client gives up.
-///
-/// Fifteen minutes, which is absurd for a hosted API and about right for the
-/// case engram is built for: a small reasoning model on one consumer GPU,
-/// where a single segmentation window has been measured at seven minutes and
-/// 8000 output tokens. A timeout there is indistinguishable from a dead
-/// endpoint to the job runner — the call fails, the job retries, and it fails
-/// again at the same wall, forever.
-///
-/// The cost of setting it too high is a stuck job holding a worker until it
-/// gives up. The cost of setting it too low is a corpus that never finishes
-/// segmenting, which is worse, so the default errs long. Hosted endpoints
-/// should lower it per role.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 900;
 
 fn default_timeout_secs() -> u64 {
@@ -172,19 +115,8 @@ pub struct SynthesizeRole {
     pub output_ratio: f32,
     #[serde(default)]
     pub tokenizer_path: Option<String>,
-    /// Sent as `reasoning_effort` when set. A reasoning model spends output
-    /// budget thinking before it writes any JSON, and that budget is the same
-    /// one the chunk list has to fit in — on a small local model the thinking
-    /// is what truncates the answer.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
-    /// Seconds to idle between segmentation calls.
-    ///
-    /// Segmenting a long source is minutes of uninterrupted generation, which
-    /// on a desktop GPU is a sustained thermal load rather than a burst. This
-    /// buys the card time to settle between windows. It does not save energy —
-    /// the same tokens are generated either way — so it is off by default and
-    /// exists for the machine sitting next to someone.
     #[serde(default)]
     pub cooldown_secs: u64,
     #[serde(default = "default_timeout_secs")]
@@ -212,7 +144,6 @@ pub struct AskRole {
     pub context_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// See `SynthesizeRole::reasoning_effort`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
 }
@@ -265,11 +196,6 @@ pub struct OidcConfig {
     pub allowed_subs: Vec<String>,
     #[serde(default)]
     pub allowed_emails: Vec<String>,
-    /// Group names from the provider's `groups` claim. Nextcloud's OIDC
-    /// provider app only sends this when the admin has turned on group
-    /// provisioning for the client; without it the claim is simply absent; and
-    /// a subject in a listed group is admitted the same as one listed by
-    /// subject or email.
     #[serde(default)]
     pub allowed_groups: Vec<String>,
 }
@@ -312,13 +238,6 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Rules that a config can satisfy syntactically and still be wrong.
-    ///
-    /// The thresholds are the only ones so far, and they are worth refusing to
-    /// start over: `auto_supersede` at or below `review_min` means every pair
-    /// the sweep finds is hidden without asking, with no review band left at
-    /// all. That destroys knowledge quietly, and the operator who typed one
-    /// number would find out from search results going missing weeks later.
     fn validate(&self) -> Result<(), ConfigError> {
         let c = &self.consolidate;
         if c.auto_supersede <= c.review_min {
@@ -331,9 +250,6 @@ impl Config {
         Ok(())
     }
 
-    /// Secrets belong in the environment. A secret sitting in the config file
-    /// is a real risk (it gets committed), so say so loudly rather than
-    /// rejecting a config that otherwise works.
     fn warn_on_file_secrets(&self, path: Option<&Path>) {
         let Some(p) = path else { return };
         let Ok(body) = std::fs::read_to_string(p) else {
@@ -374,9 +290,6 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// Environment variables are process-global, but `cargo test` runs tests on
-    /// parallel threads. Without this, the env-override test mutates `ENGRAM__*`
-    /// while another test is deserializing config and the two race.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -385,10 +298,6 @@ mod tests {
 
     #[test]
     fn the_default_timeout_survives_a_slow_local_model() {
-        // A segmentation window against a 9B model on one consumer GPU has been
-        // measured at seven minutes. Anything shorter turns a working setup
-        // into an endless retry loop, so this number is load-bearing rather
-        // than arbitrary.
         const {
             assert!(
                 DEFAULT_TIMEOUT_SECS >= 600,
@@ -478,9 +387,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 
     #[test]
     fn thresholds_that_leave_no_review_band_are_refused() {
-        // `auto_supersede` at or below `review_min` hides every pair the sweep
-        // finds without asking anyone. The operator would find out from search
-        // results going missing, weeks later.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(

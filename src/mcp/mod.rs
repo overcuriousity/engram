@@ -5,9 +5,6 @@ use axum::Router;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
-/// Results go straight into an agent's context, so they stay markdown: the
-/// artifact text is already markdown, and the surrounding structure has to be
-/// readable rather than JSON-shaped.
 pub fn format_search_results(results: &[SearchResult]) -> String {
     if results.is_empty() {
         return "No matches in the knowledge base.".to_string();
@@ -41,16 +38,13 @@ pub struct PkdbTools {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct IngestParams {
-    /// The text to store verbatim.
     pub text: String,
-    /// Optional short label for the corpus.
     #[serde(default)]
     pub title: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
-    /// What to look for, in natural language.
     pub q: String,
     #[serde(default)]
     pub limit: Option<u32>,
@@ -62,7 +56,6 @@ pub struct SearchParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AskParams {
-    /// A question to answer from the knowledge base.
     pub q: String,
 }
 
@@ -76,10 +69,6 @@ impl PkdbTools {
     async fn ingest(&self, Parameters(p): Parameters<IngestParams>) -> String {
         match self.core.ingest(&p.text, "mcp", p.title.as_deref()).await {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
-            // A parked capture is stored and nothing more: no segmentation, no
-            // embedding, and nothing searchable until a person decides. Saying
-            // "runs in the background" here would have the agent report a
-            // success that never happens.
             Ok(o) if o.near_duplicate.is_some() => {
                 let n = o.near_duplicate.expect("just checked");
                 format!(
@@ -110,7 +99,6 @@ impl PkdbTools {
             limit: p.limit.unwrap_or(0) as usize,
             tags: p.tags.unwrap_or_default(),
             category: p.category,
-            // A tool call is one deliberate question, not a keystroke.
             mark: true,
             include_deprecated: false,
             include_superseded: false,
@@ -156,8 +144,6 @@ impl PkdbTools {
     }
 }
 
-/// Guard in front of the MCP service. Extracting `Identity` here means an
-/// unauthenticated request is rejected before any tool can run.
 async fn mcp_guard(
     _id: crate::auth::Identity,
     req: axum::extract::Request,
@@ -243,8 +229,6 @@ mod tests {
                 .unwrap(),
         );
 
-        // An agent consumes this directly, so it must stay markdown and keep
-        // the corpus id for follow-up lookups.
         assert!(text.contains("mount /dev/sda1"), "{text}");
         assert!(text.contains("corpus:"), "{text}");
     }

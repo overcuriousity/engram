@@ -27,8 +27,6 @@ impl EmbedState {
     }
 }
 
-/// Where an artifact stands: still current, flagged stale with no named
-/// replacement, or hidden in favour of a specific `superseded_by` artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStatus {
@@ -73,32 +71,14 @@ pub struct Chunk {
     pub embed_state: EmbedState,
     pub embed_model: Option<String>,
     pub created_at: i64,
-    /// Bumped by every edit that invalidates the stored vector. Internal
-    /// bookkeeping between the editor and the embed job, so it is not part of
-    /// what the API hands out.
     #[serde(skip)]
     pub embed_rev: i64,
-    /// Which segmentation window produced this chunk. `None` for chunks
-    /// written before per-window segmentation existed.
     pub segment_idx: Option<i64>,
-    /// Verification failures. Empty means every check passed.
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
-    /// The artifact this one lost a near-identical pair to. Set by the
-    /// consolidation sweep; the artifact stays stored and readable, and is only
-    /// kept out of ranking.
     pub superseded_by: Option<String>,
-    /// Conditions under which this artifact does not apply, as its source
-    /// stated them. Deliberately not part of what gets embedded: changing what
-    /// every vector is built from is a decision for the evaluation harness.
     pub caveats: Vec<String>,
-    /// Active, deprecated, or superseded. Kept in sync with `superseded_by`
-    /// by `set_superseded_by`; set directly by `set_artifact_status` for the
-    /// deprecate/reactivate actions, which have no artifact on the other end.
     pub status: ArtifactStatus,
-    /// When this artifact was last confirmed accurate. Defaults to
-    /// `created_at` at insert; this, not `created_at`, is what search ranking
-    /// decays against.
     pub last_verified_at: Option<i64>,
 }
 
@@ -114,13 +94,6 @@ pub struct NewArtifact {
     pub caveats: Vec<String>,
 }
 
-/// An artifact rebuilt from a vector payload, keeping its original id.
-///
-/// Separate from `NewArtifact` because the two are opposites: that one describes
-/// an artifact being created, and the store assigns its id, while this one
-/// describes an artifact that already existed and whose id is the one thing that
-/// must not change. Only the fields a `VectorPayload` actually carries are here
-/// — see `Store::restore_artifact` for what is left neutral and why.
 #[derive(Debug, Clone)]
 pub struct RestoredArtifact {
     pub id: String,
@@ -224,25 +197,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Re-create an artifact row from what the vector store still holds about
-    /// it, keeping the original id. Returns whether a row was written; an id
-    /// that already exists is left exactly as it is.
-    ///
-    /// This is the SQLite half of the two-way heal (`Core::heal_store_drift`),
-    /// so it is deliberately not `insert_artifacts`: that mints a new id, and a
-    /// restored artifact that does not keep its own is a second copy rather than
-    /// the same artifact — its point would still be an orphan, and the next heal
-    /// would restore it again.
-    ///
-    /// What the payload cannot supply is left at its neutral value rather than
-    /// guessed. `ordinal` is 0 and `corpus_span` NULL because a payload records
-    /// neither, so a restored artifact has no position within its source; the
-    /// same goes for `segment_idx`, `caveats`, and `flags`. `embed_state` is
-    /// `pending` on purpose even though a vector demonstrably exists: the stored
-    /// vector may have been written by a different embedding model than the
-    /// collection now uses, and a restored row that claims `done` would keep
-    /// that mismatch permanently invisible. Re-embedding costs one call and
-    /// makes `embed_model` true.
     pub async fn restore_artifact(&self, c: &RestoredArtifact) -> Result<bool> {
         let res = sqlx::query(
             "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, superseded_by)
@@ -281,12 +235,6 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// How many chunks a source produced, without loading any of them.
-    ///
-    /// The queue fragment wants the number and nothing else, and it asks for
-    /// ten sources every three seconds while anything is in flight — reading
-    /// every artifact's full text to call `.len()` on the result was the bulk
-    /// of that poll.
     pub async fn count_artifacts_for_corpus(&self, corpus_id: &str) -> Result<i64> {
         Ok(
             sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?")
@@ -296,8 +244,6 @@ impl Store {
         )
     }
 
-    /// Chunks of a source still waiting for a vector. The embed job batches
-    /// these into one inference call, so it needs them as rows, not a count.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending' ORDER BY ordinal",
@@ -308,13 +254,6 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// Put every chunk of a source back in the embed queue's path. Re-embedding
-    /// only happens for rows that say they still need it, so asking for it has
-    /// to say so first.
-    ///
-    /// The revision bump is what makes this safe to run while a worker is
-    /// mid-batch on the same source: that worker's `mark_embedded` no longer
-    /// matches, so it cannot clear the pending state this just set.
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE artifacts
@@ -327,9 +266,6 @@ impl Store {
         Ok(())
     }
 
-    /// Set or clear the category. Deliberately does not touch `embed_state`:
-    /// the embedding model is never shown a category, so the stored vector is
-    /// still correct.
     pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
         self.expect_updated(
             sqlx::query("UPDATE artifacts SET category = ? WHERE id = ?")
@@ -340,7 +276,6 @@ impl Store {
         )
     }
 
-    /// Replace the tag list. An empty list is a clear, not a no-op.
     pub async fn update_artifact_tags(&self, id: &str, tags: &[String]) -> Result<()> {
         self.expect_updated(
             sqlx::query("UPDATE artifacts SET tags = ? WHERE id = ?")
@@ -351,8 +286,6 @@ impl Store {
         )
     }
 
-    /// The title is part of the text handed to the embedder, so setting or
-    /// clearing it invalidates the vector the same way changing the body does.
     pub async fn update_artifact_title(&self, id: &str, title: Option<&str>) -> Result<()> {
         self.expect_updated(
             sqlx::query(
@@ -390,17 +323,6 @@ impl Store {
         Ok(())
     }
 
-    /// Report a chunk indexed, but only if it has not been edited since the
-    /// embed job read it.
-    ///
-    /// Returns whether the mark landed. `false` means a newer revision exists
-    /// and the vector just written describes text that is already stale; the
-    /// chunk stays pending, so it will be embedded again from the current row.
-    ///
-    /// That relies on an invariant worth keeping: whoever bumps the revision
-    /// also queues the work. `update_artifact_text`, `update_artifact_title` and
-    /// `reset_embed_state` are only ever called alongside an `enqueue`, so a
-    /// chunk left pending here always has a job coming for it.
     pub async fn mark_embedded(&self, id: &str, model: &str, rev: i64) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE artifacts SET embed_state = 'embedded', embed_model = ?
@@ -433,13 +355,6 @@ impl Store {
         Ok(())
     }
 
-    /// The chunks a window's next write replaces.
-    ///
-    /// Chunks with no window at all are included, because a source segmented
-    /// before windows existed has nothing else to key on: leaving them out
-    /// would append the new segmentation beside the old one instead of
-    /// replacing it. They are swept by whichever window writes first, and there
-    /// are none left by the second.
     pub async fn artifact_ids_for_segment(
         &self,
         corpus_id: &str,
@@ -457,8 +372,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get("id")).collect())
     }
 
-    /// Open a gap of `by` ordinals after `ordinal`, so chunks inserted into it
-    /// keep reading order without renumbering the whole source.
     pub async fn make_room_after(&self, corpus_id: &str, ordinal: i64, by: i64) -> Result<()> {
         sqlx::query(
             "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
@@ -471,11 +384,6 @@ impl Store {
         Ok(())
     }
 
-    /// Give a source one continuous ordinal sequence again.
-    ///
-    /// Chunks are inserted per window and numbered within it, so until this
-    /// runs a source has three chunks numbered 0. Ordering by window and then
-    /// by the within-window number reproduces reading order.
     pub async fn renumber_artifacts(&self, corpus_id: &str) -> Result<()> {
         let rows = sqlx::query(
             "SELECT id FROM artifacts WHERE corpus_id = ?
@@ -496,11 +404,6 @@ impl Store {
         Ok(())
     }
 
-    /// Record that this artifact lost a near-identical pair. `None` undoes it.
-    /// `status` moves in lockstep: superseded when a winner is set, active
-    /// when it's cleared — the one place that keeps the two columns
-    /// consistent, so callers of `unsupersede`/`heal_dangling_supersessions`
-    /// need no changes of their own.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
         let status = if by.is_some() {
             ArtifactStatus::Superseded
@@ -519,10 +422,6 @@ impl Store {
         Ok(())
     }
 
-    /// Set an artifact's lifecycle status directly — used for deprecate and
-    /// reactivate, which (unlike supersede) have no winning artifact on the
-    /// other end. Does not touch `superseded_by`; callers that mean to clear
-    /// a supersession should use `set_superseded_by(id, None)` instead.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
         self.expect_updated(
             sqlx::query("UPDATE artifacts SET status = ? WHERE id = ?")
@@ -533,8 +432,6 @@ impl Store {
         )
     }
 
-    /// Stamp an artifact as confirmed accurate now — what search ranking's
-    /// recency decay reads.
     pub async fn set_last_verified_at(&self, id: &str, at: i64) -> Result<()> {
         self.expect_updated(
             sqlx::query("UPDATE artifacts SET last_verified_at = ? WHERE id = ?")
@@ -545,9 +442,6 @@ impl Store {
         )
     }
 
-    /// Artifacts SQLite does not consider active, newest first. What the
-    /// sweep's drift repair compares the vector store's own idea of hidden
-    /// against.
     pub async fn list_non_active_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts WHERE status != 'active' OR superseded_by IS NOT NULL
@@ -559,7 +453,6 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// Every artifact id, for the one-shot Qdrant lifecycle backfill.
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT id FROM artifacts")
             .fetch_all(&self.pool)
@@ -567,15 +460,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Ids of artifacts whose row claims a vector was written for them.
-    ///
-    /// The heal uses this rather than `list_all_artifact_ids` for the
-    /// SQLite-has-it/vectors-do-not direction, because an artifact still waiting
-    /// on its embed job has no point *correctly* — that is the normal state of
-    /// everything just ingested, not drift. Nor is a `failed` row: the embedder
-    /// refused that text, and re-queueing it every sweep is a retry loop with no
-    /// end. Only a row that says `embedded` while the vector store holds nothing
-    /// is a write that went missing.
     pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT id FROM artifacts WHERE embed_state = 'embedded'")
             .fetch_all(&self.pool)
@@ -583,19 +467,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Artifacts hidden in favour of a keeper that no longer exists.
-    ///
-    /// `superseded_by` is a plain column with no foreign key, so deleting a
-    /// corpus — or reprocessing one, which deletes and re-creates every
-    /// artifact under new ids — can leave the losing side of a pair pointing at
-    /// nothing. That artifact is hidden from search forever, in favour of a
-    /// copy that is gone: the surviving text becomes invisible, which is the
-    /// exact loss consolidation exists to avoid.
-    ///
-    /// A read, not a write: the caller clears the vector payload before the
-    /// row, so that a failure between the two leaves the artifact listed on Ops
-    /// rather than hidden with nothing pointing at it. See
-    /// `Core::heal_dangling_supersessions`.
     pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT id FROM artifacts
@@ -607,7 +478,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL
@@ -619,9 +489,6 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// Artifacts currently carrying one lifecycle status, newest first. Used
-    /// for the Ops "deprecated" list — superseded artifacts have their own
-    /// query (`superseded_artifacts`) since that one also needs the winner.
     pub async fn artifacts_by_status(
         &self,
         status: ArtifactStatus,
@@ -637,8 +504,6 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// Record what verification found. An empty list clears the flags, so a
-    /// re-checked chunk does not keep a warning it no longer earns.
     pub async fn set_artifact_flags(
         &self,
         id: &str,
@@ -860,10 +725,6 @@ mod tests {
 
     #[tokio::test]
     async fn listing_dangling_supersessions_does_not_clear_them() {
-        // The healing order depends on this being a read. If listing also
-        // cleared the rows, a vector write that then failed would leave the
-        // artifact hidden with `superseded_by` already NULL: off the Ops list,
-        // past the sweep's self-heal branch, and unreachable by any button.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -906,9 +767,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_fts_index_is_gone() {
-        // The lexical half of search lives in Qdrant now. This asserts the
-        // SQLite index and its three write triggers were actually dropped,
-        // rather than left behind to be paid for on every artifact write.
         let s = Store::memory().await.unwrap();
         let leftovers: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master

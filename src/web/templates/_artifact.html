@@ -10,8 +10,6 @@
             onclick="document.getElementById('edit-{{ c.id }}').style.display='block';this.style.display='none'">
       edit
     </button>
-    {# This page could delete the whole source but not one artifact out of it.
-       Swaps its own card away and leaves the rest of the list alone. #}
     <button class="btn-icon btn-icon-danger" title="Delete artifact"
             aria-label="Delete artifact"
             hx-post="/ui/artifacts/{{ c.id }}/delete"

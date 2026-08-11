@@ -1,21 +1,3 @@
-//! Retrieval evaluation over hand-written query/artifact pairs.
-//!
-//! Requires a running Qdrant and a real embedding endpoint, which is why it is
-//! `#[ignore]`d — the fake embedder produces meaningless vectors, so a
-//! benchmark built on it would measure nothing.
-//!
-//! Run with:
-//!   ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval -- --ignored --nocapture
-//!
-//! Ranking settings come from configuration, so a sweep is a loop over
-//! environment variables rather than a rebuild:
-//!   ENGRAM__VECTOR__RECENCY_WEIGHT=0.0 …
-//!   ENGRAM_EVAL_CAP=none              (let one document fill the whole list)
-//!
-//! The corpus it reads is whatever the operator actually wants to search, and
-//! is not in this repository. Nothing here prints artifact text; a miss is named
-//! by the leading characters of its own query.
-
 use engram::config::Config;
 use engram::core::Core;
 use engram::core::search::SearchQuery;
@@ -27,11 +9,8 @@ use engram::vector::VectorStore;
 use engram::vector::qdrant::QdrantVectors;
 use std::sync::Arc;
 
-/// Results asked of the search path per query, and the `k` in recall@k.
 const LIMIT: usize = 10;
 
-/// Its own collection, dropped before and after, so a run is never polluted by
-/// the previous one or by the operator's real index.
 const COLLECTION: &str = "engram_eval";
 
 fn cap_from_env() -> Option<usize> {
@@ -52,8 +31,6 @@ async fn evaluate_retrieval() {
     let (artifacts, pairs) = match (load_artifacts(&dir), load_pairs(&dir)) {
         (Ok(c), Ok(p)) => (c, p),
         (c, p) => {
-            // Not a failure: most people running the suite have no corpus, and
-            // a benchmark that cannot run has nothing to report either way.
             let why = c.err().map(|e| e.to_string()).unwrap_or_default()
                 + &p.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
@@ -69,9 +46,6 @@ async fn evaluate_retrieval() {
     assert!(!pairs.is_empty(), "pairs.json is empty");
 
     let known: std::collections::HashSet<&str> = artifacts.iter().map(|c| c.id.as_str()).collect();
-    // A pair naming an id no artifact has is not a hard case, it is a stale pair
-    // left behind by a re-run of eval-prepare. Scored as a miss it would look
-    // like a ranking problem forever.
     for p in &pairs {
         assert!(
             known.contains(p.expect.as_str()),
@@ -107,8 +81,6 @@ async fn evaluate_retrieval() {
             limit: LIMIT,
             tags: vec![],
             category: None,
-            // A benchmark must not stamp last_seen_at: resurfacing reads the
-            // same field, and a scored run is not someone reading their notes.
             mark: false,
             include_deprecated: false,
             include_superseded: false,
@@ -125,12 +97,6 @@ async fn evaluate_retrieval() {
     vectors.drop_collection().await.unwrap();
 }
 
-/// Load the frozen artifacts and embed them.
-///
-/// One store source per corpus file, because `corpus_id` is what the
-/// per-source cap groups by — collapsing the corpus into a single source would
-/// silently disable the cap and measure a different program from the one that
-/// serves the search page.
 async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
     let mut by_corpus: std::collections::BTreeMap<&str, Vec<&FrozenArtifact>> = Default::default();
     for c in artifacts {
@@ -138,8 +104,6 @@ async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
     }
 
     for (name, group) in by_corpus {
-        // The raw text has to differ per source: sources are deduplicated by
-        // a hash of it.
         let src = core
             .store
             .insert_corpus(&format!("eval corpus: {name}"), "eval", Some(name))
@@ -178,8 +142,6 @@ fn report(
         .iter()
         .filter(|r| matches!(r, Some(i) if *i < LIMIT))
         .count();
-    // The settings line is part of the result. A number recorded without the
-    // configuration that produced it cannot be compared against anything.
     println!(
         "\n{} queries over {} artifacts   (embed {}, rerank {}, recency {}, cap {})",
         pairs.len(),
@@ -205,8 +167,6 @@ fn report(
         println!("no misses.");
         return;
     }
-    // The list that is actually read. An aggregate says something moved; this
-    // says what moved, which is what a knob change has to be judged on.
     println!("missed:");
     for (pair, rank) in misses {
         let q: String = pair.query.chars().take(48).collect();

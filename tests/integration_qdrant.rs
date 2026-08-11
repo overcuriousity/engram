@@ -1,13 +1,3 @@
-//! Integration tests against a real Qdrant.
-//!
-//! Requires a running server: `docker compose up -d` (or `podman run -d --name
-//! engram-qdrant -p 127.0.0.1:6333:6333 qdrant/qdrant`).
-//!
-//! Run with: `cargo test --test integration_qdrant -- --ignored`
-//!
-//! Override the endpoint with `ENGRAM_TEST_QDRANT`, e.g.
-//! `ENGRAM_TEST_QDRANT=http://localhost:16333`.
-
 use engram::config::VectorConfig;
 use engram::store::artifacts::ArtifactStatus;
 use engram::vector::{
@@ -30,8 +20,6 @@ fn url() -> String {
     std::env::var("ENGRAM_TEST_QDRANT").unwrap_or_else(|_| "http://localhost:6333".into())
 }
 
-/// Raw REST, for setting up states engram itself will no longer create — such
-/// as a pre-alias collection left behind by an older deployment.
 async fn raw(method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> String {
     let mut req = reqwest::Client::new().request(method, format!("{}{path}", url()));
     if let Some(b) = body {
@@ -62,8 +50,6 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
     }
 }
 
-/// Each test owns its own collection and drops it first, so a rerun is never
-/// polluted by the previous one.
 async fn fresh(name: &str, dim: usize) -> QdrantVectors {
     let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
     v.drop_collection().await.unwrap();
@@ -104,11 +90,6 @@ async fn upsert_search_and_payload_roundtrip() {
 #[tokio::test]
 #[ignore]
 async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
-    // The two exclusions are independent opt-ins, and the deprecated one used
-    // to be unreachable: `set_lifecycle` wrote the legacy `superseded` boolean
-    // for any non-active status, and the filter drops `superseded == true`
-    // whenever superseded results were not asked for. Only a real Qdrant runs
-    // that filter, so this is where it has to be proved.
     use engram::store::artifacts::ArtifactStatus;
 
     let v = fresh("engram_it_deprecated", 4).await;
@@ -167,9 +148,6 @@ async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
 #[tokio::test]
 #[ignore]
 async fn only_a_verify_clears_the_hit_counter() {
-    // `stale_max_hits` counts retrievals since the last verification, so a
-    // verify restarts the count while the one-shot backfill — which stamps
-    // every artifact — must leave every counter alone.
     let v = fresh("engram_it_verify", 4).await;
     v.upsert(vec![point(
         "a",
@@ -180,8 +158,6 @@ async fn only_a_verify_clears_the_hit_counter() {
     )])
     .await
     .unwrap();
-    // A stamp first: `stale_candidates` only considers points that have one,
-    // since a missing stamp means unbackfilled rather than stale.
     v.set_last_verified_at("a", 1, false).await.unwrap();
     v.touch(&[engram::vector::Touch::retrieved("a", None)], 1_000)
         .await
@@ -265,8 +241,6 @@ async fn filtered_search_uses_payload_indexes() {
 #[tokio::test]
 #[ignore]
 async fn multiple_tags_are_an_and_not_an_or() {
-    // The in-memory implementation requires every listed tag. Qdrant must
-    // agree, or filtered search means different things in tests and production.
     let v = fresh("engram_it_tags_and", 4).await;
     v.upsert(vec![
         point(
@@ -395,7 +369,6 @@ async fn a_dimension_change_is_refused_rather_than_silently_accepted() {
 #[tokio::test]
 #[ignore]
 async fn ensure_collection_is_idempotent_at_the_same_dimension() {
-    // Every restart calls this; it must not fail or recreate the collection.
     let v = fresh("engram_it_idem_ensure", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
@@ -404,8 +377,6 @@ async fn ensure_collection_is_idempotent_at_the_same_dimension() {
     assert_eq!(v.count().await.unwrap(), 1, "restart dropped the vectors");
     v.drop_collection().await.unwrap();
 }
-
-// ── Generations and aliases ─────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -439,8 +410,6 @@ async fn reindex_copies_every_point_and_swaps_the_alias() {
     );
     assert_eq!(v.count().await.unwrap(), 3, "a rebuild lost points");
 
-    // Reading through the alias must land on the new generation, with the
-    // payload intact — the vectors were copied, not re-embedded.
     let hits = v
         .search(
             &[1.0, 0.0, 0.0, 0.0],
@@ -461,8 +430,6 @@ async fn reindex_copies_every_point_and_swaps_the_alias() {
 #[tokio::test]
 #[ignore]
 async fn reindex_renames_pre_taxonomy_payload_keys() {
-    // A generation written before chunk/source became artifact/corpus. Built
-    // through raw REST, because engram itself will no longer produce these keys.
     let v = fresh("engram_it_taxonomy", 4).await;
     raw(
         reqwest::Method::PUT,
@@ -496,7 +463,6 @@ async fn reindex_renames_pre_taxonomy_payload_keys() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1, "the rebuild lost the point");
-    // The whole point: the vectors were never re-embedded, only the keys moved.
     assert_eq!(hits[0].payload.artifact_id, "c1");
     assert_eq!(hits[0].payload.corpus_id, "s1");
     assert_eq!(hits[0].payload.title.as_deref(), Some("Cluster"));
@@ -508,8 +474,6 @@ async fn reindex_renames_pre_taxonomy_payload_keys() {
 #[tokio::test]
 #[ignore]
 async fn reindex_leaves_the_previous_generation_in_place() {
-    // The old generation is the only rollback that exists. Deleting it is a
-    // decision for whoever ran the rebuild, not a side effect of running it.
     let v = fresh("engram_it_reindex_keep", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
@@ -537,8 +501,6 @@ async fn a_pre_alias_collection_is_refused_at_startup_then_migrated() {
     let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
     v.drop_collection().await.unwrap();
 
-    // What an older engram left behind: a plain collection with a single
-    // unnamed vector, holding real data.
     raw(
         reqwest::Method::PUT,
         &format!("/collections/{name}"),
@@ -561,8 +523,6 @@ async fn a_pre_alias_collection_is_refused_at_startup_then_migrated() {
     )
     .await;
 
-    // Starting up against it must fail loudly rather than create a second,
-    // empty home for the vectors.
     let err = v.ensure_collection(4).await.unwrap_err().to_string();
     assert!(err.contains("--reindex"), "unhelpful: {err}");
 
@@ -587,7 +547,6 @@ async fn a_pre_alias_collection_is_refused_at_startup_then_migrated() {
         "an unnamed vector must survive the move to named vectors"
     );
 
-    // And the next startup is clean.
     v.ensure_collection(4).await.unwrap();
     v.drop_collection().await.unwrap();
 }
@@ -606,9 +565,6 @@ async fn reindex_refuses_when_there_is_nothing_to_rebuild() {
 #[tokio::test]
 #[ignore]
 async fn reindex_refuses_at_a_dimension_the_source_does_not_have() {
-    // Rebuilding copies vectors rather than re-embedding them, so it cannot
-    // change their width. Saying so beats writing 4-wide vectors into an
-    // 8-wide collection.
     let v = fresh("engram_it_reindex_dim", 4).await;
     let err = v.reindex(8, false).await.unwrap_err().to_string();
     assert!(err.contains('4') && err.contains('8'), "unhelpful: {err}");
@@ -618,8 +574,6 @@ async fn reindex_refuses_at_a_dimension_the_source_does_not_have() {
 #[tokio::test]
 #[ignore]
 async fn a_pre_alias_collection_is_never_deleted_without_being_asked() {
-    // Freeing the alias name costs the source collection, which is the only
-    // copy. Without the opt-in the rebuild must stop before creating anything.
     let name = "engram_it_legacy_consent";
     let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
     v.drop_collection().await.unwrap();
@@ -660,9 +614,6 @@ async fn a_pre_alias_collection_is_never_deleted_without_being_asked() {
 #[tokio::test]
 #[ignore]
 async fn generations_without_an_alias_are_adopted_rather_than_duplicated() {
-    // A rebuild that dies between deleting the old collection and creating the
-    // alias leaves exactly this state. Starting up must find the vectors, not
-    // build a second empty home beside them.
     let name = "engram_it_orphan";
     let v = fresh(name, 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
@@ -692,8 +643,6 @@ async fn generations_without_an_alias_are_adopted_rather_than_duplicated() {
 #[tokio::test]
 #[ignore]
 async fn set_payload_rewrites_metadata_without_touching_the_vector() {
-    // Editing a tag must not cost an embedding call, and must not disturb the
-    // vector that makes the chunk findable in the first place.
     let v = fresh("engram_it_set_payload", 4).await;
     v.upsert(vec![point(
         "a",
@@ -726,8 +675,6 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     );
     assert_eq!(hits[0].payload.category.as_deref(), Some("procedure"));
 
-    // The keyword index must see the new value, or filtered search would still
-    // answer for the old one.
     let f = SearchFilter {
         tags: vec!["fresh".into()],
         category: None,
@@ -758,11 +705,6 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
     v.drop_collection().await.unwrap();
 }
 
-// ── Hybrid retrieval ────────────────────────────────────────────────────────
-
-/// A point whose sparse half is computed from real text, the way the embed job
-/// builds one. The dense vector is supplied separately so a test can make the
-/// semantic half deliberately unhelpful.
 fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
     VectorPoint {
         vector: dense,
@@ -788,9 +730,6 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
 #[tokio::test]
 #[ignore]
 async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
-    // The case hybrid search exists for. The dense query vector is orthogonal
-    // to the document that actually contains `E01`, so a dense-only search
-    // ranks it last. The lexical branch has to rescue it.
     let v = fresh("engram_it_hybrid", 4).await;
     v.upsert(vec![
         hybrid_point(
@@ -814,7 +753,6 @@ async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
 
     let dense_query = [1.0, 0.0, 0.0, 0.0];
 
-    // Dense only: the decoys win, because the query vector is theirs.
     let dense_only = v
         .search(
             &dense_query,
@@ -829,7 +767,6 @@ async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
         "the fixture is wrong: dense search already finds it, so this proves nothing"
     );
 
-    // Hybrid: the term rescues it.
     let sparse = engram::vector::sparse::encode_query("E01");
     let hybrid = v
         .search(&dense_query, &sparse, 3, &SearchFilter::default())
@@ -849,8 +786,6 @@ async fn an_exact_token_is_found_even_when_the_dense_vector_points_elsewhere() {
 #[tokio::test]
 #[ignore]
 async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
-    // The filter has to be repeated per prefetch branch. If it were only on the
-    // outer query, the lexical branch would happily return excluded points.
     let v = fresh("engram_it_hybrid_filter", 4).await;
     let mut wanted = hybrid_point(
         "wanted",
@@ -886,8 +821,6 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
 #[tokio::test]
 #[ignore]
 async fn a_query_with_no_indexable_term_falls_back_to_dense_alone() {
-    // Punctuation produces no terms. Asking the lexical index to match nothing
-    // is not the same as not asking it, so the query shape has to change.
     let v = fresh("engram_it_hybrid_empty", 4).await;
     v.upsert(vec![hybrid_point(
         "a",
@@ -915,18 +848,14 @@ async fn a_query_with_no_indexable_term_falls_back_to_dense_alone() {
 #[tokio::test]
 #[ignore]
 async fn a_rebuild_adds_the_lexical_half_to_a_generation_without_it() {
-    // Sparse vectors are recomputed from the payload rather than copied, so a
-    // collection written before hybrid search gains it for free.
     let v = fresh("engram_it_hybrid_reindex", 4).await;
     v.upsert(vec![
-        // Written the old way: dense only, no terms.
         point("target", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "c"),
         point("decoy", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
     ])
     .await
     .unwrap();
 
-    // `point` builds its text as "text {id}", so this is the term to look for.
     let sparse = engram::vector::sparse::encode_query("target");
     let before = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 1, &SearchFilter::default())
@@ -950,8 +879,6 @@ async fn a_rebuild_adds_the_lexical_half_to_a_generation_without_it() {
 
     v.drop_collection().await.unwrap();
 }
-
-// ── Recency and pinning ─────────────────────────────────────────────────────
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -977,9 +904,6 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             hit_count: None,
             superseded: None,
             status: None,
-            // Recency decay now reads `last_verified_at`, not `created_at` —
-            // this helper's whole point is controlling how "aged" a point
-            // scores, so it has to set the field the formula actually uses.
             last_verified_at: Some(ts),
             superseded_by: None,
         },
@@ -1015,8 +939,6 @@ async fn recency_breaks_a_tie_between_equally_relevant_chunks() {
 #[tokio::test]
 #[ignore]
 async fn recency_does_not_overturn_a_clearly_better_match() {
-    // The nudge has to stay a nudge. A note captured today must not outrank a
-    // genuinely better answer written years ago.
     let v = fresh("engram_it_recency_bounded", 4).await;
     v.upsert(vec![
         aged("relevant_but_old", vec![1.0, 0.0, 0.0, 0.0], 3650, &[]),
@@ -1040,7 +962,6 @@ async fn recency_does_not_overturn_a_clearly_better_match() {
 #[tokio::test]
 #[ignore]
 async fn a_pinned_chunk_outranks_the_decay_curve() {
-    // Pinning is a decision the user made, and it has to beat the heuristic.
     let v = fresh("engram_it_pinned", 4).await;
     v.upsert(vec![
         aged("pinned_old", vec![0.94, 0.34, 0.0, 0.0], 3650, &["pinned"]),
@@ -1067,8 +988,6 @@ async fn a_pinned_chunk_outranks_the_decay_curve() {
 #[tokio::test]
 #[ignore]
 async fn scoring_leaves_the_filter_alone() {
-    // The formula runs over what retrieval returned. If it were applied
-    // instead of the filter, excluded points would reappear at the top.
     let v = fresh("engram_it_recency_filter", 4).await;
     v.upsert(vec![
         aged("keep", vec![1.0, 0.0, 0.0, 0.0], 3650, &["keep"]),
@@ -1121,7 +1040,6 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
         "expected only the old, unseen chunk; got {ids:?}"
     );
 
-    // Showing it counts as seeing it.
     v.touch(&[engram::vector::Touch::shown("forgotten")], now_secs())
         .await
         .unwrap();
@@ -1136,8 +1054,6 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
 #[tokio::test]
 #[ignore]
 async fn touching_a_chunk_leaves_the_rest_of_its_payload_alone() {
-    // The stamp is merged, not written as a whole payload. Getting this wrong
-    // would silently erase tags and text on every search.
     let v = fresh("engram_it_touch_merge", 4).await;
     v.upsert(vec![aged(
         "a",
@@ -1174,8 +1090,6 @@ async fn touching_a_chunk_leaves_the_rest_of_its_payload_alone() {
 #[tokio::test]
 #[ignore]
 async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
-    // `set_payload` sends no stamp, and Qdrant merges, so the stored one has
-    // to survive a tag edit.
     let v = fresh("engram_it_touch_survives", 4).await;
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 1, &["old"])])
         .await
@@ -1210,10 +1124,6 @@ async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
 #[tokio::test]
 #[ignore]
 async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
-    // Unlike `set_payload` and `touch`, a point write replaces the payload
-    // whole. A re-embed builds it from the chunk row, which knows nothing about
-    // the stamp, so the store has to carry the stored one forward — otherwise
-    // editing a chunk makes `resurface` call it forgotten.
     let v = fresh("engram_it_upsert_survives", 4).await;
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 60, &["t"])])
         .await
@@ -1222,7 +1132,6 @@ async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
         .await
         .unwrap();
 
-    // The same chunk, embedded again after an edit.
     let mut again = aged("a", vec![0.0, 1.0, 0.0, 0.0], 60, &["t"]);
     again.payload.text = "edited text".into();
     v.upsert(vec![again]).await.unwrap();
@@ -1239,11 +1148,6 @@ async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
 #[tokio::test]
 #[ignore]
 async fn a_point_written_by_something_else_does_not_take_search_down() {
-    // A rebuild copies payloads verbatim, and nothing stops an operator from
-    // inserting their own point. Two things would otherwise turn one foreign
-    // point into a total outage: the scoring formula reads `created_at` and
-    // fails the whole query when it is missing, and the payload would not
-    // deserialize. Neither may cost the results that *are* ours.
     let name = "engram_it_foreign_point";
     let v = fresh(name, 4).await;
     v.upsert(vec![point(
@@ -1288,8 +1192,6 @@ async fn a_point_written_by_something_else_does_not_take_search_down() {
 #[tokio::test]
 #[ignore]
 async fn a_neighbouring_collection_is_not_mistaken_for_a_generation() {
-    // `drop_collection` deletes everything the alias claims. Claiming by name
-    // prefix would make `engram_it_neighbour_vault` ours to delete.
     let name = "engram_it_neighbour";
     let neighbour = format!("{name}_vault");
     let v = fresh(name, 4).await;
@@ -1313,8 +1215,6 @@ async fn a_neighbouring_collection_is_not_mistaken_for_a_generation() {
         "a collection that merely starts the same way was deleted: {body}"
     );
 
-    // And it is not adopted as a generation either: with no alias and no
-    // numbered generation, startup must build `_v1` rather than claim it.
     v.ensure_collection(4).await.unwrap();
     assert_eq!(
         v.resolve_alias().await.unwrap().as_deref(),
@@ -1334,9 +1234,6 @@ async fn a_neighbouring_collection_is_not_mistaken_for_a_generation() {
 #[tokio::test]
 #[ignore]
 async fn two_processes_starting_together_end_up_on_one_generation() {
-    // Both read no alias, both create the first generation, both write the
-    // alias. Losing that race is the outcome we wanted; failing startup over
-    // it is not.
     let name = "engram_it_startup_race";
     let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
     v.drop_collection().await.unwrap();
@@ -1389,7 +1286,6 @@ async fn facets_count_what_the_collection_can_be_narrowed_by() {
 
     assert_eq!(cat("procedure"), Some(2));
     assert_eq!(cat("concept"), Some(1));
-    // A tag is an array field, so every element of every point is counted.
     assert_eq!(tag("shared"), Some(3));
     assert_eq!(tag("linux"), Some(1));
     assert_eq!(
@@ -1448,8 +1344,6 @@ async fn neighbours_come_back_ranked_and_never_include_the_artifact_itself() {
 #[tokio::test]
 #[ignore]
 async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
-    // The query asks for one extra so the seed can be removed without
-    // shortening the list; the caller must still get exactly what it asked for.
     let v = fresh("engram_it_neighbour_limit", 4).await;
     v.upsert(
         (0..6)
@@ -1473,9 +1367,6 @@ async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
 #[tokio::test]
 #[ignore]
 async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
-    // Qdrant answers a query for an absent point with an error. The pane treats
-    // that as an empty list, because an artifact awaiting its embed job is an
-    // ordinary state rather than a failure.
     let v = fresh("engram_it_no_neighbours", 4).await;
     v.upsert(vec![point(
         "a",
@@ -1489,14 +1380,6 @@ async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
     assert!(v.neighbours("never-embedded", 5).await.unwrap().is_empty());
     v.drop_collection().await.unwrap();
 }
-
-// ── Consolidation ───────────────────────────────────────────────────────────
-//
-// The distance-matrix API and the payload flag it feeds. Both are Qdrant-side
-// behaviour that the in-memory store can only approximate: `near_pairs` speaks
-// to `/points/search/matrix/pairs` (Qdrant 1.12+) and has to map point ids back
-// to artifact ids through a payload lookup, and the superseded filter has to
-// keep matching points written before the key existed at all.
 
 #[tokio::test]
 #[ignore]
@@ -1512,8 +1395,6 @@ async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
 
     let pairs = v.near_pairs(100, 5, 0.9).await.unwrap();
     assert_eq!(pairs.len(), 1, "expected one close pair, got {pairs:?}");
-    // Artifact ids, not point uuids: the mapping back through the payload is
-    // the part of this that cannot be unit-tested.
     assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("a", "b"));
     assert!(pairs[0].score >= 0.9, "{pairs:?}");
     v.drop_collection().await.unwrap();
@@ -1522,10 +1403,6 @@ async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
 #[tokio::test]
 #[ignore]
 async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
-    // Hidden has to mean hidden everywhere a reader browses. A superseded
-    // artifact is near-identical to its keeper by construction, so it would
-    // lead the related pane of the artifact it lost to; and the forgotten list
-    // would hand back exactly the duplicates the sweep just took out of search.
     let v = fresh("engram_it_superseded_browse", 4).await;
     v.upsert(vec![
         aged("keeper", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
@@ -1560,9 +1437,6 @@ async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
 #[tokio::test]
 #[ignore]
 async fn near_pairs_skips_a_deprecated_point() {
-    // A deprecated artifact in the sweep can win its cluster on being newer and
-    // hide a live one — and `set_superseded_by` would overwrite the operator's
-    // deprecation with `superseded` while doing it.
     let v = fresh("engram_it_near_pairs_deprecated", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
@@ -1585,9 +1459,6 @@ async fn near_pairs_skips_a_deprecated_point() {
 #[tokio::test]
 #[ignore]
 async fn the_backfill_stamps_every_point_in_one_request() {
-    // What startup runs when it finds unstamped points, and what the sweep's
-    // drift repair reuses. Both directions of the repair need `non_active_ids`
-    // to report what the payloads actually say.
     let v = fresh("engram_it_backfill", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
@@ -1616,7 +1487,6 @@ async fn the_backfill_stamps_every_point_in_one_request() {
 
     assert_eq!(v.unstamped_count().await.unwrap(), 0);
     assert_eq!(v.non_active_ids(100).await.unwrap(), vec!["b".to_string()]);
-    // The deprecation reached search, which is the whole point of the pass.
     let hits = v
         .search(
             &[0.0, 1.0, 0.0, 0.0],
@@ -1636,9 +1506,6 @@ async fn the_backfill_stamps_every_point_in_one_request() {
 #[tokio::test]
 #[ignore]
 async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
-    // A field this release filters on exists in no collection created before
-    // it, so every filtered search would run as a full scan until someone
-    // thought to `--reindex`.
     let v = fresh("engram_it_index_backfill", 4).await;
     let name = "engram_it_index_backfill_v1";
     let indexed = || async {
@@ -1653,7 +1520,6 @@ async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
     };
     assert!(indexed().await, "a fresh collection is missing the index");
 
-    // What a collection created by an earlier release looks like.
     raw(
         reqwest::Method::DELETE,
         &format!("/collections/{name}/index/status?wait=true"),
@@ -1662,7 +1528,6 @@ async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
     .await;
     assert!(!indexed().await, "the index was not actually removed");
 
-    // Re-running startup is what has to put it back.
     v.ensure_collection(4).await.unwrap();
     assert!(
         indexed().await,
@@ -1674,8 +1539,6 @@ async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
 #[tokio::test]
 #[ignore]
 async fn near_pairs_skips_what_has_already_been_superseded() {
-    // Otherwise every sweep re-finds the pair it resolved last time, and the
-    // review queue never empties.
     let v = fresh("engram_it_near_pairs_skip", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
@@ -1705,9 +1568,6 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
     .unwrap();
 
     let q = [1.0, 0.0, 0.0, 0.0];
-    // Points written before consolidation existed carry no `superseded` key at
-    // all. The default filter must not drop them, which is why the exclusion is
-    // `must_not` rather than a match on `false`.
     assert_eq!(
         v.search(&q, &Default::default(), 5, &SearchFilter::default())
             .await
@@ -1725,7 +1585,6 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].payload.artifact_id, "a");
 
-    // Still reachable when asked for: the review queue and the undo need it.
     assert_eq!(
         v.search(
             &q,
@@ -1758,9 +1617,6 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
 #[tokio::test]
 #[ignore]
 async fn a_re_embed_does_not_revive_a_superseded_point() {
-    // `payload_of` in the embed job knows nothing about consolidation and
-    // leaves the flag unset. Unset has to mean "keep what is stored", or every
-    // re-embed would silently undo the sweep.
     let v = fresh("engram_it_superseded_reembed", 4).await;
     v.upsert(vec![point(
         "a",
@@ -1801,11 +1657,6 @@ async fn a_re_embed_does_not_revive_a_superseded_point() {
 #[tokio::test]
 #[ignore]
 async fn a_deprecated_artifact_is_not_a_neighbour() {
-    // The related pane is a list of live content, and only a real Qdrant runs
-    // the filter that keeps it that way. The legacy `superseded` flag never
-    // catches a deprecation — `lifecycle_payload` writes it false on purpose —
-    // so a `must_not superseded == true` alone let every retired artifact keep
-    // linking itself from the live one it sits next to.
     let v = fresh("engram_it_neighbours_deprecated", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -1833,9 +1684,6 @@ async fn a_deprecated_artifact_is_not_a_neighbour() {
 #[tokio::test]
 #[ignore]
 async fn resurface_skips_a_deprecated_point() {
-    // Old and never seen is exactly what a retired artifact looks like, so the
-    // forgotten list used to offer back the very things an operator had just
-    // taken out of search — and stamp them as shown on the way past.
     let v = fresh("engram_it_resurface_deprecated", 4).await;
     v.upsert(vec![
         aged("live", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
@@ -1862,9 +1710,6 @@ async fn resurface_skips_a_deprecated_point() {
 #[tokio::test]
 #[ignore]
 async fn opening_an_artifact_does_not_count_as_a_retrieval() {
-    // `stale_max_hits` is zero by default, so counting the click that opens a
-    // review candidate would disqualify it from the list that offered it. The
-    // stamp that says it was shown still has to land.
     let v = fresh("engram_it_touch_shown", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
@@ -1890,8 +1735,6 @@ async fn opening_an_artifact_does_not_count_as_a_retrieval() {
 #[tokio::test]
 #[ignore]
 async fn lifecycle_of_reads_back_what_each_point_says() {
-    // What the drift repair compares against SQLite. An id with no point is
-    // absent rather than defaulted, because "no point yet" is not drift.
     let v = fresh("engram_it_lifecycle_of", 4).await;
     v.upsert(vec![
         point("plain", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -1925,9 +1768,6 @@ async fn lifecycle_of_reads_back_what_each_point_says() {
 #[tokio::test]
 #[ignore]
 async fn all_artifact_ids_pages_past_one_scroll() {
-    // The backfill subtracts this from SQLite to find points whose row is gone,
-    // so a single unpaged scroll would report most of a large base as orphaned
-    // and delete it. The page size is 1000; this crosses it.
     let v = fresh("engram_it_all_ids", 4).await;
     let points: Vec<VectorPoint> = (0..1_100)
         .map(|i| point(&format!("a{i}"), "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"))
@@ -1946,10 +1786,6 @@ async fn all_artifact_ids_pages_past_one_scroll() {
 #[tokio::test]
 #[ignore]
 async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
-    // It used to be a random sample. Acting on a candidate redirects back to
-    // Ops, which re-drew — so the queue an operator was working reshuffled under
-    // them on every press, and on a base with more candidates than the limit a
-    // given artifact might take many page loads to come back.
     let v = fresh("engram_it_stale_order", 4).await;
     let points: Vec<VectorPoint> = (0..40)
         .map(|i| {
@@ -1963,8 +1799,6 @@ async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
         })
         .collect();
     v.upsert(points).await.unwrap();
-    // Stamped in the opposite order to the ids, so "stalest first" and "id
-    // order" cannot be confused for one another.
     for i in 0..40 {
         v.set_last_verified_at(&format!("a{i:02}"), 10_000 - i, false)
             .await
@@ -1995,9 +1829,6 @@ async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
 #[tokio::test]
 #[ignore]
 async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
-    // What `Core::heal_store_drift` restores an artifact from. Unlike
-    // `lifecycle_of` it has to carry the text, title, tags and category, or the
-    // restored row is an empty artifact with the right id.
     let v = fresh("engram_it_payloads_of", 4).await;
     v.upsert(vec![point(
         "a",
@@ -2040,10 +1871,6 @@ async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
 #[tokio::test]
 #[ignore]
 async fn a_point_naming_no_artifact_does_not_keep_the_backfill_running_forever() {
-    // The backfill stamps artifacts, so a point naming none can never be
-    // stamped by it — and startup decides whether to run the backfill by
-    // counting unstamped points. Counting these meant the number never reached
-    // zero and every process start kicked off another full-base rewrite.
     let v = fresh("engram_it_unkeyed", 4).await;
     v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
         .await
@@ -2073,10 +1900,6 @@ async fn a_point_naming_no_artifact_does_not_keep_the_backfill_running_forever()
 #[tokio::test]
 #[ignore]
 async fn an_unstamped_point_is_never_a_stale_candidate() {
-    // The list says "not confirmed accurate in a while", so a point that was
-    // never stamped at all must not appear: missing means unknown, not stale,
-    // and every point predates the backfill until it runs. A row reading
-    // "last verified: never" is this invariant breaking.
     let v = fresh("engram_it_stale_unstamped", 4).await;
     v.upsert(vec![
         point("stamped", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -2103,11 +1926,6 @@ async fn an_unstamped_point_is_never_a_stale_candidate() {
 #[tokio::test]
 #[ignore]
 async fn search_reports_a_cosine_alongside_the_fused_rank() {
-    // The ranking score of a hybrid query is a reciprocal-rank fusion value: it
-    // says where a result placed, not how close it was, so the top hit for a
-    // typo scores like the top hit for a perfect question. The similarity is
-    // fetched in the same request by a second, dense-only search, and *that* is
-    // the number that means the same thing from one query to the next.
     let v = fresh("engram_it_similarity", 4).await;
     v.upsert(vec![
         point("near", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
@@ -2145,8 +1963,6 @@ async fn search_reports_a_cosine_alongside_the_fused_rank() {
         "an orthogonal vector should be maximally dissimilar: {:?}",
         far.similarity
     );
-    // The whole reason the similarity is fetched separately: this number is not
-    // one, and comparing it against a threshold would be meaningless.
     assert!(
         near.score < 0.9,
         "the fused rank looked like a similarity: {}",

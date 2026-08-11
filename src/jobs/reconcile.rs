@@ -1,15 +1,3 @@
-//! The heartbeat: pick up anything that was left unfinished.
-//!
-//! Every stage already retries its own job, so this is not the retry mechanism.
-//! It is for the case no retry covers — a job completed while its work was not,
-//! a process killed between two writes, a corpus queued by a build that had a
-//! bug in it. Without it, "the system repairs itself" holds only for the
-//! failures the system happened to be watching at the time.
-//!
-//! Cheap and idempotent: `enqueue` is keyed by (stage, target), so re-arming
-//! something already queued changes nothing, and a base with nothing wrong
-//! costs one query per hundred corpora.
-
 use crate::core::Core;
 use crate::error::Result;
 use crate::store::jobs::Stage;
@@ -24,8 +12,6 @@ pub async fn run(core: &Core) -> Result<usize> {
             break;
         }
         for c in &page {
-            // A corpus parked as a near-duplicate is waiting on a person by
-            // design, and segmenting it is the decision they have not made.
             if c.near_dupe_of.is_some() {
                 continue;
             }
@@ -74,7 +60,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Segment 1 never ran and nothing is queued: the crack this closes.
         assert_eq!(run(&core).await.unwrap(), 1);
         let job = core.store.claim_job().await.unwrap().expect("a job");
         assert_eq!(job.stage, Stage::Synthesize);
@@ -133,8 +118,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_parked_for_a_decision_is_not_dragged_into_the_pipeline() {
-        // Parking withholds the model call until someone chooses. Re-arming it
-        // here would spend exactly what parking exists to save.
         let core = test_core().await;
         let a = core
             .store

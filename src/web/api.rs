@@ -24,13 +24,6 @@ fn default_stage() -> String {
     "segment".into()
 }
 
-/// Every field is optional so a caller can correct a tag without resending —
-/// and without re-embedding — the body text.
-///
-/// `title` and `category` are doubly optional on purpose: an absent key means
-/// "leave it alone" and an explicit `null` means "clear it". Collapsing the two
-/// would make a field that can be set but never unset. Tags need no such
-/// distinction, because an empty list already says it.
 #[derive(serde::Deserialize)]
 pub struct PatchArtifactRequest {
     #[serde(default)]
@@ -43,8 +36,6 @@ pub struct PatchArtifactRequest {
     pub tags: Option<Vec<String>>,
 }
 
-/// Tell an absent key from an explicit `null`. Serde reaches this function only
-/// when the key was present, so the outer `Some` records that fact.
 fn explicit_null<'de, D, T>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -53,21 +44,11 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
-/// A chunk may carry this many tags, each this long.
-///
-/// Tags are a filter dimension and a payload index in Qdrant, not a place to
-/// put prose. Unbounded input here becomes unbounded payload on every point
-/// and an index that grows without limit.
 const MAX_TAGS: usize = 32;
 const MAX_TAG_LEN: usize = 64;
-/// Long enough for any label worth filtering on.
 const MAX_CATEGORY_LEN: usize = 64;
 const MAX_TITLE_LEN: usize = 512;
 
-/// Trim, drop blanks, deduplicate, and refuse what is out of bounds.
-///
-/// Deduplicating matters beyond tidiness: tags are ANDed in a search filter, so
-/// a repeated tag is a condition Qdrant evaluates twice for the same answer.
 fn clean_tags(tags: &[String]) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(tags.len());
     for t in tags {
@@ -93,9 +74,6 @@ fn clean_tags(tags: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Trim a settable-or-clearable string field. An empty value after trimming is
-/// a clear, so `""` and `null` mean the same thing rather than storing a label
-/// that renders as nothing.
 fn clean_optional(value: Option<String>, max: usize, field: &str) -> Result<Option<String>> {
     let Some(v) = value else {
         return Ok(None);
@@ -131,7 +109,6 @@ async fn ingest(
         .core
         .ingest(&req.text, "web", req.title.as_deref())
         .await?;
-    // 201 for a new capture, 200 when the text was already stored.
     let code = if out.duplicate {
         StatusCode::OK
     } else {
@@ -207,9 +184,6 @@ struct ResolveBody {
     action: crate::core::ingest::NearDupeAction,
 }
 
-/// Act on a capture parked as a near-duplicate. The decision is an operator's:
-/// nothing here compares the two documents again, it only carries out what was
-/// chosen.
 async fn resolve_near_dupe(
     State(st): State<AppState>,
     _id: Identity,
@@ -220,7 +194,6 @@ async fn resolve_near_dupe(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// What consolidation has decided and what it is still asking about.
 async fn consolidation(
     State(st): State<AppState>,
     _id: Identity,
@@ -228,19 +201,11 @@ async fn consolidation(
     use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
         "superseded": st.core.store.superseded_artifacts(100).await?,
-        // What the judge actually ruled on, listed first for the same reason
-        // Ops puts it at the top: it is the one output here that cost a model
-        // call, and an operator reading only `pairs` would conclude there was
-        // nothing to look at.
         "contradictions": st
             .core
             .store
             .pairs_by_state(PairState::Contradiction, 100)
             .await?,
-        // Judge-proposed supersedes awaiting an operator's confirmation. Listed
-        // for the same reason Ops renders them: without this a pair the judge
-        // ruled on simply disappears from `pairs`, and an API consumer never
-        // sees the proposal it left behind.
         "supersede_proposals": st
             .core
             .store
@@ -274,8 +239,6 @@ async fn search(
     let query = SearchQuery {
         q: q.q,
         limit: q.limit.unwrap_or(0),
-        // Repeated `?tags=a&tags=b` is awkward in a browser query string, so
-        // accept a comma-separated list.
         tags: q
             .tags
             .map(|s| {
@@ -286,7 +249,6 @@ async fn search(
             })
             .unwrap_or_default(),
         category: q.category.filter(|c| !c.is_empty()),
-        // An API call is one deliberate question; only the typing UI opts out.
         mark: true,
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
@@ -299,9 +261,6 @@ pub struct StaleParams {
     pub limit: Option<usize>,
 }
 
-/// Active artifacts nobody has confirmed or retrieved in a while — candidates
-/// for an operator to review and deprecate. Read-only: nothing here changes
-/// an artifact, and nothing here feeds search ranking.
 async fn stale(
     State(st): State<AppState>,
     _id: Identity,
@@ -348,8 +307,6 @@ async fn patch_artifact(
     if req.text.is_none() && req.title.is_none() && req.category.is_none() && req.tags.is_none() {
         return Err(Error::Validation("no fields to update".into()));
     }
-    // Validate everything before writing anything: a request half-applied and
-    // then rejected leaves a chunk in a state the caller never asked for.
     let text = match &req.text {
         Some(t) if t.trim().is_empty() => {
             return Err(Error::Validation("chunk text is empty".into()));
@@ -369,9 +326,6 @@ async fn patch_artifact(
 
     st.core.store.get_artifact(&cid).await?;
 
-    // The embedder is shown the title followed by the body, so either of those
-    // invalidates the stored vector. A category or a tag changes only what the
-    // payload says about the chunk.
     let revectorize = text.is_some() || title.is_some();
 
     if let Some(t) = &text {
@@ -400,12 +354,6 @@ async fn patch_artifact(
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
     } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
-        // Nothing the model saw has changed, so rewrite the payload in place
-        // rather than spending an inference call to recompute the same vector.
-        //
-        // Only when there is a point to rewrite: for a chunk still waiting to
-        // be embedded, this would be a request Qdrant accepts and applies to
-        // nothing, and the pending job writes the whole payload anyway.
         st.core
             .vectors
             .set_payload(&crate::vector::VectorPayload {
@@ -433,8 +381,6 @@ async fn delete_artifact(
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
-    // Both stores, in the order that survives an interruption — see
-    // `Core::delete_artifact`, which the UI button posts to as well.
     st.core.delete_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -458,8 +404,6 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
         failed: st.core.store.failed_jobs(50).await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         chunks,
-        // Qdrant being briefly unreachable should not fail the status page,
-        // which is exactly where you look when something is wrong.
         vectors: st.core.vectors.count().await.unwrap_or(0),
     }))
 }
@@ -551,8 +495,6 @@ mod tests {
 
     #[tokio::test]
     async fn every_api_route_rejects_an_unauthenticated_request() {
-        // A missing auth check on one route is the failure mode that matters
-        // most here, so assert it route by route rather than spot-checking.
         let (app, _) = app_and_token().await;
         for (method, uri) in [
             ("GET", "/api/v1/search?q=x"),
@@ -814,7 +756,6 @@ mod patch_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// One embedded chunk, and the app that can edit it.
     async fn one_artifact() -> (axum::Router, String, crate::core::Core, String) {
         let (app, token, core) = app_token_and_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -843,8 +784,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn editing_only_tags_rewrites_the_payload_without_re_embedding() {
-        // Tags are not shown to the embedding model, so recomputing the vector
-        // would spend an inference call to arrive at the same numbers.
         let (app, token, core, cid) = one_artifact().await;
 
         let res = app
@@ -867,7 +806,6 @@ mod patch_tests {
             "the stored vector is still correct and must stay so"
         );
 
-        // And the vector store agrees, so a filtered search finds it.
         let hits = core
             .vectors
             .search(
@@ -888,8 +826,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn editing_the_title_does_queue_a_re_embed() {
-        // The embedder is shown the title followed by the body, so a new title
-        // means the stored vector describes text that no longer exists.
         let (app, token, core, cid) = one_artifact().await;
 
         app.oneshot(patch_json(
@@ -939,8 +875,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_field_can_be_cleared_with_an_explicit_null() {
-        // An absent key means "leave it alone", so without this a category
-        // could be set and then never removed.
         let (app, token, core, cid) = one_artifact().await;
         assert_eq!(
             core.store
@@ -1003,7 +937,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn an_unbounded_tag_list_is_refused() {
-        // Tags become payload on every point and a keyword index in Qdrant.
         let (app, token, _core, cid) = one_artifact().await;
         let many: Vec<String> = (0..500).map(|i| format!("t{i}")).collect();
         let res = app
@@ -1033,8 +966,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_rejected_field_leaves_the_other_fields_alone() {
-        // Validation happens before any write, so a request that fails is a
-        // request that changed nothing.
         let (app, token, core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
@@ -1066,9 +997,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn deleting_an_artifact_frees_whatever_it_was_hiding() {
-        // Deleting a corpus heals for this reason; deleting one artifact left
-        // its loser hidden in favour of an id that no longer exists until the
-        // next sweep — which is never, with `consolidate.enabled = false`.
         let (app, token, core, keeper) = one_artifact().await;
         let src = core
             .store

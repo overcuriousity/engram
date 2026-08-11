@@ -7,18 +7,10 @@ use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
 
-/// Tokens consumed by the system prompt and scaffolding. Measured from the
-/// real prompt rather than guessed.
 fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
 }
 
-/// LLM-assisted segmentation, one window at a time.
-///
-/// The window rows are the job's memory. A window that succeeds is written and
-/// marked `done` before the next is attempted, so an error here costs the
-/// windows that had not started yet and nothing else — the job retries and
-/// resumes from the first pending window.
 pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     core.store
@@ -47,10 +39,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         let text = segment_text(&src.raw_text, w.start_line, w.end_line);
 
         let mut chunks = core.synthesizer.segment(&text).await?;
-        // The model was told to keep commands, paths and flags verbatim. If it
-        // did not, one more attempt usually gets it right; a second failure is
-        // stored with a flag rather than dropped, because a visible warning
-        // beats losing the chapter.
         if paraphrased(&chunks, &text) {
             tracing::warn!(
                 corpus_id,
@@ -60,16 +48,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             chunks = core.synthesizer.segment(&text).await?;
         }
 
-        // The span is ours to compute.
-        //
-        // Asking the model for `corpus_lines`, checking the answer, and having
-        // a third outcome for a claim that fails the check produced a flag on
-        // the artifact and a button offering to re-synthesise an entire segment
-        // over a line number. Since `locate_span` finds an artifact's own text
-        // even where the source is hard-wrapped and synthesis reflowed it, the
-        // claim is worth what it is: a hint for the case where nothing matches
-        // at all. Nothing here can disagree with the artifact, so nothing here
-        // has anything to report.
         for c in &mut chunks {
             let hinted = c
                 .corpus_lines
@@ -77,7 +55,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             let span = crate::infer::verify::locate_span(&c.text, &text, w.start_line)
                 .or(hinted)
                 .unwrap_or((w.start_line, w.end_line));
-            // A span outside its own window would render as the wrong text.
             let clamped = (
                 span.0.clamp(w.start_line, w.end_line),
                 span.1.clamp(w.start_line, w.end_line),
@@ -96,10 +73,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             .set_segment_state(corpus_id, w.idx, SegmentState::Done, None)
             .await?;
 
-        // Idle between windows if asked to. A long source is otherwise minutes
-        // of unbroken generation, which on a desktop GPU is a sustained load
-        // rather than a burst. The window is already committed, so a pause here
-        // costs nothing if the process dies during it.
         let cooldown = core.synthesizer.cooldown();
         if !cooldown.is_zero() {
             tracing::debug!(
@@ -113,9 +86,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     finish(core, corpus_id).await
 }
 
-/// Replace the chunks of one window. Same "replace, never append" guarantee as
-/// before; the key is the window rather than the whole source, so a retry of
-/// window 4 cannot disturb windows 0 to 3.
 async fn write_segment_artifacts(
     core: &Core,
     corpus_id: &str,
@@ -135,27 +105,12 @@ async fn write_segment_artifacts(
     core.store.insert_artifacts(corpus_id, &new).await
 }
 
-/// Did any proposed chunk lose a literal its window contains?
-///
-/// The chunk body only, deliberately — this gates a second synthesis call over
-/// the whole window, the most expensive thing here. A caveat is prose the model
-/// is asked to write freely ("only on `/dev/sd*` devices", "requires `sudo`"),
-/// so a path it names in passing need not appear verbatim in the source, and
-/// re-synthesising a window over one is paying the largest cost in the system
-/// for the smallest reason. `flag_unverified` still checks caveats: a command
-/// invented in one is flagged for the reader like any other.
 fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
     chunks
         .iter()
         .any(|c| !crate::infer::verify::missing_literals(&c.text, &[], window).is_empty())
 }
 
-/// Mark what verification could not vouch for. The chunk is kept — a warning
-/// the reader can see beats a chapter silently missing from the base.
-///
-/// One check, not two. A span is derived rather than adjudicated, so there is
-/// nothing left to disbelieve about it; what remains is the literal check,
-/// which is about the text itself and speaks to whoever reads the artifact.
 async fn flag_unverified(
     core: &Core,
     written: &[crate::store::artifacts::Chunk],
@@ -183,11 +138,6 @@ async fn flag_unverified(
     Ok(())
 }
 
-/// Measure how much of a corpus survived into its artifacts, and store it.
-///
-/// Pure local work over rows that are already there — no inference and no
-/// vector call — so it can be re-run over a whole base whenever the measure
-/// itself changes, rather than re-synthesising documents that are fine.
 pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
     let src = core.store.get_corpus(corpus_id).await?;
     let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
@@ -206,8 +156,6 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
         })
         .collect();
 
-    // A corpus segmented before per-segment windows existed has no ranges to
-    // group by; measure it as one.
     let made = if made.is_empty() {
         vec![(
             1,
@@ -227,8 +175,6 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
     Ok(cov)
 }
 
-/// Everything that can only be decided once every window has resolved:
-/// continuous ordinals, the source's status, and the single batched embed job.
 pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     core.store.renumber_artifacts(corpus_id).await?;
@@ -242,9 +188,6 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // How much of the source ended up inside a chunk. A source where the
-    // segmenter quietly dropped half a chapter used to look identical to one
-    // where it did not.
     let cov = recompute_coverage(core, corpus_id).await?;
     if cov < crate::infer::verify::LOW_COVERAGE {
         tracing::warn!(
@@ -254,13 +197,6 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         );
     }
 
-    // Named here rather than at capture, which makes no inference call by
-    // design. The artifact titles are the cheapest description of what the
-    // document turned out to be about, and they only exist now.
-    //
-    // A failure is logged and dropped: the corpus keeps the snippet the UI
-    // falls back to, and losing a document over a missing name would be a bad
-    // trade. A name given at capture is left alone — someone chose it.
     if src.title_hint.is_none() {
         let titles: Vec<String> = chunks.iter().filter_map(|c| c.title.clone()).collect();
         match core.synthesizer.title(&src.raw_text, &titles).await {
@@ -270,8 +206,6 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         }
     }
 
-    // One job for the whole source: every chunk was just written, and embedding
-    // them together is one inference call instead of `chunks.len()`.
     core.store
         .enqueue(Stage::Embed, "corpus", corpus_id)
         .await?;
@@ -285,32 +219,6 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Settle the windows a spent job leaves behind.
-///
-/// The model is a hard dependency: a window it will not segment stays
-/// unsegmented and records why. There is no structural split to fall back on,
-/// because paragraphs stored verbatim are not what the rest of the system means
-/// by a chunk — no title, no category, no tags, and not rewritten to stand
-/// alone — and they would compete for queries against chunks that are.
-///
-/// Only windows that have actually been tried get a verdict. A local endpoint
-/// fails in bursts — the model is loading, or something else took the VRAM —
-/// and the job's attempt count is shared by every window, so an outage during
-/// window 1 must not condemn windows 2 onward that the model never saw. Those
-/// go back in the queue instead. "Tried at least once" is the line rather than
-/// "spent every attempt", because the attempt count belongs to the job, which
-/// covers the whole source.
-///
-/// Returns whether windows are still waiting for their first attempt, which the
-/// caller answers with a fresh job. It cannot be enqueued here: the caller's own
-/// job row is keyed `(stage, target_id)`, so enqueuing the same source would
-/// reuse that row and the `complete_job` that follows would close it again — the
-/// untried windows would be left with nothing to come back to.
-///
-/// Either way the source is settled for now: whatever windows did succeed are
-/// embedded and the corpus reports `partial`. Settled is not finished — a failed
-/// window is still owed a model call, and the caller queues one at the backoff's
-/// distance.
 pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -> Result<bool> {
     let pending = core.store.pending_segments(corpus_id).await?;
     if pending.is_empty() {
@@ -331,7 +239,6 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
     }
 
     if tried.is_empty() {
-        // Nothing has earned a verdict yet; the caller queues another attempt.
         return Ok(true);
     }
 
@@ -347,10 +254,6 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
             "window could not be segmented; its lines have no chunk"
         );
     }
-    // Windows still waiting for their first attempt mean the source is not
-    // settled yet; finishing here would enqueue embedding for half a document.
-    // A window already marked failed does not hold it up — it is owed another
-    // call, not a first one, and the next job brings that.
     let untried_left = core
         .store
         .pending_segments(corpus_id)
@@ -418,8 +321,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_that_was_given_at_capture_is_not_overwritten() {
-        // The API still accepts a title, and a name someone chose outranks one
-        // the model would have written.
         let core = test_core().await;
         let out = core
             .ingest("alpha line\n\nbravo line", "web", Some("My own label"))
@@ -434,9 +335,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_survives_a_synthesizer_that_will_not_name_it() {
-        // The title is a nicety. Losing the document because the model would
-        // not name it would be a bad trade, so the failure is logged and the
-        // corpus keeps its fallback.
         let core = test_core().await;
         let out = core
             .ingest("alpha line\n\nbravo line", "web", None)
@@ -444,9 +342,6 @@ mod tests {
             .unwrap();
         run(&core, &out.id).await.unwrap();
 
-        // A synthesizer that fails every call cannot produce artifacts either,
-        // so naming is exercised through `finish` on a corpus that already has
-        // them: the state a real failure leaves behind.
         let failing = test_core_with_failing_synthesizer().await;
         let hurt = failing
             .ingest("alpha line\n\nbravo line", "web", None)
@@ -465,7 +360,6 @@ mod tests {
         );
     }
 
-    /// A body several windows long under the fake synthesizer's budget.
     fn multi_segment_body() -> String {
         (0..400)
             .map(|i| format!("paragraph number {i} with some filler text"))
@@ -501,9 +395,7 @@ mod tests {
             CorpusStatus::Embedding
         );
 
-        // One embed job for the whole source, not one per chunk: the point of
-        // batching is a single inference call.
-        core.store.claim_job().await.unwrap(); // segment
+        core.store.claim_job().await.unwrap();
         let mut embed_jobs = Vec::new();
         while let Some(j) = core.store.claim_job().await.unwrap() {
             if j.stage == Stage::Embed {
@@ -518,8 +410,6 @@ mod tests {
     #[tokio::test]
     async fn ordinals_stay_continuous_across_windows() {
         let core = test_core().await;
-        // Large enough to exceed the fake synthesizer's window budget several
-        // times over, so segmentation really does run per window.
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
         assert!(
@@ -538,10 +428,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_segment_the_endpoint_refused_is_queued_again() {
-        // The failure that lost a quarter of a document: the endpoint was
-        // loading a model and returned 502 for ten minutes, the job spent its
-        // attempts inside the first minute, and nothing ever tried the segment
-        // again. `failed` has to mean "waiting to be tried", not "gone".
         let core = test_core_with_failing_synthesizer().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
@@ -560,8 +446,6 @@ mod tests {
             core.store.failed_jobs(10).await.unwrap().is_empty(),
             "the corpus was abandoned"
         );
-        // Directly, because `finish` also queues an embed job for the corpus
-        // and `claim_job` may hand that one over first.
         let queued: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs
               WHERE stage = 'synthesize' AND target_id = ? AND state = 'pending'",
@@ -596,8 +480,6 @@ mod tests {
         assert_eq!(w.state, SegmentState::Failed);
         assert_eq!(w.last_error.as_deref(), Some("endpoint down"));
 
-        // The point of the change: no paragraph-shaped debris competing for
-        // queries against chunks that were actually written to stand alone.
         assert!(
             core.store
                 .artifacts_for_corpus(&out.id)
@@ -688,9 +570,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn a_wrong_span_is_replaced_by_one_recovered_from_the_text() {
-        // The model's line numbers are routinely wrong on reference documents.
-        // Where the chunk still reproduces its source, the real span can be
-        // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
         core.synthesizer = std::sync::Arc::new(crate::infer::fake::LyingSpanSynthesizer);
         let out = core
@@ -714,10 +593,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn a_wrong_span_is_never_a_review_task() {
-        // A line number engram can compute itself was being asked of the model,
-        // disbelieved, and turned into a queue entry whose only button spends a
-        // model call on a whole segment. The span falls back to the window and
-        // the reader is none the wiser.
         let mut core = test_core().await;
         core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
         let out = core
@@ -761,18 +636,12 @@ Then run sync.";
 
     #[tokio::test]
     async fn a_burst_of_endpoint_failures_does_not_condemn_untried_windows() {
-        // The job's attempt count is shared by every window of a source, so an
-        // outage while window 0 is running used to condemn the whole rest of
-        // the document without ever calling the model for it. Locally that
-        // outage is usually the model still loading.
         let mut core = test_core().await;
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
         assert!(segment_count(&core, &body) > 2);
         core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("502"));
 
-        // The endpoint refuses while the first window is running; the rest of
-        // the source never gets a call at all.
         assert!(run(&core, &out.id).await.is_err());
         let requeue = fail_pending_segments(&core, &out.id, "502 Bad Gateway")
             .await
@@ -805,10 +674,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn a_source_with_untried_windows_still_has_a_job_after_a_failure() {
-        // Settling the windows used to enqueue the retry itself. The queue is keyed by
-        // (stage, target), so that reused the very row the worker was running,
-        // and the `complete_job` that followed closed it again: the untried
-        // windows were abandoned and the source sat in `segmenting` forever.
         let mut core = test_core().await;
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
@@ -828,8 +693,6 @@ Then run sync.";
             windows.iter().any(|w| w.state == SegmentState::Pending),
             "this test only proves anything while windows are still untried"
         );
-        // Past the backoff the last failure set, which is a delay rather than
-        // the question here.
         sqlx::query("UPDATE jobs SET run_after = 0")
             .execute(&core.store.pool)
             .await
@@ -848,7 +711,6 @@ Then run sync.";
         core.synthesizer =
             std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing_on("STOPHERE"));
 
-        // First pass records the good windows and raises on the bad one.
         assert!(run(&core, &out.id).await.is_err());
         let llm_artifacts = core
             .store
@@ -914,9 +776,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn re_segmenting_replaces_chunks_written_before_windows_existed() {
-        // Chunks from before the window column was added carry no window, so
-        // the per-window delete could not see them and a re-segmentation
-        // appended a second copy of the whole source beside the first.
         let core = test_core().await;
         let out = core
             .ingest("one para\n\ntwo para", "web", None)
@@ -930,8 +789,6 @@ Then run sync.";
             .unwrap()
             .len();
 
-        // What an older database holds: chunks with no window, and no window
-        // rows to resume from.
         sqlx::query("UPDATE artifacts SET segment_idx = NULL WHERE corpus_id = ?")
             .bind(&out.id)
             .execute(&core.store.pool)
@@ -973,8 +830,6 @@ Then run sync.";
             .await
             .unwrap()
             .len();
-        // Nothing is pending, so a second run must be a no-op rather than a
-        // second full pass that doubles the chunk count.
         run(&core, &out.id).await.unwrap();
         let after = core
             .store
@@ -987,8 +842,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn a_failing_window_leaves_earlier_windows_intact() {
-        // Fails only on the window containing the marker, so window 0 succeeds
-        // and a later one raises — the shape a flaky endpoint produces.
         let mut core = test_core().await;
         let body = format!("{}\n\nSTOPHERE marker paragraph\n", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
@@ -1029,9 +882,6 @@ Then run sync.";
 
     #[tokio::test]
     async fn source_spans_are_shifted_into_document_coordinates() {
-        // The synthesizer sees one window at a time and numbers lines from 1.
-        // Without the shift, every chunk in window two would point at the
-        // wrong part of the raw text.
         let core = test_core().await;
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();

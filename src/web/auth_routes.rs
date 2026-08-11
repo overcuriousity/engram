@@ -11,8 +11,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-/// askama 0.16 no longer ships an axum integration crate, so templates get a
-/// thin wrapper of their own.
 pub struct HtmlTemplate<T>(pub T);
 
 impl<T: Template> IntoResponse for HtmlTemplate<T> {
@@ -77,7 +75,6 @@ struct LoginForm {
 }
 
 async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> Result<Response> {
-    // Only reachable in local mode; in OIDC mode there is no password to post.
     let AuthMode::Local = st.auth.mode else {
         return Err(Error::NotFound);
     };
@@ -125,7 +122,6 @@ async fn callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) ->
     };
 
     let client = st.auth.oidc.as_ref().ok_or(Error::NotFound)?;
-    // Single use: this also defeats a replayed callback URL.
     let pending = st
         .auth
         .pending
@@ -163,7 +159,6 @@ async fn logout(State(st): State<AppState>, headers: axum::http::HeaderMap) -> R
     if let Some(h) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())
         && let Some(sid) = cookie_value(h, SESSION_COOKIE)
     {
-        // Delete the row, not just the cookie: a copied cookie must stop working.
         st.core.store.delete_session(&sid).await?;
     }
     Ok((
@@ -320,7 +315,6 @@ mod tests {
                 .contains("Max-Age=0")
         );
 
-        // The server-side row is gone, so the old cookie is worthless.
         let res = app
             .oneshot(
                 Request::builder()

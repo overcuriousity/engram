@@ -30,8 +30,6 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether a worker should spend another attempt on this. Classified once,
-    /// here, rather than by string-matching at the call site later.
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -54,9 +52,6 @@ impl Error {
         }
     }
 
-    /// What the client is allowed to see. Store and LLM-parse failures carry
-    /// schema and prompt fragments, so they are replaced with a generic string
-    /// and the detail goes to the log instead.
     pub fn client_message(&self) -> String {
         match self {
             Error::Store(_) => "internal error".into(),
@@ -108,7 +103,6 @@ mod tests {
         assert!(Error::Store("database is locked".into()).retryable());
         assert!(Error::MalformedLlmOutput("expected `{`".into()).retryable());
 
-        // Retrying these burns inference calls and never succeeds.
         assert!(!Error::Validation("empty text".into()).retryable());
         assert!(!Error::NotFound.retryable());
         assert!(!Error::Unauthorized.retryable());

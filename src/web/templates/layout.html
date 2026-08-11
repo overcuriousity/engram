@@ -5,18 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}engram{% endblock %}</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  {# Installable as an app. iOS reads the touch icon and its own meta tags
-     rather than the manifest, so both are declared. #}
   <link rel="manifest" href="/assets/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="engram">
   <meta name="mobile-web-app-capable" content="yes">
-  {# `default`, so iOS draws the status bar over the page's own colour rather
-     than making it translucent and letting content run under the clock. #}
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  {# The colour behind the status bar, per theme, so an installed window does
-     not frame a light page in a dark bar or the reverse. #}
   <meta name="theme-color" content="#f8f6f1" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0e1015" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="/assets/app.css">
@@ -31,10 +25,6 @@
         <img src="/assets/logo.svg" alt="" width="22" height="22">
         <span>engram</span>
       </a>
-      {# Three destinations. Browse is gone — recent captures live under Capture
-         and everything else is found by searching for what it says — and Ops
-         moved behind one quiet link at the bottom of Capture, where the only
-         part of it that needs a person already appears. #}
       <a href="/ui/capture">Capture</a>
       <a href="/ui/search">Search</a>
       <a href="/ui/ask">Ask</a>
@@ -46,10 +36,6 @@
     {% endblock %}
     {% block content %}{% endblock %}
   </div>
-  {# On a phone the destinations move under the thumb and the top row keeps
-     only identity. Hidden above 40rem, where the top row does the same job.
-     The same three links, so an installed window and a desktop tab are the
-     same app rather than two arrangements of one. #}
   <nav class="tabbar" aria-label="Sections">
     <a href="/ui/capture">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Capture</a>

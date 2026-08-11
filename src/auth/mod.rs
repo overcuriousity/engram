@@ -13,7 +13,6 @@ pub struct Identity {
     pub email: Option<String>,
 }
 
-/// Sliding session lifetime, 30 days.
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
 pub const SESSION_COOKIE: &str = "engram_session";
 
@@ -45,9 +44,6 @@ pub fn bearer(header: &str) -> Option<String> {
         .then(|| value.trim().to_string())
 }
 
-/// Both authentication paths converge here. Handlers ask for an `Identity` and
-/// get 401 automatically if there isn't one; `core` never sees a cookie or a
-/// token.
 impl FromRequestParts<AppState> for Identity {
     type Rejection = Error;
 
@@ -71,7 +67,6 @@ impl FromRequestParts<AppState> for Identity {
             && let Some(sid) = cookie_value(h, SESSION_COOKIE)
             && let Some(session) = state.core.store.get_session(&sid).await?
         {
-            // Sliding expiry: active use keeps the session alive.
             state
                 .core
                 .store
@@ -95,16 +90,15 @@ mod tests {
     fn session_cookie_carries_the_required_flags() {
         let c = set_session_cookie("abc123", true);
         assert!(c.contains("engram_session=abc123"));
-        assert!(c.contains("HttpOnly"), "{c}"); // no JS access
-        assert!(c.contains("SameSite=Lax"), "{c}"); // CSRF mitigation
-        assert!(c.contains("Secure"), "{c}"); // HTTPS only
+        assert!(c.contains("HttpOnly"), "{c}");
+        assert!(c.contains("SameSite=Lax"), "{c}");
+        assert!(c.contains("Secure"), "{c}");
         assert!(c.contains("Path=/"), "{c}");
         assert!(c.contains("Max-Age="), "{c}");
     }
 
     #[test]
     fn insecure_deployments_omit_secure_but_keep_httponly() {
-        // Over plain HTTP a Secure cookie is never sent back and login breaks.
         let c = set_session_cookie("abc123", false);
         assert!(!c.contains("Secure"));
         assert!(c.contains("HttpOnly"));

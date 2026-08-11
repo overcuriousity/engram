@@ -1,16 +1,5 @@
 <div data-terms="{{ d.terms }}">
-  {# The way back to the list, for a narrow window where opening a result hides
-     it. An installed app has no back button to fall back on. Hidden above
-     60rem, where the rail is still on screen beside this — the same width that
-     hides it, not the phone breakpoint.
 
-     Inside the workspace the rail is only hidden by a class, so back is "show
-     the list again" rather than a navigation: dropping the class puts the
-     results back exactly as they were, and `history.back()` follows to undo
-     the URL the click pushed. The plain href is what runs on the standalone
-     artifact page, which has no workspace and no results to return to —
-     `/ui/search` cannot carry the query, because what this page is given is
-     the stripped highlight terms rather than what was typed. #}
   <a class="back" href="/ui/search"
      onclick="var w = document.querySelector('.workspace');
               if (!w) return true;
@@ -24,8 +13,6 @@
       <div>Something near-identical and newer
         (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
       <div class="chips">
-        {# `to`: these buttons also live on Ops, whose copies send nothing and
-           land back on the queue. Pressed from here, they come back here. #}
         <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
           <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Put it back</button>
@@ -50,17 +37,6 @@
   </div>
   {% endif %}
 
-  {# Icons rather than labels: controls that belong to the artifact, not
-     sentences competing with it. Each carries its meaning in `title` and
-     `aria-label`, so the tooltip and the screen reader say the same thing.
-
-     Verify and deprecate only apply to an artifact that is actually in results
-     — the flag above already offers the way back for one that is not — but
-     delete is offered whatever the status, because "get rid of this" is a
-     decision that does not depend on whether it is currently hidden.
-
-     `.actions` rather than `.chips`: it pushes delete to the far end, so the
-     one control that cannot be undone is never flush against two that can. #}
   <div class="actions">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
@@ -79,9 +55,6 @@
       </button>
     </form>
     {% endif %}
-    {# Deprecating hides an artifact and keeps it; this removes it from both
-       stores and cannot be undone. Nothing else deletes an artifact — see
-       `Core::heal_store_drift`. #}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
           onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
       <button class="btn-icon btn-icon-danger" type="submit"
@@ -126,8 +99,6 @@
         <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {% if !d.caveats.is_empty() %}
-        {# Emitted by the same synthesis call that wrote the artifact, from what
-           the source states. Shown but deliberately not embedded. #}
         <div class="caveats">
           <b>Before you rely on this</b>
           <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
@@ -140,11 +111,6 @@
       </div>
 
       {% if !d.related.is_empty() %}
-      {# Nearest by the vector already stored for this artifact: no embedding
-         call, no completion. Swaps this detail for the neighbour's in place,
-         rather than naming `#pane`: the same partial is also the whole of the
-         standalone artifact page, where no pane exists and a missing target
-         would leave the link dead. #}
       <div class="pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
@@ -160,16 +126,7 @@
       {% endif %}
     </div>
     <div>
-      {# One statement of which lines these are, and it is the link. The crumb
-         above the artifact said it, this label said it again, and a third link
-         beside the label said it a third time — on a screen whose whole point
-         is one artifact and the lines it came from.
 
-         "highlighted" rather than a bare range: the panel shows a few lines of
-         context either side, so naming the span alone read as a mismatch
-         against the line numbers actually on screen. The link opens the
-         document scrolled to those lines; an artifact with no recorded span
-         has none to jump to and gets the plain link. #}
       <div class="pane-label">
         <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
       </div>

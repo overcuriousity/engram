@@ -8,12 +8,6 @@ fn options() -> Options {
     o
 }
 
-/// Render chunk markdown to HTML, then sanitize.
-///
-/// Chunk text is written by a language model and displayed inside the
-/// operator's authenticated session, so it is untrusted input by definition.
-/// Sanitizing after rendering catches both raw HTML passed through by the
-/// markdown parser and anything the parser itself emits.
 pub fn render(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, options());
     let mut unsafe_html = String::new();
@@ -27,8 +21,6 @@ pub fn render(markdown: &str) -> String {
         .to_string()
 }
 
-/// Plain-text preview with markup removed. Used in list views where rendered
-/// HTML would break the layout.
 pub fn snippet(markdown: &str, max_chars: usize) -> String {
     let mut text = String::new();
     for event in Parser::new_ext(markdown, options()) {
@@ -42,7 +34,6 @@ pub fn snippet(markdown: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text;
     }
-    // Truncate by chars, never by bytes: slicing mid-codepoint panics.
     let mut out: String = text.chars().take(max_chars).collect();
     out.push('…');
     out
@@ -69,8 +60,6 @@ mod tests {
 
     #[test]
     fn strips_script_tags_from_llm_written_markdown() {
-        // Chunk text is model output rendered into the operator's own
-        // authenticated session. Unsanitized, this is stored XSS.
         let html = render("normal text\n\n<script>alert(1)</script>");
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("alert(1)"), "{html}");
@@ -90,8 +79,6 @@ mod tests {
 
     #[test]
     fn strips_data_urls_too() {
-        // data: can carry script in some contexts; the scheme allowlist must
-        // not quietly permit it.
         let html = render("[click](data:text/html;base64,PHNjcmlwdD4=)");
         assert!(!html.contains("data:text/html"), "{html}");
     }
@@ -108,7 +95,6 @@ mod tests {
 
     #[test]
     fn code_content_is_escaped_not_executed() {
-        // A chunk documenting an XSS payload must render as text.
         let html = render("Payload:\n\n```html\n<script>alert(1)</script>\n```");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         assert!(!html.contains("<script>"), "{html}");
@@ -121,7 +107,6 @@ mod tests {
         assert!(!s.contains('*'));
         assert!(s.chars().count() <= 21, "got {s:?}");
 
-        // Multi-byte input must not panic or split a character.
         let s = snippet("äöü ßüber alles und noch viel mehr text", 5);
         assert!(s.chars().count() <= 6);
     }

@@ -10,38 +10,18 @@ use std::sync::Arc;
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Print the effective config with secrets redacted, then exit.
     #[arg(long)]
     print_config: bool,
-    /// Permit auth.mode = "local" on a non-loopback bind address.
     #[arg(long)]
     i_know_this_is_insecure: bool,
-    /// Print an argon2id hash for a password, for auth.local.password_hash.
     #[arg(long)]
     hash_password: Option<String>,
-    /// Copy every vector into a fresh collection generation and swap the alias
-    /// onto it, then exit. Costs no embedding calls and leaves the previous
-    /// generation in place.
     #[arg(long)]
     reindex: bool,
-    /// With --reindex, permit deleting a pre-alias collection once its points
-    /// have been copied and counted. Needed only for a collection created
-    /// before engram addressed vectors through an alias.
     #[arg(long)]
     replace_legacy: bool,
-    /// Re-measure every corpus's coverage from the artifacts already stored,
-    /// then exit. Local work over existing rows: no inference, no vector calls,
-    /// nothing re-synthesised. Run it after upgrading past a change to how
-    /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
-    /// Push every artifact's SQLite-side lifecycle state (status,
-    /// last_verified_at, superseded_by) into Qdrant, then exit. Rarely needed:
-    /// startup runs the same pass in the background whenever it finds points
-    /// without the fields. This is the way to run it in the foreground and see
-    /// it finish. It also reconciles which artifacts the two stores hold,
-    /// restoring whichever side is missing one, which is what lets the startup
-    /// check ever consider the base fully stamped.
     #[arg(long)]
     backfill_lifecycle: bool,
 }
@@ -67,9 +47,6 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
     Ok(())
 }
 
-/// Fail fast on anything that would otherwise surface much later as bad search
-/// results. Inference probes are warnings only: ingest is designed to work
-/// while the endpoints are down.
 async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     core.vectors.ensure_collection(cfg.infer.embed.dim).await?;
 
@@ -88,29 +65,8 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         tracing::info!(purged, "removed expired sessions");
     }
 
-    // Points written before the lifecycle migration carry no `status` or
-    // `last_verified_at`. Every filter treats that as active, and ranking
-    // treats a missing stamp as neutral, so nothing is broken in the meantime —
-    // but until the backfill runs, no deprecation is filterable and no decay
-    // applies, and an operator who never reads the release notes never learns
-    // that. So it runs itself, once, when there is anything to do.
-    //
-    // In the background: it is a write over every artifact, and a base large
-    // enough for that to take a while is exactly the one that must not have its
-    // startup blocked by it. Two processes starting together may both run it;
-    // the writes are idempotent and both compute the same values.
-    //
-    // "Once" depends on the pass being able to stamp everything this count sees.
-    // It is driven by SQLite and the count is not, so a point whose row is gone
-    // would keep the number above zero forever and rerun the whole rewrite on
-    // every single start — which is why the backfill finishes by healing the
-    // drift, and why the count ignores points that name no artifact at all.
     match core.vectors.unstamped_count().await {
         Ok(0) => {
-            // No backfill to run, so nothing else would look at the two stores.
-            // They can still disagree — a crash between the two writes, a
-            // restore of one from a backup taken at a different moment — and
-            // until something notices, one side's artifacts are simply missing.
             let worker = core.clone();
             core.background.spawn(async move {
                 if let Err(e) = worker.heal_store_drift().await {
@@ -197,8 +153,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if args.recompute_coverage {
-        // No vector store and no inference: this only reads artifacts and
-        // writes one number per corpus, so it must not need either to be up.
         let store = engram::store::Store::connect(&cfg.store).await?;
         let core = Core::from_config(
             &cfg,
@@ -263,8 +217,6 @@ async fn main() -> anyhow::Result<()> {
     let ticker =
         engram::core::background::spawn_consolidation_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
-    // Joined with the workers so shutdown waits for it too, rather than leaving
-    // a task the runtime drops mid-enqueue.
     handles.push(ticker);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
@@ -277,14 +229,10 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    // Let in-flight jobs finish rather than orphaning `running` rows.
     let _ = shutdown_tx.send(true);
     for h in handles {
         let _ = h.await;
     }
-    // The last searches served each left a write behind. The listener is
-    // already closed, so this drains a bounded set rather than chasing new
-    // work; bounded further in case one of them is stuck on a wedged Qdrant.
     if background.inflight() > 0 {
         tracing::info!(
             inflight = background.inflight(),
