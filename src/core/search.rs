@@ -135,15 +135,31 @@ impl Core {
     /// by artifact id. `touch` needs the current count to increment it, and
     /// passing along the copy already in hand is what keeps a marked search
     /// from costing an extra read of every hit it just fetched.
-    fn mark_seen(&self, results: &[SearchResult], hit_counts: &HashMap<String, i64>) {
+    ///
+    /// `counts_as_hit` is false for a list nobody asked for — `resurface` draws
+    /// its chunks at random, and counting that as a retrieval would let the
+    /// forgotten-chunks feature quietly disqualify the same artifacts from the
+    /// stale-review list. See `vector::Touch`.
+    fn mark_seen(
+        &self,
+        results: &[SearchResult],
+        hit_counts: &HashMap<String, i64>,
+        counts_as_hit: bool,
+    ) {
         if results.is_empty() {
             return;
         }
         let targets: Vec<crate::vector::Touch> = results
             .iter()
-            .map(|r| crate::vector::Touch {
-                hit_count: hit_counts.get(&r.artifact_id).copied(),
-                artifact_id: r.artifact_id.clone(),
+            .map(|r| {
+                if counts_as_hit {
+                    crate::vector::Touch::retrieved(
+                        &r.artifact_id,
+                        hit_counts.get(&r.artifact_id).copied(),
+                    )
+                } else {
+                    crate::vector::Touch::shown(&r.artifact_id)
+                }
             })
             .collect();
         let vectors = self.vectors.clone();
@@ -158,10 +174,14 @@ impl Core {
     /// Opening a chunk is the deliberate act that counts as remembering it,
     /// which is why the detail pane records it and an incremental search does
     /// not.
+    ///
+    /// It stamps `last_seen_at` only. An open is not a retrieval: the stale
+    /// review list surfaces artifacts with at most `stale_max_hits` hits since
+    /// they were last verified — zero by default — so counting the click that
+    /// opens a candidate would remove it from the list that offered it, and
+    /// only a `verify` could ever put it back.
     pub fn mark_artifact_seen(&self, artifact_id: &str) {
-        // No payload in hand here — only an id — so the store reads the current
-        // count itself, for this one point.
-        let targets = vec![crate::vector::Touch::unknown(artifact_id)];
+        let targets = vec![crate::vector::Touch::shown(artifact_id)];
         let vectors = self.vectors.clone();
         let now = now_secs();
         self.background.spawn(async move {
@@ -198,8 +218,9 @@ impl Core {
                 last_verified_at: h.payload.last_verified_at,
             })
             .collect();
-        // Surfacing counts as seeing, or the same chunks come back tomorrow.
-        self.mark_seen(&results, &hit_counts);
+        // Surfacing counts as seeing, or the same chunks come back tomorrow —
+        // but not as a retrieval: nobody asked for these.
+        self.mark_seen(&results, &hit_counts, false);
         Ok(results)
     }
 
@@ -375,7 +396,8 @@ impl Core {
 
         results.truncate(limit);
         if query.mark {
-            self.mark_seen(&results, &hit_counts);
+            // A query answered these, so they count as retrievals.
+            self.mark_seen(&results, &hit_counts, true);
         }
         tracing::info!(
             q = %query.q,
@@ -939,5 +961,138 @@ mod tests {
 
         core.verify(&id).await.unwrap();
         assert_eq!(hits_now().await, Some(0), "verify must restart the count");
+    }
+
+    #[tokio::test]
+    async fn opening_a_stale_candidate_does_not_remove_it_from_the_review_list() {
+        // `stale_max_hits` is zero by default, so counting the click that opens
+        // a candidate meant an operator who read a row and decided to defer had
+        // just disqualified it — permanently, since only a `verify` clears the
+        // counter, and a verify is the other answer entirely.
+        let core = test_core().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        core.vectors
+            .set_last_verified_at(&id, 1, false)
+            .await
+            .unwrap();
+
+        let listed = || async {
+            core.stale_candidates(10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.artifact_id == id)
+        };
+        assert!(listed().await, "the fixture is not a stale candidate");
+
+        core.mark_artifact_seen(&id);
+        core.background.wait_idle().await;
+
+        assert!(
+            listed().await,
+            "reading a candidate took it off the list that offered it"
+        );
+    }
+
+    #[tokio::test]
+    async fn resurfacing_does_not_count_as_a_retrieval() {
+        // The forgotten list draws at random from exactly the population the
+        // stale review list targets — old and unseen — so counting what it drew
+        // as a hit quietly emptied the review list over time. It still stamps
+        // `last_seen_at`, which is what keeps the same handful from returning
+        // every day.
+        let core = test_core().await;
+        seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
+        let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
+        sqlx::query("UPDATE artifacts SET created_at = ?")
+            .bind(old)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        core.vectors
+            .set_last_verified_at(&id, 1, false)
+            .await
+            .unwrap();
+
+        assert_eq!(core.resurface(10).await.unwrap().len(), 1);
+        core.background.wait_idle().await;
+
+        assert!(
+            core.stale_candidates(10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.artifact_id == id),
+            "being drawn at random counted as a retrieval"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_artifact_is_not_offered_as_forgotten() {
+        // Old and unseen is exactly what a retired artifact looks like, so the
+        // forgotten list used to hand back the very things an operator had just
+        // taken out of search — and `resurface` marks what it shows as seen, so
+        // it also rewrote their bookkeeping on the way.
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "old",
+            &[("long forgotten", "c", &[]), ("also forgotten", "c", &[])],
+        )
+        .await;
+        let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
+        sqlx::query("UPDATE artifacts SET created_at = ?")
+            .bind(old)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+
+        core.deprecate(&ids[0]).await.unwrap();
+
+        let out = core.resurface(10).await.unwrap();
+        assert_eq!(
+            out.iter().map(|r| &r.artifact_id).collect::<Vec<_>>(),
+            vec![&ids[1]],
+            "the forgotten list offered an artifact that was just retired"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_artifact_is_not_a_neighbour() {
+        // The related pane is a list of live content. A deprecated artifact is
+        // near-identical to nothing in particular, but it is *near* — and
+        // linking to it from a live artifact presents retired knowledge as
+        // current. The legacy `superseded` flag never catches this: a
+        // deprecation deliberately writes it false.
+        let core = test_core().await;
+        seed(
+            &core,
+            &[("alpha text", "note", &[]), ("alpha text too", "note", &[])],
+        )
+        .await;
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+        assert_eq!(
+            core.vectors.neighbours(&ids[0], 10).await.unwrap().len(),
+            1,
+            "the fixture has no neighbour to lose"
+        );
+
+        core.deprecate(&ids[1]).await.unwrap();
+
+        assert!(
+            core.vectors
+                .neighbours(&ids[0], 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a retired artifact is still linked from a live one"
+        );
     }
 }

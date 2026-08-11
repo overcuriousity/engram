@@ -202,6 +202,34 @@ impl VectorStore for MemoryVectors {
         Ok(out)
     }
 
+    async fn lifecycle_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<HashMap<String, super::StoredLifecycle>> {
+        let r = self.points.read().unwrap();
+        Ok(artifact_ids
+            .iter()
+            .filter_map(|id| {
+                let p = r.get(id)?;
+                Some((
+                    id.clone(),
+                    super::StoredLifecycle {
+                        status: status_of(&p.payload),
+                        superseded_by: p.payload.superseded_by.clone(),
+                    },
+                ))
+            })
+            .collect())
+    }
+
+    async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        let r = self.points.read().unwrap();
+        let mut out: Vec<String> = r.keys().cloned().collect();
+        // Deterministic, so a test never depends on HashMap iteration order.
+        out.sort();
+        Ok(out)
+    }
+
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -235,7 +263,10 @@ impl VectorStore for MemoryVectors {
             // trip, which is a network optimisation, not a semantic one.
             if let Some(p) = w.get_mut(&t.artifact_id) {
                 p.payload.last_seen_at = Some(seen_at);
-                p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
+                // Only a search result counts as a retrieval; see `Touch`.
+                if t.counts_as_hit {
+                    p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
+                }
             }
         }
         Ok(())
@@ -250,7 +281,11 @@ impl VectorStore for MemoryVectors {
         let r = self.points.read().unwrap();
         Ok(r.values()
             .filter(|p| {
-                p.payload.superseded != Some(true)
+                // Anything not active is out, matching the Qdrant backend: a
+                // deprecated artifact is old and by definition unseen, which
+                // makes it a prime candidate for a list of things nobody has
+                // looked at — and it has just been retired on purpose.
+                status_of(&p.payload) == ArtifactStatus::Active
                     && p.payload.created_at < older_than
                     && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
             })
@@ -326,7 +361,12 @@ impl VectorStore for MemoryVectors {
         };
         let mut hits: Vec<SearchHit> = r
             .values()
-            .filter(|p| p.payload.artifact_id != artifact_id && p.payload.superseded != Some(true))
+            // Anything out of search is out of the related pane too, matching
+            // the Qdrant backend.
+            .filter(|p| {
+                p.payload.artifact_id != artifact_id
+                    && status_of(&p.payload) == ArtifactStatus::Active
+            })
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: cosine(&seed.vector, &p.vector),

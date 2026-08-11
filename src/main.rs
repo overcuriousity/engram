@@ -39,7 +39,8 @@ struct Args {
     /// last_verified_at, superseded_by) into Qdrant, then exit. Rarely needed:
     /// startup runs the same pass in the background whenever it finds points
     /// without the fields. This is the way to run it in the foreground and see
-    /// it finish.
+    /// it finish. It also deletes points whose artifact row is gone, which is
+    /// what lets the startup check ever consider the base fully stamped.
     #[arg(long)]
     backfill_lifecycle: bool,
 }
@@ -97,6 +98,11 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     // enough for that to take a while is exactly the one that must not have its
     // startup blocked by it. Two processes starting together may both run it;
     // the writes are idempotent and both compute the same values.
+    //
+    // "Once" depends on the pass being able to stamp everything this count sees.
+    // It is driven by SQLite and the count is not, so a point whose row is gone
+    // used to keep the number above zero forever and rerun the whole rewrite on
+    // every single start — which is why the backfill also deletes those.
     match core.vectors.unstamped_count().await {
         Ok(0) => {}
         Ok(n) => {

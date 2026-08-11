@@ -225,6 +225,22 @@ impl Core {
     /// payload first would instead hide the artifact behind a row that still
     /// says active, and the repair, reading the row, would undo it.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
+        // A superseded artifact is already out of search, and `deprecate` does
+        // not clear `superseded_by`, so this would leave a row that is both:
+        // listed on Ops under "deprecated" *and* under "hidden as near
+        // identical", with a detail page that renders only the supersession
+        // branch and therefore never offers the button that undoes it. The
+        // payload would carry `status: deprecated, superseded_by: <winner>`, a
+        // combination nothing else in the system produces. The Ops page does not
+        // render the button in that state, but the route is reachable directly
+        // and this is a public API — so the rule lives here, next to
+        // `supersede`'s own guard.
+        if self.store.get_artifact(id).await?.superseded_by.is_some() {
+            return Err(Error::Validation(format!(
+                "cannot deprecate: {id} is already hidden in favour of another artifact; \
+                 reactivate it first"
+            )));
+        }
         self.store
             .set_artifact_status(id, ArtifactStatus::Deprecated)
             .await?;
@@ -293,6 +309,9 @@ impl Core {
     /// resumed simply by running it again. One artifact that cannot be read is
     /// logged and skipped rather than abandoning every artifact after it —
     /// a single missing row must not be what keeps a base unbackfilled.
+    ///
+    /// Finishes with `drop_orphan_points`, which is what lets the startup check
+    /// ever see zero unstamped points again.
     pub async fn backfill_lifecycle(&self) -> Result<usize> {
         const BATCH: usize = 256;
         let ids = self.store.list_all_artifact_ids().await?;
@@ -317,8 +336,44 @@ impl Core {
             n += rows.len();
             tracing::info!(done = n, total, "lifecycle backfill progress");
         }
+        self.drop_orphan_points().await?;
         tracing::info!(n, "backfilled lifecycle fields into the vector store");
         Ok(n)
+    }
+
+    /// Delete points whose SQLite row is gone.
+    ///
+    /// The pass above is driven by SQLite, so a point with no row can never be
+    /// stamped by it — and startup decides whether to run the backfill by
+    /// counting points with no stamp. One orphan therefore means the count never
+    /// reaches zero and every process start kicks off another full-base rewrite.
+    ///
+    /// Deleting is the right answer rather than stamping: SQLite is the source
+    /// of truth for what exists, so a point it does not name is a delete that a
+    /// crash left half-applied, and until it goes it stays searchable.
+    ///
+    /// The order matters. The point list is read *first* and the row list
+    /// second, so an artifact captured while this runs is either absent from the
+    /// scroll or present in the newer row list — never mistaken for an orphan.
+    /// The opposite skew is harmless: a row deleted just after the read leaves
+    /// its point for the next run.
+    async fn drop_orphan_points(&self) -> Result<()> {
+        let points = self.vectors.all_artifact_ids().await?;
+        let live: std::collections::HashSet<String> = self
+            .store
+            .list_all_artifact_ids()
+            .await?
+            .into_iter()
+            .collect();
+        let orphans: Vec<String> = points.into_iter().filter(|id| !live.contains(id)).collect();
+        if orphans.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            orphans = orphans.len(),
+            "deleting vector points whose artifact row is gone"
+        );
+        self.vectors.delete_artifacts(&orphans).await
     }
 
     /// Put back anything that was hidden in favour of an artifact which has
@@ -794,6 +849,130 @@ mod tests {
         assert_ne!(
             core.store.get_corpus(&out.id).await.unwrap().status,
             CorpusStatus::Failed
+        );
+    }
+
+    /// One point for `artifact_id`, with nothing set beyond what a write needs.
+    fn point(artifact_id: &str, corpus_id: &str) -> crate::vector::VectorPoint {
+        crate::vector::VectorPoint {
+            sparse: Default::default(),
+            vector: vec![0.1; 8],
+            payload: crate::vector::VectorPayload {
+                artifact_id: artifact_id.to_string(),
+                corpus_id: corpus_id.to_string(),
+                text: "t".into(),
+                title: None,
+                category: None,
+                tags: vec![],
+                created_at: 0,
+                last_seen_at: None,
+                hit_count: None,
+                superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
+            },
+        }
+    }
+
+    /// A corpus with one artifact in it, and the ids of both.
+    async fn one_artifact(core: &crate::core::Core) -> (String, String) {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "t".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        (src.id, made[0].id.clone())
+    }
+
+    #[tokio::test]
+    async fn deprecating_an_already_superseded_artifact_is_refused() {
+        // `set_artifact_status` leaves `superseded_by` alone, so this used to
+        // produce a row that is deprecated *and* hidden in favour of a winner:
+        // listed in both Ops tables, rendered only as a supersession, and so out
+        // of reach of the button that would undo it.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "loser".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "winner".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.supersede(&made[0].id, &made[1].id).await.unwrap();
+
+        assert!(matches!(
+            core.deprecate(&made[0].id).await,
+            Err(crate::error::Error::Validation(_))
+        ));
+        let after = core.store.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(
+            after.status,
+            crate::store::artifacts::ArtifactStatus::Superseded,
+            "the refused call changed the row anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_backfill_deletes_points_whose_artifact_row_is_gone() {
+        // The backfill is driven by SQLite, so it can never stamp a point with
+        // no row — and startup decides whether to run it by counting unstamped
+        // points. One orphan therefore meant a full-base rewrite on every single
+        // process start, forever.
+        let core = test_core().await;
+        let (corpus, artifact) = one_artifact(&core).await;
+        core.vectors
+            .upsert(vec![point(&artifact, &corpus), point("gone", &corpus)])
+            .await
+            .unwrap();
+
+        core.backfill_lifecycle().await.unwrap();
+
+        assert_eq!(
+            core.vectors.all_artifact_ids().await.unwrap(),
+            vec![artifact],
+            "the orphaned point survived the backfill"
+        );
+        assert_eq!(
+            core.vectors.unstamped_count().await.unwrap(),
+            0,
+            "startup would run the backfill again on the next start"
         );
     }
 }

@@ -112,36 +112,68 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 ///
 /// Broader than `heal_dangling_supersessions`, which repairs one specific case
 /// (a winner that has since been deleted) in the SQLite direction only.
-async fn repair_lifecycle_drift(core: &Core) -> Result<()> {
-    let payload_hidden: HashSet<String> = core
-        .vectors
-        .non_active_ids(DRIFT_SCAN)
-        .await?
-        .into_iter()
-        .collect();
-    let store_hidden = core.store.list_non_active_artifacts(DRIFT_SCAN).await?;
-    let store_ids: HashSet<&str> = store_hidden.iter().map(|c| c.id.as_str()).collect();
+///
+/// Returns how many artifacts it rewrote, which is a number worth asserting on:
+/// a repair that fires on a base in agreement is a bug that hides behind a
+/// correct end state.
+async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
+    repair_lifecycle_drift_scanning(core, DRIFT_SCAN).await
+}
+
+/// The above with its cap as a parameter, so a test can reproduce what the two
+/// truncated scans do to each other without seeding `DRIFT_SCAN` artifacts.
+async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usize> {
+    // Both scans are capped, and neither cap lines up with the other:
+    // `list_non_active_artifacts` returns the newest rows while `non_active_ids`
+    // scrolls in point-id order. So set membership across the two proves
+    // nothing — on a base with more hidden artifacts than `DRIFT_SCAN` the lists
+    // barely intersect, and treating "missing from the other list" as drift
+    // reported the whole scan as broken every sweep and rewrote every payload in
+    // it. The union of the two scans names the artifacts worth *looking at*;
+    // what each store actually says about them is then read per id, and only a
+    // real disagreement is repaired.
+    let store_hidden = core.store.list_non_active_artifacts(scan).await?;
+    let payload_hidden = core.vectors.non_active_ids(scan).await?;
+
+    let mut ids: Vec<String> = store_hidden.iter().map(|c| c.id.clone()).collect();
+    ids.extend(payload_hidden);
+    ids.sort_unstable();
+    ids.dedup();
+
+    let stored = core.vectors.lifecycle_of(&ids).await?;
+    let known: HashMap<&str, &Chunk> = store_hidden.iter().map(|c| (c.id.as_str(), c)).collect();
 
     let mut rows = Vec::new();
-    // Hidden in SQLite, still visible to search: finish the write that was
-    // lost.
-    for c in &store_hidden {
-        if !payload_hidden.contains(&c.id) {
-            rows.push(lifecycle_row_of(c));
-        }
-    }
-    // Hidden in the payload, active in SQLite: put it back. An id the vector
-    // store still lists but SQLite has dropped is ordinary — a delete can lag a
-    // sweep — and not an error.
-    for id in &payload_hidden {
-        if store_ids.contains(id.as_str()) {
+    for id in &ids {
+        // The row is already in hand for everything the SQLite scan returned;
+        // only an id that came from the payload side alone costs a read.
+        let fetched;
+        let chunk = match known.get(id.as_str()) {
+            Some(c) => *c,
+            // An id the vector store still lists but SQLite has dropped is
+            // ordinary — a delete can lag a sweep — and not an error.
+            None => match core.store.get_artifact(id).await {
+                Ok(c) => {
+                    fetched = c;
+                    &fetched
+                }
+                Err(_) => {
+                    tracing::debug!(artifact_id = %id, "hidden point names an artifact that is gone");
+                    continue;
+                }
+            },
+        };
+        // No point at all is not drift: a freshly captured artifact is hidden
+        // in SQLite before its embedding job has written anything to hide.
+        let Some(p) = stored.get(id) else {
             continue;
-        }
-        match core.store.get_artifact(id).await {
-            Ok(c) => rows.push(lifecycle_row_of(&c)),
-            Err(_) => {
-                tracing::debug!(artifact_id = %id, "hidden point names an artifact that is gone")
-            }
+        };
+        // SQLite is the source of truth for both fields. Comparing them rather
+        // than just "hidden or not" also catches the subtler skew — a payload
+        // that says superseded behind a row that says deprecated, or one
+        // pointing at a winner the row no longer names.
+        if p.status != chunk.status || p.superseded_by != chunk.superseded_by {
+            rows.push(lifecycle_row_of(chunk));
         }
     }
 
@@ -152,7 +184,7 @@ async fn repair_lifecycle_drift(core: &Core) -> Result<()> {
         );
         core.vectors.apply_lifecycle(&rows).await?;
     }
-    Ok(())
+    Ok(rows.len())
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
@@ -358,12 +390,22 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         };
 
-        // A pair queued in the review band can have a member superseded by a
-        // later sweep, once a re-embed moves the score above `auto_supersede`.
-        // Judging it would spend the scarcest thing here — a model call — to
-        // post a contradiction about an artifact that is no longer in results.
-        // The supersession is the answer to this pair.
-        if a.superseded_by.is_some() || b.superseded_by.is_some() {
+        // A pair queued in the review band can have a member retired after the
+        // fact: superseded by a later sweep once a re-embed moves the score
+        // above `auto_supersede`, or deprecated by an operator. Judging it would
+        // spend the scarcest thing here — a model call — to post a
+        // contradiction about an artifact that is no longer in results.
+        //
+        // The status half matters beyond the wasted call. A judgement can
+        // propose a supersede, which Ops renders as an "apply supersede" button
+        // — and `Core::supersede` refuses a deprecated side, so pressing it
+        // returns a validation error and the pair stays pending forever. The
+        // same guard runs in `run`'s cluster pass and review band.
+        if a.status != ArtifactStatus::Active
+            || b.status != ArtifactStatus::Active
+            || a.superseded_by.is_some()
+            || b.superseded_by.is_some()
+        {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
                 .await?;
@@ -866,6 +908,113 @@ mod tests {
                 .is_empty(),
             "the answered pair must leave the pending queue"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_member_was_deprecated_never_reaches_the_judge() {
+        // The other half of the same rule, and the one that leaves a button
+        // nothing can press: a judgement can propose a supersede, Ops renders
+        // "Apply supersede" for it, and `Core::supersede` refuses a deprecated
+        // side — so the operator gets a validation error and the pair stays
+        // pending forever. The dismissal guard used to check `superseded_by`
+        // only, which a deprecation never sets.
+        let mut core = test_core().await;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        let ids = disagreeing(&core).await;
+        run(&core).await.unwrap();
+        core.consolidate.judge = true;
+
+        core.deprecate(&ids[0]).await.unwrap();
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(
+            completer.calls(),
+            0,
+            "the judge ruled on a deprecated artifact"
+        );
+        assert_eq!(out.judged, 0);
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pair naming a retired artifact must leave the pending queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_rewrites_nothing_when_the_two_stores_agree() {
+        // Both scans are capped and neither cap lines up with the other, so
+        // "missing from the other list" used to read as drift. On a base with
+        // more hidden artifacts than one scan returns, that reported the whole
+        // scan as broken every sweep and rewrote every payload in it — a
+        // permanent false alarm with write amplification behind it. Only a real
+        // disagreement counts.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("first", [1.0, 0.0]),
+                ("second", [0.0, 1.0]),
+                ("third", [0.5, 0.5]),
+            ],
+        )
+        .await;
+        // One hidden each way, both written through the paths that keep the two
+        // stores in step.
+        core.deprecate(&ids[0]).await.unwrap();
+        core.supersede(&ids[1], &ids[2]).await.unwrap();
+
+        assert_eq!(
+            repair_lifecycle_drift(&core).await.unwrap(),
+            0,
+            "the repair fired on a base that agrees with itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scan_cap_reached_from_both_sides_is_not_drift() {
+        // The bug in miniature. The two scans are capped independently and
+        // ordered differently — newest rows on one side, point order on the
+        // other — so past the cap they name largely different artifacts. Reading
+        // "absent from the other list" as drift then reports both whole scans as
+        // broken on every sweep and rewrites every payload in them. Two hidden
+        // artifacts and a cap of one reproduces exactly that.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        assert_eq!(
+            repair_lifecycle_drift_scanning(&core, 1).await.unwrap(),
+            0,
+            "the edge of a page was reported as a disagreement"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_notices_a_payload_naming_the_wrong_status() {
+        // Not just hidden-or-not: a payload that says superseded behind a row
+        // that says deprecated is drift too, and comparing set membership alone
+        // never saw it.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+        core.vectors
+            .set_lifecycle(&ids[0], ArtifactStatus::Superseded, Some(&ids[1]))
+            .await
+            .unwrap();
+
+        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
+        let stored = core
+            .vectors
+            .lifecycle_of(std::slice::from_ref(&ids[0]))
+            .await
+            .unwrap();
+        assert_eq!(stored[&ids[0]].status, ArtifactStatus::Deprecated);
+        assert_eq!(stored[&ids[0]].superseded_by, None);
     }
 
     #[tokio::test]

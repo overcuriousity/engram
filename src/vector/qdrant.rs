@@ -196,6 +196,20 @@ fn lifecycle_payload(status: ArtifactStatus, superseded_by: Option<&str>) -> Val
     })
 }
 
+/// What a stored payload says its lifecycle status is, read the way every
+/// filter reads it: an absent `status` falls back to the legacy `superseded`
+/// flag, and an absent flag means active — which is every point written before
+/// lifecycle tracking existed.
+fn stored_status(payload: &Value) -> ArtifactStatus {
+    match payload.get("status").and_then(Value::as_str) {
+        Some(s) => ArtifactStatus::parse(s),
+        None if payload.get("superseded").and_then(Value::as_bool) == Some(true) => {
+            ArtifactStatus::Superseded
+        }
+        None => ArtifactStatus::Active,
+    }
+}
+
 /// The payload `set_last_verified_at` merges into a point.
 ///
 /// `reset_hits` zeroes `hit_count` in the same write, because `stale_max_hits`
@@ -1274,6 +1288,90 @@ impl VectorStore for QdrantVectors {
             .collect())
     }
 
+    async fn lifecycle_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, super::StoredLifecycle>> {
+        let mut out = std::collections::HashMap::new();
+        if artifact_ids.is_empty() {
+            return Ok(out);
+        }
+        // Batched, because the drift repair asks about every hidden artifact it
+        // found and a single retrieve of thousands of ids is a request body
+        // Qdrant may well refuse.
+        const BATCH: usize = 512;
+        for batch in artifact_ids.chunks(BATCH) {
+            let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(json!({
+                        "ids": ids,
+                        // `point_uuid` is one-way, so the artifact id has to
+                        // come back from the payload.
+                        "with_payload": ["artifact_id", "status", "superseded", "superseded_by"],
+                        "with_vector": false,
+                    })),
+                )
+                .await?;
+            for p in found {
+                let Some(id) = p.payload.get("artifact_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.insert(
+                    id.to_string(),
+                    super::StoredLifecycle {
+                        status: stored_status(&p.payload),
+                        superseded_by: p
+                            .payload
+                            .get("superseded_by")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        const PAGE: usize = 1_000;
+        let mut out = Vec::new();
+        let mut offset = Value::Null;
+        loop {
+            let mut body = json!({
+                "limit": PAGE,
+                "with_payload": ["artifact_id"],
+                "with_vector": false,
+            });
+            if !offset.is_null() {
+                body["offset"] = offset.clone();
+            }
+            let page: ScrollResult = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/scroll", self.alias),
+                    Some(body),
+                )
+                .await?;
+            if page.points.is_empty() {
+                break;
+            }
+            out.extend(page.points.iter().filter_map(|p| {
+                p.payload
+                    .get("artifact_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }));
+            offset = page.next_page_offset;
+            if offset.is_null() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -1401,8 +1499,8 @@ impl VectorStore for QdrantVectors {
         // Qdrant has no atomic increment — so the current value has to come
         // from somewhere. A marked search has just read every hit's payload and
         // passes the counts in, which is the common case and costs no round
-        // trip; only the callers that know nothing but an id (opening one
-        // artifact) pay for a read, and only for their own points.
+        // trip; a caller that counts a hit while knowing nothing but an id pays
+        // for a read, and only for its own points.
         //
         // Both stay off the request path (the caller backgrounds this call),
         // and this still waits: the shutdown drain exists to keep these stamps,
@@ -1410,18 +1508,24 @@ impl VectorStore for QdrantVectors {
         // meant to prevent. A count missed under a rare concurrent double-touch
         // is an acceptable soft-counter race — it only ever feeds the one-way
         // stale-candidate query, never live scoring.
+        //
+        // A target that does not count as a hit needs no count at all: it only
+        // stamps `last_seen_at`, so it neither joins the read below nor carries
+        // a `hit_count` key into the write.
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        let mut ids: Vec<String> = Vec::with_capacity(targets.len());
+        let mut ids: Vec<(String, bool)> = Vec::with_capacity(targets.len());
         let mut unknown: Vec<String> = Vec::new();
         for t in targets {
             let uuid = point_uuid(&t.artifact_id);
-            match t.hit_count {
-                Some(n) => {
-                    counts.insert(uuid.clone(), n);
+            if t.counts_as_hit {
+                match t.hit_count {
+                    Some(n) => {
+                        counts.insert(uuid.clone(), n);
+                    }
+                    None => unknown.push(uuid.clone()),
                 }
-                None => unknown.push(uuid.clone()),
             }
-            ids.push(uuid);
+            ids.push((uuid, t.counts_as_hit));
         }
         if !unknown.is_empty() {
             let found: Vec<ScrolledPoint> = self
@@ -1447,11 +1551,14 @@ impl VectorStore for QdrantVectors {
         }
         let ops: Vec<Value> = ids
             .iter()
-            .map(|uuid| {
-                let next = counts.get(uuid).copied().unwrap_or(0) + 1;
+            .map(|(uuid, counts_as_hit)| {
+                let mut payload = json!({ "last_seen_at": seen_at });
+                if *counts_as_hit {
+                    payload["hit_count"] = json!(counts.get(uuid).copied().unwrap_or(0) + 1);
+                }
                 json!({
                     "set_payload": {
-                        "payload": { "last_seen_at": seen_at, "hit_count": next },
+                        "payload": payload,
                         "points": [uuid],
                     }
                 })
@@ -1483,9 +1590,15 @@ impl VectorStore for QdrantVectors {
                     // point written before consolidation existed carries no
                     // `superseded` key, and matching `false` would drop it.
                     // Without this the forgotten list offers exactly the
-                    // duplicates the sweep just took out of search.
+                    // duplicates the sweep just took out of search — and, since
+                    // a deprecated artifact is old and by definition unseen,
+                    // exactly the artifacts an operator has just retired.
                     "filter": {
-                      "must_not": [ { "key": "superseded", "match": { "value": true } } ],
+                      "must_not": [
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "status", "match": { "value": "deprecated" } },
+                        { "key": "superseded", "match": { "value": true } }
+                      ],
                       "must": [
                         { "key": "created_at", "range": { "lt": older_than } },
                         // Nested so this reads as AND-of-OR. A chunk written
@@ -1548,11 +1661,19 @@ impl VectorStore for QdrantVectors {
             "query": point_uuid(artifact_id),
             "using": DENSE,
             "limit": limit + 1,
-            // A superseded artifact is out of search, so it must be out of the
-            // related pane too: it is by construction near-identical to its
-            // keeper, which means it would lead that list on every artifact it
-            // was hidden in favour of.
-            "filter": { "must_not": [ { "key": "superseded", "match": { "value": true } } ] },
+            // Anything out of search is out of the related pane too. A
+            // superseded artifact is by construction near-identical to its
+            // keeper, so it would lead that list on every artifact it was
+            // hidden in favour of; a deprecated one is content an operator
+            // retired, and linking to it from a live artifact presents it as
+            // current. `status` and the legacy flag are both matched because a
+            // deprecation deliberately writes `superseded: false` — see
+            // `lifecycle_payload` — so the legacy net alone never catches it.
+            "filter": { "must_not": [
+                { "key": "status", "match": { "value": "superseded" } },
+                { "key": "status", "match": { "value": "deprecated" } },
+                { "key": "superseded", "match": { "value": true } }
+            ] },
             "with_payload": true,
         });
         let res: QueryResult = match self

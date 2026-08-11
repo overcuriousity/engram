@@ -884,7 +884,7 @@ mod tests {
         let (_src, ids) = seed(&core, &["text"]).await;
         run(&core, &ids[0]).await.unwrap();
         core.vectors
-            .touch(&[crate::vector::Touch::unknown(&ids[0])], 1_700_000_000)
+            .touch(&[crate::vector::Touch::shown(&ids[0])], 1_700_000_000)
             .await
             .unwrap();
 

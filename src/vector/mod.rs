@@ -131,20 +131,54 @@ pub struct NearPair {
 /// marked search holds every hit's count already, so passing it spares `touch`
 /// a read round trip it would otherwise pay on every query. `None` means the
 /// caller does not know (opening one artifact by id), and the store reads the
-/// current value itself.
+/// current value itself. It is only ever read when `counts_as_hit`.
+///
+/// `counts_as_hit` separates the two stamps this carries. `last_seen_at` answers
+/// "when was this last put in front of anyone", which every path updates —
+/// that is what keeps the forgotten-chunks list from offering the same artifact
+/// every day. `hit_count` answers "how often did search return this as an
+/// answer since it was last verified", which is what `stale_candidates` reads,
+/// so only a query result may increment it. Opening one artifact from the
+/// review list, or being drawn at random by `resurface`, is the operator
+/// *looking at* a candidate — counting either as a retrieval is how reading a
+/// row used to remove it from the very list that offered it.
 #[derive(Debug, Clone)]
 pub struct Touch {
     pub artifact_id: String,
     pub hit_count: Option<i64>,
+    pub counts_as_hit: bool,
 }
 
 impl Touch {
-    pub fn unknown(artifact_id: &str) -> Touch {
+    /// Returned by a search: bumps both stamps. `hit_count` is the value the
+    /// caller just read, or `None` to make the store look it up.
+    pub fn retrieved(artifact_id: &str, hit_count: Option<i64>) -> Touch {
+        Touch {
+            artifact_id: artifact_id.to_string(),
+            hit_count,
+            counts_as_hit: true,
+        }
+    }
+
+    /// Shown without being asked for — an artifact opened by id, or drawn by
+    /// `resurface`. Stamps `last_seen_at` only.
+    pub fn shown(artifact_id: &str) -> Touch {
         Touch {
             artifact_id: artifact_id.to_string(),
             hit_count: None,
+            counts_as_hit: false,
         }
     }
+}
+
+/// What a point's payload says about its lifecycle, as the drift repair reads
+/// it back. A point missing from a `lifecycle_of` answer is simply absent from
+/// the map; an absent `status` key reads as `Active`, which is how every filter
+/// treats a point written before lifecycle tracking existed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredLifecycle {
+    pub status: ArtifactStatus,
+    pub superseded_by: Option<String>,
 }
 
 /// One artifact's SQLite-side lifecycle state, as the backfill pushes it into
@@ -235,7 +269,8 @@ pub trait VectorStore: Send + Sync {
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>>;
     /// Record that these chunks were just shown. Merged into the stored
-    /// payload, never written as a whole one.
+    /// payload, never written as a whole one. `last_seen_at` is stamped for
+    /// every target; `hit_count` only for the ones marked `counts_as_hit`.
     async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()>;
     /// Push a batch of artifacts' SQLite-side lifecycle state into the store,
     /// as one request rather than one per artifact per field. What the
@@ -250,6 +285,21 @@ pub trait VectorStore: Send + Sync {
     /// to repair drift left by a half-applied lifecycle change in either
     /// direction.
     async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>>;
+    /// What these artifacts' payloads currently say about their lifecycle. Ids
+    /// with no point are absent from the answer.
+    ///
+    /// The drift repair needs this because set membership in two independently
+    /// truncated lists proves nothing: an id missing from a capped scan may be
+    /// in agreement and simply past the cap. Comparing the stored value per id
+    /// is what tells an actual disagreement from the edge of a page.
+    async fn lifecycle_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, StoredLifecycle>>;
+    /// Every artifact id the store holds a point for. Unbounded on purpose:
+    /// the one caller is the backfill, which is already a pass over the whole
+    /// base and uses this to find points whose SQLite row is gone.
+    async fn all_artifact_ids(&self) -> Result<Vec<String>>;
     /// A random sample of chunks captured before `older_than` and not shown
     /// since `unseen_since`. Random rather than ranked: there is no query here,
     /// only the question of what has been forgotten.

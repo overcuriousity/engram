@@ -182,10 +182,10 @@ async fn only_a_verify_clears_the_hit_counter() {
     // A stamp first: `stale_candidates` only considers points that have one,
     // since a missing stamp means unbackfilled rather than stale.
     v.set_last_verified_at("a", 1, false).await.unwrap();
-    v.touch(&[engram::vector::Touch::unknown("a")], 1_000)
+    v.touch(&[engram::vector::Touch::retrieved("a", None)], 1_000)
         .await
         .unwrap();
-    v.touch(&[engram::vector::Touch::unknown("a")], 2_000)
+    v.touch(&[engram::vector::Touch::retrieved("a", None)], 2_000)
         .await
         .unwrap();
 
@@ -1105,7 +1105,7 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
     .await
     .unwrap();
     v.touch(
-        &[engram::vector::Touch::unknown("old_but_just_seen")],
+        &[engram::vector::Touch::shown("old_but_just_seen")],
         now_secs(),
     )
     .await
@@ -1121,7 +1121,7 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
     );
 
     // Showing it counts as seeing it.
-    v.touch(&[engram::vector::Touch::unknown("forgotten")], now_secs())
+    v.touch(&[engram::vector::Touch::shown("forgotten")], now_secs())
         .await
         .unwrap();
     assert!(
@@ -1147,7 +1147,7 @@ async fn touching_a_chunk_leaves_the_rest_of_its_payload_alone() {
     .await
     .unwrap();
 
-    v.touch(&[engram::vector::Touch::unknown("a")], 12_345)
+    v.touch(&[engram::vector::Touch::shown("a")], 12_345)
         .await
         .unwrap();
 
@@ -1179,7 +1179,7 @@ async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 1, &["old"])])
         .await
         .unwrap();
-    v.touch(&[engram::vector::Touch::unknown("a")], 12_345)
+    v.touch(&[engram::vector::Touch::shown("a")], 12_345)
         .await
         .unwrap();
 
@@ -1217,7 +1217,7 @@ async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 60, &["t"])])
         .await
         .unwrap();
-    v.touch(&[engram::vector::Touch::unknown("a")], now_secs())
+    v.touch(&[engram::vector::Touch::shown("a")], now_secs())
         .await
         .unwrap();
 
@@ -1794,5 +1794,150 @@ async fn a_re_embed_does_not_revive_a_superseded_point() {
         .is_empty(),
         "the re-embed revived a hidden point"
     );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_deprecated_artifact_is_not_a_neighbour() {
+    // The related pane is a list of live content, and only a real Qdrant runs
+    // the filter that keeps it that way. The legacy `superseded` flag never
+    // catches a deprecation — `lifecycle_payload` writes it false on purpose —
+    // so a `must_not superseded == true` alone let every retired artifact keep
+    // linking itself from the live one it sits next to.
+    let v = fresh("engram_it_neighbours_deprecated", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(
+        v.neighbours("a", 10).await.unwrap().len(),
+        1,
+        "the fixture has no neighbour to lose"
+    );
+
+    v.set_lifecycle("b", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    assert!(
+        v.neighbours("a", 10).await.unwrap().is_empty(),
+        "a retired artifact is still linked from a live one"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn resurface_skips_a_deprecated_point() {
+    // Old and never seen is exactly what a retired artifact looks like, so the
+    // forgotten list used to offer back the very things an operator had just
+    // taken out of search — and stamp them as shown on the way past.
+    let v = fresh("engram_it_resurface_deprecated", 4).await;
+    v.upsert(vec![
+        aged("live", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+        aged("retired", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("retired", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    let cutoff = now_secs() - 31 * 86_400;
+    let ids: Vec<String> = v
+        .resurface(10, cutoff, cutoff)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert_eq!(ids, vec!["live".to_string()], "got {ids:?}");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn opening_an_artifact_does_not_count_as_a_retrieval() {
+    // `stale_max_hits` is zero by default, so counting the click that opens a
+    // review candidate would disqualify it from the list that offered it. The
+    // stamp that says it was shown still has to land.
+    let v = fresh("engram_it_touch_shown", 4).await;
+    v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
+        .await
+        .unwrap();
+    v.set_last_verified_at("a", 1, false).await.unwrap();
+
+    v.touch(&[engram::vector::Touch::shown("a")], 9_000)
+        .await
+        .unwrap();
+
+    let found = v
+        .stale_candidates(i64::MAX, 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|h| h.payload.artifact_id == "a")
+        .expect("an opened artifact left the stale review list");
+    assert_eq!(found.payload.hit_count, None, "the open counted as a hit");
+    assert_eq!(found.payload.last_seen_at, Some(9_000));
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn lifecycle_of_reads_back_what_each_point_says() {
+    // What the drift repair compares against SQLite. An id with no point is
+    // absent rather than defaulted, because "no point yet" is not drift.
+    let v = fresh("engram_it_lifecycle_of", 4).await;
+    v.upsert(vec![
+        point("plain", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("dep", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("sup", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("dep", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    v.set_lifecycle("sup", ArtifactStatus::Superseded, Some("plain"))
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = ["plain", "dep", "sup", "missing"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let out = v.lifecycle_of(&ids).await.unwrap();
+
+    assert_eq!(out.len(), 3, "a point that does not exist must be absent");
+    assert_eq!(out["plain"].status, ArtifactStatus::Active);
+    assert_eq!(out["dep"].status, ArtifactStatus::Deprecated);
+    assert_eq!(out["dep"].superseded_by, None);
+    assert_eq!(out["sup"].status, ArtifactStatus::Superseded);
+    assert_eq!(out["sup"].superseded_by.as_deref(), Some("plain"));
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn all_artifact_ids_pages_past_one_scroll() {
+    // The backfill subtracts this from SQLite to find points whose row is gone,
+    // so a single unpaged scroll would report most of a large base as orphaned
+    // and delete it. The page size is 1000; this crosses it.
+    let v = fresh("engram_it_all_ids", 4).await;
+    let points: Vec<VectorPoint> = (0..1_100)
+        .map(|i| point(&format!("a{i}"), "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"))
+        .collect();
+    for batch in points.chunks(500) {
+        v.upsert(batch.to_vec()).await.unwrap();
+    }
+
+    let mut ids = v.all_artifact_ids().await.unwrap();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 1_100, "the scroll stopped at its first page");
     v.drop_collection().await.unwrap();
 }
