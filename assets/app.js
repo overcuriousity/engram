@@ -116,6 +116,10 @@
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.workspace');
       if (ws && e.target.id === 'pane') ws.classList.add('has-selection');
+      // A fresh list is the answer to a new query or chip, so a narrow screen
+      // shows it again rather than leaving the result you opened on screen
+      // over results that have since changed underneath it.
+      if (ws && e.target.id === 'rail') ws.classList.remove('has-selection');
     });
   });
 
