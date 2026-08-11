@@ -168,3 +168,28 @@ interval_hours = 24
 # only ever sees pairs whose numbers, versions or dates already differ.
 judge = false
 max_judgements = 20
+
+# Recording real searches so they can be judged later, and turned into the
+# query/artifact pairs the evaluation harness scores against. Off by default: a
+# query log is personal, and it is useful to nobody but you.
+#
+# The queries a benchmark needs cannot be written from memory. Phrased while
+# looking at an artifact, they reuse its wording, and every retrieval system
+# passes such a pair. Only a search made in earnest — before anything came back
+# — is worth scoring against, and this is the only moment it can be recorded.
+#
+# Everything is recorded, not only deliberate searches: the search where you
+# found nothing and gave up leaves no other trace, and it is the most valuable
+# one there is. Typing bursts fold into their final wording, so `daten`,
+# `datentr`, `datenträger nicht erkannt` is one event rather than three.
+[feedback]
+enabled = false
+# Candidates stored per search. Wider than the answer on purpose — retrieval
+# over-fetches anyway, so the extra rows cost nothing, and they are what lets an
+# artifact the ranking buried still be confirmed as the right one.
+candidates = 20
+# Window in which a longer query replaces the previous one instead of starting
+# its own event. 0 turns folding off.
+coalesce_secs = 15
+# Days captured searches are kept. 0 keeps them forever.
+retain_days = 0

@@ -366,6 +366,7 @@ mod startup_tests {
                 }),
             },
             consolidate: ConsolidateConfig::default(),
+            feedback: FeedbackConfig::default(),
         }
     }
 

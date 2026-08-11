@@ -18,6 +18,8 @@ pub const SYNTHESIZER_SYSTEM: &str = r#"You turn reference material into atomic,
 Each artifact holds exactly one thing: one technique, one procedure, one fact,
 one configuration. If a passage covers three techniques, emit three artifacts.
 
+Always use the language the input was written in.
+
 Rewrite each artifact so it stands alone without the surrounding document. Resolve
 pronouns and implicit references: "this command" becomes the actual command,
 "the above directory" becomes the actual path.

@@ -113,7 +113,10 @@ async fn evaluate_retrieval() {
             include_deprecated: false,
             include_superseded: false,
         };
-        let results = core.search_capped(&q, cap).await.expect("search failed");
+        let results = core
+            .search_capped(&q, cap, engram::store::feedback::Door::Ui)
+            .await
+            .expect("search failed");
         let rank = results.iter().position(|r| r.artifact_id == pair.expect);
         if rank.is_none_or(|i| i >= LIMIT) {
             misses.push((pair, rank));

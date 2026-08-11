@@ -50,7 +50,9 @@ pub struct IngestParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
-    /// What to look for, in natural language.
+    /// The situation to find something for, in natural language. A sentence or
+    /// a paragraph of context ranks better than keywords: the query is embedded
+    /// whole, so pass what the user actually said or what you are looking at.
     pub q: String,
     #[serde(default)]
     pub limit: Option<u32>,
@@ -115,7 +117,11 @@ impl PkdbTools {
             include_deprecated: false,
             include_superseded: false,
         };
-        match self.core.search(&query).await {
+        match self
+            .core
+            .search(&query, crate::store::feedback::Door::Mcp)
+            .await
+        {
             Ok(r) => format_search_results(&r),
             Err(e) => format!("Search failed: {e}"),
         }
@@ -230,15 +236,18 @@ mod tests {
 
         let text = format_search_results(
             &core
-                .search(&SearchQuery {
-                    q: "mounting".into(),
-                    limit: 5,
-                    tags: vec![],
-                    category: None,
-                    mark: true,
-                    include_deprecated: false,
-                    include_superseded: false,
-                })
+                .search(
+                    &SearchQuery {
+                        q: "mounting".into(),
+                        limit: 5,
+                        tags: vec![],
+                        category: None,
+                        mark: true,
+                        include_deprecated: false,
+                        include_superseded: false,
+                    },
+                    crate::store::feedback::Door::Ui,
+                )
                 .await
                 .unwrap(),
         );

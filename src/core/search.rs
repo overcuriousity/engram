@@ -1,6 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
+use crate::store::feedback::Door;
 use crate::vector::SearchFilter;
 use std::collections::HashMap;
 
@@ -280,8 +281,11 @@ impl Core {
     /// rerank call. No completion, ever.
     ///
     /// Results are capped per source so one long document cannot fill the list.
-    pub async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, Some(MAX_PER_CORPUS)).await?.0)
+    pub async fn search(&self, query: &SearchQuery, door: Door) -> Result<Vec<SearchResult>> {
+        Ok(self
+            .search_inner(query, Some(MAX_PER_CORPUS), door)
+            .await?
+            .0)
     }
 
     /// The same search, plus what it cost. The UI shows these faintly, so a
@@ -290,8 +294,9 @@ impl Core {
     pub async fn search_timed(
         &self,
         query: &SearchQuery,
+        door: Door,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        self.search_inner(query, Some(MAX_PER_CORPUS)).await
+        self.search_inner(query, Some(MAX_PER_CORPUS), door).await
     }
 
     /// `cap` of `None` lets a single source supply every result. `ask` wants
@@ -301,14 +306,16 @@ impl Core {
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
+        door: Door,
     ) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, cap).await?.0)
+        Ok(self.search_inner(query, cap, door).await?.0)
     }
 
     async fn search_inner(
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
+        door: Door,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -376,6 +383,16 @@ impl Core {
         // Taken before the payloads are consumed: `mark_seen` needs each hit's
         // stored `hit_count` to increment it without reading it back.
         let hit_counts = counts_of(&hits);
+        // Taken for the same reason: the similarity is dropped when a payload
+        // becomes a `SearchResult`, and capture wants the value rather than the
+        // `weak` verdict computed from it.
+        let sims: HashMap<String, Option<f32>> = if self.feedback.enabled && door.captured() {
+            hits.iter()
+                .map(|h| (h.payload.artifact_id.clone(), h.similarity))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
@@ -417,6 +434,44 @@ impl Core {
             }
         }
 
+        // Recorded here, where the list is still wider than the answer and the
+        // ordering is final. Off the request path via `Background`, like
+        // `mark_seen` below it: a search must not get slower, or fail, because
+        // bookkeeping did.
+        if self.feedback.enabled && door.captured() {
+            let candidates: Vec<crate::store::feedback::NewCandidate> = results
+                .iter()
+                .take(self.feedback.candidates)
+                .enumerate()
+                .map(|(i, r)| crate::store::feedback::NewCandidate {
+                    artifact_id: r.artifact_id.clone(),
+                    score: r.score,
+                    similarity: sims.get(&r.artifact_id).copied().flatten(),
+                    shown: i < limit,
+                })
+                .collect();
+            let event = crate::store::feedback::NewEvent {
+                query: query.q.trim().to_string(),
+                door,
+                filters: serde_json::json!({
+                    "tags": query.tags,
+                    "category": query.category,
+                    "limit": limit,
+                })
+                .to_string(),
+                query_vec: vector.clone(),
+                embed_model: self.embedder.model().to_string(),
+                candidates,
+            };
+            let store = self.store.clone();
+            let window = self.feedback.coalesce_secs;
+            self.background.spawn(async move {
+                if let Err(e) = store.record_search(event, window).await {
+                    tracing::warn!(error = %e, "could not record the search");
+                }
+            });
+        }
+
         results.truncate(limit);
         if query.mark {
             // A query answered these, so they count as retrievals.
@@ -444,6 +499,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::{test_core, test_core_with_rerank};
     use crate::store::artifacts::NewArtifact;
+    use sqlx::Row;
 
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {
         seed_from(core, "raw", texts).await
@@ -506,11 +562,11 @@ mod tests {
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
 
-        core.search(&q("dd write iso")).await.unwrap();
+        core.search(&q("dd write iso"), Door::Ui).await.unwrap();
         let after_first = embedder.calls();
-        core.search(&q("dd write iso")).await.unwrap();
+        core.search(&q("dd write iso"), Door::Ui).await.unwrap();
         // Whitespace differences are not a different question.
-        core.search(&q("  dd write iso  ")).await.unwrap();
+        core.search(&q("  dd write iso  "), Door::Ui).await.unwrap();
 
         assert_eq!(
             embedder.calls(),
@@ -527,7 +583,7 @@ mod tests {
 
         let mut query = q("alpha");
         query.mark = false;
-        assert!(!core.search(&query).await.unwrap().is_empty());
+        assert!(!core.search(&query, Door::Ui).await.unwrap().is_empty());
         core.background.wait_idle().await;
 
         // Nothing was stamped, so the chunk is still eligible to resurface.
@@ -548,7 +604,7 @@ mod tests {
         seed_from(&core, "raw", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
 
-        assert!(!core.search(&q("alpha")).await.unwrap().is_empty());
+        assert!(!core.search(&q("alpha"), Door::Ui).await.unwrap().is_empty());
         core.background.wait_idle().await;
 
         let stamped = core
@@ -576,7 +632,10 @@ mod tests {
 
         // FakeEmbedder hashes text, so query the exact embedded string to get
         // a deterministic top hit.
-        let hits = core.search(&q("t0\nmounting an E01 image")).await.unwrap();
+        let hits = core
+            .search(&q("t0\nmounting an E01 image"), Door::Ui)
+            .await
+            .unwrap();
         assert_eq!(hits[0].text, "mounting an E01 image");
         assert!(hits[0].score > 0.99);
     }
@@ -585,7 +644,7 @@ mod tests {
     async fn results_carry_everything_needed_to_render_without_a_second_lookup() {
         let core = test_core().await;
         let src_id = seed(&core, &[("body text", "concept", &["a", "b"])]).await;
-        let hits = core.search(&q("t0\nbody text")).await.unwrap();
+        let hits = core.search(&q("t0\nbody text"), Door::Ui).await.unwrap();
         assert_eq!(hits[0].corpus_id, src_id);
         assert_eq!(hits[0].title.as_deref(), Some("t0"));
         assert_eq!(hits[0].category.as_deref(), Some("concept"));
@@ -606,13 +665,13 @@ mod tests {
 
         let mut query = q("anything");
         query.category = Some("concept".into());
-        let hits = core.search(&query).await.unwrap();
+        let hits = core.search(&query, Door::Ui).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].text, "beta");
 
         let mut query = q("anything");
         query.tags = vec!["linux".into()];
-        assert_eq!(core.search(&query).await.unwrap().len(), 2);
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -623,23 +682,23 @@ mod tests {
         let mut query = q("anything");
         query.limit = 0;
         assert_eq!(
-            core.search(&query).await.unwrap().len(),
+            core.search(&query, Door::Ui).await.unwrap().len(),
             3,
             "limit 0 must fall back to the default"
         );
 
         query.limit = 1;
-        assert_eq!(core.search(&query).await.unwrap().len(), 1);
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
 
         query.limit = 10_000;
-        assert!(core.search(&query).await.unwrap().len() <= MAX_LIMIT);
+        assert!(core.search(&query, Door::Ui).await.unwrap().len() <= MAX_LIMIT);
     }
 
     #[tokio::test]
     async fn empty_query_is_rejected() {
         let core = test_core().await;
         assert!(matches!(
-            core.search(&q("  ")).await,
+            core.search(&q("  "), Door::Ui).await,
             Err(crate::error::Error::Validation(_))
         ));
     }
@@ -660,8 +719,8 @@ mod tests {
         )
         .await;
 
-        let with = core.search(&q("t0\nalpha")).await.unwrap();
-        let without = plain.search(&q("t0\nalpha")).await.unwrap();
+        let with = core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        let without = plain.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
         assert_ne!(
             with.iter().map(|h| h.text.clone()).collect::<Vec<_>>(),
             without.iter().map(|h| h.text.clone()).collect::<Vec<_>>(),
@@ -686,7 +745,7 @@ mod tests {
 
         let mut query = q("anything");
         query.limit = 5;
-        let hits = core.search(&query).await.unwrap();
+        let hits = core.search(&query, Door::Ui).await.unwrap();
         assert_eq!(hits.len(), 5, "result count must still honour the limit");
     }
 
@@ -706,7 +765,7 @@ mod tests {
         }
 
         let query = q("anything");
-        let hits = core.search(&query).await.unwrap();
+        let hits = core.search(&query, Door::Ui).await.unwrap();
         assert_eq!(
             hits.len(),
             query.limit,
@@ -732,7 +791,7 @@ mod tests {
         let big = seed_from(&core, "big", &refs).await;
         let small = seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
-        let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
+        let hits = core.search(&q("t0\nalpha 0"), Door::Ui).await.unwrap();
         let leading = &hits[..hits.len().min(MAX_PER_CORPUS + 1)];
         let from_big = leading.iter().filter(|h| h.corpus_id == big).count();
         assert!(
@@ -756,7 +815,7 @@ mod tests {
             texts.iter().map(|t| (t.as_str(), "c", &[][..])).collect();
         seed_from(&core, "only", &refs).await;
 
-        let hits = core.search(&q("t0\nalpha 0")).await.unwrap();
+        let hits = core.search(&q("t0\nalpha 0"), Door::Ui).await.unwrap();
         assert_eq!(
             hits.len(),
             8,
@@ -780,8 +839,11 @@ mod tests {
         seed_from(&core, "big", &refs).await;
         seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
-        let capped = core.search(&q("t0\nalpha 0")).await.unwrap();
-        let uncapped = core.search_capped(&q("t0\nalpha 0"), None).await.unwrap();
+        let capped = core.search(&q("t0\nalpha 0"), Door::Ui).await.unwrap();
+        let uncapped = core
+            .search_capped(&q("t0\nalpha 0"), None, Door::Ui)
+            .await
+            .unwrap();
         assert!(
             uncapped.windows(2).all(|w| w[0].score >= w[1].score),
             "ask was handed a reordered list: {:?}",
@@ -896,13 +958,23 @@ mod tests {
         // Nothing was shown, so nothing should be recorded — and the empty
         // case must not produce a pointless write.
         let core = test_core().await;
-        assert!(core.search(&q("nothing here")).await.unwrap().is_empty());
+        assert!(
+            core.search(&q("nothing here"), Door::Ui)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn searching_an_empty_base_returns_nothing_rather_than_failing() {
         let core = test_core().await;
-        assert!(core.search(&q("anything")).await.unwrap().is_empty());
+        assert!(
+            core.search(&q("anything"), Door::Ui)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -913,19 +985,19 @@ mod tests {
         let core = test_core().await;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
-        let id = core.search(&q("alpha")).await.unwrap()[0]
+        let id = core.search(&q("alpha"), Door::Ui).await.unwrap()[0]
             .artifact_id
             .clone();
         core.deprecate(&id).await.unwrap();
 
         assert!(
-            core.search(&q("alpha")).await.unwrap().is_empty(),
+            core.search(&q("alpha"), Door::Ui).await.unwrap().is_empty(),
             "a deprecated artifact must stay out of an ordinary search"
         );
 
         let mut opted_in = q("alpha");
         opted_in.include_deprecated = true;
-        let hits = core.search(&opted_in).await.unwrap();
+        let hits = core.search(&opted_in, Door::Ui).await.unwrap();
         assert_eq!(hits.len(), 1, "include_deprecated returned nothing");
         assert_eq!(hits[0].artifact_id, id);
         assert_eq!(hits[0].status, Some(ArtifactStatus::Deprecated));
@@ -940,7 +1012,7 @@ mod tests {
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
 
-        let hit = &core.search(&q("alpha")).await.unwrap()[0];
+        let hit = &core.search(&q("alpha"), Door::Ui).await.unwrap()[0];
         let stamp = hit
             .last_verified_at
             .expect("a fresh artifact carries no last_verified_at");
@@ -963,7 +1035,7 @@ mod tests {
         let core = test_core().await;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
-        let id = core.search(&q("alpha")).await.unwrap()[0]
+        let id = core.search(&q("alpha"), Door::Ui).await.unwrap()[0]
             .artifact_id
             .clone();
         core.background.wait_idle().await;
@@ -1118,5 +1190,81 @@ mod tests {
                 .is_empty(),
             "a retired artifact is still linked from a live one"
         );
+    }
+
+    async fn captured_events(core: &crate::core::Core) -> i64 {
+        core.background.wait_idle().await;
+        sqlx::query_scalar("SELECT count(*) FROM search_events")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_captured_search_stores_the_pool_it_could_have_shown() {
+        // The stored pool is wider than the answer: the judging card offers all
+        // of it, so an artifact the ranking buried can still be confirmed.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let texts: Vec<(&str, &str, &[&str])> = (0..12)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha text about it");
+        query.limit = 3;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(
+            rows.len() > 3,
+            "the pool must be wider than the three results shown, got {}",
+            rows.len()
+        );
+        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        assert_eq!(
+            shown, 3,
+            "exactly the answer the searcher saw is flagged shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_writes_nothing_while_it_is_switched_off() {
+        let core = test_core().await; // feedback.enabled defaults to false
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        core.search(&q("alpha text"), Door::Ui).await.unwrap();
+        assert_eq!(captured_events(&core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_search_that_found_nothing_is_still_captured() {
+        // Deliberately unlike `mark_seen`, which skips an empty list because
+        // there is nothing to stamp. Here the empty list is the finding.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.search(&q("nothing is indexed yet"), Door::Ui)
+            .await
+            .unwrap();
+        assert_eq!(captured_events(&core).await, 1);
+    }
+
+    #[tokio::test]
+    async fn the_doors_that_know_the_answer_are_never_captured() {
+        // Judging composes its queries while reading the artifact, and `ask`
+        // has no single right answer to judge. Both would only add noise.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        core.search(&q("alpha text"), Door::Judge).await.unwrap();
+        core.search(&q("alpha text"), Door::Ask).await.unwrap();
+        assert_eq!(captured_events(&core).await, 0);
     }
 }

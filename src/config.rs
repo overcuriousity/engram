@@ -10,6 +10,43 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub consolidate: ConsolidateConfig,
+    #[serde(default)]
+    pub feedback: FeedbackConfig,
+}
+
+/// Recording real searches so they can be judged later.
+///
+/// The queries a benchmark needs cannot be written from memory: phrased while
+/// looking at an artifact, they reuse its vocabulary, and every retrieval system
+/// passes such a pair. Only a search made in earnest, before anything came back,
+/// is worth scoring against.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct FeedbackConfig {
+    /// Whether real searches are recorded at all. Off by default: the wording of
+    /// a query is personal, and nothing here is useful to anyone but the
+    /// operator.
+    pub enabled: bool,
+    /// Candidates stored per event. Wider than the answer on purpose — search
+    /// over-fetches anyway, so the extra rows are free, and they are what lets a
+    /// buried hit be confirmed later.
+    pub candidates: usize,
+    /// Window in which a query that extends the previous one replaces it
+    /// instead of starting a new event. `0` turns folding off.
+    pub coalesce_secs: i64,
+    /// Days captured searches are kept. `0` keeps them forever.
+    pub retain_days: i64,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidates: 20,
+            coalesce_secs: 15,
+            retain_days: 0,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

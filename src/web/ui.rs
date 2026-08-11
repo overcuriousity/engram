@@ -558,16 +558,19 @@ async fn search_results(
     let terms = highlightable_terms(p.q.trim());
     let (hits, t) = st
         .core
-        .search_timed(&SearchQuery {
-            q: p.q,
-            limit: 0,
-            tags: split_tags(p.tags),
-            category: p.category.filter(|c| !c.is_empty()),
-            // Incremental: a prefix must not stamp what it happened to match.
-            mark: false,
-            include_deprecated: false,
-            include_superseded: false,
-        })
+        .search_timed(
+            &SearchQuery {
+                q: p.q,
+                limit: 0,
+                tags: split_tags(p.tags),
+                category: p.category.filter(|c| !c.is_empty()),
+                // Incremental: a prefix must not stamp what it happened to match.
+                mark: false,
+                include_deprecated: false,
+                include_superseded: false,
+            },
+            crate::store::feedback::Door::Ui,
+        )
         .await?;
 
     let results: Vec<RenderedResult> = hits
@@ -1413,15 +1416,18 @@ mod tests {
             .unwrap();
 
         let hits = core
-            .search(&crate::core::search::SearchQuery {
-                q: "alpha".into(),
-                limit: 0,
-                tags: vec![],
-                category: None,
-                mark: false,
-                include_deprecated: false,
-                include_superseded: false,
-            })
+            .search(
+                &crate::core::search::SearchQuery {
+                    q: "alpha".into(),
+                    limit: 0,
+                    tags: vec![],
+                    category: None,
+                    mark: false,
+                    include_deprecated: false,
+                    include_superseded: false,
+                },
+                crate::store::feedback::Door::Ui,
+            )
             .await
             .unwrap();
         let r = super::render_hit(0, hits[0].clone());

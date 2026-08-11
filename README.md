@@ -30,6 +30,17 @@ stand on its own, with a title, a category and tags. Artifacts are what gets
 embedded, ranked, read and edited. One call turns one segment into several
 artifacts; no artifact spans two segments.
 
+## Asking for something
+
+Type the situation, not the keywords. The query is embedded whole and matched
+against artifacts written to stand alone, so a sentence — or the paragraph you
+happen to be staring at — carries far more signal than the two nouns you would
+distil it into. "the customer says the file was never on the stick but I see an
+entry with no start cluster" is a better query than "FAT deleted entry", and it
+is a query you can paste rather than compose.
+
+Keywords still work; they are simply the weakest thing you can hand it.
+
 ## Requirements
 
 - Rust 1.94+ (the floor comes from sqlx 0.9).
@@ -113,6 +124,7 @@ the file — the loader warns if it finds one.
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `sample`, `per_point`, `interval_hours`, `judge`, `max_judgements`. |
+| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
