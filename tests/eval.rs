@@ -25,6 +25,7 @@ use engram::store::Store;
 use engram::store::artifacts::NewArtifact;
 use engram::vector::VectorStore;
 use engram::vector::qdrant::QdrantVectors;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Results asked of the search path per query, and the `k` in recall@k.
@@ -95,7 +96,7 @@ async fn evaluate_retrieval() {
     let store = Store::memory().await.unwrap();
     let core = Core::from_config(&cfg, vectors.clone(), store);
 
-    index(&core, &artifacts).await;
+    let translated = index(&core, &artifacts).await;
 
     let cap = cap_from_env();
     let mut ranks: Vec<Option<usize>> = Vec::with_capacity(pairs.len());
@@ -117,7 +118,12 @@ async fn evaluate_retrieval() {
             .search_capped(&q, cap, engram::store::feedback::Door::Ui)
             .await
             .expect("search failed");
-        let rank = results.iter().position(|r| r.artifact_id == pair.expect);
+        // `pair.expect` names a frozen id; the store being searched knows that
+        // artifact under one it minted itself.
+        let expect = translated
+            .get(&pair.expect)
+            .expect("every pair was checked against artifacts.json above");
+        let rank = results.iter().position(|r| &r.artifact_id == expect);
         if rank.is_none_or(|i| i >= LIMIT) {
             misses.push((pair, rank));
         }
@@ -128,17 +134,25 @@ async fn evaluate_retrieval() {
     vectors.drop_collection().await.unwrap();
 }
 
-/// Load the frozen artifacts and embed them.
+/// Load the frozen artifacts and embed them, reporting the id each one was
+/// actually stored under.
+///
+/// `insert_artifacts` mints a fresh id per artifact, so the ids written in
+/// `artifacts.json` do not exist in the store being searched. Without this map
+/// every pair scores as a miss and every run reports 0.00 — which is what the
+/// harness did for as long as it existed, invisibly, because it is `#[ignore]`d
+/// and returns early when there is no corpus.
 ///
 /// One store source per corpus file, because `corpus_id` is what the
 /// per-source cap groups by — collapsing the corpus into a single source would
 /// silently disable the cap and measure a different program from the one that
 /// serves the search page.
-async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
+async fn index(core: &Core, artifacts: &[FrozenArtifact]) -> HashMap<String, String> {
     let mut by_corpus: std::collections::BTreeMap<&str, Vec<&FrozenArtifact>> = Default::default();
     for c in artifacts {
         by_corpus.entry(c.source.as_str()).or_default().push(c);
     }
+    let mut translated = HashMap::new();
 
     for (name, group) in by_corpus {
         // The raw text has to differ per source: sources are deduplicated by
@@ -162,11 +176,16 @@ async fn index(core: &Core, artifacts: &[FrozenArtifact]) {
                 caveats: vec![],
             })
             .collect();
-        core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        // Returned in input order, which is what makes the pairing sound.
+        let inserted = core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        for (frozen, stored) in group.iter().zip(inserted.iter()) {
+            translated.insert(frozen.id.clone(), stored.id.clone());
+        }
         engram::jobs::embed::run_corpus(core, &src.id)
             .await
             .expect("embedding the corpus failed");
     }
+    translated
 }
 
 fn report(
@@ -219,4 +238,78 @@ fn report(
         }
     }
     println!();
+}
+
+/// The harness scored every pair as a miss for as long as it existed: `index`
+/// re-inserts the frozen artifacts, `insert_artifacts` assigns fresh ids, and
+/// the scoring loop compared against the ids in `artifacts.json`. Nothing could
+/// ever match, so every run would have reported 0.00 — invisible, because the
+/// benchmark is `#[ignore]`d and returns early when there is no corpus.
+///
+/// This is a wiring test, not a quality one, and it runs without infrastructure:
+/// the fake embedder is deterministic, so a query equal to an artifact's text
+/// embeds identically and must come first.
+#[tokio::test]
+async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
+    let artifacts = vec![
+        FrozenArtifact {
+            id: "frozen-1".into(),
+            source: "one.txt".into(),
+            text: "the smallest addressable unit is a cluster".into(),
+            title: Some("cluster".into()),
+            category: None,
+            tags: vec![],
+        },
+        FrozenArtifact {
+            id: "frozen-2".into(),
+            source: "two.txt".into(),
+            text: "a journal records intent before the write".into(),
+            title: Some("journal".into()),
+            category: None,
+            tags: vec![],
+        },
+    ];
+
+    // Built here rather than through `test_support`, which is `#[cfg(test)]` in
+    // the library and so invisible to an integration test.
+    let core = Core {
+        store: Store::memory().await.unwrap(),
+        vectors: Arc::new(engram::vector::memory::MemoryVectors::new()),
+        synthesizer: Arc::new(engram::infer::fake::FakeSynthesizer::default()),
+        embedder: Arc::new(engram::infer::fake::FakeEmbedder::new(8)),
+        reranker: None,
+        completer: Arc::new(engram::infer::fake::FakeCompleter::default()),
+        counter: Arc::new(engram::infer::budget::TokenCounter::Estimate),
+        background: Arc::new(engram::core::background::Background::default()),
+        query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
+            engram::core::QUERY_CACHE_CAPACITY,
+        ))),
+        consolidate: engram::config::ConsolidateConfig::default(),
+        weak_below: 0.0,
+        feedback: engram::config::FeedbackConfig::default(),
+    };
+    let translated = index(&core, &artifacts).await;
+
+    let q = SearchQuery {
+        q: "a journal records intent before the write".into(),
+        limit: LIMIT,
+        tags: vec![],
+        category: None,
+        mark: false,
+        include_deprecated: false,
+        include_superseded: false,
+    };
+    let results = core
+        .search_capped(&q, None, engram::store::feedback::Door::Judge)
+        .await
+        .unwrap();
+
+    let expect = translated
+        .get("frozen-2")
+        .expect("index must report the id it gave each frozen artifact");
+    assert_eq!(
+        results.iter().position(|r| &r.artifact_id == expect),
+        Some(0),
+        "the frozen id was never translated to the one the store minted"
+    );
 }
