@@ -23,13 +23,20 @@ pub struct RenderedResult {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub corpus_id: String,
-    /// Position in the list, as `#1`, `#2`, …
+    /// Position in the list, as `#1`, `#2`, … Empty for a weak result.
     ///
     /// Not the raw score. That number is a fused rank from Qdrant plus a
     /// recency term, so it is comparable within one result list and meaningless
     /// between two — a hybrid query and a dense-only fallback do not even score
     /// on the same scale. Showing it invited a comparison it cannot support.
+    ///
+    /// Dropped entirely once a result is `weak`, because a rank is a claim
+    /// about standing among answers, and something the query barely matches is
+    /// not one. `#1` over a result the search itself calls loose is the exact
+    /// false confidence this labelling exists to remove.
     pub rank: String,
+    /// Only loosely related to the query — see `SearchResult::weak`.
+    pub weak: bool,
 }
 
 pub struct BrowseRow {
@@ -71,9 +78,21 @@ pub struct ArtifactDetail {
     /// The artifact this one was hidden in favour of. Opening a hidden artifact
     /// by link has to say why it is not in results, or it reads as a bug.
     pub superseded_by: Option<String>,
+    pub status: crate::store::artifacts::ArtifactStatus,
+    pub last_verified_at: Option<i64>,
     /// Conditions the source stated under which this artifact does not apply.
     pub caveats: Vec<String>,
     pub corpus_id: String,
+    /// True when this artifact's source was never captured here — the artifact
+    /// was restored from the vector store and its corpus row is a placeholder.
+    /// The pane shows the source beside the artifact, so it has to say when what
+    /// it is showing is the artifact's own text reflected back rather than the
+    /// document it was drawn from.
+    pub corpus_restored: bool,
+    /// Link to the source, scrolled to and highlighting the exact lines this
+    /// artifact was drawn from. Falls back to the plain source page for an
+    /// artifact with no recorded span — a restored one, for instance.
+    pub source_at_lines: String,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -131,6 +150,28 @@ pub struct PairRow {
     pub b_title: String,
     pub detail: Option<String>,
     pub contradiction: bool,
+    /// Set when the judge named a direction with enough confidence to propose
+    /// a supersede. A recommendation only: nothing here has hidden anything,
+    /// and either side can still be kept.
+    pub obsolete_title: Option<String>,
+    /// Which side the judge's proposal amounts to keeping, so the row can
+    /// accent that button. Both false when it made no proposal — every pair is
+    /// still resolvable, just with nothing recommended.
+    pub keeps_a: bool,
+    pub keeps_b: bool,
+}
+
+/// An artifact flagged stale with no specific replacement.
+pub struct DeprecatedRow {
+    pub id: String,
+    pub title: String,
+}
+
+/// An active artifact nobody has confirmed or retrieved in a while.
+pub struct StaleRow {
+    pub id: String,
+    pub title: String,
+    pub last_verified: String,
 }
 
 pub struct TokenRow {
@@ -252,6 +293,9 @@ struct SearchTemplate {
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// Every result is only loosely related, so the page says so once above the
+    /// list instead of repeating it on each card.
+    all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
     /// `embed 41ms · total 138ms`, swapped into the header out of band.
@@ -270,10 +314,17 @@ struct BrowseTemplate {
 struct CorpusTemplate {
     theme: String,
     id: String,
-    raw_text: String,
+    /// The whole source, one row per line, each anchored so a link can name it.
+    lines: Vec<crate::web::corpus_view::CorpusLine>,
     status: String,
     badge: &'static str,
     artifacts: Vec<ArtifactView>,
+    /// This row is a placeholder for a source that was never captured here, so
+    /// `raw_text` is its restored artifacts joined rather than a document. The
+    /// page has to say so: it otherwise presents reconstructed fragments under
+    /// the same "Raw corpus" heading as a real capture, and offers to
+    /// re-segment them.
+    restored: bool,
 }
 
 #[derive(Template)]
@@ -306,6 +357,8 @@ struct OpsTemplate {
     retrying: Vec<RetryingRow>,
     parked: Vec<ParkedRow>,
     superseded: Vec<SupersededRow>,
+    deprecated: Vec<DeprecatedRow>,
+    stale: Vec<StaleRow>,
     pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
@@ -467,6 +520,7 @@ async fn search_results(
     if p.q.trim().is_empty() {
         return Ok(HtmlTemplate(ResultsTemplate {
             results: vec![],
+            all_weak: false,
             terms: String::new(),
             timing: String::new(),
         })
@@ -487,15 +541,23 @@ async fn search_results(
             category: p.category.filter(|c| !c.is_empty()),
             // Incremental: a prefix must not stamp what it happened to match.
             mark: false,
+            include_deprecated: false,
+            include_superseded: false,
         })
         .await?;
 
+    let results: Vec<RenderedResult> = hits
+        .into_iter()
+        .enumerate()
+        .map(|(i, h)| render_hit(i, h))
+        .collect();
     Ok(HtmlTemplate(ResultsTemplate {
-        results: hits
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h))
-            .collect(),
+        // Only when *every* result is loose. One weak hit at the bottom of a
+        // good list is ordinary — it is the tail of any ranking — and saying
+        // "nothing matches" over a list that plainly does would train the
+        // operator to ignore the warning.
+        all_weak: !results.is_empty() && results.iter().all(|r| r.weak),
+        results,
         terms,
         timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
@@ -511,7 +573,12 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
-        rank: format!("#{}", position + 1),
+        rank: if h.weak {
+            String::new()
+        } else {
+            format!("#{}", position + 1)
+        },
+        weak: h.weak,
     }
 }
 
@@ -545,10 +612,19 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     .into_response())
 }
 
+/// Which lines to highlight, when the page was opened from an artifact that
+/// claims them. Absent for an ordinary visit, which highlights nothing.
+#[derive(serde::Deserialize, Default)]
+struct LineRange {
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
+    Query(range): Query<LineRange>,
 ) -> Result<Response> {
     let s = st.core.store.get_corpus(&cid).await?;
     let artifacts = st
@@ -559,12 +635,32 @@ async fn corpus_detail(
         .iter()
         .map(artifact_view)
         .collect();
+    // Numbered rather than one blob of text, so an artifact can link to the
+    // exact lines it was drawn from and the browser can scroll to them. Every
+    // row carries an `L<n>` anchor for that; the range, when given, is
+    // highlighted the same way the pane highlights a span.
+    let lines = s
+        .raw_text
+        .lines()
+        .enumerate()
+        .map(|(i, text)| {
+            let number = i as i64 + 1;
+            crate::web::corpus_view::CorpusLine {
+                number,
+                text: text.to_string(),
+                in_span: range
+                    .from
+                    .is_some_and(|f| number >= f && number <= range.to.unwrap_or(f)),
+            }
+        })
+        .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
         id: s.id,
-        raw_text: s.raw_text,
+        lines,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
+        restored: s.restored_at.is_some(),
         artifacts,
     })
     .into_response())
@@ -604,6 +700,36 @@ async fn delete_corpus_ui(
 ) -> Result<Response> {
     st.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/browse").into_response())
+}
+
+/// Remove an artifact from both stores, from the page that shows it.
+///
+/// The deliberate counterpart to what `Core::heal_store_drift` stopped doing on
+/// its own. A background pass cannot tell an artifact deleted on purpose from
+/// one whose row a crash lost, so it now restores both and this button is the
+/// only thing that removes anything — a person who can see the artifact deciding
+/// it should go.
+///
+/// Two callers, two right answers. Pressed in a list — a search result, a card
+/// on the source page — the answer is nothing at all: htmx swaps the row that
+/// was pressed out of the list, and the page the operator was reading stays
+/// where it was. Pressed in the pane, where the whole view *is* the artifact,
+/// there is nothing left to stay on, so it lands on the source.
+///
+/// An empty 200 rather than a 204: htmx treats no-content as "swap nothing",
+/// which would leave the deleted artifact on screen until a reload.
+async fn delete_artifact_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    headers: axum::http::HeaderMap,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    let corpus_id = st.core.store.get_artifact(&aid).await?.corpus_id;
+    st.core.delete_artifact(&aid).await?;
+    if headers.contains_key("hx-request") {
+        return Ok(axum::response::Html(String::new()).into_response());
+    }
+    Ok(Redirect::to(&format!("/ui/corpora/{corpus_id}")).into_response())
 }
 
 async fn reprocess_ui(
@@ -701,11 +827,13 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
-    // Confirmed contradictions lead: they are the ones that mean something in
-    // the base is wrong rather than merely repeated.
+    // Confirmed contradictions and judge-proposed supersedes lead: they are
+    // the ones that mean something in the base is wrong or stale, rather than
+    // merely repeated.
     let mut pairs = Vec::new();
     for state in [
         crate::store::pairs::PairState::Contradiction,
+        crate::store::pairs::PairState::Superseded,
         crate::store::pairs::PairState::Pending,
     ] {
         for p in st.core.store.pairs_by_state(state, 50).await? {
@@ -715,6 +843,17 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             ) else {
                 continue;
             };
+            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
+                if id == a.id {
+                    title_of(&a)
+                } else {
+                    title_of(&b)
+                }
+            });
+            // Keeping one side is superseding the other, so the judge naming
+            // `a` obsolete is a recommendation to keep `b`.
+            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
+            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -724,15 +863,52 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 b_id: p.b_id,
                 detail: p.detail,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
+                obsolete_title,
+                keeps_a,
+                keeps_b,
             });
         }
     }
+
+    let deprecated = st
+        .core
+        .store
+        .artifacts_by_status(crate::store::artifacts::ArtifactStatus::Deprecated, 50)
+        .await?
+        .into_iter()
+        .map(|c| DeprecatedRow {
+            title: title_of(&c),
+            id: c.id,
+        })
+        .collect();
+
+    // Read-only candidates: nothing here has been changed, only listed.
+    let stale = st
+        .core
+        .stale_candidates(50)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "no stale candidates for ops");
+            vec![]
+        })
+        .into_iter()
+        .map(|r| StaleRow {
+            title: r.title.unwrap_or_else(|| markdown::snippet(&r.text, 60)),
+            id: r.artifact_id,
+            last_verified: r
+                .last_verified_at
+                .map(fmt_time)
+                .unwrap_or_else(|| "never".to_string()),
+        })
+        .collect();
 
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
         retrying,
         parked,
         superseded,
+        deprecated,
+        stale,
         pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
@@ -789,13 +965,38 @@ async fn resolve_near_dupe_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
+/// Where a lifecycle button should land afterwards.
+///
+/// The same four actions are offered from two places: the Ops review lists,
+/// where the queue is the thing being worked through, and an artifact's own
+/// page, where being thrown onto Ops for pressing "Confirm still accurate"
+/// loses the reader's place. The page that rendered the button says where it
+/// leads; Ops sends nothing and keeps the default.
+#[derive(serde::Deserialize, Default)]
+struct ReturnTo {
+    to: Option<String>,
+}
+
+impl ReturnTo {
+    /// Only a path inside this UI. A form field is user input, and a redirect
+    /// that will follow anything it is handed is an open redirect — worth
+    /// nothing to the operator and a phishing hop to everyone else.
+    fn path(&self) -> &str {
+        match self.to.as_deref() {
+            Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => p,
+            _ => "/ui/ops",
+        }
+    }
+}
+
 async fn unsupersede_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.unsupersede(&aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn dismiss_pair_ui(
@@ -808,6 +1009,101 @@ async fn dismiss_pair_ui(
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
     Ok(Redirect::to("/ui/ops").into_response())
+}
+
+/// Which artifact of a pair the operator is keeping. Absent means "whichever
+/// the judge proposed", which is what the confirmation button on a proposed
+/// supersede sends.
+#[derive(serde::Deserialize, Default)]
+struct KeepForm {
+    keep: Option<String>,
+}
+
+/// Resolve a pair by naming the artifact that survives; the other is superseded
+/// by it.
+///
+/// Two callers, one action. The judge's proposal is a suggestion an operator
+/// confirms, and a contradiction the judge could not call is the same decision
+/// with nobody suggesting anything — so both are "keep this one", and only the
+/// default differs. Before this, a pair the judge flagged as disagreeing but
+/// could not rule on offered nothing except Dismiss: the operator could see two
+/// artifacts stating different things and had no way to say which was right,
+/// so the only way out of the queue was to declare the disagreement uninteresting
+/// and leave both in results.
+///
+/// Nothing before this press hides anything — see `jobs::consolidate::judge_pending`.
+async fn apply_pair_supersede_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+    Form(f): Form<KeepForm>,
+) -> Result<Response> {
+    let pair = st.core.store.get_pair(pid).await?;
+    // The winner has to be one of this pair's own artifacts. A form field is
+    // user input, and superseding an arbitrary id because it arrived in a POST
+    // would hide an artifact that has nothing to do with the row that was
+    // pressed.
+    let obsolete_id = match f.keep {
+        Some(keep) if keep == pair.a_id => pair.b_id.clone(),
+        Some(keep) if keep == pair.b_id => pair.a_id.clone(),
+        Some(_) => {
+            return Err(crate::error::Error::Validation(
+                "the artifact to keep is not part of this pair".into(),
+            ));
+        }
+        None => pair
+            .obsolete_id
+            .clone()
+            .ok_or(crate::error::Error::NotFound)?,
+    };
+    let winner_id = if obsolete_id == pair.a_id {
+        pair.b_id
+    } else {
+        pair.a_id
+    };
+    st.core.supersede(&obsolete_id, &winner_id).await?;
+    // The judge's explanation is carried through rather than dropped: it is the
+    // only record of why this supersede was applied, and `set_pair_state`
+    // writes `detail` unconditionally, so passing `None` would null it.
+    st.core
+        .store
+        .set_pair_state(
+            pid,
+            crate::store::pairs::PairState::Dismissed,
+            pair.detail.as_deref(),
+        )
+        .await?;
+    Ok(Redirect::to("/ui/ops").into_response())
+}
+
+async fn deprecate_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
+) -> Result<Response> {
+    st.core.deprecate(&aid).await?;
+    Ok(Redirect::to(back.path()).into_response())
+}
+
+async fn reactivate_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
+) -> Result<Response> {
+    st.core.reactivate(&aid).await?;
+    Ok(Redirect::to(back.path()).into_response())
+}
+
+async fn verify_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
+) -> Result<Response> {
+    st.core.verify(&aid).await?;
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn ask_page(_id: Identity) -> impl IntoResponse {
@@ -884,8 +1180,19 @@ pub(crate) async fn build_artifact_detail(
             id: h.payload.artifact_id,
         })
         .collect();
+    // Built before the struct consumes `c`. The fragment is what makes the
+    // browser scroll to the span; the query parameters are what make the page
+    // highlight it.
+    let source_at_lines = match c.corpus_span.as_ref() {
+        Some(sp) => format!(
+            "/ui/corpora/{}?from={}&to={}#L{}",
+            c.corpus_id, sp.start_line, sp.end_line, sp.start_line
+        ),
+        None => format!("/ui/corpora/{}", c.corpus_id),
+    };
     Ok(ArtifactDetail {
         related,
+        source_at_lines,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
         html: markdown::render(&c.text),
@@ -894,8 +1201,11 @@ pub(crate) async fn build_artifact_detail(
         flags: c.flags,
         flag_detail: c.flag_detail,
         superseded_by: c.superseded_by,
+        status: c.status,
+        last_verified_at: c.last_verified_at,
         caveats: c.caveats,
         corpus_id: c.corpus_id,
+        corpus_restored: src.restored_at.is_some(),
         segment_idx: c.segment_idx,
         slice_label: slice.label,
         slice_lines: slice.lines,
@@ -954,13 +1264,21 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
+        .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
+        .route("/ui/ops/artifacts/{id}/deprecate", post(deprecate_ui))
+        .route("/ui/ops/artifacts/{id}/reactivate", post(reactivate_ui))
+        .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
+        .route(
+            "/ui/ops/pairs/{id}/supersede",
+            post(apply_pair_supersede_ui),
+        )
 }
 
 #[cfg(test)]
@@ -1005,6 +1323,8 @@ mod tests {
                 tags: vec![],
                 category: None,
                 mark: false,
+                include_deprecated: false,
+                include_superseded: false,
             })
             .await
             .unwrap();
@@ -1336,6 +1656,7 @@ mod tests {
             .split(r#"hx-get="/ui/artifacts/"#)
             .nth(1)
             .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
             .expect("no result to open")
             .to_string();
 
@@ -1352,6 +1673,87 @@ mod tests {
             page.contains(r#"hx-target="closest [data-terms]""#),
             "a neighbour must swap the detail it is listed under"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_button_comes_back_to_the_page_that_offered_it() {
+        // These four actions are rendered both on Ops and on an artifact's own
+        // page. Always redirecting to Ops threw a reader who pressed "Confirm
+        // still accurate" while reading an artifact onto a queue they were not
+        // working through.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{id}/verify"),
+                &cookie,
+                &format!("to=/ui/artifacts/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().get("location").unwrap(),
+            format!("/ui/artifacts/{id}").as_str()
+        );
+
+        // Ops sends no `to` and keeps the default.
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{id}/deprecate"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.headers().get("location").unwrap(), "/ui/ops");
+    }
+
+    #[tokio::test]
+    async fn a_return_path_pointing_off_this_ui_is_ignored() {
+        // The field is user input, and a redirect that follows anything handed
+        // to it is an open redirect: worth nothing here, a phishing hop
+        // everywhere else.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string();
+
+        for hostile in ["https://evil.example/x", "//evil.example/x", "/ui//evil"] {
+            let res = app
+                .clone()
+                .oneshot(form(
+                    &format!("/ui/ops/artifacts/{id}/verify"),
+                    &cookie,
+                    &format!("to={}", urlencoding_of(hostile)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.headers().get("location").unwrap(),
+                "/ui/ops",
+                "followed {hostile}"
+            );
+        }
+    }
+
+    /// Percent-encoding for the handful of characters these test bodies carry.
+    fn urlencoding_of(s: &str) -> String {
+        s.replace(':', "%3A").replace('/', "%2F")
     }
 
     #[tokio::test]
@@ -1373,6 +1775,41 @@ mod tests {
             .unwrap();
         assert!(d.related.is_empty());
         assert!(!d.html.is_empty(), "the artifact itself must still render");
+    }
+
+    #[test]
+    fn a_loose_result_is_labelled_and_never_ranked() {
+        // `#1` over something the search itself calls a poor match is the false
+        // confidence this exists to remove: a rank is a claim about standing
+        // among answers, and a barely-matching artifact is not one.
+        let result = |weak: bool| crate::core::search::SearchResult {
+            artifact_id: "a".into(),
+            corpus_id: "s".into(),
+            title: Some("t".into()),
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak,
+        };
+
+        let loose = render_hit(0, result(true));
+        assert!(loose.weak);
+        assert!(loose.rank.is_empty(), "a loose result was presented as #1");
+        assert_eq!(render_hit(0, result(false)).rank, "#1");
+
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![loose],
+            all_weak: true,
+            terms: String::new(),
+            timing: String::new(),
+        })
+        .unwrap();
+        assert!(html.contains("Nothing matches closely"), "{html}");
+        assert!(!html.contains("#1"), "{html}");
     }
 
     #[test]
@@ -1822,6 +2259,93 @@ mod tests {
                 .is_none(),
             "undo did not clear the flag"
         );
+    }
+
+    #[tokio::test]
+    async fn a_contradiction_the_judge_could_not_call_is_still_resolvable() {
+        // The dead end this fixes: the judge finds two artifacts stating a
+        // detail differently but names no winner, so `obsolete_id` is NULL. The
+        // row then offered nothing but Dismiss — an operator who could see which
+        // one was right had no way to say so, and clearing the queue meant
+        // declaring the disagreement uninteresting and leaving both in results.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("they disagree about the tag"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_pair(pair.id)
+                .await
+                .unwrap()
+                .obsolete_id
+                .is_none(),
+            "this test is only meaningful with no judge proposal to fall back on"
+        );
+
+        // Keep the first; the second is the one that gets hidden.
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/supersede", pair.id),
+                &cookie,
+                &format!("keep={}", pair.a_id),
+            ))
+            .await
+            .unwrap();
+
+        let kept = core.store.get_artifact(&pair.a_id).await.unwrap();
+        let hidden = core.store.get_artifact(&pair.b_id).await.unwrap();
+        assert_eq!(kept.status, crate::store::artifacts::ArtifactStatus::Active);
+        assert_eq!(
+            hidden.status,
+            crate::store::artifacts::ArtifactStatus::Superseded
+        );
+        assert_eq!(hidden.superseded_by.as_deref(), Some(pair.a_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn keeping_an_artifact_from_outside_the_pair_is_refused() {
+        // `keep` is a form field, so it is user input. Superseding whatever id
+        // arrives would hide an artifact that has nothing to do with the row
+        // that was pressed.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one", "unrelated"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/supersede", pair.id),
+                &cookie,
+                &format!("keep={}", ids[2]),
+            ))
+            .await
+            .unwrap();
+
+        for id in &ids {
+            assert_eq!(
+                core.store.get_artifact(id).await.unwrap().status,
+                crate::store::artifacts::ArtifactStatus::Active,
+                "an artifact outside the pair was touched"
+            );
+        }
     }
 
     #[tokio::test]

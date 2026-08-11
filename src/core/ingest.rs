@@ -1,7 +1,9 @@
 use super::Core;
 use crate::error::{Error, Result};
+use crate::store::artifacts::ArtifactStatus;
 use crate::store::corpora::{CorpusStatus, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
+use crate::store::now;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IngestOutcome {
@@ -15,6 +17,24 @@ pub struct IngestOutcome {
     /// that already exist. The capture is stored and parked, never dropped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
+}
+
+/// What one pass of `Core::heal_store_drift` put back.
+///
+/// Reported rather than merely logged because "the stores agreed" and "the
+/// stores disagreed and were repaired" are different facts, and a repair that
+/// fires on every sweep over a base in agreement is a bug that hides behind a
+/// correct end state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StoreDrift {
+    /// Artifact rows rebuilt from a surviving vector payload.
+    pub rows_restored: usize,
+    /// Placeholder corpus rows written because a restored artifact's source was
+    /// not stored either.
+    pub corpora_restored: usize,
+    /// Artifacts whose row claimed `done` but had no point, re-queued for
+    /// embedding.
+    pub points_requeued: usize,
 }
 
 /// What an operator decided about a parked capture.
@@ -173,9 +193,359 @@ impl Core {
     /// job. Clearing the row first loses the only page that offers the undo
     /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
-        self.vectors.set_superseded(artifact_id, false).await?;
+        self.vectors
+            .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
+            .await?;
         self.store.set_superseded_by(artifact_id, None).await?;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
+        Ok(())
+    }
+
+    /// Hide `loser_id` in favour of `winner_id`. Row before payload, matching
+    /// the sweep's existing auto-supersede order (`jobs::consolidate`): the
+    /// intermediate state after a partial failure is one an operator can act
+    /// on, since the artifact is already listed on Ops with its `superseded_by`
+    /// set, even if the search-side flag has not caught up yet.
+    pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        // Neither side may be retired. `set_superseded_by` writes
+        // `status = 'superseded'` unconditionally, so superseding an artifact
+        // an operator deprecated would silently overwrite that decision with
+        // one nothing distinguishes from the sweep's own work. And a deprecated
+        // *winner* is worse: the loser gets hidden in favour of an artifact
+        // that is itself out of results, so the answer disappears entirely.
+        for (id, role) in [(loser_id, "loser"), (winner_id, "winner")] {
+            let status = self.store.get_artifact(id).await?.status;
+            if status != ArtifactStatus::Active {
+                return Err(Error::Validation(format!(
+                    "cannot supersede: {role} {id} is {}",
+                    status.as_str()
+                )));
+            }
+        }
+        self.store
+            .set_superseded_by(loser_id, Some(winner_id))
+            .await?;
+        self.vectors
+            .set_lifecycle(loser_id, ArtifactStatus::Superseded, Some(winner_id))
+            .await?;
+        tracing::info!(loser_id, winner_id, "superseded an artifact");
+        Ok(())
+    }
+
+    /// Flag an artifact stale with no specific replacement. Unlike `supersede`,
+    /// there is no winning artifact on the other end — an operator judged the
+    /// content itself no longer current.
+    ///
+    /// Row before payload. SQLite is the source of truth, so the state a
+    /// partial failure leaves — row deprecated, still in results — is the one
+    /// the sweep's drift repair (`jobs::consolidate::repair_lifecycle_drift`)
+    /// finishes by pushing the row's status into the payload. Writing the
+    /// payload first would instead hide the artifact behind a row that still
+    /// says active, and the repair, reading the row, would undo it.
+    pub async fn deprecate(&self, id: &str) -> Result<()> {
+        // A superseded artifact is already out of search, and `deprecate` does
+        // not clear `superseded_by`, so this would leave a row that is both:
+        // listed on Ops under "deprecated" *and* under "hidden as near
+        // identical", with a detail page that renders only the supersession
+        // branch and therefore never offers the button that undoes it. The
+        // payload would carry `status: deprecated, superseded_by: <winner>`, a
+        // combination nothing else in the system produces. The Ops page does not
+        // render the button in that state, but the route is reachable directly
+        // and this is a public API — so the rule lives here, next to
+        // `supersede`'s own guard.
+        if self.store.get_artifact(id).await?.superseded_by.is_some() {
+            return Err(Error::Validation(format!(
+                "cannot deprecate: {id} is already hidden in favour of another artifact; \
+                 reactivate it first"
+            )));
+        }
+        self.store
+            .set_artifact_status(id, ArtifactStatus::Deprecated)
+            .await?;
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Deprecated, None)
+            .await?;
+        tracing::info!(artifact_id = id, "deprecated an artifact");
+        Ok(())
+    }
+
+    /// Move an artifact back to active.
+    ///
+    /// An artifact that was hidden by a supersession is handed to
+    /// `unsupersede`, which clears `superseded_by` on both sides. Flipping the
+    /// status alone would leave the row pointing at its winner while the
+    /// payload no longer does, so Ops would keep listing it as hidden and the
+    /// next consolidation sweep would re-apply `Superseded` to the vector
+    /// store — undoing the operator without saying so.
+    ///
+    /// Payload before row, as `unsupersede` does it and for the same reason:
+    /// this direction *reveals*, so the intermediate state has to be the
+    /// visible one. Clearing the row first would leave the artifact hidden by a
+    /// payload nothing on the page explains — off the Ops deprecated list,
+    /// because the row now says active, and so out of reach of the very button
+    /// that would fix it. With the payload cleared first the artifact is back
+    /// in results immediately, still listed on Ops as deprecated, and one more
+    /// press finishes the job.
+    pub async fn reactivate(&self, id: &str) -> Result<()> {
+        if self.store.get_artifact(id).await?.superseded_by.is_some() {
+            return self.unsupersede(id).await;
+        }
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Active, None)
+            .await?;
+        self.store
+            .set_artifact_status(id, ArtifactStatus::Active)
+            .await?;
+        tracing::info!(artifact_id = id, "reactivated an artifact");
+        Ok(())
+    }
+
+    /// Stamp an artifact as confirmed accurate now — what search ranking's
+    /// recency decay reads.
+    ///
+    /// Also zeroes `hit_count`: `stale_max_hits` is "retrieved at most this
+    /// many times *since*" the last verification, and a lifetime counter would
+    /// mean one appearance in a marked search result kept an artifact off the
+    /// review list forever.
+    /// A failed vector write puts the row back the way it was. Nothing else
+    /// reconciles this pair: `repair_lifecycle_drift` only examines artifacts
+    /// that are non-active on one side or the other, so an artifact that is
+    /// active on both but stamped on only one is invisible to it — it would keep
+    /// ranking as stale and keep appearing on the review list while the row
+    /// claimed it had just been confirmed, and the operator would have no way to
+    /// tell that from a press that simply did not take. Rolling back leaves both
+    /// stores saying the same (old) thing and surfaces the error, so pressing
+    /// again is a repair rather than a guess.
+    pub async fn verify(&self, id: &str) -> Result<()> {
+        let at = now();
+        let previous = self.store.get_artifact(id).await?.last_verified_at;
+        self.store.set_last_verified_at(id, at).await?;
+        if let Err(e) = self.vectors.set_last_verified_at(id, at, true).await {
+            // A row that never had a stamp has nothing to roll back to, and
+            // clearing the column is not available here; the drift it leaves is
+            // the one the backfill already stamps.
+            if let Some(previous) = previous
+                && let Err(undo) = self.store.set_last_verified_at(id, previous).await
+            {
+                tracing::warn!(
+                    artifact_id = id,
+                    error = %undo,
+                    "could not undo the verification stamp; sqlite now claims a \
+                     verification the vector store did not record"
+                );
+            }
+            return Err(e);
+        }
+        tracing::info!(artifact_id = id, "verified an artifact");
+        Ok(())
+    }
+
+    /// Push every artifact's SQLite-side lifecycle state (source of truth) into
+    /// the vector store. Runs automatically at startup when any point is
+    /// missing its stamp, and on demand via `--backfill-lifecycle` — existing
+    /// points have no `status`/`last_verified_at` until it does, which every
+    /// filter safely treats as active in the meantime, just not yet filterable
+    /// as deprecated.
+    ///
+    /// Batched, and restartable by construction: the work is idempotent and
+    /// driven by a list SQLite regenerates, so a run that dies halfway is
+    /// resumed simply by running it again. One artifact that cannot be read is
+    /// logged and skipped rather than abandoning every artifact after it —
+    /// a single missing row must not be what keeps a base unbackfilled.
+    ///
+    /// Finishes with `heal_store_drift`, so a point whose row is gone gets the
+    /// row back and is stamped by the next pass, rather than sitting unstamped
+    /// forever and re-triggering this one on every start.
+    pub async fn backfill_lifecycle(&self) -> Result<usize> {
+        const BATCH: usize = 256;
+        let ids = self.store.list_all_artifact_ids().await?;
+        let total = ids.len();
+        let mut n = 0;
+        for chunk in ids.chunks(BATCH) {
+            let mut rows = Vec::with_capacity(chunk.len());
+            for id in chunk {
+                match self.store.get_artifact(id).await {
+                    Ok(c) => rows.push(crate::vector::LifecycleRow {
+                        artifact_id: c.id.clone(),
+                        status: c.status,
+                        superseded_by: c.superseded_by.clone(),
+                        last_verified_at: c.last_verified_at.unwrap_or(c.created_at),
+                    }),
+                    Err(e) => {
+                        tracing::warn!(artifact_id = %id, error = %e, "skipped in the lifecycle backfill");
+                    }
+                }
+            }
+            self.vectors.apply_lifecycle(&rows).await?;
+            n += rows.len();
+            tracing::info!(done = n, total, "lifecycle backfill progress");
+        }
+        self.heal_store_drift().await?;
+        tracing::info!(n, "backfilled lifecycle fields into the vector store");
+        Ok(n)
+    }
+
+    /// Make the two stores agree about which artifacts exist, by restoring
+    /// whichever side is missing one — never by deleting.
+    ///
+    /// The two stores hold complementary halves of the same artifact and are
+    /// written separately, so either can end up with an entry the other lacks: a
+    /// crash between the two writes, a restore of one store from a backup taken
+    /// at a different moment, an operator pointing a process at the wrong
+    /// `store.path`. Each direction has its own repair, and neither destroys
+    /// anything:
+    ///
+    /// - A point with no row rebuilds the row from the payload (see
+    ///   `Store::restore_artifact`) and queues a re-embed. The vector store
+    ///   carries the text, the title, the tags and the lifecycle stamps, so the
+    ///   artifact comes back searchable and correctly retired if it was retired.
+    /// - A row that says `done` with no point queues a re-embed, which writes
+    ///   the point through the ordinary pipeline. A row still `pending` is not
+    ///   drift at all — it is every artifact that was just ingested.
+    ///
+    /// Deleting used to be this method's whole job, and it was a loaded gun. It
+    /// ran unconditionally from the backfill, which startup spawns in the
+    /// background, so a process started against an empty or wrong SQLite file
+    /// found every point orphaned and emptied the collection — no confirmation,
+    /// no dry run, and nothing to reindex from afterwards, because the vectors
+    /// were the last copy. Restoring is the safe direction of the same repair:
+    /// the worst a wrong `store.path` can now do is fill that database with the
+    /// artifacts it was missing.
+    ///
+    /// What this costs is that a deletion interrupted between its two writes
+    /// comes back instead of finishing. That is the deliberate trade — an
+    /// artifact that reappears is a nuisance an operator can fix with the delete
+    /// button, and an artifact that is gone is gone. See `Core::delete_artifact`
+    /// for the deliberate path.
+    ///
+    /// The read order matters. The point list is read *first* and the row list
+    /// second, so an artifact captured while this runs is either absent from the
+    /// scroll or present in the newer row list — never mistaken for an orphan
+    /// point and restored on top of itself.
+    pub async fn heal_store_drift(&self) -> Result<StoreDrift> {
+        use std::collections::{BTreeMap, HashSet};
+
+        let points = self.vectors.all_artifact_ids().await?;
+        let rows = self.store.list_all_artifact_ids().await?;
+        let embedded = self.store.list_embedded_artifact_ids().await?;
+
+        let has_row: HashSet<&str> = rows.iter().map(String::as_str).collect();
+        let has_point: HashSet<&str> = points.iter().map(String::as_str).collect();
+
+        let mut out = StoreDrift::default();
+
+        // Vector store has it, SQLite does not: rebuild the row.
+        let orphan_points: Vec<String> = points
+            .iter()
+            .filter(|id| !has_row.contains(id.as_str()))
+            .cloned()
+            .collect();
+        if !orphan_points.is_empty() {
+            let payloads = self.vectors.payloads_of(&orphan_points).await?;
+            // Grouped by corpus so a placeholder parent, if one is needed, is
+            // written once and holds every artifact restored under it rather
+            // than only whichever happened to come first.
+            let mut by_corpus: BTreeMap<&str, Vec<&crate::vector::VectorPayload>> = BTreeMap::new();
+            for id in &orphan_points {
+                match payloads.get(id) {
+                    Some(p) => by_corpus.entry(p.corpus_id.as_str()).or_default().push(p),
+                    // The point was there for the id scroll and gone for the
+                    // retrieve, or its payload does not parse as a chunk.
+                    // Neither is an error and neither is restorable.
+                    None => tracing::debug!(
+                        artifact_id = %id,
+                        "no readable payload for an artifact the vector store listed"
+                    ),
+                }
+            }
+            for (corpus_id, group) in by_corpus {
+                if self.store.get_corpus(corpus_id).await.is_err() {
+                    let joined = group
+                        .iter()
+                        .map(|p| p.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if self
+                        .store
+                        .ensure_restored_corpus(corpus_id, &joined)
+                        .await?
+                    {
+                        out.corpora_restored += 1;
+                        tracing::info!(
+                            corpus_id,
+                            artifacts = group.len(),
+                            "the source of a restored artifact was not stored; \
+                             wrote a placeholder so the artifact has a parent"
+                        );
+                    }
+                }
+                for p in group {
+                    let restored = crate::store::artifacts::RestoredArtifact {
+                        id: p.artifact_id.clone(),
+                        corpus_id: p.corpus_id.clone(),
+                        text: p.text.clone(),
+                        title: p.title.clone(),
+                        category: p.category.clone(),
+                        tags: p.tags.clone(),
+                        created_at: p.created_at,
+                        // A payload with no `status` key predates lifecycle
+                        // tracking, which every filter reads as active — so the
+                        // restored row has to say the same thing, or the heal
+                        // would quietly retire artifacts on an unbackfilled base.
+                        status: p.status.unwrap_or(ArtifactStatus::Active),
+                        last_verified_at: p.last_verified_at,
+                        superseded_by: p.superseded_by.clone(),
+                    };
+                    if self.store.restore_artifact(&restored).await? {
+                        out.rows_restored += 1;
+                        self.store
+                            .enqueue(Stage::Embed, "artifact", &p.artifact_id)
+                            .await?;
+                    }
+                }
+            }
+        }
+
+        // SQLite says the vector was written and the vector store has nothing:
+        // send it back through the pipeline that writes it.
+        for id in embedded
+            .iter()
+            .filter(|id| !has_point.contains(id.as_str()))
+        {
+            self.store.enqueue(Stage::Embed, "artifact", id).await?;
+            out.points_requeued += 1;
+        }
+
+        if out.rows_restored > 0 || out.points_requeued > 0 {
+            tracing::info!(
+                rows_restored = out.rows_restored,
+                corpora_restored = out.corpora_restored,
+                points_requeued = out.points_requeued,
+                "the two stores disagreed about which artifacts exist; restored both ways"
+            );
+        }
+        Ok(out)
+    }
+
+    /// Delete an artifact from both stores, on purpose.
+    ///
+    /// The vector point goes first. `heal_store_drift` restores a row from a
+    /// surviving point, so deleting the row first would mean an interrupted
+    /// delete is undone by the very next heal; this way the interrupted state is
+    /// a row whose point is gone, which the heal answers by re-embedding — the
+    /// artifact survives intact instead of half-existing, and pressing delete
+    /// again finishes it.
+    pub async fn delete_artifact(&self, id: &str) -> Result<()> {
+        self.store.get_artifact(id).await?;
+        self.vectors
+            .delete_artifacts(std::slice::from_ref(&id.to_string()))
+            .await?;
+        self.store.delete_artifact(id).await?;
+        // This artifact may have been the reason another one is hidden, and a
+        // keeper that no longer exists leaves its loser out of search in favour
+        // of nothing.
+        self.heal_dangling_supersessions().await?;
+        tracing::info!(artifact_id = id, "deleted an artifact");
         Ok(())
     }
 
@@ -196,7 +566,11 @@ impl Core {
     pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
         let mut first_err = None;
         for id in self.store.dangling_superseded().await? {
-            if let Err(e) = self.vectors.set_superseded(&id, false).await {
+            if let Err(e) = self
+                .vectors
+                .set_lifecycle(&id, ArtifactStatus::Active, None)
+                .await
+            {
                 tracing::warn!(
                     artifact_id = %id,
                     error = %e,
@@ -281,8 +655,9 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::ingest::NearDupeAction;
+    use crate::core::ingest::{NearDupeAction, StoreDrift};
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
 
@@ -561,7 +936,11 @@ mod tests {
                     tags: vec![],
                     created_at: 0,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             }])
             .await
@@ -645,5 +1024,217 @@ mod tests {
             core.store.get_corpus(&out.id).await.unwrap().status,
             CorpusStatus::Failed
         );
+    }
+
+    /// One point for `artifact_id`, with nothing set beyond what a write needs.
+    fn point(artifact_id: &str, corpus_id: &str) -> crate::vector::VectorPoint {
+        crate::vector::VectorPoint {
+            sparse: Default::default(),
+            vector: vec![0.1; 8],
+            payload: crate::vector::VectorPayload {
+                artifact_id: artifact_id.to_string(),
+                corpus_id: corpus_id.to_string(),
+                text: "t".into(),
+                title: None,
+                category: None,
+                tags: vec![],
+                created_at: 0,
+                last_seen_at: None,
+                hit_count: None,
+                superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
+            },
+        }
+    }
+
+    /// A corpus with one artifact in it, and the ids of both.
+    async fn one_artifact(core: &crate::core::Core) -> (String, String) {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "t".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        (src.id, made[0].id.clone())
+    }
+
+    #[tokio::test]
+    async fn deprecating_an_already_superseded_artifact_is_refused() {
+        // `set_artifact_status` leaves `superseded_by` alone, so this used to
+        // produce a row that is deprecated *and* hidden in favour of a winner:
+        // listed in both Ops tables, rendered only as a supersession, and so out
+        // of reach of the button that would undo it.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "loser".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "winner".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.supersede(&made[0].id, &made[1].id).await.unwrap();
+
+        assert!(matches!(
+            core.deprecate(&made[0].id).await,
+            Err(crate::error::Error::Validation(_))
+        ));
+        let after = core.store.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(
+            after.status,
+            crate::store::artifacts::ArtifactStatus::Superseded,
+            "the refused call changed the row anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_point_whose_row_is_gone_gets_its_row_back() {
+        // This used to delete the point. The backfill it ran from is spawned at
+        // startup whenever anything is unstamped, so a process pointed at an
+        // empty or wrong sqlite file found every point orphaned and emptied the
+        // collection — with the vectors being the last copy, there was nothing
+        // left to reindex from.
+        let core = test_core().await;
+        let (corpus, artifact) = one_artifact(&core).await;
+        core.vectors
+            .upsert(vec![point(&artifact, &corpus), point("gone", &corpus)])
+            .await
+            .unwrap();
+
+        let drift = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(drift.rows_restored, 1, "{drift:?}");
+        assert_eq!(
+            core.vectors.all_artifact_ids().await.unwrap().len(),
+            2,
+            "the heal deleted a point instead of restoring its row"
+        );
+        let back = core.store.get_artifact("gone").await.unwrap();
+        assert_eq!(back.text, "t");
+        assert_eq!(back.corpus_id, corpus);
+        assert_eq!(
+            back.embed_state,
+            EmbedState::Pending,
+            "a restored row must be re-embedded: the stored vector may be from \
+             another model, and nothing else would ever check"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_an_artifact_whose_corpus_is_also_gone_writes_a_marked_placeholder() {
+        // The whole-database-lost case. `artifacts.corpus_id` is NOT NULL and
+        // references `corpora`, so without a parent the restore cannot happen at
+        // all — and a placeholder that did not say it was one would present
+        // reconstructed fragments as a captured document.
+        let core = test_core().await;
+        core.vectors
+            .upsert(vec![point("orphan", "corpus-that-never-existed")])
+            .await
+            .unwrap();
+
+        let drift = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(drift.rows_restored, 1, "{drift:?}");
+        assert_eq!(drift.corpora_restored, 1, "{drift:?}");
+        let stub = core
+            .store
+            .get_corpus("corpus-that-never-existed")
+            .await
+            .unwrap();
+        assert!(
+            stub.restored_at.is_some(),
+            "the placeholder is indistinguishable from a real capture"
+        );
+        assert_eq!(stub.raw_text, "t", "the stub holds what was recoverable");
+    }
+
+    #[tokio::test]
+    async fn healing_twice_changes_nothing_the_second_time() {
+        // The heal runs at startup and on every consolidation sweep, so a pass
+        // that keeps finding work on a base already in agreement is a permanent
+        // background rewrite — and, with `restore_artifact` keeping the original
+        // id, the way to get that wrong is to mint a new one and orphan the
+        // point all over again.
+        let core = test_core().await;
+        let (corpus, _) = one_artifact(&core).await;
+        core.vectors
+            .upsert(vec![point("gone", &corpus)])
+            .await
+            .unwrap();
+
+        core.heal_store_drift().await.unwrap();
+        let second = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(second, StoreDrift::default(), "the heal is not idempotent");
+    }
+
+    #[tokio::test]
+    async fn a_row_that_claims_it_is_embedded_with_no_point_is_requeued() {
+        // The other direction. A row still `pending` is not drift — that is
+        // every artifact that was just captured — so only a row claiming `done`
+        // counts, and the repair is to send it back through the pipeline that
+        // writes points rather than to delete the row.
+        let core = test_core().await;
+        let (_, artifact) = one_artifact(&core).await;
+        core.store
+            .mark_embedded(&artifact, "some-model", 0)
+            .await
+            .unwrap();
+
+        let drift = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(drift.points_requeued, 1, "{drift:?}");
+        assert!(
+            core.store.get_artifact(&artifact).await.is_ok(),
+            "the heal deleted the row instead of re-embedding it"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_still_waiting_to_embed_is_not_drift() {
+        // Everything just ingested has a row and no point. Treating that as
+        // drift would re-queue the entire backlog on every sweep.
+        let core = test_core().await;
+        one_artifact(&core).await;
+
+        let drift = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(drift, StoreDrift::default(), "{drift:?}");
     }
 }

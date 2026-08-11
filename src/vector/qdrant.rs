@@ -11,14 +11,19 @@
 //! background rebuild followed by an atomic swap, rather than an outage.
 
 use super::sparse::SparseVector;
-use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore};
+use super::{
+    FacetCount, Facets, LifecycleRow, SearchFilter, SearchHit, Touch, VectorPayload, VectorPoint,
+    VectorStore,
+};
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
+use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
 use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Generous enough for a cold HNSW segment load, short enough that a wedged
@@ -156,12 +161,68 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
         body["must"] = json!(must);
     }
     // Excluded with `must_not` rather than by matching `false`: a point written
-    // before consolidation existed carries no `superseded` key at all, and a
-    // `match: false` clause would drop every one of them from search.
+    // before consolidation existed carries no `status`/`superseded` key at
+    // all, and a `match: false` clause would drop every one of them from
+    // search.
+    let mut must_not: Vec<Value> = Vec::new();
     if !filter.include_superseded {
-        body["must_not"] = json!([{ "key": "superseded", "match": { "value": true } }]);
+        must_not.push(json!({ "key": "status", "match": { "value": "superseded" } }));
+        // Legacy flag, kept as a safety net for points written before the
+        // `status` field existed and not yet caught up by a backfill pass.
+        must_not.push(json!({ "key": "superseded", "match": { "value": true } }));
+    }
+    if !filter.include_deprecated {
+        must_not.push(json!({ "key": "status", "match": { "value": "deprecated" } }));
+    }
+    if !must_not.is_empty() {
+        body["must_not"] = json!(must_not);
     }
     Some(body)
+}
+
+/// The payload `set_lifecycle` merges into a point.
+///
+/// The legacy `superseded` boolean is derived and written alongside `status` so
+/// `build_filter`'s pre-backfill safety net and any reader that still checks it
+/// stay correct. It tracks `Superseded` specifically and *not* "anything not
+/// active": that net is a `must_not superseded == true` which `build_filter`
+/// emits whenever `include_superseded` is false, so writing `true` for a
+/// deprecated artifact would make `include_deprecated` unable to surface
+/// anything at all.
+fn lifecycle_payload(status: ArtifactStatus, superseded_by: Option<&str>) -> Value {
+    json!({
+        "status": status.as_str(),
+        "superseded": status == ArtifactStatus::Superseded,
+        "superseded_by": superseded_by,
+    })
+}
+
+/// What a stored payload says its lifecycle status is, read the way every
+/// filter reads it: an absent `status` falls back to the legacy `superseded`
+/// flag, and an absent flag means active — which is every point written before
+/// lifecycle tracking existed.
+fn stored_status(payload: &Value) -> ArtifactStatus {
+    match payload.get("status").and_then(Value::as_str) {
+        Some(s) => ArtifactStatus::parse(s),
+        None if payload.get("superseded").and_then(Value::as_bool) == Some(true) => {
+            ArtifactStatus::Superseded
+        }
+        None => ArtifactStatus::Active,
+    }
+}
+
+/// The payload `set_last_verified_at` merges into a point.
+///
+/// `reset_hits` zeroes `hit_count` in the same write, because `stale_max_hits`
+/// counts retrievals *since* the last verification — see `Core::verify`. The
+/// backfill pass leaves it alone: it stamps every artifact and must not wipe
+/// every counter.
+fn verified_payload(at: i64, reset_hits: bool) -> Value {
+    let mut p = json!({ "last_verified_at": at });
+    if reset_hits {
+        p["hit_count"] = json!(0);
+    }
+    p
 }
 
 /// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
@@ -236,19 +297,33 @@ fn sparse_of_payload(payload: &Value) -> SparseVector {
 /// rather than a second ranking.
 ///
 /// `defaults` is not optional politeness: a single point whose payload lacks
-/// `created_at` fails the *whole* query with
-/// `Expected number value for created_at in the payload and/or in the formula
-/// defaults`, not just its own scoring. Every point engram writes carries the
-/// key, but `--reindex` copies payloads verbatim from whatever was in the
-/// source collection, so one hand-written point would otherwise take search
-/// down. Treating a missing stamp as the epoch scores it as maximally old,
-/// which is the honest reading of "we do not know when this arrived".
+/// `last_verified_at` fails the *whole* query with
+/// `Expected number value for last_verified_at in the payload and/or in the
+/// formula defaults`, not just its own scoring. Every point engram writes
+/// carries the key, but `--reindex` copies payloads verbatim from whatever was
+/// in the source collection, so one hand-written point would otherwise take
+/// search down.
+///
+/// The default is `now`, not the epoch. A missing stamp means unknown, not
+/// stale, and the difference is the whole collection on the day the lifecycle
+/// migration lands: every pre-existing point lacks the key until the backfill
+/// has run, and defaulting to the epoch would collapse the recency term to
+/// zero for all of them at once — a base-wide reranking nobody asked for.
+/// Defaulting to `now` leaves the term neutral (`exp_decay` returns 1.0), so an
+/// unstamped point ranks exactly as it did before this field existed.
+///
+/// Decays against `last_verified_at` rather than `created_at`, deliberately:
+/// an artifact confirmed correct last week should outrank one merely written
+/// last week and never looked at since. Nothing here reads `hit_count` — a
+/// popularity term would let a frequently-shown result keep boosting itself
+/// further, at the expense of a correct but rarely-queried one that never
+/// gets the chance to accumulate hits.
 fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> Value {
     let mut terms = vec![json!("$score")];
     if recency > 0.0 {
         terms.push(json!({
             "mult": [recency, {
-                "exp_decay": { "x": "created_at", "target": now, "scale": half_life_secs, "midpoint": 0.5 }
+                "exp_decay": { "x": "last_verified_at", "target": now, "scale": half_life_secs, "midpoint": 0.5 }
             }]
         }));
     }
@@ -261,7 +336,7 @@ fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> 
     }
     json!({
         "formula": { "sum": terms },
-        "defaults": { "created_at": 0 },
+        "defaults": { "last_verified_at": now },
     })
 }
 
@@ -351,14 +426,17 @@ struct ScrollResult {
     next_page_offset: Value,
 }
 
-#[derive(Deserialize)]
-/// The two payload keys a point write must not clobber, as currently stored.
-/// `None` means the key is absent, which for `superseded` is every point
-/// written before consolidation existed.
-#[derive(Debug, Clone, Copy, Default)]
+/// The payload keys a point write must not clobber, as currently stored.
+/// `None` means the key is absent, which for `superseded`/`status` is every
+/// point written before consolidation/lifecycle tracking existed.
+#[derive(Debug, Clone, Default)]
 struct StoredBookkeeping {
     last_seen_at: Option<i64>,
+    hit_count: Option<i64>,
     superseded: Option<bool>,
+    status: Option<ArtifactStatus>,
+    last_verified_at: Option<i64>,
+    superseded_by: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -489,14 +567,30 @@ impl QdrantVectors {
             tracing::info!(collection = %name, "collection already existed; adopting it");
         }
 
-        // Payload indexes: without these, filtered search degrades to a
-        // full scan of the collection.
+        self.ensure_payload_indexes(name).await?;
+        tracing::info!(collection = %name, dim, "created qdrant collection");
+        Ok(())
+    }
+
+    /// Create every payload index this codebase filters on, tolerating ones
+    /// that already exist (Qdrant treats an identical index as a no-op).
+    ///
+    /// Called on every path that adopts a collection, not only on the one that
+    /// creates it. A field added to this list by a later release exists in no
+    /// collection created before it — and `build_filter` starts emitting a
+    /// clause on it immediately — so a deployment that only ever ran the
+    /// creation path once would run every filtered search as a full scan until
+    /// someone thought to `--reindex`.
+    async fn ensure_payload_indexes(&self, name: &str) -> Result<()> {
         for (field, schema) in [
             ("tags", "keyword"),
             ("category", "keyword"),
             ("corpus_id", "keyword"),
             ("created_at", "integer"),
             ("last_seen_at", "integer"),
+            ("status", "keyword"),
+            ("last_verified_at", "integer"),
+            ("hit_count", "integer"),
         ] {
             let _: Value = self
                 .call(
@@ -507,7 +601,6 @@ impl QdrantVectors {
                 .await
                 .map_err(|e| Error::Vector(format!("payload index on {field}: {e}")))?;
         }
-        tracing::info!(collection = %name, dim, "created qdrant collection");
         Ok(())
     }
 
@@ -612,20 +705,28 @@ impl QdrantVectors {
     }
 
     /// The bookkeeping keys already stored for these chunks: when the chunk was
-    /// last shown, and whether consolidation has hidden it.
+    /// last shown, how often, and its lifecycle status.
     ///
-    /// Both are written by code that knows nothing about the other — `touch`
-    /// sets one, the sweep sets the other, and the embed job rebuilding a
-    /// payload knows neither. Only asked for when a caller is about to
-    /// overwrite payloads it built without them, and only for those two keys,
-    /// so this is a small read next to the write it protects.
+    /// Each is written by code that knows nothing about the others — `touch`
+    /// sets the first two, the sweep or an operator action sets the rest, and
+    /// the embed job rebuilding a payload knows none of them. Only asked for
+    /// when a caller is about to overwrite payloads it built without them, and
+    /// only for those keys, so this is a small read next to the write it
+    /// protects.
     async fn stored_bookkeeping(
         &self,
         points: &[VectorPoint],
     ) -> Result<std::collections::HashMap<String, StoredBookkeeping>> {
         let wanted: Vec<&VectorPoint> = points
             .iter()
-            .filter(|p| p.payload.last_seen_at.is_none() || p.payload.superseded.is_none())
+            .filter(|p| {
+                p.payload.last_seen_at.is_none()
+                    || p.payload.hit_count.is_none()
+                    || p.payload.superseded.is_none()
+                    || p.payload.status.is_none()
+                    || p.payload.last_verified_at.is_none()
+                    || p.payload.superseded_by.is_none()
+            })
             .collect();
         if wanted.is_empty() {
             return Ok(Default::default());
@@ -646,7 +747,10 @@ impl QdrantVectors {
                 &format!("/collections/{}/points", self.alias),
                 Some(json!({
                     "ids": ids,
-                    "with_payload": ["last_seen_at", "superseded"],
+                    "with_payload": [
+                        "last_seen_at", "hit_count", "superseded",
+                        "status", "last_verified_at", "superseded_by",
+                    ],
                     "with_vector": false,
                 })),
             )
@@ -662,7 +766,19 @@ impl QdrantVectors {
                 (*artifact_id).to_string(),
                 StoredBookkeeping {
                     last_seen_at: p.payload.get("last_seen_at").and_then(Value::as_i64),
+                    hit_count: p.payload.get("hit_count").and_then(Value::as_i64),
                     superseded: p.payload.get("superseded").and_then(Value::as_bool),
+                    status: p
+                        .payload
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(ArtifactStatus::parse),
+                    last_verified_at: p.payload.get("last_verified_at").and_then(Value::as_i64),
+                    superseded_by: p
+                        .payload
+                        .get("superseded_by")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 },
             );
         }
@@ -839,6 +955,9 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
             Ok(payload) => out.push(SearchHit {
                 payload,
                 score: p.score,
+                // Filled in by `search` from the batched dense lookup; every
+                // other caller of this helper is a listing with no query.
+                similarity: None,
             }),
             Err(e) => tracing::warn!(
                 error = %e,
@@ -937,6 +1056,9 @@ impl VectorStore for QdrantVectors {
             if existing as usize != dim {
                 return Err(dimension_mismatch(&current, dim, existing as usize));
             }
+            // An already-serving collection predates any index this release
+            // added, so this is the path that matters most.
+            self.ensure_payload_indexes(&current).await?;
             return Ok(());
         }
 
@@ -961,6 +1083,7 @@ impl VectorStore for QdrantVectors {
                  which means an earlier rebuild did not finish"
             );
             self.claim_alias(&orphan, dim).await?;
+            self.ensure_payload_indexes(&orphan).await?;
             return Ok(());
         }
 
@@ -978,9 +1101,10 @@ impl VectorStore for QdrantVectors {
         // `touch`, which merge. A writer that does not know when the chunk was
         // last shown would therefore clear the stamp, and `resurface` would
         // offer a chunk read yesterday as forgotten. The same hazard applies to
-        // `superseded`, and costs more: clearing it puts an artifact the sweep
-        // hid straight back into results, on every re-embed. So carry both
-        // forward for every point that arrives without them.
+        // `superseded`/`status`, and costs more: clearing it puts an artifact
+        // the sweep hid straight back into results, on every re-embed. So
+        // carry every bookkeeping key forward for every point that arrives
+        // without it.
         let stored = self.stored_bookkeeping(&points).await?;
         let mut body = Vec::with_capacity(points.len());
         for p in points {
@@ -989,8 +1113,20 @@ impl VectorStore for QdrantVectors {
             if payload.last_seen_at.is_none() {
                 payload.last_seen_at = old.and_then(|s| s.last_seen_at);
             }
+            if payload.hit_count.is_none() {
+                payload.hit_count = old.and_then(|s| s.hit_count);
+            }
             if payload.superseded.is_none() {
                 payload.superseded = old.and_then(|s| s.superseded);
+            }
+            if payload.status.is_none() {
+                payload.status = old.and_then(|s| s.status);
+            }
+            if payload.last_verified_at.is_none() {
+                payload.last_verified_at = old.and_then(|s| s.last_verified_at);
+            }
+            if payload.superseded_by.is_none() {
+                payload.superseded_by = old.and_then(|s| s.superseded_by.clone());
             }
             let payload =
                 serde_json::to_value(&payload).map_err(|e| Error::Vector(e.to_string()))?;
@@ -1034,6 +1170,371 @@ impl VectorStore for QdrantVectors {
             )
             .await?;
         Ok(())
+    }
+
+    async fn set_lifecycle(
+        &self,
+        artifact_id: &str,
+        status: ArtifactStatus,
+        superseded_by: Option<&str>,
+    ) -> Result<()> {
+        let _: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/payload?wait=true", self.alias),
+                Some(json!({
+                    "payload": lifecycle_payload(status, superseded_by),
+                    "points": [ point_uuid(artifact_id) ],
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_last_verified_at(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        reset_hits: bool,
+    ) -> Result<()> {
+        let _: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/payload?wait=true", self.alias),
+                Some(json!({
+                    "payload": verified_payload(at, reset_hits),
+                    "points": [ point_uuid(artifact_id) ],
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // One request per batch, not two writes per artifact. The backfill runs
+        // over every artifact in the base, and at two round trips each — both
+        // with `wait=true` — it was slow enough that an operator would be
+        // tempted to skip it, which is the failure this batching is really
+        // preventing.
+        //
+        // `last_verified_at` is merged without touching `hit_count`: this pass
+        // stamps artifacts it knows nothing about, and zeroing every retrieval
+        // counter in the base is not a migration step. See `Core::verify` for
+        // the case that does reset it.
+        //
+        // Capped per request for the same reason `lifecycle_of` caps its
+        // retrieves: one operation per artifact means an unbounded caller
+        // produces an unbounded request body, and Qdrant may well refuse it.
+        // The callers that most need this pass are the ones with the most to
+        // write — a full backfill, or a drift repair over a base that drifted
+        // badly — so the largest request is exactly the one that must not be
+        // the one that fails.
+        const BATCH: usize = 512;
+        for group in rows.chunks(BATCH) {
+            let ops: Vec<Value> = group
+                .iter()
+                .map(|r| {
+                    let mut payload = lifecycle_payload(r.status, r.superseded_by.as_deref());
+                    payload["last_verified_at"] = json!(r.last_verified_at);
+                    json!({
+                        "set_payload": {
+                            "payload": payload,
+                            "points": [ point_uuid(&r.artifact_id) ],
+                        }
+                    })
+                })
+                .collect();
+            let _: Value = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/batch?wait=true", self.alias),
+                    Some(json!({ "operations": ops })),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn unstamped_count(&self) -> Result<u64> {
+        let res: CountResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/count", self.alias),
+                Some(json!({
+                    "exact": true,
+                    "filter": {
+                        "must": [ { "is_empty": { "key": "last_verified_at" } } ],
+                        // A point naming no artifact is not backfillable — see
+                        // the trait doc. Counting it kept this above zero
+                        // forever.
+                        "must_not": [ { "is_empty": { "key": "artifact_id" } } ],
+                    },
+                })),
+            )
+            .await?;
+        Ok(res.count)
+    }
+
+    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
+        // `point_uuid` is one-way, so the artifact id has to come out of the
+        // payload rather than the point id.
+        let page: ScrollResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/scroll", self.alias),
+                Some(json!({
+                    "filter": { "should": [
+                        { "key": "status", "match": { "value": "deprecated" } },
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "superseded", "match": { "value": true } },
+                    ] },
+                    "limit": limit,
+                    "with_payload": ["artifact_id"],
+                    "with_vector": false,
+                })),
+            )
+            .await?;
+        Ok(page
+            .points
+            .iter()
+            .filter_map(|p| {
+                p.payload
+                    .get("artifact_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
+    async fn payloads_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, VectorPayload>> {
+        let mut out = std::collections::HashMap::new();
+        if artifact_ids.is_empty() {
+            return Ok(out);
+        }
+        // Batched for the same reason as `lifecycle_of` below, and with more
+        // reason: these retrieves carry the full payload, text included.
+        const BATCH: usize = 256;
+        for batch in artifact_ids.chunks(BATCH) {
+            let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(json!({
+                        "ids": ids,
+                        "with_payload": true,
+                        "with_vector": false,
+                    })),
+                )
+                .await?;
+            for p in found {
+                match serde_json::from_value::<VectorPayload>(p.payload) {
+                    Ok(payload) => {
+                        out.insert(payload.artifact_id.clone(), payload);
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "skipping a point whose payload is not an engram chunk"
+                    ),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn lifecycle_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, super::StoredLifecycle>> {
+        let mut out = std::collections::HashMap::new();
+        if artifact_ids.is_empty() {
+            return Ok(out);
+        }
+        // Batched, because the drift repair asks about every hidden artifact it
+        // found and a single retrieve of thousands of ids is a request body
+        // Qdrant may well refuse.
+        const BATCH: usize = 512;
+        for batch in artifact_ids.chunks(BATCH) {
+            let ids: Vec<String> = batch.iter().map(|id| point_uuid(id)).collect();
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(json!({
+                        "ids": ids,
+                        // `point_uuid` is one-way, so the artifact id has to
+                        // come back from the payload.
+                        "with_payload": ["artifact_id", "status", "superseded", "superseded_by"],
+                        "with_vector": false,
+                    })),
+                )
+                .await?;
+            for p in found {
+                let Some(id) = p.payload.get("artifact_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.insert(
+                    id.to_string(),
+                    super::StoredLifecycle {
+                        status: stored_status(&p.payload),
+                        superseded_by: p
+                            .payload
+                            .get("superseded_by")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        const PAGE: usize = 1_000;
+        let mut out = Vec::new();
+        let mut offset = Value::Null;
+        loop {
+            let mut body = json!({
+                "limit": PAGE,
+                "with_payload": ["artifact_id"],
+                "with_vector": false,
+            });
+            if !offset.is_null() {
+                body["offset"] = offset.clone();
+            }
+            let page: ScrollResult = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/scroll", self.alias),
+                    Some(body),
+                )
+                .await?;
+            if page.points.is_empty() {
+                break;
+            }
+            out.extend(page.points.iter().filter_map(|p| {
+                p.payload
+                    .get("artifact_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }));
+            offset = page.next_page_offset;
+            if offset.is_null() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Scrolled and sorted rather than sampled, because this list is a work
+    /// queue.
+    ///
+    /// A random draw meant every render of Ops produced a different set: acting
+    /// on a candidate redirects back to the page, which re-drew, so an operator
+    /// could not work the queue down and a given artifact might take many page
+    /// loads to reappear. A scroll is deterministic (Qdrant returns points in id
+    /// order), so the same base with the same threshold yields the same queue,
+    /// and answering a candidate is what removes it — verifying restamps it out
+    /// of the range, deprecating filters it out.
+    ///
+    /// The scroll is capped: the filtered set is "everything stale enough", with
+    /// no upper bound on a neglected base, and this runs on a page render. The
+    /// cap costs nothing an operator can perceive, since the whole point is to
+    /// hand back `limit` rows and `limit` is small — it only means that on a
+    /// base with more than `STALE_SCAN` stale artifacts, the queue is drawn from
+    /// the first window in point-id order rather than the true global worst.
+    async fn stale_candidates(
+        &self,
+        older_than: i64,
+        max_hits: i64,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        /// How many matching points the queue is drawn from.
+        const STALE_SCAN: usize = 10_000;
+        const PAGE: usize = 1_000;
+
+        let filter = json!({
+            "must_not": [
+                { "key": "status", "match": { "value": "deprecated" } },
+                { "key": "status", "match": { "value": "superseded" } },
+                { "key": "superseded", "match": { "value": true } },
+            ],
+            "must": [
+                // Present *and* old. A point with no stamp is not a stale
+                // candidate, it is an unbackfilled one — see the trait doc.
+                // `hit_count` below is the opposite case: absent legitimately
+                // means never retrieved.
+                { "key": "last_verified_at", "range": { "lt": older_than } },
+                { "should": [
+                    { "key": "hit_count", "range": { "lte": max_hits } },
+                    { "is_empty": { "key": "hit_count" } },
+                ] },
+            ],
+        });
+
+        let mut found: Vec<VectorPayload> = Vec::new();
+        let mut offset = Value::Null;
+        while found.len() < STALE_SCAN {
+            let mut body = json!({
+                "filter": filter,
+                "limit": PAGE.min(STALE_SCAN - found.len()),
+                "with_payload": true,
+                "with_vector": false,
+            });
+            if !offset.is_null() {
+                body["offset"] = offset.clone();
+            }
+            let page: ScrollResult = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points/scroll", self.alias),
+                    Some(body),
+                )
+                .await?;
+            if page.points.is_empty() {
+                break;
+            }
+            for p in page.points {
+                match serde_json::from_value::<VectorPayload>(p.payload) {
+                    Ok(payload) => found.push(payload),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "skipping a point whose payload is not an engram chunk"
+                    ),
+                }
+            }
+            offset = page.next_page_offset;
+            if offset.is_null() {
+                break;
+            }
+        }
+
+        // Stalest first, so the queue leads with the artifacts most worth an
+        // operator's attention rather than with whichever ids sort lowest. The
+        // id tiebreak keeps the order total: two artifacts stamped in the same
+        // second must not swap places between one render and the next.
+        found.sort_by(|a, b| {
+            a.last_verified_at
+                .cmp(&b.last_verified_at)
+                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
+        });
+        found.truncate(limit);
+        Ok(found
+            .into_iter()
+            .map(|payload| SearchHit {
+                payload,
+                // No query to be similar to. The caller ranks this list by
+                // staleness, which the order above already carries.
+                score: 0.0,
+                similarity: None,
+            })
+            .collect())
     }
 
     async fn search(
@@ -1106,31 +1607,138 @@ impl VectorStore for QdrantVectors {
             });
         }
 
-        let res: QueryResult = self
+        // The second half of the request: the same dense vector, on its own,
+        // with no fusion and no recency stage over it. That returns raw cosine
+        // similarity, which is the only number in this whole path that means
+        // the same thing from one query to the next — the ranking score above
+        // is a fused rank, so the top hit for a typo scores like the top hit for
+        // a perfect match.
+        //
+        // Batched rather than sent after, so the confidence costs a round trip
+        // of nothing. `limit` matches the ranking query's, so every hit the
+        // dense branch contributed is covered; a hit only the lexical branch
+        // found is absent from this set and gets no similarity, which is
+        // correct — it contains the query's terms verbatim.
+        let mut confidence = json!({
+            "query": vector,
+            "using": DENSE,
+            "limit": limit,
+            "with_payload": ["artifact_id"],
+        });
+        if let Some(f) = &f {
+            confidence["filter"] = f.clone();
+        }
+
+        let mut res: Vec<QueryResult> = self
             .call(
                 Method::POST,
-                &format!("/collections/{}/points/query", self.alias),
-                Some(body),
+                &format!("/collections/{}/points/query/batch", self.alias),
+                Some(json!({ "searches": [body, confidence] })),
             )
             .await?;
-        Ok(hits_of(res))
+        if res.len() != 2 {
+            return Err(Error::Vector(format!(
+                "asked qdrant for 2 batched searches and got {}",
+                res.len()
+            )));
+        }
+        let similarities: HashMap<String, f32> = res
+            .pop()
+            .expect("length checked")
+            .points
+            .into_iter()
+            .filter_map(|p| {
+                let id = p.payload.get("artifact_id")?.as_str()?.to_string();
+                Some((id, p.score))
+            })
+            .collect();
+
+        let mut hits = hits_of(res.pop().expect("length checked"));
+        for h in &mut hits {
+            h.similarity = similarities.get(&h.payload.artifact_id).copied();
+        }
+        Ok(hits)
     }
 
-    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
-        if artifact_ids.is_empty() {
+    async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {
+        if targets.is_empty() {
             return Ok(());
         }
-        let ids: Vec<String> = artifact_ids.iter().map(|c| point_uuid(c)).collect();
-        // One request for the whole result list, and only the one key: this
-        // runs on every search, so it must not be a write per hit nor a
-        // read-modify-write of the full payload. It still waits: the shutdown
-        // drain exists to keep these stamps, and an acknowledged-but-unapplied
-        // write is exactly the loss it is meant to prevent.
+        // `last_seen_at` is the same value for the whole batch. `hit_count` is
+        // not — each point's next value depends on its own current one, and
+        // Qdrant has no atomic increment — so the current value has to come
+        // from somewhere. A marked search has just read every hit's payload and
+        // passes the counts in, which is the common case and costs no round
+        // trip; a caller that counts a hit while knowing nothing but an id pays
+        // for a read, and only for its own points.
+        //
+        // Both stay off the request path (the caller backgrounds this call),
+        // and this still waits: the shutdown drain exists to keep these stamps,
+        // and an acknowledged-but-unapplied write is exactly the loss it is
+        // meant to prevent. A count missed under a rare concurrent double-touch
+        // is an acceptable soft-counter race — it only ever feeds the one-way
+        // stale-candidate query, never live scoring.
+        //
+        // A target that does not count as a hit needs no count at all: it only
+        // stamps `last_seen_at`, so it neither joins the read below nor carries
+        // a `hit_count` key into the write.
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut ids: Vec<(String, bool)> = Vec::with_capacity(targets.len());
+        let mut unknown: Vec<String> = Vec::new();
+        for t in targets {
+            let uuid = point_uuid(&t.artifact_id);
+            if t.counts_as_hit {
+                match t.hit_count {
+                    Some(n) => {
+                        counts.insert(uuid.clone(), n);
+                    }
+                    None => unknown.push(uuid.clone()),
+                }
+            }
+            ids.push((uuid, t.counts_as_hit));
+        }
+        if !unknown.is_empty() {
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(
+                        json!({ "ids": unknown, "with_payload": ["hit_count"], "with_vector": false }),
+                    ),
+                )
+                .await?;
+            for p in found {
+                if let Some(uuid) = p.id.as_str() {
+                    counts.insert(
+                        uuid.to_string(),
+                        p.payload
+                            .get("hit_count")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                    );
+                }
+            }
+        }
+        let ops: Vec<Value> = ids
+            .iter()
+            .map(|(uuid, counts_as_hit)| {
+                let mut payload = json!({ "last_seen_at": seen_at });
+                if *counts_as_hit {
+                    payload["hit_count"] = json!(counts.get(uuid).copied().unwrap_or(0) + 1);
+                }
+                json!({
+                    "set_payload": {
+                        "payload": payload,
+                        "points": [uuid],
+                    }
+                })
+            })
+            .collect();
         let _: Value = self
             .call(
                 Method::POST,
-                &format!("/collections/{}/points/payload?wait=true", self.alias),
-                Some(json!({ "payload": { "last_seen_at": seen_at }, "points": ids })),
+                &format!("/collections/{}/points/batch?wait=true", self.alias),
+                Some(json!({ "operations": ops })),
             )
             .await?;
         Ok(())
@@ -1152,9 +1760,15 @@ impl VectorStore for QdrantVectors {
                     // point written before consolidation existed carries no
                     // `superseded` key, and matching `false` would drop it.
                     // Without this the forgotten list offers exactly the
-                    // duplicates the sweep just took out of search.
+                    // duplicates the sweep just took out of search — and, since
+                    // a deprecated artifact is old and by definition unseen,
+                    // exactly the artifacts an operator has just retired.
                     "filter": {
-                      "must_not": [ { "key": "superseded", "match": { "value": true } } ],
+                      "must_not": [
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "status", "match": { "value": "deprecated" } },
+                        { "key": "superseded", "match": { "value": true } }
+                      ],
                       "must": [
                         { "key": "created_at", "range": { "lt": older_than } },
                         // Nested so this reads as AND-of-OR. A chunk written
@@ -1217,11 +1831,19 @@ impl VectorStore for QdrantVectors {
             "query": point_uuid(artifact_id),
             "using": DENSE,
             "limit": limit + 1,
-            // A superseded artifact is out of search, so it must be out of the
-            // related pane too: it is by construction near-identical to its
-            // keeper, which means it would lead that list on every artifact it
-            // was hidden in favour of.
-            "filter": { "must_not": [ { "key": "superseded", "match": { "value": true } } ] },
+            // Anything out of search is out of the related pane too. A
+            // superseded artifact is by construction near-identical to its
+            // keeper, so it would lead that list on every artifact it was
+            // hidden in favour of; a deprecated one is content an operator
+            // retired, and linking to it from a live artifact presents it as
+            // current. `status` and the legacy flag are both matched because a
+            // deprecation deliberately writes `superseded: false` — see
+            // `lifecycle_payload` — so the legacy net alone never catches it.
+            "filter": { "must_not": [
+                { "key": "status", "match": { "value": "superseded" } },
+                { "key": "status", "match": { "value": "deprecated" } },
+                { "key": "superseded", "match": { "value": true } }
+            ] },
             "with_payload": true,
         });
         let res: QueryResult = match self
@@ -1254,8 +1876,14 @@ impl VectorStore for QdrantVectors {
         per_point: usize,
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
-        // Superseded points are excluded at the source. Including them would
-        // hand the sweep pairs it has already resolved, on every single run.
+        // Anything not active is excluded at the source. Superseded points
+        // would hand the sweep pairs it has already resolved, on every single
+        // run. Deprecated points are worse than redundant: the sweep's `keeper`
+        // picks the newest member of a cluster, so a newer artifact an operator
+        // retired would *win* against a live older one and hide it — leaving
+        // one artifact deprecated, the other superseded, and the knowledge in
+        // neither reachable by search. `supersede` would also overwrite the
+        // operator's `deprecated` status with `superseded` on the way past.
         let res: MatrixPairs = self
             .call(
                 Method::POST,
@@ -1265,6 +1893,8 @@ impl VectorStore for QdrantVectors {
                     "limit": per_point,
                     "using": DENSE,
                     "filter": { "must_not": [
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "status", "match": { "value": "deprecated" } },
                         { "key": "superseded", "match": { "value": true } }
                     ] },
                 })),
@@ -1495,10 +2125,12 @@ mod tests {
     fn a_filter_that_narrows_nothing_produces_no_filter_at_all() {
         // `{"must": []}` matches nothing in Qdrant, so a search that narrows
         // nothing must omit the key rather than send an empty condition list.
-        // Asking for superseded points back is what "narrows nothing" means now.
+        // Asking for superseded and deprecated points back is what "narrows
+        // nothing" means now.
         assert!(
             build_filter(&SearchFilter {
                 include_superseded: true,
+                include_deprecated: true,
                 ..Default::default()
             })
             .is_none()
@@ -1506,9 +2138,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_filter_excludes_superseded_points() {
-        // The default is what every ordinary search sends, and superseding is
-        // only meaningful if it keeps an artifact out of that.
+    fn the_default_filter_excludes_superseded_and_deprecated_points() {
+        // The default is what every ordinary search sends, and superseding /
+        // deprecating is only meaningful if it keeps an artifact out of that.
         let f = build_filter(&SearchFilter::default()).unwrap();
         assert!(
             f.get("must").is_none(),
@@ -1516,7 +2148,11 @@ mod tests {
         );
         assert_eq!(
             f["must_not"],
-            json!([{ "key": "superseded", "match": { "value": true } }]),
+            json!([
+                { "key": "status", "match": { "value": "superseded" } },
+                { "key": "superseded", "match": { "value": true } },
+                { "key": "status", "match": { "value": "deprecated" } },
+            ]),
         );
     }
 
@@ -1528,6 +2164,7 @@ mod tests {
             tags: vec!["linux".into(), "forensics".into()],
             category: Some("procedure".into()),
             include_superseded: false,
+            include_deprecated: false,
         })
         .unwrap();
         let must = f["must"].as_array().unwrap();
@@ -1596,13 +2233,50 @@ mod tests {
     }
 
     #[test]
-    fn the_scoring_formula_survives_a_point_without_a_created_at() {
+    fn the_scoring_formula_survives_a_point_without_a_last_verified_at() {
         // Qdrant fails the entire query, not just the offending point, when a
-        // formula reads a key the payload does not have.
+        // formula reads a key the payload does not have. The default is `now`,
+        // not the epoch: every point predates the lifecycle backfill until it
+        // runs, and defaulting to the epoch would zero the recency term for the
+        // whole collection at once. `now` leaves it neutral.
         let f = scoring_formula(1_700_000_000, 86_400, 0.05, 0.15);
         assert_eq!(
-            f["defaults"]["created_at"], 0,
-            "a payload missing created_at would take search down: {f}"
+            f["defaults"]["last_verified_at"], 1_700_000_000,
+            "an unstamped payload must score as unknown, not as maximally stale: {f}"
+        );
+    }
+
+    #[test]
+    fn deprecating_does_not_set_the_legacy_superseded_flag() {
+        // `build_filter` excludes `superseded == true` whenever superseded
+        // results are not asked for, which is the normal case for a caller that
+        // only set `include_deprecated`. Writing the flag for a deprecation
+        // would make that request unable to return anything.
+        let p = lifecycle_payload(ArtifactStatus::Deprecated, None);
+        assert_eq!(p["status"], "deprecated");
+        assert_eq!(p["superseded"], false, "deprecated is not superseded: {p}");
+
+        let s = lifecycle_payload(ArtifactStatus::Superseded, Some("winner"));
+        assert_eq!(s["superseded"], true);
+        assert_eq!(s["superseded_by"], "winner");
+
+        let a = lifecycle_payload(ArtifactStatus::Active, None);
+        assert_eq!(a["superseded"], false);
+    }
+
+    #[test]
+    fn only_a_verify_resets_the_hit_counter() {
+        // The backfill pass stamps every artifact; resetting there would wipe
+        // every retrieval count in the base.
+        let verified = verified_payload(42, true);
+        assert_eq!(verified["last_verified_at"], 42);
+        assert_eq!(verified["hit_count"], 0);
+
+        let backfilled = verified_payload(42, false);
+        assert_eq!(backfilled["last_verified_at"], 42);
+        assert!(
+            backfilled.get("hit_count").is_none(),
+            "a backfill must leave the counter alone: {backfilled}"
         );
     }
 

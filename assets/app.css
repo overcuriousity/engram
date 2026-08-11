@@ -138,6 +138,24 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .btn-danger:hover { background: var(--color-danger); color: #fff; }
 .btn-sm { height: 32px; padding: 0 0.75rem; font-size: 0.75rem; }
 
+/* Icon-only actions: verify, deprecate, delete.
+   The label lives in `aria-label` and `title` rather than in visible text, so a
+   row of controls stays small enough to sit beside an artifact without
+   competing with it for attention. Square, so the three read as one set. */
+.btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; cursor: pointer;
+  border-radius: var(--radius-sm); font-family: inherit;
+  background: transparent; border: 1px solid var(--color-border);
+  color: var(--color-fg-secondary);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn-icon:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+.btn-icon svg { width: 16px; height: 16px; display: block; }
+.btn-icon-danger:hover {
+  background: var(--color-danger); border-color: var(--color-danger); color: #fff;
+}
+
 .input, .textarea, .select {
   width: 100%; font-size: 0.875rem; font-family: inherit;
   color: var(--color-fg-primary); background: var(--color-bg-elevated);
@@ -236,7 +254,16 @@ nav.top a.brand img { display: block; }
   border-radius: var(--radius-md); overflow: auto; max-height: 30rem;
 }
 .raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8125rem; }
-.raw td { padding: 1px 0.5rem; vertical-align: top; white-space: pre-wrap; }
+/* `pre`, not `pre-wrap`: these are the source's own lines, and most of them are
+   shell commands. Wrapping broke one command across two rows with the
+   continuation aligned under the code column, so it read as two commands — in a
+   pane whose whole purpose is showing exactly what the source says. The
+   container already scrolls; wrapping is what stopped it from ever needing to. */
+.raw td { padding: 1px 0.5rem; vertical-align: top; white-space: pre; }
+/* The line numbers stay put while the code scrolls under them; a line number
+   that scrolls out of view makes the column useless for finding a line. */
+.raw td.ln { position: sticky; left: 0; background: var(--color-bg-elevated); z-index: 1; }
+.raw tr.in td.ln { background: var(--color-accent-dim); }
 .raw td.ln {
   width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
   border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
@@ -271,6 +298,23 @@ nav.top a.brand img { display: block; }
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
 }
 .rail-item:hover { background: var(--color-bg-hover); }
+
+/* A result row is the link plus a delete control *beside* it, not inside it: a
+   <button> nested in an <a> is invalid HTML, and the anchor has to stay the
+   `.rail-item` because that is the element the arrow-key navigation focuses.
+   The control is held out of the way until the row is hovered or something
+   inside it takes focus, so the rail still reads as a list of results rather
+   than a list of delete buttons. Keyboard users reach it by tabbing, which
+   `:focus-within` reveals; a touch screen has no hover, so there it is simply
+   always visible. */
+.rail-row { position: relative; }
+.rail-row .rail-item { padding-right: 2.75rem; }
+.rail-del {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.rail-row:hover .rail-del, .rail-del:focus-within { opacity: 1; }
+@media (hover: none) { .rail-del { opacity: 1; } }
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
@@ -293,6 +337,13 @@ nav.top a.brand img { display: block; }
    sight, so none of that is reimplemented in script. */
 .facets { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 0.625rem; }
 .facets .chips { margin-top: 0; }
+/* Each row says what it narrows by. The label sits on the baseline of the first
+   chip rather than above the row, so two rows cost two lines, not four. */
+.facet-row { display: flex; gap: 0.5rem; align-items: baseline; }
+.facet-label {
+  flex: none; width: 2.5rem; font-size: 0.75rem; text-transform: uppercase;
+  letter-spacing: 0.03em; color: var(--color-fg-muted); padding-top: 3px;
+}
 .chip { display: inline-flex; cursor: pointer; }
 .chip input {
   position: absolute; width: 1px; height: 1px; margin: -1px;

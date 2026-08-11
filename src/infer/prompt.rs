@@ -75,10 +75,11 @@ These are NOT contradictions:
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"contradicts": true, "detail": "..."}
+{"contradicts": true, "detail": "...", "obsolete": "a"}
 
 - contradicts: true only for a concrete disagreement about one subject, as above.
-- detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false."#;
+- detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false.
+- obsolete: "a" or "b" — only when you are confident one artifact plainly replaces the other (a deprecated flag, step, or default versus its current replacement), not merely that they differ. Omit this field whenever the direction is unclear, the two describe genuinely different but still-valid options, or you are not sure."#;
 
 /// The two artifacts, each under its title.
 ///
@@ -100,6 +101,8 @@ struct Judgement {
     contradicts: bool,
     #[serde(default)]
     detail: Option<String>,
+    #[serde(default)]
+    obsolete: Option<String>,
 }
 
 /// A reply that cannot be read is an error, not a verdict.
@@ -107,7 +110,13 @@ struct Judgement {
 /// Defaulting to "contradicts" would fill the review queue with noise an
 /// operator has to clear by hand; defaulting to "no" would quietly close real
 /// conflicts. Failing leaves the pair pending, and the next sweep asks again.
-pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>)> {
+///
+/// The third element is which side the judge named obsolete — `'a'` or
+/// `'b'` — when it named one with confidence. Anything else the model wrote
+/// there (a stray word, a full sentence) is treated the same as omitting it:
+/// an unreadable direction must not fail the whole reply, since the
+/// contradiction verdict itself may still be perfectly readable.
+pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>, Option<char>)> {
     let j: Judgement = serde_json::from_str(extract_json(body)).map_err(|e| {
         Error::MalformedLlmOutput(format!("judge reply was not the expected JSON: {e}"))
     })?;
@@ -115,7 +124,12 @@ pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>)> {
         .detail
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty() && j.contradicts);
-    Ok((j.contradicts, detail))
+    let obsolete = j.obsolete.as_deref().and_then(|o| match o.trim() {
+        "a" | "A" => Some('a'),
+        "b" | "B" => Some('b'),
+        _ => None,
+    });
+    Ok((j.contradicts, detail, obsolete))
 }
 
 #[derive(serde::Deserialize)]
@@ -439,16 +453,17 @@ mod tests {
 
     #[test]
     fn a_judgement_parses() {
-        let (yes, detail) =
+        let (yes, detail, obsolete) =
             parse_judgement(r#"{"contradicts":true,"detail":"one says 1.2, the other 1.4"}"#)
                 .unwrap();
         assert!(yes);
         assert_eq!(detail.as_deref(), Some("one says 1.2, the other 1.4"));
+        assert!(obsolete.is_none());
     }
 
     #[test]
     fn a_negative_judgement_carries_no_detail() {
-        let (yes, detail) = parse_judgement(r#"{"contradicts":false}"#).unwrap();
+        let (yes, detail, _) = parse_judgement(r#"{"contradicts":false}"#).unwrap();
         assert!(!yes);
         assert!(detail.is_none());
     }
@@ -456,8 +471,28 @@ mod tests {
     #[test]
     fn a_judgement_wrapped_in_prose_and_fences_still_parses() {
         // The same models that fence the synthesis reply fence this one.
-        let (yes, _) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
+        let (yes, ..) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
         assert!(yes);
+    }
+
+    #[test]
+    fn a_judgement_names_the_obsolete_side() {
+        let (yes, _, obsolete) = parse_judgement(
+            r#"{"contradicts":true,"detail":"a uses --old-flag, b uses --new-flag","obsolete":"a"}"#,
+        )
+        .unwrap();
+        assert!(yes);
+        assert_eq!(obsolete, Some('a'));
+    }
+
+    #[test]
+    fn an_unreadable_obsolete_value_is_treated_as_absent() {
+        // An unparsable direction must not fail the whole reply — the
+        // contradiction verdict itself is still readable.
+        let (yes, _, obsolete) =
+            parse_judgement(r#"{"contradicts":true,"obsolete":"not sure honestly"}"#).unwrap();
+        assert!(yes);
+        assert!(obsolete.is_none());
     }
 
     #[test]

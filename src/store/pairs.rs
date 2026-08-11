@@ -16,9 +16,13 @@ pub enum PairState {
     Pending,
     /// The fact-token prefilter or the judge found nothing to disagree about.
     NoConflict,
-    /// The judge found a detail the two artifacts state differently. Which one
-    /// is current is a judgement only the reader can make.
+    /// The judge found a detail the two artifacts state differently, with no
+    /// clear direction — both readings could still be current.
     Contradiction,
+    /// The judge named which artifact is obsolete (`obsolete_id`) with enough
+    /// confidence to propose a supersede, but it is not applied automatically:
+    /// an operator confirms via the pair's "apply supersede" action.
+    Superseded,
     /// An operator looked and decided there is nothing here.
     Dismissed,
 }
@@ -29,6 +33,7 @@ impl PairState {
             PairState::Pending => "pending",
             PairState::NoConflict => "no_conflict",
             PairState::Contradiction => "contradiction",
+            PairState::Superseded => "superseded",
             PairState::Dismissed => "dismissed",
         }
     }
@@ -36,6 +41,7 @@ impl PairState {
         match s {
             "no_conflict" => PairState::NoConflict,
             "contradiction" => PairState::Contradiction,
+            "superseded" => PairState::Superseded,
             "dismissed" => PairState::Dismissed,
             _ => PairState::Pending,
         }
@@ -54,6 +60,10 @@ pub struct ArtifactPair {
     /// Model calls this pair has already cost, successful or not. Orders the
     /// judge's queue so a pair it cannot read does not starve the rest.
     pub judge_attempts: i64,
+    /// Which artifact the judge named obsolete, when `state` is `Superseded`.
+    /// Lets the review UI offer "apply supersede" without asking the model
+    /// again.
+    pub obsolete_id: Option<String>,
 }
 
 fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
@@ -66,6 +76,7 @@ fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         detail: r.get("detail"),
         created_at: r.get("created_at"),
         judge_attempts: r.get("judge_attempts"),
+        obsolete_id: r.get("obsolete_id"),
     }
 }
 
@@ -123,6 +134,15 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
+    pub async fn get_pair(&self, id: i64) -> Result<ArtifactPair> {
+        let row = sqlx::query("SELECT * FROM artifact_pairs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(crate::error::Error::NotFound)?;
+        Ok(row_to_pair(&row))
+    }
+
     pub async fn pairs_by_state(&self, state: PairState, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query(
             "SELECT * FROM artifact_pairs WHERE state = ?
@@ -135,22 +155,58 @@ impl Store {
         Ok(rows.iter().map(row_to_pair).collect())
     }
 
+    /// Move a pair to any state other than `Superseded`, clearing the judge's
+    /// proposed direction along with it.
+    ///
+    /// `obsolete_id` is cleared rather than left alone because it belongs to the
+    /// `Superseded` state and to nothing else — see `set_pair_superseded`, the
+    /// only path that writes it. A pair the judge proposed a winner for and an
+    /// operator then dismissed would otherwise keep naming a supersede that was
+    /// explicitly rejected, and any later listing of dismissed pairs would offer
+    /// to apply it.
     pub async fn set_pair_state(
         &self,
         id: i64,
         state: PairState,
         detail: Option<&str>,
     ) -> Result<()> {
-        let res = sqlx::query("UPDATE artifact_pairs SET state = ?, detail = ? WHERE id = ?")
-            .bind(state.as_str())
-            .bind(detail)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = ?, detail = ?, obsolete_id = NULL WHERE id = ?",
+        )
+        .bind(state.as_str())
+        .bind(detail)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         // A dismiss from a stale Ops page names a pair that is no longer there
         // — its artifacts were deleted, or the row never existed. Redirecting
         // as though it worked tells the operator the queue is one shorter than
         // it is.
+        if res.rows_affected() == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Record the judge's proposed direction: `state` becomes `Superseded`,
+    /// `obsolete_id` names which artifact it believes is stale. Separate from
+    /// `set_pair_state` because this is the only path that writes
+    /// `obsolete_id`, and a plain contradiction must never carry a stale value
+    /// left over from a different pair.
+    pub async fn set_pair_superseded(
+        &self,
+        id: i64,
+        obsolete_id: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'superseded', detail = ?, obsolete_id = ? WHERE id = ?",
+        )
+        .bind(detail)
+        .bind(obsolete_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         if res.rows_affected() == 0 {
             return Err(crate::error::Error::NotFound);
         }
@@ -305,6 +361,39 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_the_superseded_state_drops_the_judge_s_proposal() {
+        // `obsolete_id` belongs to `Superseded` and to no other state. A pair
+        // the judge proposed a winner for and an operator then dismissed used to
+        // keep naming that winner, so any listing of dismissed pairs would offer
+        // to apply a supersede that had been explicitly rejected.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        s.set_pair_superseded(p.id, &a, Some("a is stale"))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(p.id).await.unwrap().obsolete_id.as_deref(),
+            Some(a.as_str())
+        );
+
+        s.set_pair_state(p.id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.get_pair(p.id).await.unwrap().obsolete_id,
+            None,
+            "a dismissed pair still carries the supersede that was rejected"
         );
     }
 

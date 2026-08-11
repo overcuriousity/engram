@@ -112,6 +112,8 @@ impl PkdbTools {
             category: p.category,
             // A tool call is one deliberate question, not a keystroke.
             mark: true,
+            include_deprecated: false,
+            include_superseded: false,
         };
         match self.core.search(&query).await {
             Ok(r) => format_search_results(&r),
@@ -234,6 +236,8 @@ mod tests {
                     tags: vec![],
                     category: None,
                     mark: true,
+                    include_deprecated: false,
+                    include_superseded: false,
                 })
                 .await
                 .unwrap(),

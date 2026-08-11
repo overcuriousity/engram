@@ -14,7 +14,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::store::artifacts::Chunk;
+use crate::store::artifacts::{ArtifactStatus, Chunk};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
@@ -84,6 +84,109 @@ fn keeper(members: &[Chunk]) -> &Chunk {
         .expect("a cluster has at least one member")
 }
 
+/// How many hidden artifacts the drift repair compares per sweep, from either
+/// side. A base with more than this many hidden artifacts drifting at once is
+/// not a case worth unbounded scanning for; the next sweep continues.
+const DRIFT_SCAN: usize = 5_000;
+
+fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
+    crate::vector::LifecycleRow {
+        artifact_id: c.id.clone(),
+        status: c.status,
+        superseded_by: c.superseded_by.clone(),
+        last_verified_at: c.last_verified_at.unwrap_or(c.created_at),
+    }
+}
+
+/// Make the vector store's lifecycle payloads agree with SQLite, which is the
+/// source of truth for all of them.
+///
+/// Every lifecycle change is two writes to two stores that cannot be written
+/// atomically, so each of `deprecate`, `reactivate`, `supersede` and
+/// `unsupersede` can be interrupted halfway. Both resulting skews are silent
+/// and neither self-corrects: a row that says deprecated behind a payload that
+/// does not leaves the artifact in search results while Ops calls it retired,
+/// and a payload that says deprecated behind an active row leaves it out of
+/// search with no page listing it and no button that reaches it. The pair of
+/// scans below is the only thing in the system that notices either.
+///
+/// Broader than `heal_dangling_supersessions`, which repairs one specific case
+/// (a winner that has since been deleted) in the SQLite direction only.
+///
+/// Returns how many artifacts it rewrote, which is a number worth asserting on:
+/// a repair that fires on a base in agreement is a bug that hides behind a
+/// correct end state.
+async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
+    repair_lifecycle_drift_scanning(core, DRIFT_SCAN).await
+}
+
+/// The above with its cap as a parameter, so a test can reproduce what the two
+/// truncated scans do to each other without seeding `DRIFT_SCAN` artifacts.
+async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usize> {
+    // Both scans are capped, and neither cap lines up with the other:
+    // `list_non_active_artifacts` returns the newest rows while `non_active_ids`
+    // scrolls in point-id order. So set membership across the two proves
+    // nothing — on a base with more hidden artifacts than `DRIFT_SCAN` the lists
+    // barely intersect, and treating "missing from the other list" as drift
+    // reported the whole scan as broken every sweep and rewrote every payload in
+    // it. The union of the two scans names the artifacts worth *looking at*;
+    // what each store actually says about them is then read per id, and only a
+    // real disagreement is repaired.
+    let store_hidden = core.store.list_non_active_artifacts(scan).await?;
+    let payload_hidden = core.vectors.non_active_ids(scan).await?;
+
+    let mut ids: Vec<String> = store_hidden.iter().map(|c| c.id.clone()).collect();
+    ids.extend(payload_hidden);
+    ids.sort_unstable();
+    ids.dedup();
+
+    let stored = core.vectors.lifecycle_of(&ids).await?;
+    let known: HashMap<&str, &Chunk> = store_hidden.iter().map(|c| (c.id.as_str(), c)).collect();
+
+    let mut rows = Vec::new();
+    for id in &ids {
+        // The row is already in hand for everything the SQLite scan returned;
+        // only an id that came from the payload side alone costs a read.
+        let fetched;
+        let chunk = match known.get(id.as_str()) {
+            Some(c) => *c,
+            // An id the vector store still lists but SQLite has dropped is
+            // ordinary — a delete can lag a sweep — and not an error.
+            None => match core.store.get_artifact(id).await {
+                Ok(c) => {
+                    fetched = c;
+                    &fetched
+                }
+                Err(_) => {
+                    tracing::debug!(artifact_id = %id, "hidden point names an artifact that is gone");
+                    continue;
+                }
+            },
+        };
+        // No point at all is not drift: a freshly captured artifact is hidden
+        // in SQLite before its embedding job has written anything to hide.
+        let Some(p) = stored.get(id) else {
+            continue;
+        };
+        // SQLite is the source of truth for both fields. Comparing them rather
+        // than just "hidden or not" also catches the subtler skew — a payload
+        // that says superseded behind a row that says deprecated, or one
+        // pointing at a winner the row no longer names.
+        if p.status != chunk.status || p.superseded_by != chunk.superseded_by {
+            rows.push(lifecycle_row_of(chunk));
+        }
+    }
+
+    if !rows.is_empty() {
+        tracing::info!(
+            repaired = rows.len(),
+            "lifecycle state disagreed between sqlite and the vector store"
+        );
+        core.vectors.apply_lifecycle(&rows).await?;
+    }
+    Ok(rows.len())
+}
+
 pub async fn run(core: &Core) -> Result<Outcome> {
     let cfg = &core.consolidate;
     if !cfg.enabled {
@@ -97,7 +200,34 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // Deletions clear these as they happen; the sweep repeats it because a
     // hidden artifact pointing at nothing is invisible to search and to every
     // page that could put it back, and nothing else would ever notice.
-    core.heal_dangling_supersessions().await?;
+    // Neither repair is allowed to take the sweep with it. Both are maintenance
+    // over state the rest of the sweep does not read, both are retried on every
+    // sweep, and both are most likely to fail on exactly the base that needs
+    // them most — the one that drifted far enough to make the repair large.
+    // Propagating the error stopped consolidation *permanently*: the next sweep
+    // reached the same call and failed the same way, so near-duplicate
+    // detection and judging never ran again.
+    if let Err(e) = core.heal_dangling_supersessions().await {
+        tracing::warn!(
+            error = %e,
+            "could not restore every artifact whose winner was deleted; retrying on the next sweep"
+        );
+    }
+    if let Err(e) = repair_lifecycle_drift(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile lifecycle state with the vector store; retrying on the next sweep"
+        );
+    }
+    // Startup heals too, but a process that stays up for weeks is exactly the
+    // one whose stores drift: every interrupted write between the two happens
+    // while it is running, not while it is starting.
+    if let Err(e) = core.heal_store_drift().await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile which artifacts the two stores hold; retrying on the next sweep"
+        );
+    }
 
     let pairs = core
         .vectors
@@ -125,14 +255,14 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             tracing::debug!(artifact_id = %id, "pair names an artifact that is gone");
             continue;
         };
-        if c.superseded_by.is_some() {
+        if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
             // The row says hidden but the vector store still offered this point
-            // as a pair candidate, so its payload flag never landed — the sweep
-            // was interrupted between the two writes. Ops has been listing this
-            // artifact as hidden while every search still returned it. Finish
-            // the write that was lost; it is idempotent and costs no inference.
-            tracing::info!(artifact_id = %id, "re-applying a superseded flag the vector store is missing");
-            core.vectors.set_superseded(id, true).await?;
+            // as a pair candidate, so its payload never caught up — the write
+            // was interrupted, and `repair_lifecycle_drift` at the top of this
+            // sweep has already re-issued it. Either way the artifact takes no
+            // part in this run: a retired artifact must not win a cluster and
+            // hide a live one, and a resolved pair has nothing left to decide.
+            tracing::debug!(artifact_id = %id, status = c.status.as_str(), "skipping a hidden artifact");
             continue;
         }
         let root = clusters.find(id);
@@ -147,9 +277,24 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         let keep = keeper(group);
         for c in group.iter().filter(|c| c.id != keep.id) {
             // SQLite first: it is the source of truth, and a payload flag with
-            // no row behind it is a hidden artifact nothing can explain.
-            core.store.set_superseded_by(&c.id, Some(&keep.id)).await?;
-            core.vectors.set_superseded(&c.id, true).await?;
+            // no row behind it is a hidden artifact nothing can explain. See
+            // `Core::supersede`.
+            //
+            // One failure does not abandon the rest, as in
+            // `heal_dangling_supersessions`. `supersede` refuses a side that is
+            // no longer active, and these statuses were read earlier in this
+            // same sweep — so an operator deprecating one of them from Ops in
+            // the meantime is an ordinary race, not a reason to abandon the
+            // remaining clusters, the judge pass, and every pair below.
+            if let Err(e) = core.supersede(&c.id, &keep.id).await {
+                tracing::warn!(
+                    superseded = %c.id,
+                    by = %keep.id,
+                    error = %e,
+                    "could not hide a near-identical artifact; it stays active"
+                );
+                continue;
+            }
             hidden.insert(c.id.clone());
             out.superseded += 1;
             tracing::info!(
@@ -173,7 +318,13 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         ) else {
             continue;
         };
-        if a.superseded_by.is_some() || b.superseded_by.is_some() {
+        // Same rule as the cluster pass: only two live artifacts have a
+        // question worth a queue slot, an inference call, or a containment
+        // supersede below.
+        if [&a, &b]
+            .iter()
+            .any(|c| c.status != ArtifactStatus::Active || c.superseded_by.is_some())
+        {
             continue;
         }
 
@@ -193,10 +344,16 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 (&b, &a)
             };
             if contains_normalized(&long.text, &short.text) {
-                core.store
-                    .set_superseded_by(&short.id, Some(&long.id))
-                    .await?;
-                core.vectors.set_superseded(&short.id, true).await?;
+                // Same race, same treatment as the cluster pass above.
+                if let Err(e) = core.supersede(&short.id, &long.id).await {
+                    tracing::warn!(
+                        superseded = %short.id,
+                        by = %long.id,
+                        error = %e,
+                        "could not hide a duplicated passage; it stays active"
+                    );
+                    continue;
+                }
                 out.superseded += 1;
                 tracing::info!(
                     superseded = %short.id,
@@ -283,12 +440,22 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         };
 
-        // A pair queued in the review band can have a member superseded by a
-        // later sweep, once a re-embed moves the score above `auto_supersede`.
-        // Judging it would spend the scarcest thing here — a model call — to
-        // post a contradiction about an artifact that is no longer in results.
-        // The supersession is the answer to this pair.
-        if a.superseded_by.is_some() || b.superseded_by.is_some() {
+        // A pair queued in the review band can have a member retired after the
+        // fact: superseded by a later sweep once a re-embed moves the score
+        // above `auto_supersede`, or deprecated by an operator. Judging it would
+        // spend the scarcest thing here — a model call — to post a
+        // contradiction about an artifact that is no longer in results.
+        //
+        // The status half matters beyond the wasted call. A judgement can
+        // propose a supersede, which Ops renders as an "apply supersede" button
+        // — and `Core::supersede` refuses a deprecated side, so pressing it
+        // returns a validation error and the pair stays pending forever. The
+        // same guard runs in `run`'s cluster pass and review band.
+        if a.status != ArtifactStatus::Active
+            || b.status != ArtifactStatus::Active
+            || a.superseded_by.is_some()
+            || b.superseded_by.is_some()
+        {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
                 .await?;
@@ -336,18 +503,47 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         };
 
         match crate::infer::prompt::parse_judgement(&reply) {
-            Ok((true, detail)) => {
+            Ok((true, detail, obsolete)) => {
                 contradictions += 1;
-                core.store
-                    .set_pair_state(
-                        p.id,
-                        crate::store::pairs::PairState::Contradiction,
-                        detail.as_deref(),
-                    )
-                    .await?;
-                tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+                // Trust the judge's named direction only when it agrees with
+                // the sweep's own newest-wins bias (see `keeper`): a call that
+                // names the *newer* artifact obsolete is exactly the failure
+                // mode worth guarding against, since it would otherwise
+                // propose hiding the side more likely to be current.
+                let obsolete_id = obsolete.and_then(|side| {
+                    let (named, other) = match side {
+                        'a' => (&a, &b),
+                        _ => (&b, &a),
+                    };
+                    (named.created_at <= other.created_at).then(|| named.id.clone())
+                });
+                match obsolete_id {
+                    Some(obsolete_id) => {
+                        // Proposed, not applied: an operator confirms via the
+                        // pair's "apply supersede" action before anything is
+                        // actually hidden.
+                        core.store
+                            .set_pair_superseded(p.id, &obsolete_id, detail.as_deref())
+                            .await?;
+                        tracing::info!(
+                            pair = p.id,
+                            obsolete = %obsolete_id,
+                            "judge proposed a supersede, pending operator confirmation"
+                        );
+                    }
+                    None => {
+                        core.store
+                            .set_pair_state(
+                                p.id,
+                                crate::store::pairs::PairState::Contradiction,
+                                detail.as_deref(),
+                            )
+                            .await?;
+                        tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+                    }
+                }
             }
-            Ok((false, _)) => {
+            Ok((false, _, _)) => {
                 core.store
                     .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
                     .await?;
@@ -402,7 +598,11 @@ mod tests {
                     tags: vec![],
                     created_at: c.created_at,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             })
             .collect();
@@ -448,7 +648,11 @@ mod tests {
                     tags: vec![],
                     created_at: made[0].created_at,
                     last_seen_at: None,
+                    hit_count: None,
                     superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
                 },
             }])
             .await
@@ -481,6 +685,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reactivating_a_superseded_artifact_survives_the_next_sweep() {
+        // Flipping the status without clearing `superseded_by` left the row
+        // still pointing at its winner, so the next sweep re-applied the
+        // superseded flag and the operator's decision quietly disappeared.
+        // The pair sits in the review band, below `auto_supersede`, so nothing
+        // here is a near-identical copy the sweep would re-hide on merit. The
+        // supersession is an applied judge proposal, which is the case an
+        // operator would reverse.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+
+        core.reactivate(&ids[0]).await.unwrap();
+
+        let back = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            back.superseded_by.is_none(),
+            "reactivate left the row pointing at its winner"
+        );
+        assert_eq!(back.status, crate::store::artifacts::ArtifactStatus::Active);
+
+        run(&core).await.unwrap();
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "the sweep re-hid an artifact an operator had reactivated"
+        );
+    }
+
+    #[tokio::test]
     async fn a_sweep_finishes_a_supersession_whose_payload_write_was_lost() {
         // The row and the payload cannot be written atomically. A crash between
         // them used to be permanent: the next sweep skipped the artifact
@@ -510,6 +755,116 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(hits[0].payload.artifact_id, ids[1]);
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_artifact_never_wins_a_cluster() {
+        // The newest member of a cluster wins, so a *newer* artifact an
+        // operator retired used to be handed the win over a live older one:
+        // the loser went superseded, the winner stayed deprecated, and the
+        // knowledge left search entirely. It also overwrote the operator's
+        // `deprecated` status with `superseded` on the way past.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        core.deprecate(&ids[1]).await.unwrap();
+
+        let out = run(&core).await.unwrap();
+
+        assert_eq!(out.superseded, 0, "{out:?}");
+        let older = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            older.superseded_by.is_none(),
+            "a deprecated artifact hid a live one"
+        );
+        assert_eq!(
+            core.store.get_artifact(&ids[1]).await.unwrap().status,
+            ArtifactStatus::Deprecated,
+            "the sweep overwrote an operator's deprecation"
+        );
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the live artifact should be the one thing search returns"
+        );
+        assert_eq!(hits[0].payload.artifact_id, ids[0]);
+    }
+
+    #[tokio::test]
+    async fn superseding_refuses_to_overwrite_a_deprecation() {
+        // `set_superseded_by` writes `status = 'superseded'` unconditionally,
+        // so this is the guard that keeps an applied judge proposal from
+        // erasing what an operator decided, with nothing left to tell the two
+        // apart afterwards.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+
+        assert!(core.supersede(&ids[0], &ids[1]).await.is_err());
+        assert!(
+            core.supersede(&ids[1], &ids[0]).await.is_err(),
+            "a deprecated winner would hide the loser behind something out of results"
+        );
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().status,
+            ArtifactStatus::Deprecated
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_finishes_a_deprecation_whose_payload_write_was_lost() {
+        // Row written, payload not: Ops lists the artifact as deprecated while
+        // every search still returns it, and the only button that row offers is
+        // "Reactivate". Nothing used to notice — the old self-heal branch fired
+        // only on `superseded_by`.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.store
+            .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            !hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "a deprecated artifact is still in search"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_frees_an_artifact_hidden_by_a_payload_alone() {
+        // The other skew, and the worse one: the payload says deprecated but
+        // the row says active, so the artifact is out of search, off the Ops
+        // deprecated list, and out of reach of every button — invisible and
+        // unrecoverable until something reconciles the two stores.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.vectors
+            .set_lifecycle(&ids[0], ArtifactStatus::Deprecated, None)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "an artifact SQLite calls active is still hidden from search"
+        );
     }
 
     #[tokio::test]
@@ -603,6 +958,113 @@ mod tests {
                 .is_empty(),
             "the answered pair must leave the pending queue"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_member_was_deprecated_never_reaches_the_judge() {
+        // The other half of the same rule, and the one that leaves a button
+        // nothing can press: a judgement can propose a supersede, Ops renders
+        // "Apply supersede" for it, and `Core::supersede` refuses a deprecated
+        // side — so the operator gets a validation error and the pair stays
+        // pending forever. The dismissal guard used to check `superseded_by`
+        // only, which a deprecation never sets.
+        let mut core = test_core().await;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        let ids = disagreeing(&core).await;
+        run(&core).await.unwrap();
+        core.consolidate.judge = true;
+
+        core.deprecate(&ids[0]).await.unwrap();
+
+        let out = run(&core).await.unwrap();
+        assert_eq!(
+            completer.calls(),
+            0,
+            "the judge ruled on a deprecated artifact"
+        );
+        assert_eq!(out.judged, 0);
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pair naming a retired artifact must leave the pending queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_rewrites_nothing_when_the_two_stores_agree() {
+        // Both scans are capped and neither cap lines up with the other, so
+        // "missing from the other list" used to read as drift. On a base with
+        // more hidden artifacts than one scan returns, that reported the whole
+        // scan as broken every sweep and rewrote every payload in it — a
+        // permanent false alarm with write amplification behind it. Only a real
+        // disagreement counts.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("first", [1.0, 0.0]),
+                ("second", [0.0, 1.0]),
+                ("third", [0.5, 0.5]),
+            ],
+        )
+        .await;
+        // One hidden each way, both written through the paths that keep the two
+        // stores in step.
+        core.deprecate(&ids[0]).await.unwrap();
+        core.supersede(&ids[1], &ids[2]).await.unwrap();
+
+        assert_eq!(
+            repair_lifecycle_drift(&core).await.unwrap(),
+            0,
+            "the repair fired on a base that agrees with itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scan_cap_reached_from_both_sides_is_not_drift() {
+        // The bug in miniature. The two scans are capped independently and
+        // ordered differently — newest rows on one side, point order on the
+        // other — so past the cap they name largely different artifacts. Reading
+        // "absent from the other list" as drift then reports both whole scans as
+        // broken on every sweep and rewrites every payload in them. Two hidden
+        // artifacts and a cap of one reproduces exactly that.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        assert_eq!(
+            repair_lifecycle_drift_scanning(&core, 1).await.unwrap(),
+            0,
+            "the edge of a page was reported as a disagreement"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_notices_a_payload_naming_the_wrong_status() {
+        // Not just hidden-or-not: a payload that says superseded behind a row
+        // that says deprecated is drift too, and comparing set membership alone
+        // never saw it.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+        core.vectors
+            .set_lifecycle(&ids[0], ArtifactStatus::Superseded, Some(&ids[1]))
+            .await
+            .unwrap();
+
+        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
+        let stored = core
+            .vectors
+            .lifecycle_of(std::slice::from_ref(&ids[0]))
+            .await
+            .unwrap();
+        assert_eq!(stored[&ids[0]].status, ArtifactStatus::Deprecated);
+        assert_eq!(stored[&ids[0]].superseded_by, None);
     }
 
     #[tokio::test]
@@ -738,6 +1200,73 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].detail.as_deref(), Some("1.21.4 versus 1.30.0"));
+    }
+
+    #[tokio::test]
+    async fn a_confident_direction_proposes_a_supersede_but_does_not_apply_it() {
+        // The judge names a direction; an operator still has to confirm it.
+        // Nothing about either artifact changes here — only the pair.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":true,"detail":"old flag vs new flag","obsolete":"a"}"#.into(),
+        ]));
+        let ids = disagreeing(&core).await;
+
+        let out = run(&core).await.unwrap();
+        assert_eq!((out.judged, out.contradictions), (1, 1), "{out:?}");
+        let found = core
+            .store
+            .pairs_by_state(PairState::Superseded, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "the pair did not land as proposed");
+        assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
+
+        // Proposed, not applied.
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the judge's proposal must not hide anything by itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direction_naming_the_newer_artifact_is_not_trusted() {
+        // A miscalibrated call proposing to hide the *newer* side is exactly
+        // the failure mode the newest-wins guard exists to catch: it disagrees
+        // with the sweep's own bias, so it must fall back to a plain
+        // contradiction rather than being trusted.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        let ids = disagreeing(&core).await;
+        // Force `b` (ids[1]) strictly newer than `a`: `now()` is second-grained,
+        // so two rows inserted in the same test would otherwise tie, and a tie
+        // is meant to pass the guard. Naming the genuinely newer side obsolete
+        // disagrees with `keeper()`'s bias and must be rejected.
+        sqlx::query("UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?")
+            .bind(&ids[1])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":true,"detail":"x","obsolete":"b"}"#.into(),
+        ]));
+
+        run(&core).await.unwrap();
+        let superseded = core
+            .store
+            .pairs_by_state(PairState::Superseded, 10)
+            .await
+            .unwrap();
+        assert!(
+            superseded.is_empty(),
+            "a direction naming the newer artifact must not be trusted: {superseded:?}"
+        );
     }
 
     #[tokio::test]

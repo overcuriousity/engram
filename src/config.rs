@@ -40,6 +40,16 @@ pub struct ConsolidateConfig {
     pub judge: bool,
     /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
     pub max_judgements: usize,
+    /// An active artifact not confirmed accurate (`last_verified_at`) in this
+    /// many days becomes a deprecation-review candidate — never anything more
+    /// automatic than that. See `stale_max_hits`.
+    pub stale_after_days: u32,
+    /// ...and retrieved at most this many times since. Both conditions must
+    /// hold: staleness alone is not suspicious for a rare topic, and
+    /// popularity alone says nothing about accuracy. This is read-only input
+    /// to the candidate list — it never feeds search scoring, or a frequently
+    /// shown result would keep boosting its own visibility.
+    pub stale_max_hits: i64,
 }
 
 impl Default for ConsolidateConfig {
@@ -54,6 +64,8 @@ impl Default for ConsolidateConfig {
             interval_hours: 24,
             judge: false,
             max_judgements: 20,
+            stale_after_days: 365,
+            stale_max_hits: 0,
         }
     }
 }
@@ -92,6 +104,21 @@ pub struct VectorConfig {
     /// decided matters can outrank the decay curve.
     #[serde(default = "default_pinned_boost")]
     pub pinned_boost: f32,
+    /// Cosine similarity below which a result is only loosely related to the
+    /// query, and is labelled as such rather than presented like a real answer.
+    ///
+    /// This is a similarity, not a rank: hybrid retrieval returns reciprocal
+    /// rank fusion values, which say where a result placed and nothing about
+    /// how close it was, so the top hit for a typo scores exactly like the top
+    /// hit for a perfect match. The similarity is read separately — see
+    /// `VectorStore::search` — and compared here.
+    ///
+    /// Normalised embeddings put unrelated text around 0.0–0.2 and genuinely
+    /// related text well above 0.4, so the default sits between them. Raise it
+    /// to be told more often that nothing really matched; `0.0` turns the
+    /// labelling off.
+    #[serde(default = "default_weak_below")]
+    pub weak_below: f32,
 }
 fn default_recency_weight() -> f32 {
     0.05
@@ -101,6 +128,9 @@ fn default_recency_half_life_days() -> u32 {
 }
 fn default_pinned_boost() -> f32 {
     0.15
+}
+fn default_weak_below() -> f32 {
+    0.35
 }
 
 #[derive(Debug, Deserialize, Clone)]

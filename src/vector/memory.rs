@@ -1,5 +1,8 @@
-use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPoint, VectorStore, cosine};
+use super::{
+    FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore, cosine,
+};
 use crate::error::Result;
+use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -22,6 +25,17 @@ impl Default for MemoryVectors {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A payload's effective lifecycle status. Falls back to the legacy
+/// `superseded` boolean when `status` is unset, matching the Qdrant backend's
+/// dual-check `build_filter` so both implementations agree on points written
+/// before `status` existed.
+fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
+    payload.status.unwrap_or(match payload.superseded {
+        Some(true) => ArtifactStatus::Superseded,
+        _ => ArtifactStatus::Active,
+    })
 }
 
 /// Counts into chips, most frequent first. Ties break on the value so a
@@ -63,6 +77,26 @@ impl VectorStore for MemoryVectors {
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.superseded);
             }
+            if p.payload.hit_count.is_none() {
+                p.payload.hit_count = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.hit_count);
+            }
+            if p.payload.status.is_none() {
+                p.payload.status = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.status);
+            }
+            if p.payload.last_verified_at.is_none() {
+                p.payload.last_verified_at = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.last_verified_at);
+            }
+            if p.payload.superseded_by.is_none() {
+                p.payload.superseded_by = w
+                    .get(&p.payload.artifact_id)
+                    .and_then(|old| old.payload.superseded_by.clone());
+            }
             w.insert(p.payload.artifact_id.clone(), p);
         }
         Ok(())
@@ -74,10 +108,21 @@ impl VectorStore for MemoryVectors {
             // A merge, matching Qdrant: an absent stamp means "unchanged", so
             // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
+            let hits = payload.hit_count.or(p.payload.hit_count);
             let sup = payload.superseded.or(p.payload.superseded);
+            let status = payload.status.or(p.payload.status);
+            let verified = payload.last_verified_at.or(p.payload.last_verified_at);
+            let superseded_by = payload
+                .superseded_by
+                .clone()
+                .or_else(|| p.payload.superseded_by.clone());
             p.payload = payload.clone();
             p.payload.last_seen_at = seen;
+            p.payload.hit_count = hits;
             p.payload.superseded = sup;
+            p.payload.status = status;
+            p.payload.last_verified_at = verified;
+            p.payload.superseded_by = superseded_by;
         }
         Ok(())
     }
@@ -90,11 +135,165 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
-    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
+    async fn set_lifecycle(
+        &self,
+        artifact_id: &str,
+        status: ArtifactStatus,
+        superseded_by: Option<&str>,
+    ) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        for id in artifact_ids {
-            if let Some(p) = w.get_mut(id) {
+        if let Some(p) = w.get_mut(artifact_id) {
+            p.payload.status = Some(status);
+            // Tracks `Superseded` specifically, matching the Qdrant backend:
+            // the legacy flag feeds a `must_not superseded == true` net that is
+            // active whenever superseded results are excluded, so setting it
+            // for a deprecated artifact would make `include_deprecated`
+            // unable to surface anything.
+            p.payload.superseded = Some(status == ArtifactStatus::Superseded);
+            p.payload.superseded_by = superseded_by.map(str::to_string);
+        }
+        Ok(())
+    }
+
+    async fn set_last_verified_at(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        reset_hits: bool,
+    ) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        if let Some(p) = w.get_mut(artifact_id) {
+            p.payload.last_verified_at = Some(at);
+            if reset_hits {
+                p.payload.hit_count = Some(0);
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_lifecycle(&self, rows: &[super::LifecycleRow]) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        for r in rows {
+            if let Some(p) = w.get_mut(&r.artifact_id) {
+                p.payload.status = Some(r.status);
+                p.payload.superseded = Some(r.status == ArtifactStatus::Superseded);
+                p.payload.superseded_by = r.superseded_by.clone();
+                p.payload.last_verified_at = Some(r.last_verified_at);
+            }
+        }
+        Ok(())
+    }
+
+    async fn unstamped_count(&self) -> Result<u64> {
+        let r = self.points.read().unwrap();
+        Ok(r.values()
+            .filter(|p| p.payload.last_verified_at.is_none())
+            .count() as u64)
+    }
+
+    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
+        let r = self.points.read().unwrap();
+        let mut out: Vec<String> = r
+            .values()
+            .filter(|p| status_of(&p.payload) != ArtifactStatus::Active)
+            .map(|p| p.payload.artifact_id.clone())
+            .collect();
+        // Deterministic, so a test never depends on HashMap iteration order.
+        out.sort();
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn lifecycle_of(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<HashMap<String, super::StoredLifecycle>> {
+        let r = self.points.read().unwrap();
+        Ok(artifact_ids
+            .iter()
+            .filter_map(|id| {
+                let p = r.get(id)?;
+                Some((
+                    id.clone(),
+                    super::StoredLifecycle {
+                        status: status_of(&p.payload),
+                        superseded_by: p.payload.superseded_by.clone(),
+                    },
+                ))
+            })
+            .collect())
+    }
+
+    async fn payloads_of(&self, artifact_ids: &[String]) -> Result<HashMap<String, VectorPayload>> {
+        let r = self.points.read().unwrap();
+        Ok(artifact_ids
+            .iter()
+            .filter_map(|id| Some((id.clone(), r.get(id)?.payload.clone())))
+            .collect())
+    }
+
+    async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        let r = self.points.read().unwrap();
+        let mut out: Vec<String> = r.keys().cloned().collect();
+        // Deterministic, so a test never depends on HashMap iteration order.
+        out.sort();
+        Ok(out)
+    }
+
+    async fn stale_candidates(
+        &self,
+        older_than: i64,
+        max_hits: i64,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let r = self.points.read().unwrap();
+        let mut found: Vec<&VectorPayload> = r
+            .values()
+            .map(|p| &p.payload)
+            .filter(|p| {
+                status_of(p) == ArtifactStatus::Active
+                    // Present and old. An unstamped point is unbackfilled, not
+                    // stale — see the trait doc. A missing `hit_count` is the
+                    // other way round: never retrieved is what it means.
+                    && p.last_verified_at.is_some_and(|v| v < older_than)
+                    && p.hit_count.unwrap_or(0) <= max_hits
+            })
+            .collect();
+        // Sorted before truncating, and sorted at all: this backs a work queue
+        // an operator returns to after every action, and `values()` iterates a
+        // HashMap in an order that is neither stable nor meaningful. Stalest
+        // first, id as the tiebreak — see the Qdrant implementation, whose order
+        // this has to match for the two to be testable against each other.
+        found.sort_by(|a, b| {
+            a.last_verified_at
+                .cmp(&b.last_verified_at)
+                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
+        });
+        Ok(found
+            .into_iter()
+            .take(limit)
+            .map(|payload| SearchHit {
+                payload: payload.clone(),
+                score: 0.0,
+                // No query vector to be similar to; this is a listing.
+                similarity: None,
+            })
+            .collect())
+    }
+
+    async fn touch(&self, targets: &[super::Touch], seen_at: i64) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        for t in targets {
+            // The count the caller passed is ignored here on purpose: this
+            // store holds the authoritative value already, and reading it is
+            // free. The Qdrant path uses the caller's copy to skip a round
+            // trip, which is a network optimisation, not a semantic one.
+            if let Some(p) = w.get_mut(&t.artifact_id) {
                 p.payload.last_seen_at = Some(seen_at);
+                // Only a search result counts as a retrieval; see `Touch`.
+                if t.counts_as_hit {
+                    p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
+                }
             }
         }
         Ok(())
@@ -109,7 +308,11 @@ impl VectorStore for MemoryVectors {
         let r = self.points.read().unwrap();
         Ok(r.values()
             .filter(|p| {
-                p.payload.superseded != Some(true)
+                // Anything not active is out, matching the Qdrant backend: a
+                // deprecated artifact is old and by definition unseen, which
+                // makes it a prime candidate for a list of things nobody has
+                // looked at — and it has just been retired on purpose.
+                status_of(&p.payload) == ArtifactStatus::Active
                     && p.payload.created_at < older_than
                     && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
             })
@@ -117,6 +320,8 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: 0.0,
+                // Drawn at random rather than matched; nothing to be close to.
+                similarity: None,
             })
             .collect())
     }
@@ -135,16 +340,25 @@ impl VectorStore for MemoryVectors {
         let mut hits: Vec<SearchHit> = r
             .values()
             .filter(|p| {
-                (filter.include_superseded || p.payload.superseded != Some(true))
+                let status = status_of(&p.payload);
+                (filter.include_superseded || status != ArtifactStatus::Superseded)
+                    && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
                     && filter.tags.iter().all(|t| p.payload.tags.contains(t))
                     && filter
                         .category
                         .as_ref()
                         .is_none_or(|c| p.payload.category.as_ref() == Some(c))
             })
-            .map(|p| SearchHit {
-                payload: p.payload.clone(),
-                score: cosine(vector, &p.vector),
+            .map(|p| {
+                // Dense only here, so the ranking score *is* the similarity.
+                // The Qdrant store has to fetch it separately because fusion
+                // throws the magnitude away.
+                let similarity = cosine(vector, &p.vector);
+                SearchHit {
+                    payload: p.payload.clone(),
+                    score: similarity,
+                    similarity: Some(similarity),
+                }
             })
             .collect();
         // Tie-break on artifact_id so equal scores produce a stable order rather
@@ -183,10 +397,18 @@ impl VectorStore for MemoryVectors {
         };
         let mut hits: Vec<SearchHit> = r
             .values()
-            .filter(|p| p.payload.artifact_id != artifact_id && p.payload.superseded != Some(true))
+            // Anything out of search is out of the related pane too, matching
+            // the Qdrant backend.
+            .filter(|p| {
+                p.payload.artifact_id != artifact_id
+                    && status_of(&p.payload) == ArtifactStatus::Active
+            })
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: cosine(&seed.vector, &p.vector),
+                // The seed is an artifact, not a query. "Loosely related" is
+                // the honest description of every neighbour list.
+                similarity: None,
             })
             .collect();
         hits.sort_by(|a, b| {
@@ -205,9 +427,12 @@ impl VectorStore for MemoryVectors {
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
         let r = self.points.read().unwrap();
+        // Active only, matching the Qdrant backend: a deprecated artifact must
+        // not enter the sweep, where being newer would let it win a cluster and
+        // hide a live one.
         let live: Vec<&VectorPoint> = r
             .values()
-            .filter(|p| p.payload.superseded != Some(true))
+            .filter(|p| status_of(&p.payload) == ArtifactStatus::Active)
             .take(sample)
             .collect();
 
@@ -277,9 +502,100 @@ mod tests {
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 created_at: 0,
                 last_seen_at: None,
+                hit_count: None,
                 superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_point_with_no_stamp_is_unknown_rather_than_stale() {
+        // Every point predates the lifecycle backfill until it runs. Reading a
+        // missing `last_verified_at` as the epoch made the whole base a
+        // deprecation candidate and asked an operator to act on it.
+        let v = MemoryVectors::new();
+        let mut stamped = point("stamped", "s1", vec![1.0], &[], "note");
+        stamped.payload.last_verified_at = Some(10);
+        v.upsert(vec![
+            point("unstamped", "s1", vec![1.0], &[], "note"),
+            stamped,
+        ])
+        .await
+        .unwrap();
+
+        let ids: Vec<String> = v
+            .stale_candidates(i64::MAX, i64::MAX, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| h.payload.artifact_id)
+            .collect();
+        assert_eq!(ids, vec!["stamped".to_string()], "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_point_is_no_longer_a_consolidation_candidate() {
+        // A deprecated artifact entering the sweep can win a cluster on being
+        // newer and hide a live one, leaving the knowledge in neither.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("live", "s1", vec![1.0, 0.0], &[], "note"),
+            point("retired", "s2", vec![0.99, 0.01], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        v.set_lifecycle("retired", ArtifactStatus::Deprecated, None)
+            .await
+            .unwrap();
+
+        assert!(v.near_pairs(10, 5, 0.5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_reports_the_similarity_it_ranked_by() {
+        // The store has to say how close each hit actually was, not only where
+        // it placed. Here they are the same number because this store is dense
+        // only; the Qdrant one fuses ranks and has to fetch the similarity
+        // separately, and both must report it the same way.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("near", "s1", vec![1.0, 0.0, 0.0], &[], "c"),
+            point("far", "s1", vec![0.0, 0.0, 1.0], &[], "c"),
+        ])
+        .await
+        .unwrap();
+
+        let hits = v
+            .search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+            )
+            .await
+            .unwrap();
+
+        let near = hits
+            .iter()
+            .find(|h| h.payload.artifact_id == "near")
+            .unwrap();
+        let far = hits
+            .iter()
+            .find(|h| h.payload.artifact_id == "far")
+            .unwrap();
+        assert!(
+            near.similarity.is_some_and(|s| s > 0.99),
+            "{:?}",
+            near.similarity
+        );
+        assert!(
+            far.similarity.is_some_and(|s| s < 0.01),
+            "{:?}",
+            far.similarity
+        );
     }
 
     #[tokio::test]
@@ -352,6 +668,7 @@ mod tests {
             tags: vec!["linux".into(), "forensics".into()],
             category: None,
             include_superseded: false,
+            include_deprecated: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -375,6 +692,7 @@ mod tests {
             tags: vec![],
             category: Some("concept".into()),
             include_superseded: false,
+            include_deprecated: false,
         };
         let hits = v
             .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &f)

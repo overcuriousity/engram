@@ -9,8 +9,9 @@
 //! `ENGRAM_TEST_QDRANT=http://localhost:16333`.
 
 use engram::config::VectorConfig;
+use engram::store::artifacts::ArtifactStatus;
 use engram::vector::{
-    SearchFilter, VectorPayload, VectorPoint, VectorStore, qdrant::QdrantVectors,
+    LifecycleRow, SearchFilter, VectorPayload, VectorPoint, VectorStore, qdrant::QdrantVectors,
 };
 
 fn cfg(collection: &str) -> VectorConfig {
@@ -21,6 +22,7 @@ fn cfg(collection: &str) -> VectorConfig {
         recency_weight: 0.05,
         recency_half_life_days: 180,
         pinned_boost: 0.15,
+        weak_below: 0.35,
     }
 }
 
@@ -51,7 +53,11 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: 42,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
         },
     }
 }
@@ -97,6 +103,120 @@ async fn upsert_search_and_payload_roundtrip() {
 
 #[tokio::test]
 #[ignore]
+async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
+    // The two exclusions are independent opt-ins, and the deprecated one used
+    // to be unreachable: `set_lifecycle` wrote the legacy `superseded` boolean
+    // for any non-active status, and the filter drops `superseded == true`
+    // whenever superseded results were not asked for. Only a real Qdrant runs
+    // that filter, so this is where it has to be proved.
+    use engram::store::artifacts::ArtifactStatus;
+
+    let v = fresh("engram_it_deprecated", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+        point("b", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("a", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    v.set_lifecycle("b", ArtifactStatus::Superseded, Some("a"))
+        .await
+        .unwrap();
+
+    let ids = |f: SearchFilter| {
+        let v = &v;
+        async move {
+            let mut got: Vec<String> = v
+                .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|h| h.payload.artifact_id)
+                .collect();
+            got.sort();
+            got
+        }
+    };
+
+    assert!(
+        ids(SearchFilter::default()).await.is_empty(),
+        "neither retired artifact belongs in an ordinary search"
+    );
+    assert_eq!(
+        ids(SearchFilter {
+            include_deprecated: true,
+            ..Default::default()
+        })
+        .await,
+        vec!["a".to_string()],
+        "include_deprecated returned nothing, or leaked the superseded one"
+    );
+    assert_eq!(
+        ids(SearchFilter {
+            include_superseded: true,
+            ..Default::default()
+        })
+        .await,
+        vec!["b".to_string()]
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn only_a_verify_clears_the_hit_counter() {
+    // `stale_max_hits` counts retrievals since the last verification, so a
+    // verify restarts the count while the one-shot backfill — which stamps
+    // every artifact — must leave every counter alone.
+    let v = fresh("engram_it_verify", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["linux"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    // A stamp first: `stale_candidates` only considers points that have one,
+    // since a missing stamp means unbackfilled rather than stale.
+    v.set_last_verified_at("a", 1, false).await.unwrap();
+    v.touch(&[engram::vector::Touch::retrieved("a", None)], 1_000)
+        .await
+        .unwrap();
+    v.touch(&[engram::vector::Touch::retrieved("a", None)], 2_000)
+        .await
+        .unwrap();
+
+    let counted = |older: i64| {
+        let v = &v;
+        async move {
+            v.stale_candidates(older, i64::MAX, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|h| h.payload.artifact_id == "a")
+                .and_then(|h| h.payload.hit_count)
+        }
+    };
+    assert_eq!(counted(i64::MAX).await, Some(2));
+
+    v.set_last_verified_at("a", 5_000, false).await.unwrap();
+    assert_eq!(
+        counted(i64::MAX).await,
+        Some(2),
+        "a backfill stamp must not wipe the counter"
+    );
+
+    v.set_last_verified_at("a", 6_000, true).await.unwrap();
+    assert_eq!(counted(i64::MAX).await, Some(0), "verify must restart it");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn filtered_search_uses_payload_indexes() {
     let v = fresh("engram_it_filter", 4).await;
     v.upsert(vec![
@@ -116,6 +236,7 @@ async fn filtered_search_uses_payload_indexes() {
         tags: vec!["forensics".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -128,6 +249,7 @@ async fn filtered_search_uses_payload_indexes() {
         tags: vec![],
         category: Some("concept".into()),
         include_superseded: false,
+        include_deprecated: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -169,6 +291,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
         tags: vec!["linux".into(), "forensics".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -609,6 +732,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         tags: vec!["fresh".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -621,6 +745,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         tags: vec!["old".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     assert!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &stale)
@@ -651,7 +776,11 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             tags: vec![],
             created_at: 42,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
         },
     }
 }
@@ -742,6 +871,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
         tags: vec!["keep".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 10, &f)
@@ -831,6 +961,7 @@ fn now_secs() -> i64 {
 }
 
 fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint {
+    let ts = now_secs() - days_old * 86_400;
     VectorPoint {
         vector: dense,
         sparse: Default::default(),
@@ -841,9 +972,16 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             title: None,
             category: Some("c".into()),
             tags: tags.iter().map(|s| s.to_string()).collect(),
-            created_at: now_secs() - days_old * 86_400,
+            created_at: ts,
             last_seen_at: None,
+            hit_count: None,
             superseded: None,
+            status: None,
+            // Recency decay now reads `last_verified_at`, not `created_at` —
+            // this helper's whole point is controlling how "aged" a point
+            // scores, so it has to set the field the formula actually uses.
+            last_verified_at: Some(ts),
+            superseded_by: None,
         },
     }
 }
@@ -943,6 +1081,7 @@ async fn scoring_leaves_the_filter_alone() {
         tags: vec!["keep".into()],
         category: None,
         include_superseded: false,
+        include_deprecated: false,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -966,9 +1105,12 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
     ])
     .await
     .unwrap();
-    v.touch(&["old_but_just_seen".to_string()], now_secs())
-        .await
-        .unwrap();
+    v.touch(
+        &[engram::vector::Touch::shown("old_but_just_seen")],
+        now_secs(),
+    )
+    .await
+    .unwrap();
 
     let cutoff = now_secs() - month;
     let out = v.resurface(10, cutoff, cutoff).await.unwrap();
@@ -980,7 +1122,7 @@ async fn resurface_finds_the_old_and_unseen_and_skips_everything_else() {
     );
 
     // Showing it counts as seeing it.
-    v.touch(&["forgotten".to_string()], now_secs())
+    v.touch(&[engram::vector::Touch::shown("forgotten")], now_secs())
         .await
         .unwrap();
     assert!(
@@ -1006,7 +1148,9 @@ async fn touching_a_chunk_leaves_the_rest_of_its_payload_alone() {
     .await
     .unwrap();
 
-    v.touch(&["a".to_string()], 12_345).await.unwrap();
+    v.touch(&[engram::vector::Touch::shown("a")], 12_345)
+        .await
+        .unwrap();
 
     let hits = v
         .search(
@@ -1036,7 +1180,9 @@ async fn editing_metadata_does_not_erase_when_a_chunk_was_last_seen() {
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 1, &["old"])])
         .await
         .unwrap();
-    v.touch(&["a".to_string()], 12_345).await.unwrap();
+    v.touch(&[engram::vector::Touch::shown("a")], 12_345)
+        .await
+        .unwrap();
 
     let mut edited = aged("a", vec![], 1, &["fresh"]).payload;
     edited.last_seen_at = None;
@@ -1072,7 +1218,9 @@ async fn re_embedding_does_not_erase_when_a_chunk_was_last_seen() {
     v.upsert(vec![aged("a", vec![1.0, 0.0, 0.0, 0.0], 60, &["t"])])
         .await
         .unwrap();
-    v.touch(&["a".to_string()], now_secs()).await.unwrap();
+    v.touch(&[engram::vector::Touch::shown("a")], now_secs())
+        .await
+        .unwrap();
 
     // The same chunk, embedded again after an edit.
     let mut again = aged("a", vec![0.0, 1.0, 0.0, 0.0], 60, &["t"]);
@@ -1411,6 +1559,120 @@ async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
 
 #[tokio::test]
 #[ignore]
+async fn near_pairs_skips_a_deprecated_point() {
+    // A deprecated artifact in the sweep can win its cluster on being newer and
+    // hide a live one — and `set_superseded_by` would overwrite the operator's
+    // deprecation with `superseded` while doing it.
+    let v = fresh("engram_it_near_pairs_deprecated", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
+
+    v.set_lifecycle("b", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    assert!(
+        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
+        "a deprecated artifact is still a consolidation candidate"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_backfill_stamps_every_point_in_one_request() {
+    // What startup runs when it finds unstamped points, and what the sweep's
+    // drift repair reuses. Both directions of the repair need `non_active_ids`
+    // to report what the payloads actually say.
+    let v = fresh("engram_it_backfill", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
+        point("b", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "procedure"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(v.unstamped_count().await.unwrap(), 2);
+
+    v.apply_lifecycle(&[
+        LifecycleRow {
+            artifact_id: "a".into(),
+            status: ArtifactStatus::Active,
+            superseded_by: None,
+            last_verified_at: 1_000,
+        },
+        LifecycleRow {
+            artifact_id: "b".into(),
+            status: ArtifactStatus::Deprecated,
+            superseded_by: None,
+            last_verified_at: 2_000,
+        },
+    ])
+    .await
+    .unwrap();
+
+    assert_eq!(v.unstamped_count().await.unwrap(), 0);
+    assert_eq!(v.non_active_ids(100).await.unwrap(), vec!["b".to_string()]);
+    // The deprecation reached search, which is the whole point of the pass.
+    let hits = v
+        .search(
+            &[0.0, 1.0, 0.0, 0.0],
+            &Default::default(),
+            5,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h.payload.artifact_id != "b"),
+        "{hits:?}"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
+    // A field this release filters on exists in no collection created before
+    // it, so every filtered search would run as a full scan until someone
+    // thought to `--reindex`.
+    let v = fresh("engram_it_index_backfill", 4).await;
+    let name = "engram_it_index_backfill_v1";
+    let indexed = || async {
+        let info: serde_json::Value = serde_json::from_str(
+            &raw(reqwest::Method::GET, &format!("/collections/{name}"), None).await,
+        )
+        .unwrap();
+        info["result"]["payload_schema"]
+            .as_object()
+            .map(|m| m.contains_key("status"))
+            .unwrap_or(false)
+    };
+    assert!(indexed().await, "a fresh collection is missing the index");
+
+    // What a collection created by an earlier release looks like.
+    raw(
+        reqwest::Method::DELETE,
+        &format!("/collections/{name}/index/status?wait=true"),
+        None,
+    )
+    .await;
+    assert!(!indexed().await, "the index was not actually removed");
+
+    // Re-running startup is what has to put it back.
+    v.ensure_collection(4).await.unwrap();
+    assert!(
+        indexed().await,
+        "an existing collection never got the index this release filters on"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn near_pairs_skips_what_has_already_been_superseded() {
     // Otherwise every sweep re-finds the pair it resolved last time, and the
     // review queue never empties.
@@ -1471,6 +1733,7 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
             5,
             &SearchFilter {
                 include_superseded: true,
+                include_deprecated: false,
                 ..Default::default()
             },
         )
@@ -1533,4 +1796,360 @@ async fn a_re_embed_does_not_revive_a_superseded_point() {
         "the re-embed revived a hidden point"
     );
     v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_deprecated_artifact_is_not_a_neighbour() {
+    // The related pane is a list of live content, and only a real Qdrant runs
+    // the filter that keeps it that way. The legacy `superseded` flag never
+    // catches a deprecation — `lifecycle_payload` writes it false on purpose —
+    // so a `must_not superseded == true` alone let every retired artifact keep
+    // linking itself from the live one it sits next to.
+    let v = fresh("engram_it_neighbours_deprecated", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(
+        v.neighbours("a", 10).await.unwrap().len(),
+        1,
+        "the fixture has no neighbour to lose"
+    );
+
+    v.set_lifecycle("b", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    assert!(
+        v.neighbours("a", 10).await.unwrap().is_empty(),
+        "a retired artifact is still linked from a live one"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn resurface_skips_a_deprecated_point() {
+    // Old and never seen is exactly what a retired artifact looks like, so the
+    // forgotten list used to offer back the very things an operator had just
+    // taken out of search — and stamp them as shown on the way past.
+    let v = fresh("engram_it_resurface_deprecated", 4).await;
+    v.upsert(vec![
+        aged("live", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+        aged("retired", vec![1.0, 0.0, 0.0, 0.0], 60, &[]),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("retired", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    let cutoff = now_secs() - 31 * 86_400;
+    let ids: Vec<String> = v
+        .resurface(10, cutoff, cutoff)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    assert_eq!(ids, vec!["live".to_string()], "got {ids:?}");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn opening_an_artifact_does_not_count_as_a_retrieval() {
+    // `stale_max_hits` is zero by default, so counting the click that opens a
+    // review candidate would disqualify it from the list that offered it. The
+    // stamp that says it was shown still has to land.
+    let v = fresh("engram_it_touch_shown", 4).await;
+    v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
+        .await
+        .unwrap();
+    v.set_last_verified_at("a", 1, false).await.unwrap();
+
+    v.touch(&[engram::vector::Touch::shown("a")], 9_000)
+        .await
+        .unwrap();
+
+    let found = v
+        .stale_candidates(i64::MAX, 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|h| h.payload.artifact_id == "a")
+        .expect("an opened artifact left the stale review list");
+    assert_eq!(found.payload.hit_count, None, "the open counted as a hit");
+    assert_eq!(found.payload.last_seen_at, Some(9_000));
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn lifecycle_of_reads_back_what_each_point_says() {
+    // What the drift repair compares against SQLite. An id with no point is
+    // absent rather than defaulted, because "no point yet" is not drift.
+    let v = fresh("engram_it_lifecycle_of", 4).await;
+    v.upsert(vec![
+        point("plain", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("dep", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("sup", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("dep", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    v.set_lifecycle("sup", ArtifactStatus::Superseded, Some("plain"))
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = ["plain", "dep", "sup", "missing"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let out = v.lifecycle_of(&ids).await.unwrap();
+
+    assert_eq!(out.len(), 3, "a point that does not exist must be absent");
+    assert_eq!(out["plain"].status, ArtifactStatus::Active);
+    assert_eq!(out["dep"].status, ArtifactStatus::Deprecated);
+    assert_eq!(out["dep"].superseded_by, None);
+    assert_eq!(out["sup"].status, ArtifactStatus::Superseded);
+    assert_eq!(out["sup"].superseded_by.as_deref(), Some("plain"));
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn all_artifact_ids_pages_past_one_scroll() {
+    // The backfill subtracts this from SQLite to find points whose row is gone,
+    // so a single unpaged scroll would report most of a large base as orphaned
+    // and delete it. The page size is 1000; this crosses it.
+    let v = fresh("engram_it_all_ids", 4).await;
+    let points: Vec<VectorPoint> = (0..1_100)
+        .map(|i| point(&format!("a{i}"), "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"))
+        .collect();
+    for batch in points.chunks(500) {
+        v.upsert(batch.to_vec()).await.unwrap();
+    }
+
+    let mut ids = v.all_artifact_ids().await.unwrap();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 1_100, "the scroll stopped at its first page");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
+    // It used to be a random sample. Acting on a candidate redirects back to
+    // Ops, which re-drew — so the queue an operator was working reshuffled under
+    // them on every press, and on a base with more candidates than the limit a
+    // given artifact might take many page loads to come back.
+    let v = fresh("engram_it_stale_order", 4).await;
+    let points: Vec<VectorPoint> = (0..40)
+        .map(|i| {
+            point(
+                &format!("a{i:02}"),
+                "s1",
+                vec![1.0, 0.0, 0.0, 0.0],
+                &[],
+                "c",
+            )
+        })
+        .collect();
+    v.upsert(points).await.unwrap();
+    // Stamped in the opposite order to the ids, so "stalest first" and "id
+    // order" cannot be confused for one another.
+    for i in 0..40 {
+        v.set_last_verified_at(&format!("a{i:02}"), 10_000 - i, false)
+            .await
+            .unwrap();
+    }
+
+    let first: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+    let again: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+
+    assert_eq!(first, again, "the queue reshuffled between two renders");
+    let expected: Vec<String> = (0..10).map(|i| format!("a{:02}", 39 - i)).collect();
+    assert_eq!(first, expected, "the queue did not lead with the stalest");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
+    // What `Core::heal_store_drift` restores an artifact from. Unlike
+    // `lifecycle_of` it has to carry the text, title, tags and category, or the
+    // restored row is an empty artifact with the right id.
+    let v = fresh("engram_it_payloads_of", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["t1", "t2"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    v.set_lifecycle("a", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+
+    let found = v
+        .payloads_of(&["a".to_string(), "never-existed".to_string()])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        found.len(),
+        1,
+        "an id with no point must be absent, not empty"
+    );
+    let p = &found["a"];
+    assert_eq!(p.text, "text a");
+    assert_eq!(p.corpus_id, "s1");
+    assert_eq!(p.title.as_deref(), Some("a"));
+    assert_eq!(p.category.as_deref(), Some("procedure"));
+    assert_eq!(p.tags, vec!["t1".to_string(), "t2".to_string()]);
+    assert_eq!(p.created_at, 42);
+    assert_eq!(
+        p.status,
+        Some(ArtifactStatus::Deprecated),
+        "a restored artifact would come back active and searchable"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_point_naming_no_artifact_does_not_keep_the_backfill_running_forever() {
+    // The backfill stamps artifacts, so a point naming none can never be
+    // stamped by it — and startup decides whether to run the backfill by
+    // counting unstamped points. Counting these meant the number never reached
+    // zero and every process start kicked off another full-base rewrite.
+    let v = fresh("engram_it_unkeyed", 4).await;
+    v.upsert(vec![point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c")])
+        .await
+        .unwrap();
+    raw(
+        reqwest::Method::PUT,
+        "/collections/engram_it_unkeyed/points?wait=true",
+        Some(serde_json::json!({
+            "points": [{
+                "id": "11111111-1111-1111-1111-111111111111",
+                "vector": { "dense": [0.0, 0.0, 0.0, 1.0] },
+                "payload": { "something": "else" },
+            }],
+        })),
+    )
+    .await;
+    v.set_last_verified_at("a", 1, false).await.unwrap();
+
+    assert_eq!(
+        v.unstamped_count().await.unwrap(),
+        0,
+        "startup would run the whole backfill again on every single start"
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_unstamped_point_is_never_a_stale_candidate() {
+    // The list says "not confirmed accurate in a while", so a point that was
+    // never stamped at all must not appear: missing means unknown, not stale,
+    // and every point predates the backfill until it runs. A row reading
+    // "last verified: never" is this invariant breaking.
+    let v = fresh("engram_it_stale_unstamped", 4).await;
+    v.upsert(vec![
+        point("stamped", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("unstamped", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+    v.set_last_verified_at("stamped", 1_000, false)
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = v
+        .stale_candidates(i64::MAX, i64::MAX, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.payload.artifact_id)
+        .collect();
+
+    assert_eq!(ids, vec!["stamped".to_string()], "{ids:?}");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn search_reports_a_cosine_alongside_the_fused_rank() {
+    // The ranking score of a hybrid query is a reciprocal-rank fusion value: it
+    // says where a result placed, not how close it was, so the top hit for a
+    // typo scores like the top hit for a perfect question. The similarity is
+    // fetched in the same request by a second, dense-only search, and *that* is
+    // the number that means the same thing from one query to the next.
+    let v = fresh("engram_it_similarity", 4).await;
+    v.upsert(vec![
+        point("near", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("far", "s1", vec![0.0, 0.0, 0.0, 1.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+
+    let hits = v
+        .search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &engram::vector::sparse::encode_query("text near"),
+            10,
+            &SearchFilter::default(),
+        )
+        .await
+        .unwrap();
+
+    let near = hits
+        .iter()
+        .find(|h| h.payload.artifact_id == "near")
+        .expect("the matching point was not returned");
+    let far = hits
+        .iter()
+        .find(|h| h.payload.artifact_id == "far")
+        .expect("the distant point was not returned");
+
+    assert!(
+        near.similarity.is_some_and(|s| s > 0.99),
+        "an identical vector should be maximally similar: {:?}",
+        near.similarity
+    );
+    assert!(
+        far.similarity.is_some_and(|s| s < 0.1),
+        "an orthogonal vector should be maximally dissimilar: {:?}",
+        far.similarity
+    );
+    // The whole reason the similarity is fetched separately: this number is not
+    // one, and comparing it against a threshold would be meaningless.
+    assert!(
+        near.score < 0.9,
+        "the fused rank looked like a similarity: {}",
+        near.score
+    );
 }

@@ -11,10 +11,80 @@
       <div>Something near-identical and newer
         (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
       <div class="chips">
+        {# `to`: these buttons also live on Ops, whose copies send nothing and
+           land back on the queue. Pressed from here, they come back here. #}
         <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Put it back</button>
         </form>
       </div>
+    </div>
+  </div>
+  {% else if d.status.as_str() == "deprecated" %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Deprecated</b>
+      <div>Flagged stale, with no specific replacement. Still stored and still
+        readable; kept out of results only.</div>
+      <div class="chips">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+          <button class="btn btn-sm" type="submit">Reactivate</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Icons rather than labels: controls that belong to the artifact, not
+     sentences competing with it. Each carries its meaning in `title` and
+     `aria-label`, so the tooltip and the screen reader say the same thing.
+
+     Verify and deprecate only apply to an artifact that is actually in results
+     — the flag above already offers the way back for one that is not — but
+     delete is offered whatever the status, because "get rid of this" is a
+     decision that does not depend on whether it is currently hidden. #}
+  <div class="chips">
+    {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+      <button class="btn-icon" type="submit"
+              title="Confirm still accurate" aria-label="Confirm still accurate">
+        {% include "_icon_check.html" %}
+      </button>
+    </form>
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+      <button class="btn-icon" type="submit"
+              title="Deprecate — hide from results, keep the artifact"
+              aria-label="Deprecate: hide from results, keep the artifact">
+        {% include "_icon_hide.html" %}
+      </button>
+    </form>
+    {% endif %}
+    {# Deprecating hides an artifact and keeps it; this removes it from both
+       stores and cannot be undone. Nothing else deletes an artifact — see
+       `Core::heal_store_drift`. #}
+    <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
+          onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
+      <button class="btn-icon btn-icon-danger" type="submit"
+              title="Delete permanently" aria-label="Delete artifact permanently">
+        {% include "_icon_trash.html" %}
+      </button>
+    </form>
+  </div>
+
+  {% if d.corpus_restored %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Source not stored</b>
+      <div>This artifact was restored from the vector store after its row went
+        missing, and the document it came from was not in the database to
+        restore. The source shown beside it is the restored artifacts joined
+        together, not the original — line numbers and the highlighted span mean
+        nothing here, and re-segmenting would not reproduce this artifact.</div>
     </div>
   </div>
   {% endif %}
@@ -74,10 +144,18 @@
       {% endif %}
     </div>
     <div>
+      {# Two links to the source, doing different jobs. The crumb above opens
+         the document plainly; this one opens it scrolled to and highlighting
+         the very lines this artifact was drawn from. An artifact with no
+         recorded span has no lines to jump to, so it gets the plain link.
+
+         "highlighted" rather than a bare range: the panel shows a few lines of
+         context either side, so naming the span alone read as a mismatch
+         against the line numbers actually on screen. #}
       <div class="pane-label">
-        {{ d.slice_label }}
+        {{ d.slice_label }} highlighted
         <span class="spacer"></span>
-        <a href="/ui/corpora/{{ d.corpus_id }}">open full source</a>
+        <a href="{{ d.source_at_lines }}">open source at these lines</a>
       </div>
       <div class="raw">
         <table>

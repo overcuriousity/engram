@@ -4,18 +4,48 @@
 <div class="row" style="margin-bottom:1rem">
   <span class="badge {{ badge }}">{{ status }}</span>
   <span class="spacer"></span>
+  {# Re-segmenting a placeholder would delete the restored artifacts and pay the
+     model to re-derive them from their own text. Nothing to re-segment. #}
+  {% if !restored %}
   <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline">
     <button class="btn btn-sm" type="submit">Re-segment</button>
   </form>
+  {% endif %}
   <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
         onsubmit="return confirm('Delete this corpus and all its artifacts?')">
     <button class="btn btn-sm btn-danger" type="submit">Delete</button>
   </form>
 </div>
 
+{% if restored %}
+<div class="flag" role="status">
+  <div aria-hidden="true">⚠</div>
+  <div>
+    <b>Placeholder source</b>
+    <div>This source was never captured here. Its artifacts were restored from
+      the vector store after their rows went missing, and every artifact needs a
+      source to belong to, so this row was written to hold them. The text below
+      is those artifacts joined together — not the original document.</div>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
-  <div class="card-head"><span class="card-title">Raw corpus</span></div>
-  <pre class="mono" style="white-space:pre-wrap;font-size:0.8125rem;margin:0">{{ raw_text }}</pre>
+  <div class="card-head">
+    <span class="card-title">{% if restored %}Restored artifacts{% else %}Raw corpus{% endif %}</span>
+  </div>
+  {# Every line is anchored, so an artifact's "open at these lines" link lands
+     on the exact lines it was drawn from instead of the top of the document.
+     Same markup and highlighting as the excerpt in the artifact pane. #}
+  <div class="raw" style="max-height:none">
+    <table>
+      {% for l in lines %}
+      <tr id="L{{ l.number }}" class="{% if l.in_span %}in{% endif %}">
+        <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
 </div>
 
 <h3>Artifacts</h3>

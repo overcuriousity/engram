@@ -237,6 +237,15 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Contradiction, 100)
             .await?,
+        // Judge-proposed supersedes awaiting an operator's confirmation. Listed
+        // for the same reason Ops renders them: without this a pair the judge
+        // ruled on simply disappears from `pairs`, and an API consumer never
+        // sees the proposal it left behind.
+        "supersede_proposals": st
+            .core
+            .store
+            .pairs_by_state(PairState::Superseded, 100)
+            .await?,
         "pairs": st
             .core
             .store
@@ -251,6 +260,10 @@ pub struct SearchParams {
     pub limit: Option<usize>,
     pub tags: Option<String>,
     pub category: Option<String>,
+    #[serde(default)]
+    pub include_deprecated: bool,
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 async fn search(
@@ -275,8 +288,26 @@ async fn search(
         category: q.category.filter(|c| !c.is_empty()),
         // An API call is one deliberate question; only the typing UI opts out.
         mark: true,
+        include_deprecated: q.include_deprecated,
+        include_superseded: q.include_superseded,
     };
     Ok(Json(st.core.search(&query).await?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct StaleParams {
+    pub limit: Option<usize>,
+}
+
+/// Active artifacts nobody has confirmed or retrieved in a while — candidates
+/// for an operator to review and deprecate. Read-only: nothing here changes
+/// an artifact, and nothing here feeds search ranking.
+async fn stale(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<StaleParams>,
+) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+    Ok(Json(st.core.stale_candidates(p.limit.unwrap_or(20)).await?))
 }
 
 async fn ask(
@@ -386,7 +417,11 @@ async fn patch_artifact(
                 tags: chunk.tags.clone(),
                 created_at: chunk.created_at,
                 last_seen_at: None,
+                hit_count: None,
                 superseded: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
             })
             .await?;
     }
@@ -398,16 +433,9 @@ async fn delete_artifact(
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
-    st.core.store.get_artifact(&cid).await?;
-    st.core
-        .vectors
-        .delete_artifacts(std::slice::from_ref(&cid))
-        .await?;
-    st.core.store.delete_artifact(&cid).await?;
-    // This artifact may have been the reason another one is hidden, and a
-    // keeper that no longer exists leaves its loser out of search in favour of
-    // nothing. Deleting a whole corpus heals for the same reason.
-    st.core.heal_dangling_supersessions().await?;
+    // Both stores, in the order that survives an interruption — see
+    // `Core::delete_artifact`, which the UI button posts to as well.
+    st.core.delete_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -446,6 +474,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/ask", post(ask))
         .route("/resurface", get(resurface))
         .route("/consolidation", get(consolidation))
+        .route("/consolidation/stale", get(stale))
         .route(
             "/artifacts/{id}",
             get(get_artifact)
@@ -849,6 +878,7 @@ mod patch_tests {
                     tags: vec!["fresh".into()],
                     category: None,
                     include_superseded: false,
+                    include_deprecated: false,
                 },
             )
             .await
