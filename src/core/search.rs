@@ -2,6 +2,7 @@ use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use crate::vector::SearchFilter;
+use std::collections::HashMap;
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
@@ -105,6 +106,19 @@ fn cap_per_corpus(
     kept
 }
 
+/// Each hit's stored retrieval count, keyed by artifact id. Absent means the
+/// payload carried no `hit_count`, which reads as zero.
+fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
+    hits.iter()
+        .map(|h| {
+            (
+                h.payload.artifact_id.clone(),
+                h.payload.hit_count.unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
 /// Chunks older than this are candidates for resurfacing, and a chunk shown
 /// within this window counts as still remembered.
 pub const FORGOTTEN_AFTER_DAYS: i64 = 30;
@@ -117,15 +131,25 @@ impl Core {
     /// get slower, or fail, because a bookkeeping write did. Tracked rather
     /// than merely spawned, so shutdown drains it instead of dropping it — a
     /// lost stamp makes a chunk look forgotten when it is not.
-    fn mark_seen(&self, results: &[SearchResult]) {
+    /// `hit_counts` carries what the payloads the caller just read said, keyed
+    /// by artifact id. `touch` needs the current count to increment it, and
+    /// passing along the copy already in hand is what keeps a marked search
+    /// from costing an extra read of every hit it just fetched.
+    fn mark_seen(&self, results: &[SearchResult], hit_counts: &HashMap<String, i64>) {
         if results.is_empty() {
             return;
         }
-        let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+        let targets: Vec<crate::vector::Touch> = results
+            .iter()
+            .map(|r| crate::vector::Touch {
+                hit_count: hit_counts.get(&r.artifact_id).copied(),
+                artifact_id: r.artifact_id.clone(),
+            })
+            .collect();
         let vectors = self.vectors.clone();
         let now = now_secs();
         self.background.spawn(async move {
-            if let Err(e) = vectors.touch(&ids, now).await {
+            if let Err(e) = vectors.touch(&targets, now).await {
                 tracing::warn!(error = %e, "could not record which chunks were shown");
             }
         });
@@ -135,11 +159,13 @@ impl Core {
     /// which is why the detail pane records it and an incremental search does
     /// not.
     pub fn mark_artifact_seen(&self, artifact_id: &str) {
-        let ids = vec![artifact_id.to_string()];
+        // No payload in hand here — only an id — so the store reads the current
+        // count itself, for this one point.
+        let targets = vec![crate::vector::Touch::unknown(artifact_id)];
         let vectors = self.vectors.clone();
         let now = now_secs();
         self.background.spawn(async move {
-            if let Err(e) = vectors.touch(&ids, now).await {
+            if let Err(e) = vectors.touch(&targets, now).await {
                 tracing::warn!(error = %e, "could not record that a chunk was opened");
             }
         });
@@ -156,6 +182,7 @@ impl Core {
             .vectors
             .resurface(limit.clamp(1, MAX_LIMIT), cutoff, cutoff)
             .await?;
+        let hit_counts = counts_of(&hits);
         let results: Vec<SearchResult> = hits
             .into_iter()
             .map(|h| SearchResult {
@@ -172,7 +199,7 @@ impl Core {
             })
             .collect();
         // Surfacing counts as seeing, or the same chunks come back tomorrow.
-        self.mark_seen(&results);
+        self.mark_seen(&results, &hit_counts);
         Ok(results)
     }
 
@@ -305,6 +332,9 @@ impl Core {
             Some(max) => cap_per_corpus(hits, max, candidates),
             None => hits,
         };
+        // Taken before the payloads are consumed: `mark_seen` needs each hit's
+        // stored `hit_count` to increment it without reading it back.
+        let hit_counts = counts_of(&hits);
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
@@ -345,7 +375,7 @@ impl Core {
 
         results.truncate(limit);
         if query.mark {
-            self.mark_seen(&results);
+            self.mark_seen(&results, &hit_counts);
         }
         tracing::info!(
             q = %query.q,

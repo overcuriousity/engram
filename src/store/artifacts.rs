@@ -469,6 +469,20 @@ impl Store {
         )
     }
 
+    /// Artifacts SQLite does not consider active, newest first. What the
+    /// sweep's drift repair compares the vector store's own idea of hidden
+    /// against.
+    pub async fn list_non_active_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE status != 'active' OR superseded_by IS NOT NULL
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
     /// Every artifact id, for the one-shot Qdrant lifecycle backfill.
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT id FROM artifacts")

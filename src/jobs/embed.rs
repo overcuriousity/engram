@@ -883,7 +883,10 @@ mod tests {
         let core = test_core().await;
         let (_src, ids) = seed(&core, &["text"]).await;
         run(&core, &ids[0]).await.unwrap();
-        core.vectors.touch(&ids[0..1], 1_700_000_000).await.unwrap();
+        core.vectors
+            .touch(&[crate::vector::Touch::unknown(&ids[0])], 1_700_000_000)
+            .await
+            .unwrap();
 
         core.store
             .update_artifact_text(&ids[0], "edited text")

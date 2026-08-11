@@ -11,7 +11,10 @@
 //! background rebuild followed by an atomic swap, rather than an outage.
 
 use super::sparse::SparseVector;
-use super::{FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore};
+use super::{
+    FacetCount, Facets, LifecycleRow, SearchFilter, SearchHit, Touch, VectorPayload, VectorPoint,
+    VectorStore,
+};
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
@@ -284,9 +287,15 @@ fn sparse_of_payload(payload: &Value) -> SparseVector {
 /// formula defaults`, not just its own scoring. Every point engram writes
 /// carries the key, but `--reindex` copies payloads verbatim from whatever was
 /// in the source collection, so one hand-written point would otherwise take
-/// search down. Treating a missing stamp as the epoch scores it as maximally
-/// stale, which is the honest reading of "we do not know when this was last
-/// confirmed accurate".
+/// search down.
+///
+/// The default is `now`, not the epoch. A missing stamp means unknown, not
+/// stale, and the difference is the whole collection on the day the lifecycle
+/// migration lands: every pre-existing point lacks the key until the backfill
+/// has run, and defaulting to the epoch would collapse the recency term to
+/// zero for all of them at once — a base-wide reranking nobody asked for.
+/// Defaulting to `now` leaves the term neutral (`exp_decay` returns 1.0), so an
+/// unstamped point ranks exactly as it did before this field existed.
 ///
 /// Decays against `last_verified_at` rather than `created_at`, deliberately:
 /// an artifact confirmed correct last week should outrank one merely written
@@ -312,7 +321,7 @@ fn scoring_formula(now: i64, half_life_secs: u64, recency: f32, pinned: f32) -> 
     }
     json!({
         "formula": { "sum": terms },
-        "defaults": { "last_verified_at": 0 },
+        "defaults": { "last_verified_at": now },
     })
 }
 
@@ -543,8 +552,21 @@ impl QdrantVectors {
             tracing::info!(collection = %name, "collection already existed; adopting it");
         }
 
-        // Payload indexes: without these, filtered search degrades to a
-        // full scan of the collection.
+        self.ensure_payload_indexes(name).await?;
+        tracing::info!(collection = %name, dim, "created qdrant collection");
+        Ok(())
+    }
+
+    /// Create every payload index this codebase filters on, tolerating ones
+    /// that already exist (Qdrant treats an identical index as a no-op).
+    ///
+    /// Called on every path that adopts a collection, not only on the one that
+    /// creates it. A field added to this list by a later release exists in no
+    /// collection created before it — and `build_filter` starts emitting a
+    /// clause on it immediately — so a deployment that only ever ran the
+    /// creation path once would run every filtered search as a full scan until
+    /// someone thought to `--reindex`.
+    async fn ensure_payload_indexes(&self, name: &str) -> Result<()> {
         for (field, schema) in [
             ("tags", "keyword"),
             ("category", "keyword"),
@@ -564,7 +586,6 @@ impl QdrantVectors {
                 .await
                 .map_err(|e| Error::Vector(format!("payload index on {field}: {e}")))?;
         }
-        tracing::info!(collection = %name, dim, "created qdrant collection");
         Ok(())
     }
 
@@ -1017,6 +1038,9 @@ impl VectorStore for QdrantVectors {
             if existing as usize != dim {
                 return Err(dimension_mismatch(&current, dim, existing as usize));
             }
+            // An already-serving collection predates any index this release
+            // added, so this is the path that matters most.
+            self.ensure_payload_indexes(&current).await?;
             return Ok(());
         }
 
@@ -1041,6 +1065,7 @@ impl VectorStore for QdrantVectors {
                  which means an earlier rebuild did not finish"
             );
             self.claim_alias(&orphan, dim).await?;
+            self.ensure_payload_indexes(&orphan).await?;
             return Ok(());
         }
 
@@ -1167,6 +1192,88 @@ impl VectorStore for QdrantVectors {
         Ok(())
     }
 
+    async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // One request per batch, not two writes per artifact. The backfill runs
+        // over every artifact in the base, and at two round trips each — both
+        // with `wait=true` — it was slow enough that an operator would be
+        // tempted to skip it, which is the failure this batching is really
+        // preventing.
+        //
+        // `last_verified_at` is merged without touching `hit_count`: this pass
+        // stamps artifacts it knows nothing about, and zeroing every retrieval
+        // counter in the base is not a migration step. See `Core::verify` for
+        // the case that does reset it.
+        let ops: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let mut payload = lifecycle_payload(r.status, r.superseded_by.as_deref());
+                payload["last_verified_at"] = json!(r.last_verified_at);
+                json!({
+                    "set_payload": {
+                        "payload": payload,
+                        "points": [ point_uuid(&r.artifact_id) ],
+                    }
+                })
+            })
+            .collect();
+        let _: Value = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/batch?wait=true", self.alias),
+                Some(json!({ "operations": ops })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn unstamped_count(&self) -> Result<u64> {
+        let res: CountResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/count", self.alias),
+                Some(json!({
+                    "exact": true,
+                    "filter": { "must": [ { "is_empty": { "key": "last_verified_at" } } ] },
+                })),
+            )
+            .await?;
+        Ok(res.count)
+    }
+
+    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
+        // `point_uuid` is one-way, so the artifact id has to come out of the
+        // payload rather than the point id.
+        let page: ScrollResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/scroll", self.alias),
+                Some(json!({
+                    "filter": { "should": [
+                        { "key": "status", "match": { "value": "deprecated" } },
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "superseded", "match": { "value": true } },
+                    ] },
+                    "limit": limit,
+                    "with_payload": ["artifact_id"],
+                    "with_vector": false,
+                })),
+            )
+            .await?;
+        Ok(page
+            .points
+            .iter()
+            .filter_map(|p| {
+                p.payload
+                    .get("artifact_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -1186,10 +1293,11 @@ impl VectorStore for QdrantVectors {
                         { "key": "superseded", "match": { "value": true } },
                       ],
                       "must": [
-                        { "should": [
-                            { "key": "last_verified_at", "range": { "lt": older_than } },
-                            { "is_empty": { "key": "last_verified_at" } },
-                        ] },
+                        // Present *and* old. A point with no stamp is not a
+                        // stale candidate, it is an unbackfilled one — see the
+                        // trait doc. `hit_count` below is the opposite case:
+                        // absent legitimately means never retrieved.
+                        { "key": "last_verified_at", "range": { "lt": older_than } },
                         { "should": [
                             { "key": "hit_count", "range": { "lte": max_hits } },
                             { "is_empty": { "key": "hit_count" } },
@@ -1284,37 +1392,57 @@ impl VectorStore for QdrantVectors {
         Ok(hits_of(res))
     }
 
-    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
-        if artifact_ids.is_empty() {
+    async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {
+        if targets.is_empty() {
             return Ok(());
         }
-        let ids: Vec<String> = artifact_ids.iter().map(|c| point_uuid(c)).collect();
-        // `last_seen_at` is the same value for the whole batch, so it stays
-        // one uniform merge write. `hit_count` is not — each point's next
-        // value depends on its own current one — so it costs one extra read
-        // first. Both stay off the request path (the caller backgrounds this
-        // call), and this still waits: the shutdown drain exists to keep
-        // these stamps, and an acknowledged-but-unapplied write is exactly the
-        // loss it is meant to prevent. A count missed under a rare concurrent
-        // double-touch is an acceptable soft-counter race — it only ever feeds
-        // the one-way stale-candidate query, never live scoring.
-        let found: Vec<ScrolledPoint> = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points", self.alias),
-                Some(json!({ "ids": ids, "with_payload": ["hit_count"], "with_vector": false })),
-            )
-            .await?;
+        // `last_seen_at` is the same value for the whole batch. `hit_count` is
+        // not — each point's next value depends on its own current one, and
+        // Qdrant has no atomic increment — so the current value has to come
+        // from somewhere. A marked search has just read every hit's payload and
+        // passes the counts in, which is the common case and costs no round
+        // trip; only the callers that know nothing but an id (opening one
+        // artifact) pay for a read, and only for their own points.
+        //
+        // Both stay off the request path (the caller backgrounds this call),
+        // and this still waits: the shutdown drain exists to keep these stamps,
+        // and an acknowledged-but-unapplied write is exactly the loss it is
+        // meant to prevent. A count missed under a rare concurrent double-touch
+        // is an acceptable soft-counter race — it only ever feeds the one-way
+        // stale-candidate query, never live scoring.
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for p in found {
-            if let Some(uuid) = p.id.as_str() {
-                counts.insert(
-                    uuid.to_string(),
-                    p.payload
-                        .get("hit_count")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0),
-                );
+        let mut ids: Vec<String> = Vec::with_capacity(targets.len());
+        let mut unknown: Vec<String> = Vec::new();
+        for t in targets {
+            let uuid = point_uuid(&t.artifact_id);
+            match t.hit_count {
+                Some(n) => {
+                    counts.insert(uuid.clone(), n);
+                }
+                None => unknown.push(uuid.clone()),
+            }
+            ids.push(uuid);
+        }
+        if !unknown.is_empty() {
+            let found: Vec<ScrolledPoint> = self
+                .call(
+                    Method::POST,
+                    &format!("/collections/{}/points", self.alias),
+                    Some(
+                        json!({ "ids": unknown, "with_payload": ["hit_count"], "with_vector": false }),
+                    ),
+                )
+                .await?;
+            for p in found {
+                if let Some(uuid) = p.id.as_str() {
+                    counts.insert(
+                        uuid.to_string(),
+                        p.payload
+                            .get("hit_count")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                    );
+                }
             }
         }
         let ops: Vec<Value> = ids
@@ -1457,8 +1585,14 @@ impl VectorStore for QdrantVectors {
         per_point: usize,
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
-        // Superseded points are excluded at the source. Including them would
-        // hand the sweep pairs it has already resolved, on every single run.
+        // Anything not active is excluded at the source. Superseded points
+        // would hand the sweep pairs it has already resolved, on every single
+        // run. Deprecated points are worse than redundant: the sweep's `keeper`
+        // picks the newest member of a cluster, so a newer artifact an operator
+        // retired would *win* against a live older one and hide it — leaving
+        // one artifact deprecated, the other superseded, and the knowledge in
+        // neither reachable by search. `supersede` would also overwrite the
+        // operator's `deprecated` status with `superseded` on the way past.
         let res: MatrixPairs = self
             .call(
                 Method::POST,
@@ -1468,6 +1602,8 @@ impl VectorStore for QdrantVectors {
                     "limit": per_point,
                     "using": DENSE,
                     "filter": { "must_not": [
+                        { "key": "status", "match": { "value": "superseded" } },
+                        { "key": "status", "match": { "value": "deprecated" } },
                         { "key": "superseded", "match": { "value": true } }
                     ] },
                 })),
@@ -1808,11 +1944,14 @@ mod tests {
     #[test]
     fn the_scoring_formula_survives_a_point_without_a_last_verified_at() {
         // Qdrant fails the entire query, not just the offending point, when a
-        // formula reads a key the payload does not have.
+        // formula reads a key the payload does not have. The default is `now`,
+        // not the epoch: every point predates the lifecycle backfill until it
+        // runs, and defaulting to the epoch would zero the recency term for the
+        // whole collection at once. `now` leaves it neutral.
         let f = scoring_formula(1_700_000_000, 86_400, 0.05, 0.15);
         assert_eq!(
-            f["defaults"]["last_verified_at"], 0,
-            "a payload missing last_verified_at would take search down: {f}"
+            f["defaults"]["last_verified_at"], 1_700_000_000,
+            "an unstamped payload must score as unknown, not as maximally stale: {f}"
         );
     }
 

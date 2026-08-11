@@ -856,13 +856,38 @@ async fn resolve_near_dupe_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
+/// Where a lifecycle button should land afterwards.
+///
+/// The same four actions are offered from two places: the Ops review lists,
+/// where the queue is the thing being worked through, and an artifact's own
+/// page, where being thrown onto Ops for pressing "Confirm still accurate"
+/// loses the reader's place. The page that rendered the button says where it
+/// leads; Ops sends nothing and keeps the default.
+#[derive(serde::Deserialize, Default)]
+struct ReturnTo {
+    to: Option<String>,
+}
+
+impl ReturnTo {
+    /// Only a path inside this UI. A form field is user input, and a redirect
+    /// that will follow anything it is handed is an open redirect — worth
+    /// nothing to the operator and a phishing hop to everyone else.
+    fn path(&self) -> &str {
+        match self.to.as_deref() {
+            Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => p,
+            _ => "/ui/ops",
+        }
+    }
+}
+
 async fn unsupersede_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.unsupersede(&aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn dismiss_pair_ui(
@@ -911,27 +936,30 @@ async fn deprecate_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.deprecate(&aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn reactivate_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.reactivate(&aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn verify_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(aid): Path<String>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.verify(&aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 async fn ask_page(_id: Identity) -> impl IntoResponse {
@@ -1471,6 +1499,7 @@ mod tests {
             .split(r#"hx-get="/ui/artifacts/"#)
             .nth(1)
             .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
             .expect("no result to open")
             .to_string();
 
@@ -1487,6 +1516,87 @@ mod tests {
             page.contains(r#"hx-target="closest [data-terms]""#),
             "a neighbour must swap the detail it is listed under"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_button_comes_back_to_the_page_that_offered_it() {
+        // These four actions are rendered both on Ops and on an artifact's own
+        // page. Always redirecting to Ops threw a reader who pressed "Confirm
+        // still accurate" while reading an artifact onto a queue they were not
+        // working through.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{id}/verify"),
+                &cookie,
+                &format!("to=/ui/artifacts/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().get("location").unwrap(),
+            format!("/ui/artifacts/{id}").as_str()
+        );
+
+        // Ops sends no `to` and keeps the default.
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{id}/deprecate"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.headers().get("location").unwrap(), "/ui/ops");
+    }
+
+    #[tokio::test]
+    async fn a_return_path_pointing_off_this_ui_is_ignored() {
+        // The field is user input, and a redirect that follows anything handed
+        // to it is an open redirect: worth nothing here, a phishing hop
+        // everywhere else.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string();
+
+        for hostile in ["https://evil.example/x", "//evil.example/x", "/ui//evil"] {
+            let res = app
+                .clone()
+                .oneshot(form(
+                    &format!("/ui/ops/artifacts/{id}/verify"),
+                    &cookie,
+                    &format!("to={}", urlencoding_of(hostile)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.headers().get("location").unwrap(),
+                "/ui/ops",
+                "followed {hostile}"
+            );
+        }
+    }
+
+    /// Percent-encoding for the handful of characters these test bodies carry.
+    fn urlencoding_of(s: &str) -> String {
+        s.replace(':', "%3A").replace('/', "%2F")
     }
 
     #[tokio::test]

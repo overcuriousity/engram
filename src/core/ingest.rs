@@ -189,6 +189,21 @@ impl Core {
     /// on, since the artifact is already listed on Ops with its `superseded_by`
     /// set, even if the search-side flag has not caught up yet.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        // Neither side may be retired. `set_superseded_by` writes
+        // `status = 'superseded'` unconditionally, so superseding an artifact
+        // an operator deprecated would silently overwrite that decision with
+        // one nothing distinguishes from the sweep's own work. And a deprecated
+        // *winner* is worse: the loser gets hidden in favour of an artifact
+        // that is itself out of results, so the answer disappears entirely.
+        for (id, role) in [(loser_id, "loser"), (winner_id, "winner")] {
+            let status = self.store.get_artifact(id).await?.status;
+            if status != ArtifactStatus::Active {
+                return Err(Error::Validation(format!(
+                    "cannot supersede: {role} {id} is {}",
+                    status.as_str()
+                )));
+            }
+        }
         self.store
             .set_superseded_by(loser_id, Some(winner_id))
             .await?;
@@ -202,6 +217,13 @@ impl Core {
     /// Flag an artifact stale with no specific replacement. Unlike `supersede`,
     /// there is no winning artifact on the other end — an operator judged the
     /// content itself no longer current.
+    ///
+    /// Row before payload. SQLite is the source of truth, so the state a
+    /// partial failure leaves — row deprecated, still in results — is the one
+    /// the sweep's drift repair (`jobs::consolidate::repair_lifecycle_drift`)
+    /// finishes by pushing the row's status into the payload. Writing the
+    /// payload first would instead hide the artifact behind a row that still
+    /// says active, and the repair, reading the row, would undo it.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
         self.store
             .set_artifact_status(id, ArtifactStatus::Deprecated)
@@ -221,15 +243,24 @@ impl Core {
     /// payload no longer does, so Ops would keep listing it as hidden and the
     /// next consolidation sweep would re-apply `Superseded` to the vector
     /// store — undoing the operator without saying so.
+    ///
+    /// Payload before row, as `unsupersede` does it and for the same reason:
+    /// this direction *reveals*, so the intermediate state has to be the
+    /// visible one. Clearing the row first would leave the artifact hidden by a
+    /// payload nothing on the page explains — off the Ops deprecated list,
+    /// because the row now says active, and so out of reach of the very button
+    /// that would fix it. With the payload cleared first the artifact is back
+    /// in results immediately, still listed on Ops as deprecated, and one more
+    /// press finishes the job.
     pub async fn reactivate(&self, id: &str) -> Result<()> {
         if self.store.get_artifact(id).await?.superseded_by.is_some() {
             return self.unsupersede(id).await;
         }
-        self.store
-            .set_artifact_status(id, ArtifactStatus::Active)
-            .await?;
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Active, None)
+            .await?;
+        self.store
+            .set_artifact_status(id, ArtifactStatus::Active)
             .await?;
         tracing::info!(artifact_id = id, "reactivated an artifact");
         Ok(())
@@ -250,27 +281,43 @@ impl Core {
         Ok(())
     }
 
-    /// One-shot: push every artifact's SQLite-side lifecycle state (source of
-    /// truth) into Qdrant. Run once after deploying the lifecycle migration —
-    /// existing points have no `status`/`last_verified_at` until this runs,
-    /// which every filter safely treats as active in the meantime, just not
-    /// yet filterable as deprecated.
+    /// Push every artifact's SQLite-side lifecycle state (source of truth) into
+    /// the vector store. Runs automatically at startup when any point is
+    /// missing its stamp, and on demand via `--backfill-lifecycle` — existing
+    /// points have no `status`/`last_verified_at` until it does, which every
+    /// filter safely treats as active in the meantime, just not yet filterable
+    /// as deprecated.
+    ///
+    /// Batched, and restartable by construction: the work is idempotent and
+    /// driven by a list SQLite regenerates, so a run that dies halfway is
+    /// resumed simply by running it again. One artifact that cannot be read is
+    /// logged and skipped rather than abandoning every artifact after it —
+    /// a single missing row must not be what keeps a base unbackfilled.
     pub async fn backfill_lifecycle(&self) -> Result<usize> {
+        const BATCH: usize = 256;
+        let ids = self.store.list_all_artifact_ids().await?;
+        let total = ids.len();
         let mut n = 0;
-        for id in self.store.list_all_artifact_ids().await? {
-            let c = self.store.get_artifact(&id).await?;
-            self.vectors
-                .set_lifecycle(&id, c.status, c.superseded_by.as_deref())
-                .await?;
-            self.vectors
-                // `false`: this pass touches every artifact, and a verify-style
-                // counter reset here would wipe every retrieval count in the
-                // base.
-                .set_last_verified_at(&id, c.last_verified_at.unwrap_or(c.created_at), false)
-                .await?;
-            n += 1;
+        for chunk in ids.chunks(BATCH) {
+            let mut rows = Vec::with_capacity(chunk.len());
+            for id in chunk {
+                match self.store.get_artifact(id).await {
+                    Ok(c) => rows.push(crate::vector::LifecycleRow {
+                        artifact_id: c.id.clone(),
+                        status: c.status,
+                        superseded_by: c.superseded_by.clone(),
+                        last_verified_at: c.last_verified_at.unwrap_or(c.created_at),
+                    }),
+                    Err(e) => {
+                        tracing::warn!(artifact_id = %id, error = %e, "skipped in the lifecycle backfill");
+                    }
+                }
+            }
+            self.vectors.apply_lifecycle(&rows).await?;
+            n += rows.len();
+            tracing::info!(done = n, total, "lifecycle backfill progress");
         }
-        tracing::info!(n, "backfilled lifecycle fields into qdrant");
+        tracing::info!(n, "backfilled lifecycle fields into the vector store");
         Ok(n)
     }
 

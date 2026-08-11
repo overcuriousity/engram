@@ -11,7 +11,10 @@
       <div>Something near-identical and newer
         (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
       <div class="chips">
+        {# `to`: these buttons also live on Ops, whose copies send nothing and
+           land back on the queue. Pressed from here, they come back here. #}
         <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Put it back</button>
         </form>
       </div>
@@ -26,6 +29,7 @@
         readable; kept out of results only.</div>
       <div class="chips">
         <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Reactivate</button>
         </form>
       </div>
@@ -34,9 +38,11 @@
   {% else %}
   <div class="chips">
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn btn-sm" type="submit">Confirm still accurate</button>
     </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn btn-sm" type="submit">Deprecate</button>
     </form>
   </div>

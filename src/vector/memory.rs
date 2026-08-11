@@ -169,6 +169,39 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
+    async fn apply_lifecycle(&self, rows: &[super::LifecycleRow]) -> Result<()> {
+        let mut w = self.points.write().unwrap();
+        for r in rows {
+            if let Some(p) = w.get_mut(&r.artifact_id) {
+                p.payload.status = Some(r.status);
+                p.payload.superseded = Some(r.status == ArtifactStatus::Superseded);
+                p.payload.superseded_by = r.superseded_by.clone();
+                p.payload.last_verified_at = Some(r.last_verified_at);
+            }
+        }
+        Ok(())
+    }
+
+    async fn unstamped_count(&self) -> Result<u64> {
+        let r = self.points.read().unwrap();
+        Ok(r.values()
+            .filter(|p| p.payload.last_verified_at.is_none())
+            .count() as u64)
+    }
+
+    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
+        let r = self.points.read().unwrap();
+        let mut out: Vec<String> = r
+            .values()
+            .filter(|p| status_of(&p.payload) != ArtifactStatus::Active)
+            .map(|p| p.payload.artifact_id.clone())
+            .collect();
+        // Deterministic, so a test never depends on HashMap iteration order.
+        out.sort();
+        out.truncate(limit);
+        Ok(out)
+    }
+
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -179,7 +212,10 @@ impl VectorStore for MemoryVectors {
         Ok(r.values()
             .filter(|p| {
                 status_of(&p.payload) == ArtifactStatus::Active
-                    && p.payload.last_verified_at.unwrap_or(0) < older_than
+                    // Present and old. An unstamped point is unbackfilled, not
+                    // stale — see the trait doc. A missing `hit_count` is the
+                    // other way round: never retrieved is what it means.
+                    && p.payload.last_verified_at.is_some_and(|v| v < older_than)
                     && p.payload.hit_count.unwrap_or(0) <= max_hits
             })
             .take(limit)
@@ -190,10 +226,14 @@ impl VectorStore for MemoryVectors {
             .collect())
     }
 
-    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()> {
+    async fn touch(&self, targets: &[super::Touch], seen_at: i64) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        for id in artifact_ids {
-            if let Some(p) = w.get_mut(id) {
+        for t in targets {
+            // The count the caller passed is ignored here on purpose: this
+            // store holds the authoritative value already, and reading it is
+            // free. The Qdrant path uses the caller's copy to skip a round
+            // trip, which is a network optimisation, not a semantic one.
+            if let Some(p) = w.get_mut(&t.artifact_id) {
                 p.payload.last_seen_at = Some(seen_at);
                 p.payload.hit_count = Some(p.payload.hit_count.unwrap_or(0) + 1);
             }
@@ -308,9 +348,12 @@ impl VectorStore for MemoryVectors {
         min_score: f32,
     ) -> Result<Vec<super::NearPair>> {
         let r = self.points.read().unwrap();
+        // Active only, matching the Qdrant backend: a deprecated artifact must
+        // not enter the sweep, where being newer would let it win a cluster and
+        // hide a live one.
         let live: Vec<&VectorPoint> = r
             .values()
-            .filter(|p| p.payload.superseded != Some(true))
+            .filter(|p| status_of(&p.payload) == ArtifactStatus::Active)
             .take(sample)
             .collect();
 
@@ -387,6 +430,49 @@ mod tests {
                 superseded_by: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_point_with_no_stamp_is_unknown_rather_than_stale() {
+        // Every point predates the lifecycle backfill until it runs. Reading a
+        // missing `last_verified_at` as the epoch made the whole base a
+        // deprecation candidate and asked an operator to act on it.
+        let v = MemoryVectors::new();
+        let mut stamped = point("stamped", "s1", vec![1.0], &[], "note");
+        stamped.payload.last_verified_at = Some(10);
+        v.upsert(vec![
+            point("unstamped", "s1", vec![1.0], &[], "note"),
+            stamped,
+        ])
+        .await
+        .unwrap();
+
+        let ids: Vec<String> = v
+            .stale_candidates(i64::MAX, i64::MAX, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| h.payload.artifact_id)
+            .collect();
+        assert_eq!(ids, vec!["stamped".to_string()], "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_point_is_no_longer_a_consolidation_candidate() {
+        // A deprecated artifact entering the sweep can win a cluster on being
+        // newer and hide a live one, leaving the knowledge in neither.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("live", "s1", vec![1.0, 0.0], &[], "note"),
+            point("retired", "s2", vec![0.99, 0.01], &[], "note"),
+        ])
+        .await
+        .unwrap();
+        v.set_lifecycle("retired", ArtifactStatus::Deprecated, None)
+            .await
+            .unwrap();
+
+        assert!(v.near_pairs(10, 5, 0.5).await.unwrap().is_empty());
     }
 
     #[tokio::test]

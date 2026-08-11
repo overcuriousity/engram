@@ -36,10 +36,10 @@ struct Args {
     #[arg(long)]
     recompute_coverage: bool,
     /// Push every artifact's SQLite-side lifecycle state (status,
-    /// last_verified_at, superseded_by) into Qdrant, then exit. Run once after
-    /// deploying the lifecycle migration: existing points have none of these
-    /// fields until this runs, which every filter treats as active in the
-    /// meantime, just not yet filterable as deprecated.
+    /// last_verified_at, superseded_by) into Qdrant, then exit. Rarely needed:
+    /// startup runs the same pass in the background whenever it finds points
+    /// without the fields. This is the way to run it in the foreground and see
+    /// it finish.
     #[arg(long)]
     backfill_lifecycle: bool,
 }
@@ -84,6 +84,36 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     let purged = core.store.purge_expired_sessions().await?;
     if purged > 0 {
         tracing::info!(purged, "removed expired sessions");
+    }
+
+    // Points written before the lifecycle migration carry no `status` or
+    // `last_verified_at`. Every filter treats that as active, and ranking
+    // treats a missing stamp as neutral, so nothing is broken in the meantime —
+    // but until the backfill runs, no deprecation is filterable and no decay
+    // applies, and an operator who never reads the release notes never learns
+    // that. So it runs itself, once, when there is anything to do.
+    //
+    // In the background: it is a write over every artifact, and a base large
+    // enough for that to take a while is exactly the one that must not have its
+    // startup blocked by it. Two processes starting together may both run it;
+    // the writes are idempotent and both compute the same values.
+    match core.vectors.unstamped_count().await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(
+                unstamped = n,
+                "backfilling lifecycle fields in the background"
+            );
+            let worker = core.clone();
+            core.background.spawn(async move {
+                if let Err(e) = worker.backfill_lifecycle().await {
+                    tracing::warn!(error = %e, "lifecycle backfill did not finish; it will be retried at the next start");
+                }
+            });
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not tell whether the lifecycle backfill is needed")
+        }
     }
 
     engram::infer::openai::probe(

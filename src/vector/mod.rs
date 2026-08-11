@@ -124,6 +124,41 @@ pub struct NearPair {
     pub score: f32,
 }
 
+/// One artifact to stamp as shown, and the `hit_count` the caller already read
+/// for it.
+///
+/// `hit_count` is `Some` when the caller has just seen the stored payload — a
+/// marked search holds every hit's count already, so passing it spares `touch`
+/// a read round trip it would otherwise pay on every query. `None` means the
+/// caller does not know (opening one artifact by id), and the store reads the
+/// current value itself.
+#[derive(Debug, Clone)]
+pub struct Touch {
+    pub artifact_id: String,
+    pub hit_count: Option<i64>,
+}
+
+impl Touch {
+    pub fn unknown(artifact_id: &str) -> Touch {
+        Touch {
+            artifact_id: artifact_id.to_string(),
+            hit_count: None,
+        }
+    }
+}
+
+/// One artifact's SQLite-side lifecycle state, as the backfill pushes it into
+/// the vector store. `last_verified_at` is never optional here: the backfill's
+/// whole job is to give every point the stamp that ranking decays against, and
+/// an artifact never explicitly verified falls back to its `created_at`.
+#[derive(Debug, Clone)]
+pub struct LifecycleRow {
+    pub artifact_id: String,
+    pub status: ArtifactStatus,
+    pub superseded_by: Option<String>,
+    pub last_verified_at: i64,
+}
+
 impl NearPair {
     pub fn new(x: &str, y: &str, score: f32) -> NearPair {
         let (a, b) = if x <= y { (x, y) } else { (y, x) };
@@ -176,6 +211,13 @@ pub trait VectorStore: Send + Sync {
     /// most `max_hits`) — candidates for an operator to review and deprecate.
     /// A one-way signal: it can only surface a candidate, never rank anything
     /// higher, so it cannot create a popularity feedback loop.
+    ///
+    /// A point with no `last_verified_at` at all is *not* a candidate. Missing
+    /// means unknown, not stale: every point predates the backfill until it
+    /// runs, and treating those as maximally stale would fill the review list
+    /// with an arbitrary sample of the whole base and invite an operator to
+    /// deprecate it. A missing `hit_count` is different — never retrieved is a
+    /// fact the absent key states correctly — so it counts as zero.
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -194,7 +236,20 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<SearchHit>>;
     /// Record that these chunks were just shown. Merged into the stored
     /// payload, never written as a whole one.
-    async fn touch(&self, artifact_ids: &[String], seen_at: i64) -> Result<()>;
+    async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()>;
+    /// Push a batch of artifacts' SQLite-side lifecycle state into the store,
+    /// as one request rather than one per artifact per field. What the
+    /// migration backfill runs on; also what the sweep's drift repair uses.
+    async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()>;
+    /// How many points carry no `last_verified_at`, i.e. still need the
+    /// lifecycle backfill. Startup reads this to decide whether to run it,
+    /// rather than making an operator remember a flag.
+    async fn unstamped_count(&self) -> Result<u64>;
+    /// Artifact ids whose payload says deprecated or superseded, capped at
+    /// `limit`. The sweep compares these against SQLite — the source of truth —
+    /// to repair drift left by a half-applied lifecycle change in either
+    /// direction.
+    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>>;
     /// A random sample of chunks captured before `older_than` and not shown
     /// since `unseen_since`. Random rather than ranked: there is no query here,
     /// only the question of what has been forgotten.
@@ -213,8 +268,9 @@ pub trait VectorStore: Send + Sync {
     /// index. The artifact itself is never among its own neighbours.
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>>;
     /// Pairs of artifacts closer than `min_score`, best first, over a sample of
-    /// the collection. Superseded artifacts are excluded — a resolved pair
-    /// re-found every sweep is a review queue that never empties.
+    /// the collection. Anything not active is excluded — a resolved pair
+    /// re-found every sweep is a review queue that never empties, and a
+    /// deprecated artifact must never win a supersession and hide a live one.
     ///
     /// This is one round trip, not one query per point: `sample` points are
     /// drawn and each contributes at most `per_point` neighbours. A sweep over
