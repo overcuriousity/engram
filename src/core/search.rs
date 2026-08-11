@@ -64,6 +64,20 @@ pub struct SearchResult {
     pub superseded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_verified_at: Option<i64>,
+    /// This artifact is only loosely related to the query.
+    ///
+    /// Retrieval always returns its best candidates, however bad they are, and
+    /// `score` cannot expose that: hybrid retrieval fuses ranks, so the top hit
+    /// for a typed-in typo carries the same score as the top hit for an exact
+    /// question. Presenting both the same way is how a search for nonsense came
+    /// back with four confident-looking answers. This is read from the cosine
+    /// similarity, which does mean the same thing from one query to the next.
+    ///
+    /// False when nothing can be said — a hit the lexical half found contains
+    /// the query's terms verbatim, and a store that reports no similarity gets
+    /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub weak: bool,
 }
 
 fn now_secs() -> i64 {
@@ -216,6 +230,9 @@ impl Core {
                 status: h.payload.status,
                 superseded_by: h.payload.superseded_by,
                 last_verified_at: h.payload.last_verified_at,
+                // Not an answer to a query, so there is no query to be far
+                // from. These lists are drawn, not matched.
+                weak: false,
             })
             .collect();
         // Surfacing counts as seeing, or the same chunks come back tomorrow —
@@ -252,6 +269,9 @@ impl Core {
                 status: h.payload.status,
                 superseded_by: h.payload.superseded_by,
                 last_verified_at: h.payload.last_verified_at,
+                // Not an answer to a query, so there is no query to be far
+                // from. These lists are drawn, not matched.
+                weak: false,
             })
             .collect())
     }
@@ -370,6 +390,9 @@ impl Core {
                 status: h.payload.status,
                 superseded_by: h.payload.superseded_by,
                 last_verified_at: h.payload.last_verified_at,
+                // Demonstrated, never assumed: a hit with no similarity to
+                // read is one the lexical half matched verbatim.
+                weak: h.similarity.is_some_and(|s| s < self.weak_below),
             })
             .collect();
 
@@ -793,6 +816,7 @@ mod tests {
                 superseded_by: None,
             },
             score,
+            similarity: Some(score),
         };
         let ranked = || {
             vec![

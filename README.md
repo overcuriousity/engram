@@ -77,6 +77,7 @@ effective config with secrets redacted.
 | `vector.recency_weight` | How much age counts against a result. `0.0` disables. Default 0.05. |
 | `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
 | `vector.pinned_boost` | Extra score for an artifact tagged `pinned`. Default 0.15. |
+| `vector.weak_below` | Cosine similarity under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns the labelling off. |
 | `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, optional `tokenizer_path`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |

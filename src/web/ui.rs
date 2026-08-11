@@ -23,13 +23,20 @@ pub struct RenderedResult {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub corpus_id: String,
-    /// Position in the list, as `#1`, `#2`, …
+    /// Position in the list, as `#1`, `#2`, … Empty for a weak result.
     ///
     /// Not the raw score. That number is a fused rank from Qdrant plus a
     /// recency term, so it is comparable within one result list and meaningless
     /// between two — a hybrid query and a dense-only fallback do not even score
     /// on the same scale. Showing it invited a comparison it cannot support.
+    ///
+    /// Dropped entirely once a result is `weak`, because a rank is a claim
+    /// about standing among answers, and something the query barely matches is
+    /// not one. `#1` over a result the search itself calls loose is the exact
+    /// false confidence this labelling exists to remove.
     pub rank: String,
+    /// Only loosely related to the query — see `SearchResult::weak`.
+    pub weak: bool,
 }
 
 pub struct BrowseRow {
@@ -82,6 +89,10 @@ pub struct ArtifactDetail {
     /// it is showing is the artifact's own text reflected back rather than the
     /// document it was drawn from.
     pub corpus_restored: bool,
+    /// Link to the source, scrolled to and highlighting the exact lines this
+    /// artifact was drawn from. Falls back to the plain source page for an
+    /// artifact with no recorded span — a restored one, for instance.
+    pub source_at_lines: String,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -282,6 +293,9 @@ struct SearchTemplate {
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// Every result is only loosely related, so the page says so once above the
+    /// list instead of repeating it on each card.
+    all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
     /// `embed 41ms · total 138ms`, swapped into the header out of band.
@@ -300,7 +314,8 @@ struct BrowseTemplate {
 struct CorpusTemplate {
     theme: String,
     id: String,
-    raw_text: String,
+    /// The whole source, one row per line, each anchored so a link can name it.
+    lines: Vec<crate::web::corpus_view::CorpusLine>,
     status: String,
     badge: &'static str,
     artifacts: Vec<ArtifactView>,
@@ -505,6 +520,7 @@ async fn search_results(
     if p.q.trim().is_empty() {
         return Ok(HtmlTemplate(ResultsTemplate {
             results: vec![],
+            all_weak: false,
             terms: String::new(),
             timing: String::new(),
         })
@@ -530,12 +546,18 @@ async fn search_results(
         })
         .await?;
 
+    let results: Vec<RenderedResult> = hits
+        .into_iter()
+        .enumerate()
+        .map(|(i, h)| render_hit(i, h))
+        .collect();
     Ok(HtmlTemplate(ResultsTemplate {
-        results: hits
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h))
-            .collect(),
+        // Only when *every* result is loose. One weak hit at the bottom of a
+        // good list is ordinary — it is the tail of any ranking — and saying
+        // "nothing matches" over a list that plainly does would train the
+        // operator to ignore the warning.
+        all_weak: !results.is_empty() && results.iter().all(|r| r.weak),
+        results,
         terms,
         timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
@@ -551,7 +573,12 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
-        rank: format!("#{}", position + 1),
+        rank: if h.weak {
+            String::new()
+        } else {
+            format!("#{}", position + 1)
+        },
+        weak: h.weak,
     }
 }
 
@@ -585,10 +612,19 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     .into_response())
 }
 
+/// Which lines to highlight, when the page was opened from an artifact that
+/// claims them. Absent for an ordinary visit, which highlights nothing.
+#[derive(serde::Deserialize, Default)]
+struct LineRange {
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
+    Query(range): Query<LineRange>,
 ) -> Result<Response> {
     let s = st.core.store.get_corpus(&cid).await?;
     let artifacts = st
@@ -599,10 +635,29 @@ async fn corpus_detail(
         .iter()
         .map(artifact_view)
         .collect();
+    // Numbered rather than one blob of text, so an artifact can link to the
+    // exact lines it was drawn from and the browser can scroll to them. Every
+    // row carries an `L<n>` anchor for that; the range, when given, is
+    // highlighted the same way the pane highlights a span.
+    let lines = s
+        .raw_text
+        .lines()
+        .enumerate()
+        .map(|(i, text)| {
+            let number = i as i64 + 1;
+            crate::web::corpus_view::CorpusLine {
+                number,
+                text: text.to_string(),
+                in_span: range
+                    .from
+                    .is_some_and(|f| number >= f && number <= range.to.unwrap_or(f)),
+            }
+        })
+        .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
         id: s.id,
-        raw_text: s.raw_text,
+        lines,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
         restored: s.restored_at.is_some(),
@@ -1125,8 +1180,19 @@ pub(crate) async fn build_artifact_detail(
             id: h.payload.artifact_id,
         })
         .collect();
+    // Built before the struct consumes `c`. The fragment is what makes the
+    // browser scroll to the span; the query parameters are what make the page
+    // highlight it.
+    let source_at_lines = match c.corpus_span.as_ref() {
+        Some(sp) => format!(
+            "/ui/corpora/{}?from={}&to={}#L{}",
+            c.corpus_id, sp.start_line, sp.end_line, sp.start_line
+        ),
+        None => format!("/ui/corpora/{}", c.corpus_id),
+    };
     Ok(ArtifactDetail {
         related,
+        source_at_lines,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
         html: markdown::render(&c.text),
@@ -1709,6 +1775,41 @@ mod tests {
             .unwrap();
         assert!(d.related.is_empty());
         assert!(!d.html.is_empty(), "the artifact itself must still render");
+    }
+
+    #[test]
+    fn a_loose_result_is_labelled_and_never_ranked() {
+        // `#1` over something the search itself calls a poor match is the false
+        // confidence this exists to remove: a rank is a claim about standing
+        // among answers, and a barely-matching artifact is not one.
+        let result = |weak: bool| crate::core::search::SearchResult {
+            artifact_id: "a".into(),
+            corpus_id: "s".into(),
+            title: Some("t".into()),
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak,
+        };
+
+        let loose = render_hit(0, result(true));
+        assert!(loose.weak);
+        assert!(loose.rank.is_empty(), "a loose result was presented as #1");
+        assert_eq!(render_hit(0, result(false)).rank, "#1");
+
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![loose],
+            all_weak: true,
+            terms: String::new(),
+            timing: String::new(),
+        })
+        .unwrap();
+        assert!(html.contains("Nothing matches closely"), "{html}");
+        assert!(!html.contains("#1"), "{html}");
     }
 
     #[test]

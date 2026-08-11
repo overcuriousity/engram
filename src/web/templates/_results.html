@@ -3,6 +3,21 @@
   <p class="muted">No matches.</p>
 {% else %}
 <div data-terms="{{ terms }}">
+  {# Said once, above the list, rather than repeated on every card: when the
+     whole answer is loose the useful statement is about the search, not about
+     each result. Retrieval always returns its best candidates however bad they
+     are, so without this a typo comes back looking like an answer. #}
+  {% if all_weak %}
+  <div class="flag" role="status">
+    <div aria-hidden="true">⚠</div>
+    <div>
+      <b>Nothing matches closely</b>
+      <div>These are the nearest artifacts, but none of them is a close match
+        for what you typed. Check the spelling, or try describing the thing
+        rather than naming it.</div>
+    </div>
+  </div>
+  {% endif %}
   {% for r in results %}
   {# The delete control is a sibling of the link rather than a child: a button
      inside an anchor is invalid, and the anchor must keep being the
@@ -13,7 +28,11 @@
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
        hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
       <div class="rail-head">
+        {% if r.weak %}
+        <span class="badge badge-warning">loose</span>
+        {% else %}
         <span class="rail-rank mono">{{ r.rank }}</span>
+        {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
       <div class="rail-snippet">{{ r.snippet }}</div>

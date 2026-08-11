@@ -23,6 +23,7 @@ use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Generous enough for a cold HNSW segment load, short enough that a wedged
@@ -954,6 +955,9 @@ fn hits_of(res: QueryResult) -> Vec<SearchHit> {
             Ok(payload) => out.push(SearchHit {
                 payload,
                 score: p.score,
+                // Filled in by `search` from the batched dense lookup; every
+                // other caller of this helper is a listing with no query.
+                similarity: None,
             }),
             Err(e) => tracing::warn!(
                 error = %e,
@@ -1528,6 +1532,7 @@ impl VectorStore for QdrantVectors {
                 // No query to be similar to. The caller ranks this list by
                 // staleness, which the order above already carries.
                 score: 0.0,
+                similarity: None,
             })
             .collect())
     }
@@ -1602,14 +1607,57 @@ impl VectorStore for QdrantVectors {
             });
         }
 
-        let res: QueryResult = self
+        // The second half of the request: the same dense vector, on its own,
+        // with no fusion and no recency stage over it. That returns raw cosine
+        // similarity, which is the only number in this whole path that means
+        // the same thing from one query to the next — the ranking score above
+        // is a fused rank, so the top hit for a typo scores like the top hit for
+        // a perfect match.
+        //
+        // Batched rather than sent after, so the confidence costs a round trip
+        // of nothing. `limit` matches the ranking query's, so every hit the
+        // dense branch contributed is covered; a hit only the lexical branch
+        // found is absent from this set and gets no similarity, which is
+        // correct — it contains the query's terms verbatim.
+        let mut confidence = json!({
+            "query": vector,
+            "using": DENSE,
+            "limit": limit,
+            "with_payload": ["artifact_id"],
+        });
+        if let Some(f) = &f {
+            confidence["filter"] = f.clone();
+        }
+
+        let mut res: Vec<QueryResult> = self
             .call(
                 Method::POST,
-                &format!("/collections/{}/points/query", self.alias),
-                Some(body),
+                &format!("/collections/{}/points/query/batch", self.alias),
+                Some(json!({ "searches": [body, confidence] })),
             )
             .await?;
-        Ok(hits_of(res))
+        if res.len() != 2 {
+            return Err(Error::Vector(format!(
+                "asked qdrant for 2 batched searches and got {}",
+                res.len()
+            )));
+        }
+        let similarities: HashMap<String, f32> = res
+            .pop()
+            .expect("length checked")
+            .points
+            .into_iter()
+            .filter_map(|p| {
+                let id = p.payload.get("artifact_id")?.as_str()?.to_string();
+                Some((id, p.score))
+            })
+            .collect();
+
+        let mut hits = hits_of(res.pop().expect("length checked"));
+        for h in &mut hits {
+            h.similarity = similarities.get(&h.payload.artifact_id).copied();
+        }
+        Ok(hits)
     }
 
     async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {

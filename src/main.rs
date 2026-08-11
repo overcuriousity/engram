@@ -39,8 +39,9 @@ struct Args {
     /// last_verified_at, superseded_by) into Qdrant, then exit. Rarely needed:
     /// startup runs the same pass in the background whenever it finds points
     /// without the fields. This is the way to run it in the foreground and see
-    /// it finish. It also deletes points whose artifact row is gone, which is
-    /// what lets the startup check ever consider the base fully stamped.
+    /// it finish. It also reconciles which artifacts the two stores hold,
+    /// restoring whichever side is missing one, which is what lets the startup
+    /// check ever consider the base fully stamped.
     #[arg(long)]
     backfill_lifecycle: bool,
 }
@@ -323,6 +324,7 @@ mod startup_tests {
                 recency_weight: 0.05,
                 recency_half_life_days: 180,
                 pinned_boost: 0.15,
+                weak_below: 0.35,
             },
             infer: InferConfig {
                 synthesize: SynthesizeRole {

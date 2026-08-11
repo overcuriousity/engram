@@ -22,6 +22,7 @@ fn cfg(collection: &str) -> VectorConfig {
         recency_weight: 0.05,
         recency_half_life_days: 180,
         pinned_boost: 0.15,
+        weak_below: 0.35,
     }
 }
 
@@ -2097,4 +2098,58 @@ async fn an_unstamped_point_is_never_a_stale_candidate() {
 
     assert_eq!(ids, vec!["stamped".to_string()], "{ids:?}");
     v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn search_reports_a_cosine_alongside_the_fused_rank() {
+    // The ranking score of a hybrid query is a reciprocal-rank fusion value: it
+    // says where a result placed, not how close it was, so the top hit for a
+    // typo scores like the top hit for a perfect question. The similarity is
+    // fetched in the same request by a second, dense-only search, and *that* is
+    // the number that means the same thing from one query to the next.
+    let v = fresh("engram_it_similarity", 4).await;
+    v.upsert(vec![
+        point("near", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "c"),
+        point("far", "s1", vec![0.0, 0.0, 0.0, 1.0], &[], "c"),
+    ])
+    .await
+    .unwrap();
+
+    let hits = v
+        .search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &engram::vector::sparse::encode_query("text near"),
+            10,
+            &SearchFilter::default(),
+        )
+        .await
+        .unwrap();
+
+    let near = hits
+        .iter()
+        .find(|h| h.payload.artifact_id == "near")
+        .expect("the matching point was not returned");
+    let far = hits
+        .iter()
+        .find(|h| h.payload.artifact_id == "far")
+        .expect("the distant point was not returned");
+
+    assert!(
+        near.similarity.is_some_and(|s| s > 0.99),
+        "an identical vector should be maximally similar: {:?}",
+        near.similarity
+    );
+    assert!(
+        far.similarity.is_some_and(|s| s < 0.1),
+        "an orthogonal vector should be maximally dissimilar: {:?}",
+        far.similarity
+    );
+    // The whole reason the similarity is fetched separately: this number is not
+    // one, and comparing it against a threshold would be meaningless.
+    assert!(
+        near.score < 0.9,
+        "the fused rank looked like a similarity: {}",
+        near.score
+    );
 }

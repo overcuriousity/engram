@@ -94,7 +94,23 @@ impl SearchFilter {
 pub struct SearchHit {
     #[serde(flatten)]
     pub payload: VectorPayload,
+    /// What this hit was ranked by. Deliberately not comparable across queries
+    /// or across stores: hybrid retrieval fuses ranks, so this says where the
+    /// result placed rather than how good it was. Use `similarity` to judge
+    /// whether it is any good.
     pub score: f32,
+    /// Cosine similarity between the query vector and this artifact's, when the
+    /// store can say. This *is* comparable across queries — that is the whole
+    /// difference from `score` — so it is what decides whether a result is
+    /// worth presenting as an answer.
+    ///
+    /// `None` means "no opinion", and is not the same as a low value. It covers
+    /// a hit the lexical half found that the dense half did not return, which is
+    /// an exact term match and the opposite of weak; a store with no notion of a
+    /// query vector, as in the listing methods; and any store that does not
+    /// implement the second lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
 }
 
 /// One facet value and how many points carry it, counted straight from the

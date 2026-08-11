@@ -20,8 +20,14 @@
 
   {% if !facets.categories.is_empty() || !facets.tags.is_empty() %}
   <div class="facets">
+    {# Labelled in the page, not only in `aria-label`: two unlabelled rows both
+       starting with "All" left the same word appearing in both with different
+       numbers beside it, which read as a contradiction rather than as a kind
+       and a tag. #}
     {% if !facets.categories.is_empty() %}
-    <div class="chips" role="group" aria-label="Category">
+    <div class="facet-row">
+    <span class="facet-label">Kind</span>
+    <div class="chips" role="group" aria-label="Kind">
       <label class="chip">
         <input type="radio" name="category" value="" {% if category.is_empty() %}checked{% endif %}>
         <span>All</span>
@@ -30,13 +36,16 @@
       <label class="chip">
         <input type="radio" name="category" value="{{ f.value }}"
                {% if category == f.value %}checked{% endif %}>
-        <span>{{ f.value }}{% if f.count > 0 %} <span class="muted mono">{{ f.count }}</span>{% endif %}</span>
+        <span>{{ f.value }}</span>
       </label>
       {% endfor %}
+    </div>
     </div>
     {% endif %}
 
     {% if !facets.tags.is_empty() %}
+    <div class="facet-row">
+    <span class="facet-label">Tag</span>
     <div class="chips" role="group" aria-label="Tag">
       <label class="chip">
         <input type="radio" name="tags" value="" {% if tag.is_empty() %}checked{% endif %}>
@@ -46,9 +55,10 @@
       <label class="chip">
         <input type="radio" name="tags" value="{{ f.value }}"
                {% if tag == f.value %}checked{% endif %}>
-        <span>{{ f.value }}{% if f.count > 0 %} <span class="muted mono">{{ f.count }}</span>{% endif %}</span>
+        <span>{{ f.value }}</span>
       </label>
       {% endfor %}
+    </div>
     </div>
     {% endif %}
   </div>

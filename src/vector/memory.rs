@@ -275,6 +275,8 @@ impl VectorStore for MemoryVectors {
             .map(|payload| SearchHit {
                 payload: payload.clone(),
                 score: 0.0,
+                // No query vector to be similar to; this is a listing.
+                similarity: None,
             })
             .collect())
     }
@@ -318,6 +320,8 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: 0.0,
+                // Drawn at random rather than matched; nothing to be close to.
+                similarity: None,
             })
             .collect())
     }
@@ -345,9 +349,16 @@ impl VectorStore for MemoryVectors {
                         .as_ref()
                         .is_none_or(|c| p.payload.category.as_ref() == Some(c))
             })
-            .map(|p| SearchHit {
-                payload: p.payload.clone(),
-                score: cosine(vector, &p.vector),
+            .map(|p| {
+                // Dense only here, so the ranking score *is* the similarity.
+                // The Qdrant store has to fetch it separately because fusion
+                // throws the magnitude away.
+                let similarity = cosine(vector, &p.vector);
+                SearchHit {
+                    payload: p.payload.clone(),
+                    score: similarity,
+                    similarity: Some(similarity),
+                }
             })
             .collect();
         // Tie-break on artifact_id so equal scores produce a stable order rather
@@ -395,6 +406,9 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: cosine(&seed.vector, &p.vector),
+                // The seed is an artifact, not a query. "Loosely related" is
+                // the honest description of every neighbour list.
+                similarity: None,
             })
             .collect();
         hits.sort_by(|a, b| {
@@ -538,6 +552,50 @@ mod tests {
             .unwrap();
 
         assert!(v.near_pairs(10, 5, 0.5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_reports_the_similarity_it_ranked_by() {
+        // The store has to say how close each hit actually was, not only where
+        // it placed. Here they are the same number because this store is dense
+        // only; the Qdrant one fuses ranks and has to fetch the similarity
+        // separately, and both must report it the same way.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("near", "s1", vec![1.0, 0.0, 0.0], &[], "c"),
+            point("far", "s1", vec![0.0, 0.0, 1.0], &[], "c"),
+        ])
+        .await
+        .unwrap();
+
+        let hits = v
+            .search(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+            )
+            .await
+            .unwrap();
+
+        let near = hits
+            .iter()
+            .find(|h| h.payload.artifact_id == "near")
+            .unwrap();
+        let far = hits
+            .iter()
+            .find(|h| h.payload.artifact_id == "far")
+            .unwrap();
+        assert!(
+            near.similarity.is_some_and(|s| s > 0.99),
+            "{:?}",
+            near.similarity
+        );
+        assert!(
+            far.similarity.is_some_and(|s| s < 0.01),
+            "{:?}",
+            far.similarity
+        );
     }
 
     #[tokio::test]

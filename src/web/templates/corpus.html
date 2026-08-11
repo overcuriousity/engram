@@ -34,7 +34,18 @@
   <div class="card-head">
     <span class="card-title">{% if restored %}Restored artifacts{% else %}Raw corpus{% endif %}</span>
   </div>
-  <pre class="mono" style="white-space:pre-wrap;font-size:0.8125rem;margin:0">{{ raw_text }}</pre>
+  {# Every line is anchored, so an artifact's "open at these lines" link lands
+     on the exact lines it was drawn from instead of the top of the document.
+     Same markup and highlighting as the excerpt in the artifact pane. #}
+  <div class="raw" style="max-height:none">
+    <table>
+      {% for l in lines %}
+      <tr id="L{{ l.number }}" class="{% if l.in_span %}in{% endif %}">
+        <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
 </div>
 
 <h3>Artifacts</h3>

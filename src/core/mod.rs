@@ -69,6 +69,9 @@ pub struct Core {
     /// Thresholds and budgets for duplicate hygiene. Read on the capture path
     /// and by the sweep, so it lives here rather than being passed down.
     pub consolidate: crate::config::ConsolidateConfig,
+    /// Cosine similarity below which a result is reported as only loosely
+    /// related. See `VectorConfig::weak_below`.
+    pub weak_below: f32,
 }
 
 impl Core {
@@ -101,6 +104,7 @@ impl Core {
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
+            weak_below: cfg.vector.weak_below,
         }
     }
 }
@@ -155,6 +159,11 @@ pub mod test_support {
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
+            // The fake embedder's vectors are not a semantic space, so a
+            // realistic threshold would mark arbitrary results weak and every
+            // search test would be asserting against noise. Tests that care
+            // about the labelling set it themselves.
+            weak_below: 0.0,
         }
     }
 }

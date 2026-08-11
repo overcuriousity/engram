@@ -144,10 +144,18 @@
       {% endif %}
     </div>
     <div>
+      {# Two links to the source, doing different jobs. The crumb above opens
+         the document plainly; this one opens it scrolled to and highlighting
+         the very lines this artifact was drawn from. An artifact with no
+         recorded span has no lines to jump to, so it gets the plain link.
+
+         "highlighted" rather than a bare range: the panel shows a few lines of
+         context either side, so naming the span alone read as a mismatch
+         against the line numbers actually on screen. #}
       <div class="pane-label">
-        {{ d.slice_label }}
+        {{ d.slice_label }} highlighted
         <span class="spacer"></span>
-        <a href="/ui/corpora/{{ d.corpus_id }}">open full source</a>
+        <a href="{{ d.source_at_lines }}">open source at these lines</a>
       </div>
       <div class="raw">
         <table>
