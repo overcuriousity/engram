@@ -391,11 +391,12 @@ async fn capture_page(_id: Identity) -> impl IntoResponse {
     })
 }
 
+/// Text and nothing else. The label field is gone: a name arrives from
+/// synthesis, which has read the document, rather than from someone who has
+/// just pasted it and does not yet know what it says.
 #[derive(serde::Deserialize)]
 struct CaptureForm {
     text: String,
-    #[serde(default)]
-    title: String,
 }
 
 async fn capture_submit(
@@ -403,8 +404,7 @@ async fn capture_submit(
     _id: Identity,
     Form(f): Form<CaptureForm>,
 ) -> Result<Response> {
-    let title = (!f.title.trim().is_empty()).then(|| f.title.trim().to_string());
-    let out = st.core.ingest(&f.text, "web", title.as_deref()).await?;
+    let out = st.core.ingest(&f.text, "web", None).await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -1941,11 +1941,28 @@ mod tests {
     async fn capturing_text_stores_it_and_confirms() {
         let (app, cookie) = app_with_session().await;
         let res = app
-            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure&title=t"))
+            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(body_of(res).await.to_lowercase().contains("captured"));
+    }
+
+    #[tokio::test]
+    async fn capture_takes_only_text() {
+        // The label field is gone from the form. A client still sending one —
+        // a cached page, a script written against the old form — must not get
+        // a 422 for a field the server stopped caring about.
+        let (app, cookie) = app_with_session().await;
+        let res = app
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=another+one&title=ignored",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2062,11 +2079,7 @@ mod tests {
     async fn browse_lists_captured_sources() {
         let (app, cookie) = app_with_session().await;
         app.clone()
-            .oneshot(form(
-                "/ui/capture",
-                &cookie,
-                "text=findable+content&title=My+Note",
-            ))
+            .oneshot(form("/ui/capture", &cookie, "text=findable+content"))
             .await
             .unwrap();
 
@@ -2081,7 +2094,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_of(res).await.contains("My Note"));
+        // An unnamed capture is listed by its opening words: nothing has read
+        // it yet, so there is nothing better to call it.
+        assert!(body_of(res).await.contains("findable content"));
     }
 
     #[tokio::test]

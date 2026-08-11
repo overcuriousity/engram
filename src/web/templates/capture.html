@@ -3,12 +3,11 @@
 {% block content %}
 <form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if(event.detail.successful) this.reset()" class="stack">
+  {# One line. The segment-count hint below the box says the expensive part,
+     and says it only once it is true. #}
   <p class="muted" style="margin:0">
-    Paste a chapter at a time. Long text is split into segments and synthesised one
-    segment per model call, so a whole book works but takes a while — and a
-    chapter is what search results read best from.
+    Paste a chapter at a time — long text is split into segments, one model call each.
   </p>
-  <input class="input" name="title" placeholder="Optional label">
   <textarea class="textarea" name="text" placeholder="Paste anything worth keeping." autofocus></textarea>
   <p id="size-hint" class="muted" hidden></p>
   <div class="row">
