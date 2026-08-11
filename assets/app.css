@@ -427,3 +427,19 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 }
 @keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
 @media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
+
+/* ── An artifact's own controls ──────────────────────────────────────────── */
+
+/* Delete is not one of the other two. It sits at the far end so the control
+   that cannot be undone is never flush against two that can. */
+.actions { display: flex; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; }
+.actions > form:last-of-type { margin-left: auto; }
+
+/* The open card drops its snippet: the pane beside it is showing that text in
+   full. Only the open one — the rest of the list still needs its two lines. */
+.rail-item[aria-selected="true"] .rail-snippet { display: none; }
+
+/* The one statement of which lines these are, underlined on hover only, so the
+   pane label reads as a label rather than as a link dropped into a heading. */
+.pane-label a { color: var(--color-accent); text-decoration: none; }
+.pane-label a:hover { text-decoration: underline; }

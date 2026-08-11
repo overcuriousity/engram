@@ -35,11 +35,11 @@
         {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
+      {# Rank, title, two lines. No tags: the pane beside this lists them in
+         full, so the card was echoing it — and the chips were what made the
+         rail heavy enough to need a scrollbar of its own. The facets above
+         narrow by tag, which is what the chips were being read for. #}
       <div class="rail-snippet">{{ r.snippet }}</div>
-      <div class="chips">
-        {% if let Some(c) = r.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
-        {% for t in r.tags %}<span class="badge">{{ t }}</span>{% endfor %}
-      </div>
     </a>
     {# Swaps its own row out and leaves the rest of the results alone, so the
        search you were reading is still on screen afterwards. #}

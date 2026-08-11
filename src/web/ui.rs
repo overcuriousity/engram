@@ -2166,6 +2166,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_result_card_does_not_repeat_the_pane_beside_it() {
+        // The pane lists an artifact's tags in full. Repeating them on the card
+        // was what made the rail heavy enough to need its own scrollbar, and on
+        // a short artifact the card and the pane read as the same thing twice.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(
+            body.contains("rail-title"),
+            "the card still names the artifact"
+        );
+        assert!(
+            !body.contains("badge-accent"),
+            "the card no longer carries the category chip the pane already lists"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_source_pane_names_its_lines_once() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        let id = body
+            .split("/ui/artifacts/")
+            .nth(1)
+            .and_then(|s| s.split(['"', '?']).next())
+            .expect("a result to open")
+            .to_string();
+
+        let body = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
+        assert!(
+            !body.contains("open source at these lines"),
+            "the pane label is the link now"
+        );
+        assert_eq!(
+            body.matches("highlighted").count(),
+            1,
+            "the span is named once, not in a crumb and a label and a link"
+        );
+    }
+
+    #[tokio::test]
     async fn browse_redirects_to_capture() {
         // An installed PWA may still have /ui/browse as its start URL.
         let (app, cookie) = app_with_session().await;
