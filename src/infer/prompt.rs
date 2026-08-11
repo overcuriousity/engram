@@ -1,3 +1,15 @@
+//! Every instruction the application puts in front of a model, in one file.
+//!
+//! Four calls, in pipeline order: the synthesizer that turns a segment into
+//! artifacts, the titler that names the document they came from, the judge that
+//! decides whether two artifacts contradict each other, and the answerer behind
+//! `ask`. Nothing else in the tree writes model-facing prose, so changing how
+//! engram talks to a model is an edit here and nowhere else.
+//!
+//! The parsers live here too, deliberately. Three of the four prompts specify a
+//! JSON shape, and the code that reads that shape back has to change in the same
+//! breath as the prompt that asks for it.
+
 use super::ProposedArtifact;
 use crate::error::{Error, Result};
 
@@ -107,6 +119,34 @@ pub fn judge_prompt(a: (&str, &str), b: (&str, &str)) -> String {
     format!(
         "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
         a.0, a.1, b.0, b.1
+    )
+}
+
+pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
+Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
+say so plainly rather than guessing. Cite excerpts by their number. \
+An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
+Repeat any caveat that bears on your answer rather than dropping it.";
+
+/// One retrieved excerpt, numbered so the answer can cite it.
+///
+/// The caveats are appended here rather than left to the caller because their
+/// `Caveat:` prefix is the exact string `ASK_SYSTEM` tells the model to look
+/// for. Splitting the two apart is how that agreement quietly breaks.
+pub fn ask_excerpt(number: usize, title: &str, text: &str, caveats: &[String]) -> String {
+    let mut block = format!("[{number}] {title}\n{text}");
+    for c in caveats {
+        block.push_str("\nCaveat: ");
+        block.push_str(c);
+    }
+    block
+}
+
+/// The question and whatever excerpts survived the context budget.
+pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
+    format!(
+        "Question: {question}\n\nExcerpts:\n\n{}",
+        excerpts.join("\n\n---\n\n")
     )
 }
 

@@ -2,12 +2,7 @@ use super::Core;
 use super::search::{SearchQuery, SearchResult};
 use crate::error::{Error, Result};
 use crate::infer::budget::pack_by_budget;
-
-const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
-Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
-say so plainly rather than guessing. Cite excerpts by their number. \
-An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
-Repeat any caveat that bears on your answer rather than dropping it.";
+use crate::infer::prompt::{ASK_SYSTEM, ask_excerpt, ask_prompt};
 
 /// Reserve part of the context for the answer itself.
 const ANSWER_RESERVE_TOKENS: usize = 1024;
@@ -83,17 +78,12 @@ impl Core {
                 .await
                 .map(|c| c.caveats)
                 .unwrap_or_default();
-            let mut block = format!(
-                "[{}] {}\n{}",
+            blocks.push(ask_excerpt(
                 i + 1,
-                h.title.clone().unwrap_or_default(),
-                h.text
-            );
-            for c in &caveats {
-                block.push_str("\nCaveat: ");
-                block.push_str(c);
-            }
-            blocks.push(block);
+                h.title.as_deref().unwrap_or_default(),
+                &h.text,
+                &caveats,
+            ));
         }
 
         let budget = self
@@ -119,11 +109,7 @@ impl Core {
             });
         }
 
-        let user = format!(
-            "Question: {}\n\nExcerpts:\n\n{}",
-            req.q,
-            blocks[..kept].join("\n\n---\n\n")
-        );
+        let user = ask_prompt(&req.q, &blocks[..kept]);
         let answer = self.completer.complete(ASK_SYSTEM, &user).await?;
 
         Ok(AskResponse {
