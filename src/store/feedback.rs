@@ -178,6 +178,239 @@ impl Store {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// One artifact is the answer. `expect_id` names it — and it may be an
+    /// artifact the search never returned, which is the most valuable case
+    /// there is.
+    Hit,
+    /// Nothing in the base could have answered this. Not a pair; a finding.
+    Gap,
+    /// Not a real search — a typo, or poking at the box.
+    Discard,
+}
+
+impl Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verdict::Hit => "hit",
+            Verdict::Gap => "gap",
+            Verdict::Discard => "discard",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub artifact_id: String,
+    pub rank: i64,
+    pub shown: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingEvent {
+    pub id: String,
+    pub query: String,
+    pub door: String,
+    pub created_at: i64,
+    pub candidates: Vec<Candidate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Stats {
+    pub captured: i64,
+    pub pending: i64,
+    pub judged: i64,
+    pub hits: i64,
+    /// Hits whose artifact the search never returned. Rare, expensive, and the
+    /// only evidence that ranking — rather than the corpus — was at fault.
+    pub finds: i64,
+    pub gaps: i64,
+    pub discards: i64,
+    pub recall_at_10: f64,
+    pub mrr: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Miss {
+    pub query: String,
+    /// `None` means the confirmed artifact was not in the stored pool at all.
+    pub rank: Option<i64>,
+}
+
+impl Store {
+    /// The next event to judge: never-skipped first, newest first within that.
+    ///
+    /// Newest first because a judgement is worth something only while the
+    /// situation is still in mind, and that memory is the most perishable part
+    /// of the whole dataset.
+    pub async fn next_pending(&self) -> Result<Option<PendingEvent>> {
+        let row = sqlx::query(
+            // `id DESC` breaks the tie: two searches within one second are
+            // ordinary, and `created_at` alone would leave SQLite to pick.
+            // Ids are uuid v7, so they sort by time down to the millisecond.
+            "SELECT id, query, door, created_at FROM search_events
+             WHERE judged_at IS NULL
+             ORDER BY skips ASC, created_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let id: String = row.get("id");
+
+        let candidates = sqlx::query(
+            "SELECT artifact_id, rank, shown FROM search_candidates
+             WHERE event_id = ? ORDER BY rank",
+        )
+        .bind(&id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| Candidate {
+            artifact_id: r.get("artifact_id"),
+            rank: r.get("rank"),
+            shown: r.get::<i64, _>("shown") == 1,
+        })
+        .collect();
+
+        Ok(Some(PendingEvent {
+            id,
+            query: row.get("query"),
+            door: row.get("door"),
+            created_at: row.get("created_at"),
+            candidates,
+        }))
+    }
+
+    pub async fn judge_hit(&self, event_id: &str, artifact_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE search_events SET judged_at = ?, verdict = 'hit', expect_id = ?
+             WHERE id = ?",
+        )
+        .bind(now())
+        .bind(artifact_id)
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn judge(&self, event_id: &str, verdict: Verdict) -> Result<()> {
+        sqlx::query("UPDATE search_events SET judged_at = ?, verdict = ? WHERE id = ?")
+            .bind(now())
+            .bind(verdict.as_str())
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Not a verdict: the event stays pending and only sinks in the order. An
+    /// honest "I don't remember" must never cost anything, or it stops being
+    /// honest.
+    pub async fn skip_event(&self, event_id: &str) -> Result<()> {
+        sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The field value: recall@10 and MRR read from the ranks the searches
+    /// actually gave. No vector store and no embedding are involved, so the
+    /// number can move on every single judgement — which is what makes it worth
+    /// showing while judging rather than afterwards.
+    pub async fn feedback_stats(&self) -> Result<Stats> {
+        let mut s = Stats {
+            captured: sqlx::query_scalar("SELECT count(*) FROM search_events")
+                .fetch_one(&self.pool)
+                .await?,
+            pending: sqlx::query_scalar(
+                "SELECT count(*) FROM search_events WHERE judged_at IS NULL",
+            )
+            .fetch_one(&self.pool)
+            .await?,
+            ..Default::default()
+        };
+
+        for (field, verdict) in [
+            (&mut s.hits, "hit"),
+            (&mut s.gaps, "gap"),
+            (&mut s.discards, "discard"),
+        ] {
+            *field = sqlx::query_scalar("SELECT count(*) FROM search_events WHERE verdict = ?")
+                .bind(verdict)
+                .fetch_one(&self.pool)
+                .await?;
+        }
+        s.judged = s.hits + s.gaps + s.discards;
+
+        // A left join, because an expected artifact that was never returned has
+        // no candidate row to join to — and that absence is precisely what a
+        // miss is.
+        let ranks: Vec<Option<i64>> = sqlx::query(
+            "SELECT c.rank AS rank FROM search_events e
+             LEFT JOIN search_candidates c
+               ON c.event_id = e.id AND c.artifact_id = e.expect_id
+             WHERE e.verdict = 'hit'",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<Option<i64>, _>("rank"))
+        .collect();
+
+        s.finds = ranks.iter().filter(|r| r.is_none()).count() as i64;
+        if !ranks.is_empty() {
+            let n = ranks.len() as f64;
+            s.recall_at_10 = ranks
+                .iter()
+                .filter(|r| matches!(r, Some(i) if *i < 10))
+                .count() as f64
+                / n;
+            s.mrr = ranks
+                .iter()
+                .map(|r| r.map_or(0.0, |i| 1.0 / (i as f64 + 1.0)))
+                .sum::<f64>()
+                / n;
+        }
+        Ok(s)
+    }
+
+    /// The queries whose confirmed answer fell outside the first ten. The list
+    /// that is actually read: an aggregate says something is wrong, this says
+    /// what.
+    pub async fn misses(&self, limit: i64) -> Result<Vec<Miss>> {
+        Ok(sqlx::query(
+            "SELECT e.query AS query, c.rank AS rank FROM search_events e
+             LEFT JOIN search_candidates c
+               ON c.event_id = e.id AND c.artifact_id = e.expect_id
+             WHERE e.verdict = 'hit' AND (c.rank IS NULL OR c.rank >= 10)
+             ORDER BY e.judged_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| Miss {
+            query: r.get("query"),
+            rank: r.get("rank"),
+        })
+        .collect())
+    }
+
+    /// Everything captured, gone. Judgements included: they are statements
+    /// about queries, and a judgement whose query no longer exists is not a
+    /// record of anything.
+    pub async fn purge_feedback(&self) -> Result<u64> {
+        // `search_candidates` goes with it through ON DELETE CASCADE.
+        Ok(sqlx::query("DELETE FROM search_events")
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +530,111 @@ mod tests {
         e.candidates.clear();
         store.record_search(e, 15).await.unwrap();
         assert_eq!(queries(&store).await.len(), 1);
+    }
+
+    async fn seed(store: &Store, query: &str, ranked: &[&str]) -> String {
+        let mut e = ev(query, Door::Ui);
+        e.candidates = ranked
+            .iter()
+            .enumerate()
+            .map(|(i, id)| NewCandidate {
+                artifact_id: (*id).into(),
+                score: 1.0 - i as f32 / 100.0,
+                similarity: Some(0.5),
+                shown: i < 10,
+            })
+            .collect();
+        // No folding: these are separate searches, not one being typed.
+        store.record_search(e, 0).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_newest_unjudged_event_comes_up_first() {
+        // Judging is worth something because the situation is still in mind,
+        // and that memory is the most perishable part of the dataset.
+        let store = Store::memory().await.unwrap();
+        seed(&store, "older", &["a"]).await;
+        seed(&store, "newer", &["b"]).await;
+        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "newer");
+    }
+
+    #[tokio::test]
+    async fn a_skipped_event_sinks_below_the_ones_never_looked_at() {
+        let store = Store::memory().await.unwrap();
+        seed(&store, "older", &["a"]).await;
+        let newer = seed(&store, "newer", &["b"]).await;
+        store.skip_event(&newer).await.unwrap();
+        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "older");
+    }
+
+    #[tokio::test]
+    async fn a_judged_event_does_not_come_back() {
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "only one", &["a"]).await;
+        store.judge_hit(&id, "a").await.unwrap();
+        assert!(store.next_pending().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_field_metrics_read_the_rank_the_search_actually_gave() {
+        // No Qdrant and no embedding: the rank of every candidate was stored
+        // when the search happened, so confirming one settles its rank too.
+        let store = Store::memory().await.unwrap();
+        let first = seed(&store, "top hit", &["a", "b", "c"]).await;
+        store.judge_hit(&first, "a").await.unwrap();
+        let third = seed(&store, "third hit", &["x", "y", "z"]).await;
+        store.judge_hit(&third, "z").await.unwrap();
+
+        let s = store.feedback_stats().await.unwrap();
+        assert_eq!(s.judged, 2);
+        assert_eq!(s.hits, 2);
+        assert!((s.recall_at_10 - 1.0).abs() < 1e-9);
+        // 1/1 and 1/3, averaged.
+        assert!((s.mrr - (1.0 + 1.0 / 3.0) / 2.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn an_answer_outside_the_pool_counts_as_a_find_and_a_miss() {
+        // The whole point of the "none of these" path: an artifact the ranker
+        // never returned. It has no rank, so it contributes nothing to MRR and
+        // it drags recall down — which is the truth about that search.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "found nothing useful", &["a", "b"]).await;
+        store.judge_hit(&id, "something-else").await.unwrap();
+
+        let s = store.feedback_stats().await.unwrap();
+        assert_eq!(s.finds, 1);
+        assert_eq!(s.recall_at_10, 0.0);
+        assert_eq!(s.mrr, 0.0);
+        assert_eq!(store.misses(10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gaps_and_discards_are_counted_but_are_not_pairs() {
+        let store = Store::memory().await.unwrap();
+        let g = seed(&store, "nothing written about this", &[]).await;
+        store.judge(&g, Verdict::Gap).await.unwrap();
+        let d = seed(&store, "asdf", &["a"]).await;
+        store.judge(&d, Verdict::Discard).await.unwrap();
+
+        let s = store.feedback_stats().await.unwrap();
+        assert_eq!((s.gaps, s.discards, s.hits), (1, 1, 0));
+        // Neither can score: one has no answer, the other was not a question.
+        assert_eq!(s.mrr, 0.0);
+    }
+
+    #[tokio::test]
+    async fn purging_removes_events_and_their_candidates() {
+        let store = Store::memory().await.unwrap();
+        seed(&store, "a search", &["a", "b"]).await;
+        store.purge_feedback().await.unwrap();
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(store.next_pending().await.unwrap().is_none());
     }
 
     #[tokio::test]
