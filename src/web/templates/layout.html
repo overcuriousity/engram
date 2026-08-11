@@ -28,12 +28,14 @@
         <img src="/assets/logo.svg" alt="" width="22" height="22">
         <span>engram</span>
       </a>
+      {# Three destinations. Browse is gone — recent captures live under Capture
+         and everything else is found by searching for what it says — and Ops
+         moved behind one quiet link at the bottom of Capture, where the only
+         part of it that needs a person already appears. #}
       <a href="/ui/capture">Capture</a>
       <a href="/ui/search">Search</a>
-      <a href="/ui/browse">Browse</a>
       <a href="/ui/ask">Ask</a>
       <span class="spacer"></span>
-      <a href="/ui/ops">Ops</a>
       <form method="post" action="/auth/logout" style="display:inline">
         <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
       </form>

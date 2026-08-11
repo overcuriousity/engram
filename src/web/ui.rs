@@ -731,7 +731,7 @@ async fn delete_corpus_ui(
     Path(cid): Path<String>,
 ) -> Result<Response> {
     st.core.delete_corpus(&cid).await?;
-    Ok(Redirect::to("/ui/browse").into_response())
+    Ok(Redirect::to("/ui/capture").into_response())
 }
 
 /// Remove an artifact from both stores, from the page that shows it.
