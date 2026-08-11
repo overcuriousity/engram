@@ -381,6 +381,9 @@ struct OpsTemplate {
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     tokens: Vec<TokenRow>,
+    /// `None` when capture is switched off, which renders nothing at all: a
+    /// section about a log nobody is keeping is noise.
+    feedback: Option<crate::store::feedback::Stats>,
 }
 
 #[derive(Template)]
@@ -1003,8 +1006,23 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
         tokens,
+        feedback: match st.core.feedback.enabled {
+            true => Some(st.core.store.feedback_stats().await?),
+            false => None,
+        },
     })
     .into_response())
+}
+
+/// Forget every captured search.
+///
+/// Judgements go with them: a verdict is a statement about a query, and one
+/// whose query no longer exists records nothing. Accepted settings and their
+/// history stay, because they describe how the application is configured now.
+async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    let n = st.core.store.purge_feedback().await?;
+    tracing::info!(dropped = n, "captured searches deleted by the operator");
+    Ok(Redirect::to("/ui/ops").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1367,6 +1385,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
+        .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))

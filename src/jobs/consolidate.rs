@@ -188,6 +188,16 @@ async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usi
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
+    // Ahead of the enabled check and outside it: retention is the operator's
+    // instruction about their own query log, and it must be honoured whether or
+    // not duplicate hygiene happens to be switched on. Failing to expire is not
+    // worth taking the sweep down for.
+    match core.store.expire_feedback(core.feedback.retain_days).await {
+        Ok(n) if n > 0 => tracing::info!(dropped = n, "expired captured searches"),
+        Err(e) => tracing::warn!(error = %e, "could not expire captured searches"),
+        _ => {}
+    }
+
     let cfg = &core.consolidate;
     if !cfg.enabled {
         return Ok(Outcome::default());

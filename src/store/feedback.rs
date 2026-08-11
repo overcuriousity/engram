@@ -412,6 +412,23 @@ impl Store {
         .collect())
     }
 
+    /// Drop captured searches older than the window. `0` keeps them forever.
+    ///
+    /// Ridden along with the consolidation sweep rather than given a ticker of
+    /// its own: a periodic `DELETE` is not worth a second moving part.
+    pub async fn expire_feedback(&self, retain_days: i64) -> Result<u64> {
+        if retain_days <= 0 {
+            return Ok(0);
+        }
+        Ok(
+            sqlx::query("DELETE FROM search_events WHERE created_at < ?")
+                .bind(now() - retain_days * 86_400)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
     /// Everything captured, gone. Judgements included: they are statements
     /// about queries, and a judgement whose query no longer exists is not a
     /// record of anything.
@@ -634,6 +651,26 @@ mod tests {
         assert_eq!((s.gaps, s.discards, s.hits), (1, 1, 0));
         // Neither can score: one has no answer, the other was not a question.
         assert_eq!(s.mrr, 0.0);
+    }
+
+    #[tokio::test]
+    async fn retention_of_zero_keeps_everything() {
+        let store = Store::memory().await.unwrap();
+        seed(&store, "old", &["a"]).await;
+        assert_eq!(store.expire_feedback(0).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_event_past_the_retention_window_is_dropped() {
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "old", &["a"]).await;
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(now() - 40 * 86_400)
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
     }
 
     #[tokio::test]
