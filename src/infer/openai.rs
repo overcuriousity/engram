@@ -175,6 +175,19 @@ impl Synthesizer for HttpSynthesizer {
     fn cooldown(&self) -> std::time::Duration {
         self.cooldown
     }
+
+    async fn title(&self, text: &str, artifact_titles: &[String]) -> Result<Option<String>> {
+        let out = self
+            .chat(json!([
+                {"role":"system","content": prompt::TITLE_SYSTEM},
+                {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
+            ]))
+            .await?;
+        // A model that ignores "no quotes" should not put them on the screen,
+        // and a model that answers with an essay should not become a title.
+        let t = out.trim().trim_matches('"').trim();
+        Ok((!t.is_empty()).then(|| t.chars().take(120).collect()))
+    }
 }
 
 // ── Embedder ─────────────────────────────────────────────────────────────────

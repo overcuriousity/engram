@@ -58,6 +58,20 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
 /// context the base does not hold — what the reader is actually running — and
 /// is a judgement only they can make. All this call does is tell them there is
 /// a judgement waiting.
+pub const TITLE_SYSTEM: &str = r#"You name documents. Given the opening of a document and the titles of the notes taken from it, reply with one short title — at most eight words, no quotes, no trailing punctuation, no preamble.
+
+Name what the document is about, not what it is. Never "Document", "Notes", "Guide", "Untitled"."#;
+
+/// The opening rather than the whole document: a title needs the subject, and
+/// the artifact titles already say what the rest of it turned out to cover.
+pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
+    let opening: String = text.chars().take(2000).collect();
+    format!(
+        "Opening of the document:\n{opening}\n\nTitles of the notes taken from it:\n{}\n\nTitle:",
+        artifact_titles.join("\n")
+    )
+}
+
 pub const JUDGE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
 
 First decide whether the two are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.

@@ -1,7 +1,20 @@
 <div data-terms="{{ d.terms }}">
-  <div class="crumb">
-    <a href="/ui/corpora/{{ d.corpus_id }}">source</a> · {{ d.slice_label }}
-  </div>
+  {# The way back to the list, for a narrow window where opening a result hides
+     it. An installed app has no back button to fall back on. Hidden above
+     60rem, where the rail is still on screen beside this — the same width that
+     hides it, not the phone breakpoint.
+
+     Inside the workspace the rail is only hidden by a class, so back is "show
+     the list again" rather than a navigation: dropping the class puts the
+     results back exactly as they were, and `history.back()` follows to undo
+     the URL the click pushed. The plain href is what runs on the standalone
+     artifact page, which has no workspace and no results to return to —
+     `/ui/search` cannot carry the query, because what this page is given is
+     the stripped highlight terms rather than what was typed. #}
+  <a class="back" href="/ui/search"
+     onclick="var w = document.querySelector('.workspace');
+              if (!w) return true;
+              w.classList.remove('has-selection'); history.back(); return false;">← Results</a>
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">
@@ -44,8 +57,11 @@
      Verify and deprecate only apply to an artifact that is actually in results
      — the flag above already offers the way back for one that is not — but
      delete is offered whatever the status, because "get rid of this" is a
-     decision that does not depend on whether it is currently hidden. #}
-  <div class="chips">
+     decision that does not depend on whether it is currently hidden.
+
+     `.actions` rather than `.chips`: it pushes delete to the far end, so the
+     one control that cannot be undone is never flush against two that can. #}
+  <div class="actions">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
@@ -144,18 +160,18 @@
       {% endif %}
     </div>
     <div>
-      {# Two links to the source, doing different jobs. The crumb above opens
-         the document plainly; this one opens it scrolled to and highlighting
-         the very lines this artifact was drawn from. An artifact with no
-         recorded span has no lines to jump to, so it gets the plain link.
+      {# One statement of which lines these are, and it is the link. The crumb
+         above the artifact said it, this label said it again, and a third link
+         beside the label said it a third time — on a screen whose whole point
+         is one artifact and the lines it came from.
 
          "highlighted" rather than a bare range: the panel shows a few lines of
          context either side, so naming the span alone read as a mismatch
-         against the line numbers actually on screen. #}
+         against the line numbers actually on screen. The link opens the
+         document scrolled to those lines; an artifact with no recorded span
+         has none to jump to and gets the plain link. #}
       <div class="pane-label">
-        {{ d.slice_label }} highlighted
-        <span class="spacer"></span>
-        <a href="{{ d.source_at_lines }}">open source at these lines</a>
+        <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
       </div>
       <div class="raw">
         <table>

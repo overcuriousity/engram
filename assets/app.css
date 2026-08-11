@@ -168,10 +168,13 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .input::placeholder, .textarea::placeholder { color: var(--color-fg-muted); }
 .input:focus, .textarea:focus, .select:focus { outline: none; border-color: var(--color-accent); }
 
+/* `nowrap`, because a badge is a label rather than a paragraph: "100% covered"
+   broke across two lines inside its own border and made every table row a
+   different height. */
 .badge {
   display: inline-flex; align-items: center; padding: 2px 6px;
   font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.2;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm); white-space: nowrap;
   background: var(--color-bg-active); color: var(--color-fg-secondary);
   border: 1px solid var(--color-border-strong);
 }
@@ -242,6 +245,18 @@ nav.top a.brand img { display: block; }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
 @media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
+
+/* A grid child defaults to `min-width: auto`, which resolves to min-content:
+   one unwrappable line of source then widens the column instead of scrolling
+   inside `.raw`, and takes the document's width with it. `.pane` had this; its
+   siblings did not, so the source pane escaped to the right at every width. */
+.workspace > *, .split > *, .rail-head { min-width: 0; }
+.raw { max-width: 100%; }
+/* Titles and snippets are prose, not source: they break rather than push. */
+.rail-title, .rail-snippet, .card-title { overflow-wrap: anywhere; }
+/* A backstop. If something new overflows, it scrolls in its own box rather
+   than dragging the document sideways. */
+body { overflow-x: hidden; }
 
 .pane-label {
   display: flex; gap: 0.5rem; align-items: baseline;
@@ -381,3 +396,162 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   border: 1px solid var(--color-border-strong);
 }
 .copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }
+
+/* ── The capture queue ───────────────────────────────────────────────────── */
+
+/* Rows, not a table: five columns of mostly-empty cells collapse badly on a
+   phone, and only two facts per row are ever worth reading — what it is called
+   and whether it is done. */
+.queue { display: flex; flex-direction: column; margin-top: 0.25rem; }
+.qrow {
+  display: flex; gap: 0.75rem; align-items: baseline; min-width: 0;
+  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--color-border-subtle);
+}
+.qrow:last-child { border-bottom: none; }
+.qrow:hover { background: var(--color-bg-hover); }
+.qtitle {
+  font-size: 0.9375rem; text-decoration: none; color: var(--color-fg-primary);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qrow:hover .qtitle { color: var(--color-accent); }
+/* A capture on its way to being named reads as a placeholder, because it is. */
+.qtitle.pending { color: var(--color-fg-muted); font-style: italic; }
+.qmeta {
+  margin-left: auto; display: flex; gap: 0.5rem; align-items: baseline; flex: none;
+  font-size: 0.8125rem; color: var(--color-fg-muted); font-family: var(--font-mono);
+}
+/* Only work in flight announces itself. A finished capture is just a line. */
+.qdot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent);
+  flex: none; align-self: center; animation: qpulse 1.6s ease-in-out infinite;
+}
+@keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+@media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
+
+/* ── An artifact's own controls ──────────────────────────────────────────── */
+
+/* Delete is not one of the other two. It sits at the far end so the control
+   that cannot be undone is never flush against two that can.
+
+   `form + form`, because a superseded or deprecated artifact renders neither
+   verify nor deprecate: delete is then the only form in the row, and pushing
+   it away from siblings it does not have just stranded a lone trash button at
+   the far side of an empty row. */
+.actions { display: flex; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; }
+.actions > form + form:last-of-type { margin-left: auto; }
+
+/* The open card drops its snippet: the pane beside it is showing that text in
+   full. Only the open one — the rest of the list still needs its two lines. */
+.rail-item[aria-selected="true"] .rail-snippet { display: none; }
+
+/* The one statement of which lines these are, underlined on hover only, so the
+   pane label reads as a label rather than as a link dropped into a heading. */
+.pane-label a { color: var(--color-accent); text-decoration: none; }
+.pane-label a:hover { text-decoration: underline; }
+
+/* ── A decision, where the work arrives ──────────────────────────────────── */
+
+/* Shown on Capture rather than on a page you have to remember to visit, and
+   rendered not at all when there is nothing to decide. */
+.decide {
+  border: 1px solid var(--color-warning); background: var(--color-warning-dim);
+  border-radius: var(--radius-md); padding: 0.75rem 0.875rem; margin-bottom: 0.5rem;
+}
+.decide-head { font-size: 0.875rem; }
+.decide-finding { font-size: 0.875rem; margin: 0.375rem 0 0.625rem; }
+.decide .row { flex-wrap: wrap; gap: 0.375rem; }
+/* Links keep the weight of the sentence around them rather than turning it
+   into a row of blue. */
+.decide a {
+  color: var(--color-fg-primary); text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+}
+.decide a:hover { text-decoration-color: currentColor; }
+
+/* Reachable, not advertised. */
+.quiet-link {
+  display: inline-block; margin-top: 2rem; font-size: 0.8125rem;
+  color: var(--color-fg-muted); text-decoration: none;
+}
+.quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+/* ── Phone ───────────────────────────────────────────────────────────────── */
+
+/* Above 40rem the top row carries the destinations, so the tab bar has nothing
+   to do. The back link answers a different width and gets its own block
+   below. */
+.tabbar { display: none; }
+.back { display: none; }
+
+/* Paired with `.workspace.has-selection .rail { display: none }` above, which
+   is what makes a back link necessary — so it has to appear at the same width
+   that hides the rail, not at the phone breakpoint. Between the two, a
+   half-screen desktop window opened a result, lost the list, and offered
+   nothing on the page to get back to it. */
+@media (max-width: 60rem) {
+  .back {
+    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
+    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
+    font-size: 0.875rem; font-weight: 500; text-decoration: none;
+    color: var(--color-fg-secondary);
+  }
+  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+}
+
+@media (max-width: 40rem) {
+  .shell {
+    padding-bottom: 5.5rem;                        /* clear of the tab bar */
+    /* Landscape on a notched phone puts the cutout beside the page, not
+       above it. */
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  /* The top row keeps identity and the way out; everything else is a thumb
+     away at the bottom. */
+  nav.top > a:not(.brand), nav.top .spacer { display: none; }
+  nav.top form { margin-left: auto; }
+
+  .tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex;
+    background: var(--color-bg-surface); border-top: 1px solid var(--color-border);
+    /* Above the home indicator rather than under it. */
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .tabbar a {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px; min-height: 52px; text-decoration: none;
+    font-size: 0.6875rem; color: var(--color-fg-muted);
+  }
+  .tabbar a[aria-current="page"] { color: var(--color-accent); }
+  .tabbar svg { width: 20px; height: 20px; }
+
+  /* 16px, or iOS zooms the page on focus — and a standalone window has no URL
+     bar to zoom back out from, so it simply stays zoomed. */
+  .input, .textarea, .select { font-size: 1rem; }
+  .input, .select { height: 44px; }
+
+  /* Targets a thumb can hit. */
+  .btn-icon { width: 44px; height: 44px; }
+  .chip > span { padding: 8px 12px; font-size: 0.8125rem; }
+  .facet-row { align-items: center; }
+
+  /* No scroller inside a scroller: the page is the only thing that scrolls. */
+  .rail, .raw { max-height: none; }
+
+  /* The metadata column is fixed-width and the title is what gives: with a
+     timestamp in the row, a name truncated to "Fake title: al…" was all that
+     survived. What a capture is called matters more here than when it
+     arrived, and the corpus page still says when. */
+  .qtime { display: none; }
+
+  /* A row of five cells, most of them empty, is a card here instead. */
+  table.grid, table.grid tbody, table.grid tr, table.grid td { display: block; }
+  table.grid thead { display: none; }
+  table.grid tr {
+    border: 1px solid var(--color-border); border-radius: var(--radius-md);
+    padding: 0.75rem; margin-bottom: 0.5rem;
+  }
+  table.grid td { border: none; height: auto; padding: 0.125rem 0; }
+  table.grid tr:hover td { background: transparent; }
+}

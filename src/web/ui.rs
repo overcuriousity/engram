@@ -1,6 +1,7 @@
 use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
+use crate::store::corpora::CorpusStatus;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
@@ -39,7 +40,7 @@ pub struct RenderedResult {
     pub weak: bool,
 }
 
-pub struct BrowseRow {
+pub struct QueueRow {
     pub id: String,
     pub label: String,
     pub status: String,
@@ -49,9 +50,21 @@ pub struct BrowseRow {
     /// `3/9` while windows are still being segmented, `None` once every window
     /// has resolved.
     pub progress: Option<String>,
-    /// Percentage of the source that ended up inside some chunk.
-    pub coverage: Option<String>,
+    /// Percentage of the source that ended up inside some chunk, already
+    /// formatted. `—` for a capture that has not been read yet.
+    pub coverage: String,
     pub low_coverage: bool,
+    /// Still on its way through the pipeline. Only these announce themselves;
+    /// a finished capture is a title and a count.
+    pub in_flight: bool,
+    /// Read, and read successfully. False covers both halves of "not moving
+    /// and not done" — failed, parked, partial — which are the states a count
+    /// of artifacts describes least well, because it is usually zero and looks
+    /// exactly like a finished capture that produced nothing.
+    pub settled: bool,
+    /// Waiting to be named. Shown differently from a capture that simply has
+    /// no title, because this one is about to get one.
+    pub unnamed: bool,
 }
 
 pub struct ArtifactView {
@@ -260,6 +273,12 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[template(path = "capture.html")]
 struct CaptureTemplate {
     theme: String,
+    /// Decisions waiting on a person, shown where the work arrives rather than
+    /// on a page you have to remember to visit. Empty renders nothing at all.
+    pairs: Vec<PairRow>,
+    /// How many more are behind the ones shown. Said once under the list, so a
+    /// short list does not read as an empty queue when it is a capped one.
+    more_pairs: i64,
 }
 
 #[derive(Template)]
@@ -303,10 +322,12 @@ struct ResultsTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "browse.html")]
-struct BrowseTemplate {
-    theme: String,
-    corpora: Vec<BrowseRow>,
+#[template(path = "_queue.html")]
+struct QueueTemplate {
+    rows: Vec<QueueRow>,
+    /// Whether anything is still moving. The fragment carries its own polling
+    /// trigger only while this holds, so an idle page makes no requests.
+    active: bool,
 }
 
 #[derive(Template)]
@@ -359,7 +380,6 @@ struct OpsTemplate {
     superseded: Vec<SupersededRow>,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
-    pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -385,17 +405,22 @@ struct AnswerTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn capture_page(_id: Identity) -> impl IntoResponse {
-    HtmlTemplate(CaptureTemplate {
+async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    let (pairs, more_pairs) = pair_rows(&st).await?;
+    Ok(HtmlTemplate(CaptureTemplate {
         theme: "light".into(),
+        pairs,
+        more_pairs,
     })
+    .into_response())
 }
 
+/// Text and nothing else. The label field is gone: a name arrives from
+/// synthesis, which has read the document, rather than from someone who has
+/// just pasted it and does not yet know what it says.
 #[derive(serde::Deserialize)]
 struct CaptureForm {
     text: String,
-    #[serde(default)]
-    title: String,
 }
 
 async fn capture_submit(
@@ -403,8 +428,7 @@ async fn capture_submit(
     _id: Identity,
     Form(f): Form<CaptureForm>,
 ) -> Result<Response> {
-    let title = (!f.title.trim().is_empty()).then(|| f.title.trim().to_string());
-    let out = st.core.ingest(&f.text, "web", title.as_deref()).await?;
+    let out = st.core.ingest(&f.text, "web", None).await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -582,34 +606,56 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
     }
 }
 
-async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+/// The ten most recent captures, under the box that made them.
+///
+/// Ten rather than everything: an index of every corpus was a page nobody read,
+/// and anything older than the last handful is found by searching for what it
+/// says rather than by scrolling a list of what it is called.
+async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
-    for s in st.core.store.list_corpora(200, 0).await? {
+    for s in st.core.store.list_corpora(10, 0).await? {
         let (resolved, total) = st.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
+        // Terminal states: nothing else will happen without someone asking.
+        // NeedsReview is terminal in this sense — it is waiting on a person.
+        let in_flight = !matches!(
+            s.status,
+            CorpusStatus::Ready
+                | CorpusStatus::Failed
+                | CorpusStatus::NeedsReview
+                | CorpusStatus::Partial
+        );
         let low_coverage = s
             .coverage
             .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
-        rows.push(BrowseRow {
+        rows.push(QueueRow {
             progress,
-            coverage: s.coverage.map(|c| format!("{:.0}%", c * 100.0)),
+            coverage: s
+                .coverage
+                .map(|c| format!("{:.0}%", c * 100.0))
+                .unwrap_or_else(|| "—".into()),
             low_coverage,
+            // Until synthesis names it, a capture is called by its opening
+            // words — the only thing anything knows about it, and the only
+            // thing that tells three captures pasted in a row apart. `unnamed`
+            // is what says the name is still coming; the label itself is not
+            // the place to say it.
             label: s
                 .title_hint
                 .clone()
                 .unwrap_or_else(|| markdown::snippet(&s.raw_text, 60)),
+            unnamed: s.title_hint.is_none() && in_flight,
+            in_flight,
+            settled: matches!(s.status, CorpusStatus::Ready),
             badge: status_badge(&s.status),
             status: s.status.as_str().to_string(),
-            artifact_count: st.core.store.artifacts_for_corpus(&s.id).await?.len() as i64,
+            artifact_count: st.core.store.count_artifacts_for_corpus(&s.id).await?,
             created: fmt_time(s.created_at),
             id: s.id,
         });
     }
-    Ok(HtmlTemplate(BrowseTemplate {
-        theme: "light".into(),
-        corpora: rows,
-    })
-    .into_response())
+    let active = rows.iter().any(|r| r.in_flight);
+    Ok(HtmlTemplate(QueueTemplate { rows, active }).into_response())
 }
 
 /// Which lines to highlight, when the page was opened from an artifact that
@@ -699,7 +745,7 @@ async fn delete_corpus_ui(
     Path(cid): Path<String>,
 ) -> Result<Response> {
     st.core.delete_corpus(&cid).await?;
-    Ok(Redirect::to("/ui/browse").into_response())
+    Ok(Redirect::to("/ui/capture").into_response())
 }
 
 /// Remove an artifact from both stores, from the page that shows it.
@@ -741,6 +787,95 @@ async fn reprocess_ui(
         .reprocess(&cid, crate::store::jobs::Stage::Synthesize)
         .await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
+}
+
+/// A title is what makes two near-identical artifacts tellable apart at a
+/// glance; falling back to the opening of the body beats an id.
+fn title_of(c: &crate::store::artifacts::Chunk) -> String {
+    c.title
+        .clone()
+        .unwrap_or_else(|| c.text.chars().take(60).collect())
+}
+
+/// How many decisions Capture offers at once, and the order it looks for them
+/// in. Confirmed contradictions and judge-proposed supersedes lead: they are
+/// the ones that mean something in the base is wrong or stale, rather than
+/// merely repeated.
+///
+/// A rolling window rather than the whole backlog. This is now the app's start
+/// page, so every open paid for three fifty-row queries and two point lookups
+/// per pair, and a base with real overlap in it rendered a screen of warning
+/// boxes above the captures. Deciding one of these makes the next appear, so
+/// the cap strands nothing — there is no second page to go and find the rest
+/// on, which is the point: Housekeeping is reference, not work.
+const PAIR_LIMIT: usize = 5;
+const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
+    crate::store::pairs::PairState::Contradiction,
+    crate::store::pairs::PairState::Superseded,
+    crate::store::pairs::PairState::Pending,
+];
+
+/// The first `PAIR_LIMIT` pairs still waiting on a judgement, and how many more
+/// there are behind them.
+///
+/// Used by Capture, which shows them because that is where the work arrives,
+/// and by nothing else: Housekeeping is what is left over once the only part of
+/// Ops that needs a person has moved to the page people actually open.
+async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
+    let mut waiting = 0i64;
+    for state in PAIR_STATES {
+        waiting += st.core.store.count_pairs_by_state(state).await?;
+    }
+
+    let mut pairs = Vec::new();
+    'fill: for state in PAIR_STATES {
+        for p in st
+            .core
+            .store
+            .pairs_by_state(state, PAIR_LIMIT as i64)
+            .await?
+        {
+            let (Ok(a), Ok(b)) = (
+                st.core.store.get_artifact(&p.a_id).await,
+                st.core.store.get_artifact(&p.b_id).await,
+            ) else {
+                continue;
+            };
+            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
+                if id == a.id {
+                    title_of(&a)
+                } else {
+                    title_of(&b)
+                }
+            });
+            // Keeping one side is superseding the other, so the judge naming
+            // `a` obsolete is a recommendation to keep `b`.
+            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
+            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
+            pairs.push(PairRow {
+                id: p.id,
+                percent: (p.score * 100.0).round() as i64,
+                a_title: title_of(&a),
+                b_title: title_of(&b),
+                a_id: p.a_id,
+                b_id: p.b_id,
+                detail: p.detail,
+                contradiction: state == crate::store::pairs::PairState::Contradiction,
+                obsolete_title,
+                keeps_a,
+                keeps_b,
+            });
+            if pairs.len() == PAIR_LIMIT {
+                break 'fill;
+            }
+        }
+    }
+
+    // Counted from the states rather than from the rows, so a pair whose
+    // artifacts have since gone missing — skipped above — is not announced as
+    // something waiting that never appears.
+    let more = (waiting - pairs.len() as i64).max(0);
+    Ok((pairs, more))
 }
 
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
@@ -804,14 +939,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
-    // A title is what makes two near-identical artifacts tellable apart at a
-    // glance; falling back to the opening of the body beats an id.
-    let title_of = |c: &crate::store::artifacts::Chunk| {
-        c.title
-            .clone()
-            .unwrap_or_else(|| c.text.chars().take(60).collect())
-    };
-
     let mut superseded = Vec::new();
     for c in st.core.store.superseded_artifacts(50).await? {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
@@ -825,49 +952,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             winner_id,
             winner_title,
         });
-    }
-
-    // Confirmed contradictions and judge-proposed supersedes lead: they are
-    // the ones that mean something in the base is wrong or stale, rather than
-    // merely repeated.
-    let mut pairs = Vec::new();
-    for state in [
-        crate::store::pairs::PairState::Contradiction,
-        crate::store::pairs::PairState::Superseded,
-        crate::store::pairs::PairState::Pending,
-    ] {
-        for p in st.core.store.pairs_by_state(state, 50).await? {
-            let (Ok(a), Ok(b)) = (
-                st.core.store.get_artifact(&p.a_id).await,
-                st.core.store.get_artifact(&p.b_id).await,
-            ) else {
-                continue;
-            };
-            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
-                if id == a.id {
-                    title_of(&a)
-                } else {
-                    title_of(&b)
-                }
-            });
-            // Keeping one side is superseding the other, so the judge naming
-            // `a` obsolete is a recommendation to keep `b`.
-            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
-            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
-            pairs.push(PairRow {
-                id: p.id,
-                percent: (p.score * 100.0).round() as i64,
-                a_title: title_of(&a),
-                b_title: title_of(&b),
-                a_id: p.a_id,
-                b_id: p.b_id,
-                detail: p.detail,
-                contradiction: state == crate::store::pairs::PairState::Contradiction,
-                obsolete_title,
-                keeps_a,
-                keeps_b,
-            });
-        }
     }
 
     let deprecated = st
@@ -909,7 +993,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         superseded,
         deprecated,
         stale,
-        pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -1003,12 +1086,13 @@ async fn dismiss_pair_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 /// Which artifact of a pair the operator is keeping. Absent means "whichever
@@ -1017,6 +1101,10 @@ async fn dismiss_pair_ui(
 #[derive(serde::Deserialize, Default)]
 struct KeepForm {
     keep: Option<String>,
+    /// Pressed from Capture, these come back to Capture. Same reasoning as
+    /// `ReturnTo`, which validates the path.
+    #[serde(flatten)]
+    back: ReturnTo,
 }
 
 /// Resolve a pair by naming the artifact that survives; the other is superseded
@@ -1073,7 +1161,7 @@ async fn apply_pair_supersede_ui(
             pair.detail.as_deref(),
         )
         .await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(f.back.path()).into_response())
 }
 
 async fn deprecate_ui(
@@ -1258,7 +1346,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
-        .route("/ui/browse", get(browse))
+        .route("/ui/queue", get(queue_fragment))
+        // An installed PWA may still hold /ui/browse as its start URL, and a
+        // bookmark outlives the page it pointed at.
+        // Takes an `Identity` like every other page: a gone page must still send
+        // a signed-out visitor to sign in rather than bouncing them onward.
+        .route(
+            "/ui/browse",
+            get(|_id: Identity| async { Redirect::to("/ui/capture") }),
+        )
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
@@ -1453,6 +1549,22 @@ mod tests {
             format!("engram_session={cid}"),
             handle,
         )
+    }
+
+    async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+        body_of(res).await
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -1837,6 +1949,7 @@ mod tests {
             "/ui/search",
             "/ui/search/results?q=x",
             "/ui/browse",
+            "/ui/queue",
             "/ui/corpora/abc",
             "/ui/ask",
             "/ui/ops",
@@ -1935,17 +2048,47 @@ mod tests {
         let html = body_of(res).await;
         assert!(html.contains("<textarea"));
         assert!(html.contains("hx-post=\"/ui/capture\""));
+        // The two halves of "a capture appears under Recent without a reload":
+        // the form announces the capture, the queue below is listening. The
+        // form only swaps its own result card, so without the event a capture
+        // pasted onto an idle page leaves the list below it stale.
+        assert!(
+            html.contains("htmx.trigger(document.body, 'captured')"),
+            "a successful capture announces nothing for the queue to hear"
+        );
+        assert!(
+            !html.contains("autofocus"),
+            "this page is the app's start_url: autofocus opens the software \
+             keyboard over the page the moment the installed app launches"
+        );
     }
 
     #[tokio::test]
     async fn capturing_text_stores_it_and_confirms() {
         let (app, cookie) = app_with_session().await;
         let res = app
-            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure&title=t"))
+            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(body_of(res).await.to_lowercase().contains("captured"));
+    }
+
+    #[tokio::test]
+    async fn capture_takes_only_text() {
+        // The label field is gone from the form. A client still sending one —
+        // a cached page, a script written against the old form — must not get
+        // a 422 for a field the server stopped caring about.
+        let (app, cookie) = app_with_session().await;
+        let res = app
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=another+one&title=ignored",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2059,17 +2202,158 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browse_lists_captured_sources() {
-        let (app, cookie) = app_with_session().await;
-        app.clone()
-            .oneshot(form(
-                "/ui/capture",
-                &cookie,
-                "text=findable+content&title=My+Note",
-            ))
+    async fn the_queue_lists_recent_captures_and_polls_only_while_busy() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
 
+        // Freshly captured and still queued: the fragment has to ask to be
+        // refreshed, or the row would sit at its opening words forever.
+        let body = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            body.contains("alpha line"),
+            "a capture nothing has read yet is called by its opening words, \
+             which is what tells two of them apart"
+        );
+        assert!(body.contains("every 3s"), "work in flight keeps polling");
+
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let body = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            body.contains("Fake title: alpha line"),
+            "once synthesis names it, the row is called what it is"
+        );
+        assert!(
+            !body.contains("every 3s"),
+            "an idle queue stops polling itself"
+        );
+        assert!(
+            body.contains("captured from:body"),
+            "an idle queue still listens, or a capture pasted onto it never \
+             appears without a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_stopped_without_finishing_says_which_way() {
+        // Failed, parked and partial are all "not moving and not done", and
+        // all three usually have no artifacts — so the count that describes a
+        // finished capture described these as `0 artifacts · —`, which is
+        // exactly what a capture that was read and yielded nothing looks like.
+        // The only list of captures there now is must distinguish them.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+
+        for (status, badge) in [
+            (crate::store::corpora::CorpusStatus::Failed, "badge-danger"),
+            (
+                crate::store::corpora::CorpusStatus::NeedsReview,
+                "badge-warning",
+            ),
+            (
+                crate::store::corpora::CorpusStatus::Partial,
+                "badge-warning",
+            ),
+        ] {
+            let name = status.as_str();
+            core.store.set_corpus_status(&out.id, status).await.unwrap();
+            let body = get_body(&app, &cookie, "/ui/queue").await;
+            assert!(
+                body.contains(badge) && body.contains(name),
+                "{name} renders no status of its own"
+            );
+            assert!(
+                !body.contains("0 artifacts"),
+                "{name} reads as a finished capture that produced nothing"
+            );
+            assert!(
+                !body.contains("every 3s"),
+                "{name} waits on a person or on nobody; polling it changes nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_offers_a_few_decisions_and_counts_the_rest() {
+        // The whole backlog used to render here, on what is now the app's
+        // start page: three fifty-row queries and two point lookups per pair
+        // on every open, and a screen of warning boxes above the captures.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &[
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+            ],
+        )
+        .await;
+        for w in ids.chunks(2) {
+            core.store.record_pair(&w[0], &w[1], 0.9).await.unwrap();
+        }
+
+        let body = get_body(&app, &cookie, "/ui/capture").await;
+        assert_eq!(
+            body.matches("/supersede").count(),
+            super::PAIR_LIMIT * 2,
+            "five pairs, both sides offered for each, and nothing beyond that"
+        );
+        // Seven pairs, five shown. Said on the page, because there is no
+        // second page to go and find the other two on.
+        assert!(
+            body.contains("2 more waiting"),
+            "a capped list that does not say it is capped reads as an empty queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_card_does_not_repeat_the_pane_beside_it() {
+        // The pane lists an artifact's tags in full. Repeating them on the card
+        // was what made the rail heavy enough to need its own scrollbar, and on
+        // a short artifact the card and the pane read as the same thing twice.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(
+            body.contains("rail-title"),
+            "the card still names the artifact"
+        );
+        assert!(
+            !body.contains("badge-accent"),
+            "the card no longer carries the category chip the pane already lists"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_source_pane_names_its_lines_once() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        let id = body
+            .split("/ui/artifacts/")
+            .nth(1)
+            .and_then(|s| s.split(['"', '?']).next())
+            .expect("a result to open")
+            .to_string();
+
+        let body = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
+        assert!(
+            !body.contains("open source at these lines"),
+            "the pane label is the link now"
+        );
+        assert_eq!(
+            body.matches("highlighted").count(),
+            1,
+            "the span is named once, not in a crumb and a label and a link"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_redirects_to_capture() {
+        // An installed PWA may still have /ui/browse as its start URL.
+        let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(
                 Request::builder()
@@ -2080,8 +2364,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_of(res).await.contains("My Note"));
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/capture");
     }
 
     #[tokio::test]
@@ -2153,8 +2437,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
-        assert!(html.contains("Queue"));
+        // The counts read as a sentence now rather than as a row of badges.
+        assert!(html.contains("artifacts,"), "the counts are still stated");
         assert!(html.contains("API tokens"));
+        // An empty base says so once, instead of answering five headings with
+        // "None."
+        assert!(html.contains("Nothing deprecated"));
+        assert!(!html.contains("<h3>Deprecated</h3>"));
     }
 
     #[tokio::test]
@@ -2349,7 +2638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_lists_a_pending_pair_and_can_dismiss_it() {
+    async fn capture_lists_a_pending_pair_and_can_dismiss_it() {
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["left one", "right one"]).await;
         core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
@@ -2360,19 +2649,14 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let res = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/ops")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let html = body_of(res).await;
+        // On Capture, not on Housekeeping: this is the one part of Ops that
+        // needs a person, so it belongs where the work arrives.
+        let html = get_body(&app, &cookie, "/ui/capture").await;
         assert!(html.contains("left one") && html.contains("right one"));
+        assert!(
+            html.contains("Keep “left one”"),
+            "each button names the artifact it keeps"
+        );
 
         app.clone()
             .oneshot(form(

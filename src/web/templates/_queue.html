@@ -1,0 +1,39 @@
+{# Polls itself, and only while something is still moving. The trigger lives on
+   the fragment rather than on the page, so the swap that reports the last job
+   finishing is also the swap that stops the polling — an idle page open in a
+   background tab makes no requests at all. Three seconds because a segment is
+   one model call: polling faster only samples the same answer twice.
+
+   `captured` is listened for whatever the state, and that is the half that has
+   to survive every swap: a capture pasted onto an idle page has nothing in
+   flight to poll, so without this the row it just created never arrives and
+   the list sits there stale until a reload. The form fires the event; this
+   fetch is what starts the polling for the job it started. #}
+<div id="queue" class="queue" hx-get="/ui/queue" hx-swap="outerHTML"
+     hx-trigger="{% if active %}every 3s, {% endif %}captured from:body">
+  {% for r in rows %}
+  <div class="qrow">
+    {% if r.in_flight %}<span class="qdot" aria-hidden="true"></span>{% endif %}
+    <a class="qtitle {% if r.unnamed %}pending{% endif %}" href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+    <span class="qmeta">
+      {% if let Some(p) = r.progress %}
+        <span class="badge badge-accent">segmenting {{ p }}</span>
+      {% else if r.in_flight %}
+        <span class="badge badge-accent">{{ r.status }}</span>
+      {# Failed, parked and partial stop moving without finishing, and their
+         artifact count is usually zero — which renders as "0 artifacts · —",
+         indistinguishable from a capture that was read and yielded nothing.
+         The status is the only thing worth saying about these rows. #}
+      {% else if !r.settled %}
+        <span class="badge {{ r.badge }}">{{ r.status }}</span>
+      {% else if r.low_coverage %}
+        <span class="badge badge-warning" title="fraction of this capture that ended up inside an artifact">{{ r.coverage }} covered</span>
+      {% else %}
+        <span>{{ r.artifact_count }} artifacts · {{ r.coverage }}</span>
+      {% endif %}
+      <span class="qtime">{{ r.created }}</span>
+    </span>
+  </div>
+  {% endfor %}
+  {% if rows.is_empty() %}<p class="muted">Nothing captured yet.</p>{% endif %}
+</div>

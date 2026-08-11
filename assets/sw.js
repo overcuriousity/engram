@@ -15,11 +15,19 @@ var OFFLINE_PAGE = [
   '<!doctype html><html lang="en"><head><meta charset="utf-8">',
   '<meta name="viewport" content="width=device-width, initial-scale=1">',
   '<title>Offline — engram</title>',
+  // The app's own base colours, not a palette of this page's own. The manifest
+  // paints #f8f6f1 behind a launch, so a dark offline page is the same flash of
+  // the wrong colour that moving the manifest to cream was meant to remove. The
+  // dark values are app.css's, for a device set that way.
   '<style>',
-  'html{background:#0e1015;color:#e6e6e6;font:16px/1.5 system-ui,sans-serif}',
+  'html{background:#f8f6f1;color:#2d2d2d;font:16px/1.5 system-ui,sans-serif}',
   'body{margin:0;display:grid;place-items:center;min-height:100vh;padding:2rem}',
   'div{max-width:24rem;text-align:center}',
-  'p{color:#9aa0aa}',
+  'p{color:#7a7a72}',
+  '@media(prefers-color-scheme:dark){',
+  'html{background:#0e1015;color:#e2e4ec}',
+  'p{color:#8b8fa8}',
+  '}',
   '</style></head><body><div>',
   '<h1>Offline</h1>',
   '<p>engram keeps its corpora on its server, so there is nothing to search',

@@ -186,8 +186,17 @@ mod tests {
 
         assert_eq!(m["name"], "engram");
         assert_eq!(m["display"], "standalone");
-        assert_eq!(m["start_url"], "/ui/search");
+        assert_eq!(m["start_url"], "/ui/capture");
+        // `id` stays what it always was even though `start_url` moved: a
+        // browser keys an installed app on `id`, and changing it turns an
+        // update into a second app sitting beside the first.
+        assert_eq!(m["id"], "/ui/search");
         assert_eq!(m["scope"], "/", "the worker controls the whole origin");
+        // The splash matches the page it opens into. These were the dark
+        // palette while the app serves light, so an install flashed a dark
+        // screen and then repainted cream.
+        assert_eq!(m["background_color"], "#f8f6f1");
+        assert_eq!(m["theme_color"], "#f8f6f1");
 
         let icons = m["icons"].as_array().unwrap();
         // Android will not offer to install without both of these sizes, and
@@ -293,6 +302,23 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(res.status(), StatusCode::OK);
+    }
+
+    /// The manifest paints `#f8f6f1` behind a launch. An offline page that
+    /// opens dark is the same flash of the wrong colour that moving the
+    /// manifest off the dark palette was meant to remove.
+    #[test]
+    fn the_offline_page_opens_in_the_colour_the_manifest_paints() {
+        let js = Assets::get("sw.js").expect("sw.js must be embedded");
+        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
+        assert!(
+            js.contains("html{background:#f8f6f1"),
+            "the offline page does not start from the app's light base colour"
+        );
+        assert!(
+            js.contains("prefers-color-scheme:dark"),
+            "a device set to dark gets no dark offline page"
+        );
     }
 
     #[test]

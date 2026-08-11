@@ -2,80 +2,19 @@
 {% block title %}Ops — engram{% endblock %}
 {% block content %}
 
-<h3>Queue</h3>
-<div class="row" style="gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
-  {% for j in job_counts %}<span class="badge">{{ j.0 }}: {{ j.1 }}</span>{% endfor %}
-  {% if let Some(age) = oldest_pending_secs %}
-    <span class="badge badge-muted">oldest pending: {{ age }}s</span>
-  {% endif %}
-  <span class="badge badge-muted">artifacts: {{ artifact_count }}</span>
-  <span class="badge badge-muted">vectors: {{ vector_count }}</span>
-</div>
+<p class="crumb"><a href="/ui/capture">Capture</a> › Housekeeping</p>
 
-<h3>Pairs worth a look</h3>
-{% if pairs.is_empty() %}
-  <p class="muted">None.</p>
-{% else %}
+{# The counts as a sentence rather than as `done: 17`-style badges: this is a
+   page you open to reassure yourself, and a row of key-value chips reads as a
+   debug dump of something going wrong. #}
 <p class="muted">
-  Two artifacts covering the same ground. Which one is current is a judgement
-  only you can make, so nothing here has been changed.
+  {{ artifact_count }} artifacts, {{ vector_count }} embedded.
+  {% for j in job_counts %}{{ j.1 }} {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}{% if job_counts.is_empty() %}Nothing queued{% endif %}.
+  {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
 </p>
-<table class="grid">
-  <thead><tr><th>Match</th><th>One</th><th>The other</th><th>Finding</th><th></th></tr></thead>
-  <tbody>
-  {% for p in pairs %}
-    <tr>
-      <td class="mono">
-        {{ p.percent }}%
-        {% if p.contradiction %}<span class="badge badge-warning">disagrees</span>{% endif %}
-        {% if let Some(t) = p.obsolete_title %}<span class="badge badge-accent">proposes superseding "{{ t }}"</span>{% endif %}
-      </td>
-      <td><a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a></td>
-      <td><a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a></td>
-      <td class="muted">{% if let Some(d) = p.detail %}{{ d }}{% else %}—{% endif %}</td>
-      {# Resolving a pair means saying which artifact is current. Both sides are
-         offered for every pair, not only the ones the judge could call: a pair
-         flagged as disagreeing with no proposed direction used to offer nothing
-         but Dismiss, so the only way to clear it was to declare the
-         disagreement uninteresting and leave both artifacts in results.
 
-         The judge's pick, when it has one, is the accented button rather than a
-         separate action — a recommendation about which of these two to press,
-         not a third thing to do. #}
-      {# The flex container is a div inside the cell, not the cell itself:
-         `display:flex` on a <td> takes it out of the table layout, so it stops
-         sizing with its column and its buttons spill past the row's rule. #}
-      <td>
-      <div class="row" style="gap:0.25rem;flex-wrap:wrap">
-        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
-              onsubmit="return confirm('Keep &quot;{{ p.a_title }}&quot; and hide the other? You can undo this from Ops.')">
-          <input type="hidden" name="keep" value="{{ p.a_id }}">
-          <button class="btn btn-sm {% if p.keeps_a %}btn-accent{% endif %}" type="submit">
-            Keep one
-          </button>
-        </form>
-        <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
-              onsubmit="return confirm('Keep &quot;{{ p.b_title }}&quot; and hide the other? You can undo this from Ops.')">
-          <input type="hidden" name="keep" value="{{ p.b_id }}">
-          <button class="btn btn-sm {% if p.keeps_b %}btn-accent{% endif %}" type="submit">
-            Keep the other
-          </button>
-        </form>
-        <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
-          <button class="btn btn-sm btn-ghost" type="submit">Dismiss</button>
-        </form>
-      </div>
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
+{% if !deprecated.is_empty() %}
 <h3>Deprecated</h3>
-{% if deprecated.is_empty() %}
-  <p class="muted">None.</p>
-{% else %}
 <p class="muted">Flagged stale with no specific replacement. Still stored and still readable; kept out of results only.</p>
 <table class="grid">
   <thead><tr><th>Artifact</th><th></th></tr></thead>
@@ -94,10 +33,8 @@
 </table>
 {% endif %}
 
+{% if !stale.is_empty() %}
 <h3>Worth a second look</h3>
-{% if stale.is_empty() %}
-  <p class="muted">None.</p>
-{% else %}
 <p class="muted">
   Active, but not confirmed accurate in a while and rarely or never retrieved
   since. A candidate list only — nothing here has been changed, and this never
@@ -136,10 +73,8 @@
 </table>
 {% endif %}
 
+{% if !superseded.is_empty() %}
 <h3>Hidden as near-identical</h3>
-{% if superseded.is_empty() %}
-  <p class="muted">None.</p>
-{% else %}
 <p class="muted">Still stored and still readable; kept out of results only.</p>
 <table class="grid">
   <thead><tr><th>Hidden</th><th>Kept</th><th></th></tr></thead>
@@ -159,10 +94,8 @@
 </table>
 {% endif %}
 
+{% if !parked.is_empty() %}
 <h3>Captures waiting on a decision</h3>
-{% if parked.is_empty() %}
-  <p class="muted">None.</p>
-{% else %}
 <p class="muted">
   Stored but not synthesised: each looks like a document already in the base.
   Nothing is spent on them until you choose.
@@ -191,10 +124,8 @@
 </table>
 {% endif %}
 
+{% if !retrying.is_empty() %}
 <h3>Retrying</h3>
-{% if retrying.is_empty() %}
-  <p class="muted">Nothing is stuck.</p>
-{% else %}
 <p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
 <table class="grid">
   <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Next</th><th>Last error</th></tr></thead>
@@ -210,6 +141,12 @@
   {% endfor %}
   </tbody>
 </table>
+{% endif %}
+
+{# One sentence for everything that is empty. Five headings each answered
+   "None." made a base with nothing wrong with it look like a backlog. #}
+{% if deprecated.is_empty() && stale.is_empty() && superseded.is_empty() && parked.is_empty() && retrying.is_empty() %}
+<p class="muted">Nothing deprecated, nothing hidden, nothing waiting on a decision, nothing retrying.</p>
 {% endif %}
 
 <h3>API tokens</h3>
