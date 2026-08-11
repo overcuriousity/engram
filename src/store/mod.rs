@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod auth;
 pub mod corpora;
+pub mod feedback;
 pub mod jobs;
 pub mod pairs;
 pub mod segments;
