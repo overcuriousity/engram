@@ -1,3 +1,11 @@
+{% match flash %}
+{% when Some with (f) %}
+{# What the last verdict revealed. Loudest where the ranking did worst: a
+   first-position confirmation is the least informative card of the day, and
+   celebrating it would breed agreement rather than judgement. #}
+<p class="judge-flash">{{ f.line }} <span class="mono muted">{{ f.delta }}</span></p>
+{% when None %}
+{% endmatch %}
 {% match card %}
 {% when Some with (c) %}
 <article class="judge-card" data-judge-id="{{ c.id }}">
@@ -21,7 +29,9 @@
     {% endfor %}
   </ol>
   <div class="row judge-outs">
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/judge/{{ c.id }}/gap"
+    {# Not a verdict yet: it opens the search for what should have answered.
+       Only if nothing there fits does it become a gap. #}
+    <button class="btn btn-ghost btn-sm" hx-get="/ui/judge/{{ c.id }}/assign"
             hx-target="#card" hx-swap="innerHTML">
       None of these <kbd>N</kbd>
     </button>

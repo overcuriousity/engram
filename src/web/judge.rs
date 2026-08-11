@@ -56,12 +56,45 @@ struct JudgeTemplate {
     progress_pct: i64,
     misses: Vec<crate::store::feedback::Miss>,
     card: Option<Card>,
+    /// Always `None` here — the page is a fresh arrival, not the moment after a
+    /// verdict. It exists because the card partial is shared with the fragment
+    /// route, which does show one.
+    flash: Option<Flash>,
 }
 
 #[derive(Template)]
 #[template(path = "_judge_card.html")]
 struct CardTemplate {
     card: Option<Card>,
+    /// What the judgement just before this one revealed. `None` on a plain
+    /// fetch of the next card.
+    flash: Option<Flash>,
+}
+
+pub struct Flash {
+    pub line: String,
+    /// `MRR 0.54 → 0.57`, so the figure the work is measured by visibly moves
+    /// as the work is done.
+    pub delta: String,
+}
+
+/// What the judgement just revealed, said plainly.
+///
+/// The emphasis runs opposite to intuition: the better the ranking did, the
+/// quieter the line. A rank-one confirmation teaches almost nothing, and an
+/// interface that cheers for it is training its operator to agree with
+/// whatever was already on top.
+pub fn diagnosis(rank: Option<i64>, verdict: Verdict) -> &'static str {
+    match (verdict, rank) {
+        (Verdict::Gap, _) => "a hole: your base doesn't know this yet.",
+        (Verdict::Discard, _) => "discarded.",
+        (Verdict::Hit, None) => "a find: search would never have shown you this.",
+        (Verdict::Hit, Some(r)) if r >= 10 => {
+            "the ranking got this wrong — this is what we're here for."
+        }
+        (Verdict::Hit, Some(r)) if r > 0 => "there, but far down. These are what move the MRR.",
+        (Verdict::Hit, _) => "found as expected.",
+    }
 }
 
 /// Roughly how long ago, in the words someone would use out loud. Precision
@@ -152,6 +185,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         stats,
         misses,
         card: next_pending_card(&st).await?,
+        flash: None,
     })
     .into_response())
 }
@@ -160,6 +194,24 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
     use axum::response::IntoResponse;
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&st).await?,
+        flash: None,
+    })
+    .into_response())
+}
+
+/// Render the next card with a note about the verdict that was just given.
+///
+/// The MRR is read on both sides of the write, so the delta shown is the one
+/// this judgement actually caused rather than a figure recomputed later.
+async fn card_after(st: &AppState, before: f64, line: &'static str) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let after = st.core.store.feedback_stats().await?.mrr;
+    Ok(HtmlTemplate(CardTemplate {
+        card: next_pending_card(st).await?,
+        flash: Some(Flash {
+            line: line.to_string(),
+            delta: format!("MRR {before:.2} → {after:.2}"),
+        }),
     })
     .into_response())
 }
@@ -175,8 +227,16 @@ async fn hit(
     Path(event_id): Path<String>,
     axum::extract::Form(f): axum::extract::Form<HitForm>,
 ) -> Result<Response> {
+    // Read before the write: afterwards the event is no longer pending, and the
+    // rank is what decides which diagnosis the operator gets.
+    let rank = st
+        .core
+        .store
+        .rank_in_event(&event_id, &f.artifact_id)
+        .await?;
+    let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge_hit(&event_id, &f.artifact_id).await?;
-    next_card(State(st), _id).await
+    card_after(&st, before, diagnosis(rank, Verdict::Hit)).await
 }
 
 async fn gap(
@@ -184,8 +244,9 @@ async fn gap(
     _id: Identity,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
+    let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge(&event_id, Verdict::Gap).await?;
-    next_card(State(st), _id).await
+    card_after(&st, before, diagnosis(None, Verdict::Gap)).await
 }
 
 async fn discard(
@@ -193,8 +254,9 @@ async fn discard(
     _id: Identity,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
+    let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge(&event_id, Verdict::Discard).await?;
-    next_card(State(st), _id).await
+    card_after(&st, before, diagnosis(None, Verdict::Discard)).await
 }
 
 async fn skip(
@@ -206,6 +268,93 @@ async fn skip(
     next_card(State(st), _id).await
 }
 
+// ── The "none of these" path ────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "_judge_assign.html")]
+struct AssignTemplate {
+    event_id: String,
+    query: String,
+    results: Vec<Choice>,
+    /// Whether a search has been run yet, so an empty list can say "nothing
+    /// matched" instead of appearing before anything was asked.
+    searched: bool,
+}
+
+async fn assign(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(event_id): Path<String>,
+) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let query = st
+        .core
+        .store
+        .next_pending()
+        .await?
+        .filter(|e| e.id == event_id)
+        .map(|e| e.query)
+        .unwrap_or_default();
+    Ok(HtmlTemplate(AssignTemplate {
+        event_id,
+        query,
+        results: vec![],
+        searched: false,
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct AssignQuery {
+    #[serde(default)]
+    pub q: String,
+}
+
+async fn assign_results(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(event_id): Path<String>,
+    axum::extract::Query(p): axum::extract::Query<AssignQuery>,
+) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let mut results = vec![];
+    if !p.q.trim().is_empty() {
+        let query = crate::core::search::SearchQuery {
+            q: p.q.clone(),
+            limit: 10,
+            tags: vec![],
+            category: None,
+            // Looking something up in order to label it is not the operator
+            // reading their notes.
+            mark: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        // The one search in the application that must never be captured: it is
+        // composed in full knowledge of the answer, which is the contamination
+        // the whole feature exists to keep out of the dataset.
+        let hits = st
+            .core
+            .search(&query, crate::store::feedback::Door::Judge)
+            .await?;
+        results = hits
+            .into_iter()
+            .map(|h| Choice {
+                artifact_id: h.artifact_id,
+                title: h.title.unwrap_or_else(|| "Untitled".into()),
+                snippet: snippet_of(&h.text),
+            })
+            .collect();
+    }
+    Ok(HtmlTemplate(AssignTemplate {
+        event_id,
+        query: p.q,
+        results,
+        searched: true,
+    })
+    .into_response())
+}
+
 pub fn judge_router() -> Router<AppState> {
     Router::new()
         .route("/ui/judge", get(page))
@@ -214,6 +363,8 @@ pub fn judge_router() -> Router<AppState> {
         .route("/ui/judge/{id}/gap", post(gap))
         .route("/ui/judge/{id}/discard", post(discard))
         .route("/ui/judge/{id}/skip", post(skip))
+        .route("/ui/judge/{id}/assign", get(assign))
+        .route("/ui/judge/{id}/assign/results", get(assign_results))
 }
 
 #[cfg(test)]
@@ -398,6 +549,104 @@ mod tests {
         let (app, cookie, _core, _) = judge_app(1, &["gone-for-good"]).await;
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("gone-for-good"));
+    }
+
+    #[test]
+    fn the_diagnosis_is_loudest_where_the_ranking_did_worst() {
+        // Inverted on purpose. A first-position hit is the least informative
+        // card of the day; making it the most celebrated would breed agreement
+        // with whatever the ranker already thought.
+        use super::diagnosis;
+        use crate::store::feedback::Verdict;
+        assert_eq!(diagnosis(Some(0), Verdict::Hit), "found as expected.");
+        assert!(diagnosis(Some(13), Verdict::Hit).contains("wrong"));
+        assert!(diagnosis(None, Verdict::Hit).contains("find"));
+        assert!(diagnosis(None, Verdict::Gap).contains("hole"));
+    }
+
+    #[tokio::test]
+    async fn the_assignment_search_is_never_captured() {
+        // It is composed in full knowledge of the answer. Recording it would
+        // feed the dataset exactly the contamination this feature avoids.
+        let (app, cookie, core, _) = judge_app(2, &[]).await;
+        core.store.purge_feedback().await.unwrap();
+        let event = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: "the one being judged".into(),
+                    door: Door::Ui,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let before = core.store.feedback_stats().await.unwrap().captured;
+
+        get(
+            &app,
+            &format!("/ui/judge/{event}/assign/results?q=mounting+an+image"),
+            &cookie,
+        )
+        .await;
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.feedback_stats().await.unwrap().captured,
+            before,
+            "looking something up in order to label it must not become data"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirming_from_outside_the_pool_is_reported_as_a_find() {
+        let (app, cookie, core, ids) = judge_app(1, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        // An artifact that exists but was never in this event's pool.
+        let src = core
+            .store
+            .insert_corpus("another raw", "web", None)
+            .await
+            .unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "the artifact search never offered".into(),
+                    corpus_span: None,
+                    title: Some("unoffered".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        assert_ne!(made[0].id, ids[0]);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/{}/hit", event.id))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("artifact_id={}", made[0].id)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(body.contains("a find"), "the flash did not name it a find");
+        assert_eq!(core.store.feedback_stats().await.unwrap().finds, 1);
     }
 
     #[tokio::test]

@@ -282,6 +282,19 @@ impl Store {
         }))
     }
 
+    /// Where this artifact stood in what the search returned, if it was in the
+    /// pool at all. `None` is the interesting answer: it means the search never
+    /// offered what turned out to be the right thing.
+    pub async fn rank_in_event(&self, event_id: &str, artifact_id: &str) -> Result<Option<i64>> {
+        Ok(sqlx::query_scalar(
+            "SELECT rank FROM search_candidates WHERE event_id = ? AND artifact_id = ?",
+        )
+        .bind(event_id)
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn judge_hit(&self, event_id: &str, artifact_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE search_events SET judged_at = ?, verdict = 'hit', expect_id = ?
