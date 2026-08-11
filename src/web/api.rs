@@ -237,6 +237,15 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Contradiction, 100)
             .await?,
+        // Judge-proposed supersedes awaiting an operator's confirmation. Listed
+        // for the same reason Ops renders them: without this a pair the judge
+        // ruled on simply disappears from `pairs`, and an API consumer never
+        // sees the proposal it left behind.
+        "supersede_proposals": st
+            .core
+            .store
+            .pairs_by_state(PairState::Superseded, 100)
+            .await?,
         "pairs": st
             .core
             .store

@@ -521,6 +521,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reactivating_a_superseded_artifact_survives_the_next_sweep() {
+        // Flipping the status without clearing `superseded_by` left the row
+        // still pointing at its winner, so the next sweep re-applied the
+        // superseded flag and the operator's decision quietly disappeared.
+        // The pair sits in the review band, below `auto_supersede`, so nothing
+        // here is a near-identical copy the sweep would re-hide on merit. The
+        // supersession is an applied judge proposal, which is the case an
+        // operator would reverse.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+
+        core.reactivate(&ids[0]).await.unwrap();
+
+        let back = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            back.superseded_by.is_none(),
+            "reactivate left the row pointing at its winner"
+        );
+        assert_eq!(back.status, crate::store::artifacts::ArtifactStatus::Active);
+
+        run(&core).await.unwrap();
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "the sweep re-hid an artifact an operator had reactivated"
+        );
+    }
+
+    #[tokio::test]
     async fn a_sweep_finishes_a_supersession_whose_payload_write_was_lost() {
         // The row and the payload cannot be written atomically. A crash between
         // them used to be permanent: the next sweep skipped the artifact

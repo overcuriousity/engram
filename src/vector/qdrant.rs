@@ -176,6 +176,37 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     Some(body)
 }
 
+/// The payload `set_lifecycle` merges into a point.
+///
+/// The legacy `superseded` boolean is derived and written alongside `status` so
+/// `build_filter`'s pre-backfill safety net and any reader that still checks it
+/// stay correct. It tracks `Superseded` specifically and *not* "anything not
+/// active": that net is a `must_not superseded == true` which `build_filter`
+/// emits whenever `include_superseded` is false, so writing `true` for a
+/// deprecated artifact would make `include_deprecated` unable to surface
+/// anything at all.
+fn lifecycle_payload(status: ArtifactStatus, superseded_by: Option<&str>) -> Value {
+    json!({
+        "status": status.as_str(),
+        "superseded": status == ArtifactStatus::Superseded,
+        "superseded_by": superseded_by,
+    })
+}
+
+/// The payload `set_last_verified_at` merges into a point.
+///
+/// `reset_hits` zeroes `hit_count` in the same write, because `stale_max_hits`
+/// counts retrievals *since* the last verification — see `Core::verify`. The
+/// backfill pass leaves it alone: it stamps every artifact and must not wipe
+/// every counter.
+fn verified_payload(at: i64, reset_hits: bool) -> Value {
+    let mut p = json!({ "last_verified_at": at });
+    if reset_hits {
+        p["hit_count"] = json!(0);
+    }
+    p
+}
+
 /// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
 /// which is why `near_pairs` follows this with a payload lookup.
 #[derive(Deserialize)]
@@ -1109,14 +1140,7 @@ impl VectorStore for QdrantVectors {
                 Method::POST,
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
-                    // The legacy boolean is derived and written alongside
-                    // `status` so `build_filter`'s pre-backfill safety net and
-                    // any reader that still checks it stay correct.
-                    "payload": {
-                        "status": status.as_str(),
-                        "superseded": status != ArtifactStatus::Active,
-                        "superseded_by": superseded_by,
-                    },
+                    "payload": lifecycle_payload(status, superseded_by),
                     "points": [ point_uuid(artifact_id) ],
                 })),
             )
@@ -1124,13 +1148,18 @@ impl VectorStore for QdrantVectors {
         Ok(())
     }
 
-    async fn set_last_verified_at(&self, artifact_id: &str, at: i64) -> Result<()> {
+    async fn set_last_verified_at(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        reset_hits: bool,
+    ) -> Result<()> {
         let _: Value = self
             .call(
                 Method::POST,
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
-                    "payload": { "last_verified_at": at },
+                    "payload": verified_payload(at, reset_hits),
                     "points": [ point_uuid(artifact_id) ],
                 })),
             )
@@ -1784,6 +1813,40 @@ mod tests {
         assert_eq!(
             f["defaults"]["last_verified_at"], 0,
             "a payload missing last_verified_at would take search down: {f}"
+        );
+    }
+
+    #[test]
+    fn deprecating_does_not_set_the_legacy_superseded_flag() {
+        // `build_filter` excludes `superseded == true` whenever superseded
+        // results are not asked for, which is the normal case for a caller that
+        // only set `include_deprecated`. Writing the flag for a deprecation
+        // would make that request unable to return anything.
+        let p = lifecycle_payload(ArtifactStatus::Deprecated, None);
+        assert_eq!(p["status"], "deprecated");
+        assert_eq!(p["superseded"], false, "deprecated is not superseded: {p}");
+
+        let s = lifecycle_payload(ArtifactStatus::Superseded, Some("winner"));
+        assert_eq!(s["superseded"], true);
+        assert_eq!(s["superseded_by"], "winner");
+
+        let a = lifecycle_payload(ArtifactStatus::Active, None);
+        assert_eq!(a["superseded"], false);
+    }
+
+    #[test]
+    fn only_a_verify_resets_the_hit_counter() {
+        // The backfill pass stamps every artifact; resetting there would wipe
+        // every retrieval count in the base.
+        let verified = verified_payload(42, true);
+        assert_eq!(verified["last_verified_at"], 42);
+        assert_eq!(verified["hit_count"], 0);
+
+        let backfilled = verified_payload(42, false);
+        assert_eq!(backfilled["last_verified_at"], 42);
+        assert!(
+            backfilled.get("hit_count").is_none(),
+            "a backfill must leave the counter alone: {backfilled}"
         );
     }
 

@@ -142,16 +142,29 @@ impl VectorStore for MemoryVectors {
         let mut w = self.points.write().unwrap();
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.status = Some(status);
-            p.payload.superseded = Some(status != ArtifactStatus::Active);
+            // Tracks `Superseded` specifically, matching the Qdrant backend:
+            // the legacy flag feeds a `must_not superseded == true` net that is
+            // active whenever superseded results are excluded, so setting it
+            // for a deprecated artifact would make `include_deprecated`
+            // unable to surface anything.
+            p.payload.superseded = Some(status == ArtifactStatus::Superseded);
             p.payload.superseded_by = superseded_by.map(str::to_string);
         }
         Ok(())
     }
 
-    async fn set_last_verified_at(&self, artifact_id: &str, at: i64) -> Result<()> {
+    async fn set_last_verified_at(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        reset_hits: bool,
+    ) -> Result<()> {
         let mut w = self.points.write().unwrap();
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.last_verified_at = Some(at);
+            if reset_hits {
+                p.payload.hit_count = Some(0);
+            }
         }
         Ok(())
     }

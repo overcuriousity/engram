@@ -828,4 +828,86 @@ mod tests {
         let core = test_core().await;
         assert!(core.search(&q("anything")).await.unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn include_deprecated_surfaces_a_deprecated_artifact() {
+        // The opt-in exists to let an operator look at what was retired. It has
+        // to reach past the legacy `superseded` flag, which a deprecation must
+        // therefore leave alone — see `lifecycle_payload`.
+        let core = test_core().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.search(&q("alpha")).await.unwrap()[0]
+            .artifact_id
+            .clone();
+        core.deprecate(&id).await.unwrap();
+
+        assert!(
+            core.search(&q("alpha")).await.unwrap().is_empty(),
+            "a deprecated artifact must stay out of an ordinary search"
+        );
+
+        let mut opted_in = q("alpha");
+        opted_in.include_deprecated = true;
+        let hits = core.search(&opted_in).await.unwrap();
+        assert_eq!(hits.len(), 1, "include_deprecated returned nothing");
+        assert_eq!(hits[0].artifact_id, id);
+        assert_eq!(hits[0].status, Some(ArtifactStatus::Deprecated));
+    }
+
+    #[tokio::test]
+    async fn a_newly_embedded_artifact_is_not_already_stale() {
+        // The scoring formula reads a missing `last_verified_at` as epoch, so
+        // an unstamped point ranks as maximally stale and lands on the
+        // deprecation-review list the moment it is ingested.
+        let core = test_core().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        let hit = &core.search(&q("alpha")).await.unwrap()[0];
+        let stamp = hit
+            .last_verified_at
+            .expect("a fresh artifact carries no last_verified_at");
+        assert!(
+            stamp > now_secs() - 300,
+            "the stamp must be the artifact's own, not epoch: {stamp}"
+        );
+
+        assert!(
+            core.stale_candidates(10).await.unwrap().is_empty(),
+            "an artifact ingested seconds ago is not a deprecation candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn verifying_restarts_the_retrieval_count() {
+        // `stale_max_hits` counts retrievals *since* the last verification. A
+        // lifetime counter would mean one appearance in a marked search kept an
+        // artifact off the review list for good.
+        let core = test_core().await;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.search(&q("alpha")).await.unwrap()[0]
+            .artifact_id
+            .clone();
+        core.background.wait_idle().await;
+
+        let hits_now = || async {
+            core.vectors
+                .stale_candidates(i64::MAX, i64::MAX, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|h| h.payload.artifact_id == id)
+                .and_then(|h| h.payload.hit_count)
+        };
+        assert_eq!(
+            hits_now().await,
+            Some(1),
+            "the marked search was not counted"
+        );
+
+        core.verify(&id).await.unwrap();
+        assert_eq!(hits_now().await, Some(0), "verify must restart the count");
+    }
 }

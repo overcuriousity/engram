@@ -893,9 +893,16 @@ async fn apply_pair_supersede_ui(
         pair.a_id
     };
     st.core.supersede(&obsolete_id, &winner_id).await?;
+    // The judge's explanation is carried through rather than dropped: it is the
+    // only record of why this supersede was applied, and `set_pair_state`
+    // writes `detail` unconditionally, so passing `None` would null it.
     st.core
         .store
-        .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .set_pair_state(
+            pid,
+            crate::store::pairs::PairState::Dismissed,
+            pair.detail.as_deref(),
+        )
         .await?;
     Ok(Redirect::to("/ui/ops").into_response())
 }

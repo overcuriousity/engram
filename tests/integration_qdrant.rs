@@ -101,6 +101,113 @@ async fn upsert_search_and_payload_roundtrip() {
 
 #[tokio::test]
 #[ignore]
+async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
+    // The two exclusions are independent opt-ins, and the deprecated one used
+    // to be unreachable: `set_lifecycle` wrote the legacy `superseded` boolean
+    // for any non-active status, and the filter drops `superseded == true`
+    // whenever superseded results were not asked for. Only a real Qdrant runs
+    // that filter, so this is where it has to be proved.
+    use engram::store::artifacts::ArtifactStatus;
+
+    let v = fresh("engram_it_deprecated", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+        point("b", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("a", ArtifactStatus::Deprecated, None)
+        .await
+        .unwrap();
+    v.set_lifecycle("b", ArtifactStatus::Superseded, Some("a"))
+        .await
+        .unwrap();
+
+    let ids = |f: SearchFilter| {
+        let v = &v;
+        async move {
+            let mut got: Vec<String> = v
+                .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|h| h.payload.artifact_id)
+                .collect();
+            got.sort();
+            got
+        }
+    };
+
+    assert!(
+        ids(SearchFilter::default()).await.is_empty(),
+        "neither retired artifact belongs in an ordinary search"
+    );
+    assert_eq!(
+        ids(SearchFilter {
+            include_deprecated: true,
+            ..Default::default()
+        })
+        .await,
+        vec!["a".to_string()],
+        "include_deprecated returned nothing, or leaked the superseded one"
+    );
+    assert_eq!(
+        ids(SearchFilter {
+            include_superseded: true,
+            ..Default::default()
+        })
+        .await,
+        vec!["b".to_string()]
+    );
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn only_a_verify_clears_the_hit_counter() {
+    // `stale_max_hits` counts retrievals since the last verification, so a
+    // verify restarts the count while the one-shot backfill — which stamps
+    // every artifact — must leave every counter alone.
+    let v = fresh("engram_it_verify", 4).await;
+    v.upsert(vec![point(
+        "a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["linux"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    v.touch(&["a".to_string()], 1_000).await.unwrap();
+    v.touch(&["a".to_string()], 2_000).await.unwrap();
+
+    let counted = |older: i64| {
+        let v = &v;
+        async move {
+            v.stale_candidates(older, i64::MAX, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|h| h.payload.artifact_id == "a")
+                .and_then(|h| h.payload.hit_count)
+        }
+    };
+    assert_eq!(counted(i64::MAX).await, Some(2));
+
+    v.set_last_verified_at("a", 5_000, false).await.unwrap();
+    assert_eq!(
+        counted(i64::MAX).await,
+        Some(2),
+        "a backfill stamp must not wipe the counter"
+    );
+
+    v.set_last_verified_at("a", 6_000, true).await.unwrap();
+    assert_eq!(counted(i64::MAX).await, Some(0), "verify must restart it");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn filtered_search_uses_payload_indexes() {
     let v = fresh("engram_it_filter", 4).await;
     v.upsert(vec![

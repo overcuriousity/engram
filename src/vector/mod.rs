@@ -160,7 +160,17 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<()>;
     /// Stamp an artifact as confirmed accurate now — what the recency-decay
     /// scoring formula reads.
-    async fn set_last_verified_at(&self, artifact_id: &str, at: i64) -> Result<()>;
+    ///
+    /// `reset_hits` also zeroes `hit_count`, because `stale_max_hits` counts
+    /// retrievals *since* the last verification. An operator verifying an
+    /// artifact passes `true`; the one-shot backfill passes `false`, since it
+    /// stamps every artifact and would otherwise wipe every counter.
+    async fn set_last_verified_at(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        reset_hits: bool,
+    ) -> Result<()>;
     /// Active artifacts confirmed stale a while ago (`last_verified_at` older
     /// than `older_than`) and rarely or never retrieved since (`hit_count` at
     /// most `max_hits`) — candidates for an operator to review and deprecate.

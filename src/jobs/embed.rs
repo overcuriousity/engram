@@ -387,7 +387,15 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // would revive an artifact the sweep hid, on every re-embed.
         superseded: None,
         status: None,
-        last_verified_at: None,
+        // Written, not deferred: a brand-new point has no stored stamp to carry
+        // forward, and the scoring formula reads a missing `last_verified_at`
+        // as epoch — so leaving it unset would rank every freshly ingested
+        // artifact as maximally stale and put it straight on the
+        // deprecation-review list. SQLite is the source of truth here (set at
+        // insert, updated by `Core::verify`), so this is the current value.
+        // The `created_at` fallback covers any row written before the column
+        // existed.
+        last_verified_at: chunk.last_verified_at.or(Some(chunk.created_at)),
         superseded_by: None,
     }
 }

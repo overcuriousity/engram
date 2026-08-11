@@ -213,11 +213,18 @@ impl Core {
         Ok(())
     }
 
-    /// Move an artifact back to active. Does not touch `superseded_by` — an
-    /// artifact reactivated out of `Superseded` keeps pointing at what it lost
-    /// to, same as `unsupersede`; callers that mean to undo a supersession
-    /// specifically should use that instead.
+    /// Move an artifact back to active.
+    ///
+    /// An artifact that was hidden by a supersession is handed to
+    /// `unsupersede`, which clears `superseded_by` on both sides. Flipping the
+    /// status alone would leave the row pointing at its winner while the
+    /// payload no longer does, so Ops would keep listing it as hidden and the
+    /// next consolidation sweep would re-apply `Superseded` to the vector
+    /// store — undoing the operator without saying so.
     pub async fn reactivate(&self, id: &str) -> Result<()> {
+        if self.store.get_artifact(id).await?.superseded_by.is_some() {
+            return self.unsupersede(id).await;
+        }
         self.store
             .set_artifact_status(id, ArtifactStatus::Active)
             .await?;
@@ -230,10 +237,15 @@ impl Core {
 
     /// Stamp an artifact as confirmed accurate now — what search ranking's
     /// recency decay reads.
+    ///
+    /// Also zeroes `hit_count`: `stale_max_hits` is "retrieved at most this
+    /// many times *since*" the last verification, and a lifetime counter would
+    /// mean one appearance in a marked search result kept an artifact off the
+    /// review list forever.
     pub async fn verify(&self, id: &str) -> Result<()> {
         let at = now();
         self.store.set_last_verified_at(id, at).await?;
-        self.vectors.set_last_verified_at(id, at).await?;
+        self.vectors.set_last_verified_at(id, at, true).await?;
         tracing::info!(artifact_id = id, "verified an artifact");
         Ok(())
     }
@@ -251,7 +263,10 @@ impl Core {
                 .set_lifecycle(&id, c.status, c.superseded_by.as_deref())
                 .await?;
             self.vectors
-                .set_last_verified_at(&id, c.last_verified_at.unwrap_or(c.created_at))
+                // `false`: this pass touches every artifact, and a verify-style
+                // counter reset here would wipe every retrieval count in the
+                // base.
+                .set_last_verified_at(&id, c.last_verified_at.unwrap_or(c.created_at), false)
                 .await?;
             n += 1;
         }
