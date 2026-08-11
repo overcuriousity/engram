@@ -41,6 +41,35 @@ is a query you can paste rather than compose.
 
 Keywords still work; they are simply the weakest thing you can hand it.
 
+## Learning what the search got wrong
+
+Whether that ranking is any good is a question nothing in the app can answer on
+its own, and it cannot be answered from memory either: a test query written
+while looking at an artifact reuses the artifact's wording, and every retrieval
+system passes it. The only uncontaminated question is one you asked in earnest,
+before you saw what came back.
+
+So with `feedback.enabled`, every search is recorded — including the one where
+you found nothing and gave up, which leaves no other trace and is the most
+telling of all. Later, at `/ui/judge`, each recorded search comes back as a card
+with its candidates shuffled and unlabelled, and one question: which of these
+was the one you needed? Four answers, all one keystroke: a number, `N` for none
+of these (then find what should have answered), `S` to skip, `X` if it was not a
+real search.
+
+The counter at the top is not a score standing in for the measurement — it *is*
+recall@10 and MRR, read from the positions those searches actually gave.
+
+```bash
+engram --export-eval ~/engram-eval          # artifacts.json + pairs.json
+ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval -- --ignored --nocapture
+```
+
+The export reads SQLite only: no inference, no Qdrant, and the artifacts keep
+their real ids, so running it again does not invalidate the pairs. Nothing
+leaves the machine, `enabled` is off until you turn it on, and Ops has a button
+that forgets all of it.
+
 ## Requirements
 
 - Rust 1.94+ (the floor comes from sqlx 0.9).

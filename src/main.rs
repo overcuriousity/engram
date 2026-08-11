@@ -29,6 +29,12 @@ struct Args {
     /// before engram addressed vectors through an alias.
     #[arg(long)]
     replace_legacy: bool,
+    /// Write artifacts.json and pairs.json for the evaluation harness into DIR,
+    /// then exit. Reads only SQLite: no inference, no vector store. The pairs
+    /// are the searches you judged; the artifacts keep their production ids, so
+    /// re-exporting does not invalidate them.
+    #[arg(long, value_name = "DIR")]
+    export_eval: Option<std::path::PathBuf>,
     /// Re-measure every corpus's coverage from the artifacts already stored,
     /// then exit. Local work over existing rows: no inference, no vector calls,
     /// nothing re-synthesised. Run it after upgrading past a change to how
@@ -193,6 +199,25 @@ async fn main() -> anyhow::Result<()> {
         let core = Core::from_config(&cfg, vectors, store);
         let n = core.backfill_lifecycle().await?;
         println!("backfilled lifecycle fields for {n} artifacts");
+        return Ok(());
+    }
+
+    if let Some(dir) = &args.export_eval {
+        // SQLite only. The artifacts are already synthesised and the pairs are
+        // already judged, so this costs nothing and needs neither Qdrant nor an
+        // inference endpoint to be up.
+        let store = engram::store::Store::connect(&cfg.store).await?;
+        let (artifacts, pairs) = engram::eval::export::export(&store, dir).await?;
+        println!(
+            "wrote {artifacts} artifacts and {pairs} pairs to {}",
+            dir.display()
+        );
+        if pairs == 0 {
+            println!(
+                "no judged searches yet — set feedback.enabled, use the base, \
+                 then judge what it recorded at /ui/judge"
+            );
+        }
         return Ok(());
     }
 

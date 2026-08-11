@@ -273,6 +273,34 @@ impl Store {
         Ok(row_to_artifact(&row))
     }
 
+    /// Every artifact an ordinary search could return, with a label for the
+    /// corpus it came from.
+    ///
+    /// Superseded and deprecated stay out, so a benchmark built from this sees
+    /// the same base the search page does. The label falls back to the corpus id
+    /// when there is no title hint, because it is what the per-corpus cap groups
+    /// by and it has to be stable, not pretty.
+    pub async fn all_active_artifacts(&self) -> Result<Vec<(Chunk, String)>> {
+        let rows = sqlx::query(
+            "SELECT a.*, c.title_hint AS corpus_title FROM artifacts a
+             JOIN corpora c ON c.id = a.corpus_id
+             WHERE a.status = 'active' AND a.superseded_by IS NULL
+             ORDER BY a.corpus_id, a.ordinal",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let artifact = row_to_artifact(r);
+                let label = r
+                    .get::<Option<String>, _>("corpus_title")
+                    .unwrap_or_else(|| artifact.corpus_id.clone());
+                (artifact, label)
+            })
+            .collect())
+    }
+
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query("SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal")
             .bind(corpus_id)
