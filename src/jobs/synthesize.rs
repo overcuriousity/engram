@@ -230,7 +230,7 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
 /// Everything that can only be decided once every window has resolved:
 /// continuous ordinals, the source's status, and the single batched embed job.
 pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
-    core.store.get_corpus(corpus_id).await?;
+    let src = core.store.get_corpus(corpus_id).await?;
     core.store.renumber_artifacts(corpus_id).await?;
     let windows = core.store.segments_for_corpus(corpus_id).await?;
     let degraded = windows.iter().any(|w| w.state != SegmentState::Done);
@@ -252,6 +252,22 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
             coverage = cov,
             "most of this source is unclaimed"
         );
+    }
+
+    // Named here rather than at capture, which makes no inference call by
+    // design. The artifact titles are the cheapest description of what the
+    // document turned out to be about, and they only exist now.
+    //
+    // A failure is logged and dropped: the corpus keeps the snippet the UI
+    // falls back to, and losing a document over a missing name would be a bad
+    // trade. A name given at capture is left alone — someone chose it.
+    if src.title_hint.is_none() {
+        let titles: Vec<String> = chunks.iter().filter_map(|c| c.title.clone()).collect();
+        match core.synthesizer.title(&src.raw_text, &titles).await {
+            Ok(Some(t)) => core.store.set_title_hint(corpus_id, &t).await?,
+            Ok(None) => {}
+            Err(e) => tracing::warn!(corpus_id, error = %e, "could not name this corpus"),
+        }
     }
 
     // One job for the whole source: every chunk was just written, and embedding
@@ -377,6 +393,77 @@ mod tests {
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+
+    #[tokio::test]
+    async fn synthesis_names_the_corpus() {
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .title_hint
+                .is_none()
+        );
+
+        run(&core, &out.id).await.unwrap();
+
+        let named = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(named.title_hint.as_deref(), Some("Fake title: alpha line"));
+    }
+
+    #[tokio::test]
+    async fn a_name_that_was_given_at_capture_is_not_overwritten() {
+        // The API still accepts a title, and a name someone chose outranks one
+        // the model would have written.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", Some("My own label"))
+            .await
+            .unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let got = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(got.title_hint.as_deref(), Some("My own label"));
+    }
+
+    #[tokio::test]
+    async fn a_capture_survives_a_synthesizer_that_will_not_name_it() {
+        // The title is a nicety. Losing the document because the model would
+        // not name it would be a bad trade, so the failure is logged and the
+        // corpus keeps its fallback.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        run(&core, &out.id).await.unwrap();
+
+        // A synthesizer that fails every call cannot produce artifacts either,
+        // so naming is exercised through `finish` on a corpus that already has
+        // them: the state a real failure leaves behind.
+        let failing = test_core_with_failing_synthesizer().await;
+        let hurt = failing
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let _ = run(&failing, &hurt.id).await;
+        assert!(
+            failing
+                .store
+                .get_corpus(&hurt.id)
+                .await
+                .unwrap()
+                .title_hint
+                .is_none(),
+            "a corpus the model would not name simply stays unnamed"
+        );
+    }
 
     /// A body several windows long under the fake synthesizer's budget.
     fn multi_segment_body() -> String {
