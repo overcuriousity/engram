@@ -17,10 +17,20 @@
 </form>
 <div id="capture-result" style="margin-top:1rem"></div>
 
+{% if !pairs.is_empty() %}
+<h3>Needs you</h3>
+{% include "_decide.html" %}
+{% endif %}
+
 <h3>Recent</h3>
 {# Loaded rather than rendered inline, so the first paint and every refresh
    afterwards go through exactly the same fragment. #}
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
+
+{# Reachable, not advertised. What is left on Ops is reference — what is hidden,
+   what is stale, what is retrying — and none of it is work waiting on you; the
+   part that was moved up to "Needs you". #}
+<a class="quiet-link" href="/ui/ops">Housekeeping</a>
 <script>
   (function () {
     var box = document.querySelector('textarea[name="text"]');

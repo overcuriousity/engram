@@ -268,6 +268,9 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[template(path = "capture.html")]
 struct CaptureTemplate {
     theme: String,
+    /// Decisions waiting on a person, shown where the work arrives rather than
+    /// on a page you have to remember to visit. Empty renders nothing at all.
+    pairs: Vec<PairRow>,
 }
 
 #[derive(Template)]
@@ -369,7 +372,6 @@ struct OpsTemplate {
     superseded: Vec<SupersededRow>,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
-    pairs: Vec<PairRow>,
     tokens: Vec<TokenRow>,
 }
 
@@ -395,10 +397,12 @@ struct AnswerTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn capture_page(_id: Identity) -> impl IntoResponse {
-    HtmlTemplate(CaptureTemplate {
+async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    Ok(HtmlTemplate(CaptureTemplate {
         theme: "light".into(),
+        pairs: pair_rows(&st).await?,
     })
+    .into_response())
 }
 
 /// Text and nothing else. The label field is gone: a name arrives from
@@ -775,6 +779,66 @@ async fn reprocess_ui(
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
+/// A title is what makes two near-identical artifacts tellable apart at a
+/// glance; falling back to the opening of the body beats an id.
+fn title_of(c: &crate::store::artifacts::Chunk) -> String {
+    c.title
+        .clone()
+        .unwrap_or_else(|| c.text.chars().take(60).collect())
+}
+
+/// The pairs still waiting on a judgement.
+///
+/// Shared by Capture, which shows them because that is where the work arrives,
+/// and by nothing else: Housekeeping is what is left over once the only part of
+/// Ops that needs a person has moved to the page people actually open.
+///
+/// Confirmed contradictions and judge-proposed supersedes lead: they are the
+/// ones that mean something in the base is wrong or stale, rather than merely
+/// repeated.
+async fn pair_rows(st: &AppState) -> Result<Vec<PairRow>> {
+    let mut pairs = Vec::new();
+    for state in [
+        crate::store::pairs::PairState::Contradiction,
+        crate::store::pairs::PairState::Superseded,
+        crate::store::pairs::PairState::Pending,
+    ] {
+        for p in st.core.store.pairs_by_state(state, 50).await? {
+            let (Ok(a), Ok(b)) = (
+                st.core.store.get_artifact(&p.a_id).await,
+                st.core.store.get_artifact(&p.b_id).await,
+            ) else {
+                continue;
+            };
+            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
+                if id == a.id {
+                    title_of(&a)
+                } else {
+                    title_of(&b)
+                }
+            });
+            // Keeping one side is superseding the other, so the judge naming
+            // `a` obsolete is a recommendation to keep `b`.
+            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
+            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
+            pairs.push(PairRow {
+                id: p.id,
+                percent: (p.score * 100.0).round() as i64,
+                a_title: title_of(&a),
+                b_title: title_of(&b),
+                a_id: p.a_id,
+                b_id: p.b_id,
+                detail: p.detail,
+                contradiction: state == crate::store::pairs::PairState::Contradiction,
+                obsolete_title,
+                keeps_a,
+                keeps_b,
+            });
+        }
+    }
+    Ok(pairs)
+}
+
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
@@ -836,14 +900,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
-    // A title is what makes two near-identical artifacts tellable apart at a
-    // glance; falling back to the opening of the body beats an id.
-    let title_of = |c: &crate::store::artifacts::Chunk| {
-        c.title
-            .clone()
-            .unwrap_or_else(|| c.text.chars().take(60).collect())
-    };
-
     let mut superseded = Vec::new();
     for c in st.core.store.superseded_artifacts(50).await? {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
@@ -857,49 +913,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             winner_id,
             winner_title,
         });
-    }
-
-    // Confirmed contradictions and judge-proposed supersedes lead: they are
-    // the ones that mean something in the base is wrong or stale, rather than
-    // merely repeated.
-    let mut pairs = Vec::new();
-    for state in [
-        crate::store::pairs::PairState::Contradiction,
-        crate::store::pairs::PairState::Superseded,
-        crate::store::pairs::PairState::Pending,
-    ] {
-        for p in st.core.store.pairs_by_state(state, 50).await? {
-            let (Ok(a), Ok(b)) = (
-                st.core.store.get_artifact(&p.a_id).await,
-                st.core.store.get_artifact(&p.b_id).await,
-            ) else {
-                continue;
-            };
-            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
-                if id == a.id {
-                    title_of(&a)
-                } else {
-                    title_of(&b)
-                }
-            });
-            // Keeping one side is superseding the other, so the judge naming
-            // `a` obsolete is a recommendation to keep `b`.
-            let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
-            let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
-            pairs.push(PairRow {
-                id: p.id,
-                percent: (p.score * 100.0).round() as i64,
-                a_title: title_of(&a),
-                b_title: title_of(&b),
-                a_id: p.a_id,
-                b_id: p.b_id,
-                detail: p.detail,
-                contradiction: state == crate::store::pairs::PairState::Contradiction,
-                obsolete_title,
-                keeps_a,
-                keeps_b,
-            });
-        }
     }
 
     let deprecated = st
@@ -941,7 +954,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         superseded,
         deprecated,
         stale,
-        pairs,
         job_counts: st.core.store.job_counts().await?,
         oldest_pending_secs: st.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -1035,12 +1047,13 @@ async fn dismiss_pair_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(back.path()).into_response())
 }
 
 /// Which artifact of a pair the operator is keeping. Absent means "whichever
@@ -1049,6 +1062,10 @@ async fn dismiss_pair_ui(
 #[derive(serde::Deserialize, Default)]
 struct KeepForm {
     keep: Option<String>,
+    /// Pressed from Capture, these come back to Capture. Same reasoning as
+    /// `ReturnTo`, which validates the path.
+    #[serde(flatten)]
+    back: ReturnTo,
 }
 
 /// Resolve a pair by naming the artifact that survives; the other is superseded
@@ -1105,7 +1122,7 @@ async fn apply_pair_supersede_ui(
             pair.detail.as_deref(),
         )
         .await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to(f.back.path()).into_response())
 }
 
 async fn deprecate_ui(
@@ -2292,8 +2309,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
-        assert!(html.contains("Queue"));
+        // The counts read as a sentence now rather than as a row of badges.
+        assert!(html.contains("artifacts,"), "the counts are still stated");
         assert!(html.contains("API tokens"));
+        // An empty base says so once, instead of answering five headings with
+        // "None."
+        assert!(html.contains("Nothing deprecated"));
+        assert!(!html.contains("<h3>Deprecated</h3>"));
     }
 
     #[tokio::test]
@@ -2488,7 +2510,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_lists_a_pending_pair_and_can_dismiss_it() {
+    async fn capture_lists_a_pending_pair_and_can_dismiss_it() {
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["left one", "right one"]).await;
         core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
@@ -2499,19 +2521,14 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let res = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/ops")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let html = body_of(res).await;
+        // On Capture, not on Housekeeping: this is the one part of Ops that
+        // needs a person, so it belongs where the work arrives.
+        let html = get_body(&app, &cookie, "/ui/capture").await;
         assert!(html.contains("left one") && html.contains("right one"));
+        assert!(
+            html.contains("Keep “left one”"),
+            "each button names the artifact it keeps"
+        );
 
         app.clone()
             .oneshot(form(

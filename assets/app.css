@@ -443,3 +443,29 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
    pane label reads as a label rather than as a link dropped into a heading. */
 .pane-label a { color: var(--color-accent); text-decoration: none; }
 .pane-label a:hover { text-decoration: underline; }
+
+/* ── A decision, where the work arrives ──────────────────────────────────── */
+
+/* Shown on Capture rather than on a page you have to remember to visit, and
+   rendered not at all when there is nothing to decide. */
+.decide {
+  border: 1px solid var(--color-warning); background: var(--color-warning-dim);
+  border-radius: var(--radius-md); padding: 0.75rem 0.875rem; margin-bottom: 0.5rem;
+}
+.decide-head { font-size: 0.875rem; }
+.decide-finding { font-size: 0.875rem; margin: 0.375rem 0 0.625rem; }
+.decide .row { flex-wrap: wrap; gap: 0.375rem; }
+/* Links keep the weight of the sentence around them rather than turning it
+   into a row of blue. */
+.decide a {
+  color: var(--color-fg-primary); text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+}
+.decide a:hover { text-decoration-color: currentColor; }
+
+/* Reachable, not advertised. */
+.quiet-link {
+  display: inline-block; margin-top: 2rem; font-size: 0.8125rem;
+  color: var(--color-fg-muted); text-decoration: none;
+}
+.quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
