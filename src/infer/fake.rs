@@ -121,6 +121,26 @@ impl Synthesizer for FakeSynthesizer {
             output_ratio: 1.4,
         }
     }
+
+    /// Deterministic and obviously synthetic, so a test can assert on it. A
+    /// configured failure applies here too: naming is a model call like any
+    /// other, and the caller has to survive it failing.
+    async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+        if let Some(m) = &self.fail_with {
+            return Err(Error::Inference {
+                role: "title",
+                detail: m.clone(),
+            });
+        }
+        let first: String = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect();
+        Ok(Some(format!("Fake title: {}", first.trim())))
+    }
 }
 
 /// Drops a token from the first window it sees and reproduces it faithfully

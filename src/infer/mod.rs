@@ -39,6 +39,16 @@ pub trait Synthesizer: Send + Sync {
     fn cooldown(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
+    /// A short name for a whole document, given its opening and the titles of
+    /// the artifacts drawn from it.
+    ///
+    /// `None` means this synthesizer does not name documents, and the caller
+    /// leaves the corpus unnamed rather than inventing a name for it. Defaulted
+    /// rather than required because most implementations of this trait are test
+    /// doubles that have no opinion about titles.
+    async fn title(&self, _text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[async_trait]

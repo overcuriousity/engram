@@ -236,6 +236,19 @@ impl Store {
         Ok(())
     }
 
+    /// Names a corpus after the fact. Capture makes no inference call by
+    /// design, so the name arrives later — once synthesis has read the document
+    /// and knows what it is about.
+    pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?")
+            .bind(title)
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// How much of this source ended up inside a chunk. Written once every
     /// window has resolved; a low number means the segmenter dropped part of
     /// the document, which nothing used to notice.
@@ -359,6 +372,25 @@ mod tests {
         let got = s.get_corpus(&src.id).await.unwrap();
         assert_eq!(got.raw_text, "hello world");
         assert_eq!(got.title_hint.as_deref(), Some("greeting"));
+    }
+
+    #[tokio::test]
+    async fn a_title_can_be_written_after_the_fact() {
+        // Capture no longer asks for a label, so the only way a corpus gets a
+        // name is a write once synthesis has read the document.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("some text", "web", None).await.unwrap();
+        assert!(src.title_hint.is_none());
+
+        s.set_title_hint(&src.id, "Unattended Upgrades on Debian")
+            .await
+            .unwrap();
+
+        let got = s.get_corpus(&src.id).await.unwrap();
+        assert_eq!(
+            got.title_hint.as_deref(),
+            Some("Unattended Upgrades on Debian")
+        );
     }
 
     #[tokio::test]
