@@ -1,0 +1,27 @@
+{# Polls itself, and only while something is still moving. The trigger lives on
+   the fragment rather than on the page, so the swap that reports the last job
+   finishing is also the swap that stops the polling — an idle page open in a
+   background tab makes no requests at all. Three seconds because a segment is
+   one model call: polling faster only samples the same answer twice. #}
+<div id="queue" class="queue"
+     {% if active %}hx-get="/ui/queue" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% for r in rows %}
+  <div class="qrow">
+    {% if r.in_flight %}<span class="qdot" aria-hidden="true"></span>{% endif %}
+    <a class="qtitle {% if r.unnamed %}pending{% endif %}" href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+    <span class="qmeta">
+      {% if let Some(p) = r.progress %}
+        <span class="badge badge-accent">segmenting {{ p }}</span>
+      {% else if r.in_flight %}
+        <span class="badge badge-accent">{{ r.status }}</span>
+      {% else if r.low_coverage %}
+        <span class="badge badge-warning" title="fraction of this capture that ended up inside an artifact">{{ r.coverage }} covered</span>
+      {% else %}
+        <span>{{ r.artifact_count }} artifacts · {{ r.coverage }}</span>
+      {% endif %}
+      <span>{{ r.created }}</span>
+    </span>
+  </div>
+  {% endfor %}
+  {% if rows.is_empty() %}<p class="muted">Nothing captured yet.</p>{% endif %}
+</div>

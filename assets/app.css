@@ -396,3 +396,34 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   border: 1px solid var(--color-border-strong);
 }
 .copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }
+
+/* ── The capture queue ───────────────────────────────────────────────────── */
+
+/* Rows, not a table: five columns of mostly-empty cells collapse badly on a
+   phone, and only two facts per row are ever worth reading — what it is called
+   and whether it is done. */
+.queue { display: flex; flex-direction: column; margin-top: 0.25rem; }
+.qrow {
+  display: flex; gap: 0.75rem; align-items: baseline; min-width: 0;
+  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--color-border-subtle);
+}
+.qrow:last-child { border-bottom: none; }
+.qrow:hover { background: var(--color-bg-hover); }
+.qtitle {
+  font-size: 0.9375rem; text-decoration: none; color: var(--color-fg-primary);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qrow:hover .qtitle { color: var(--color-accent); }
+/* A capture on its way to being named reads as a placeholder, because it is. */
+.qtitle.pending { color: var(--color-fg-muted); font-style: italic; }
+.qmeta {
+  margin-left: auto; display: flex; gap: 0.5rem; align-items: baseline; flex: none;
+  font-size: 0.8125rem; color: var(--color-fg-muted); font-family: var(--font-mono);
+}
+/* Only work in flight announces itself. A finished capture is just a line. */
+.qdot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent);
+  flex: none; align-self: center; animation: qpulse 1.6s ease-in-out infinite;
+}
+@keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+@media (prefers-reduced-motion: reduce) { .qdot { animation: none } }

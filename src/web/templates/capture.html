@@ -16,6 +16,11 @@
   </div>
 </form>
 <div id="capture-result" style="margin-top:1rem"></div>
+
+<h3>Recent</h3>
+{# Loaded rather than rendered inline, so the first paint and every refresh
+   afterwards go through exactly the same fragment. #}
+<div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
 <script>
   (function () {
     var box = document.querySelector('textarea[name="text"]');

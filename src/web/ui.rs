@@ -1,6 +1,7 @@
 use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
+use crate::store::corpora::CorpusStatus;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
@@ -39,7 +40,7 @@ pub struct RenderedResult {
     pub weak: bool,
 }
 
-pub struct BrowseRow {
+pub struct QueueRow {
     pub id: String,
     pub label: String,
     pub status: String,
@@ -49,9 +50,16 @@ pub struct BrowseRow {
     /// `3/9` while windows are still being segmented, `None` once every window
     /// has resolved.
     pub progress: Option<String>,
-    /// Percentage of the source that ended up inside some chunk.
-    pub coverage: Option<String>,
+    /// Percentage of the source that ended up inside some chunk, already
+    /// formatted. `—` for a capture that has not been read yet.
+    pub coverage: String,
     pub low_coverage: bool,
+    /// Still on its way through the pipeline. Only these announce themselves;
+    /// a finished capture is a title and a count.
+    pub in_flight: bool,
+    /// Waiting to be named. Shown differently from a capture that simply has
+    /// no title, because this one is about to get one.
+    pub unnamed: bool,
 }
 
 pub struct ArtifactView {
@@ -303,10 +311,12 @@ struct ResultsTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "browse.html")]
-struct BrowseTemplate {
-    theme: String,
-    corpora: Vec<BrowseRow>,
+#[template(path = "_queue.html")]
+struct QueueTemplate {
+    rows: Vec<QueueRow>,
+    /// Whether anything is still moving. The fragment carries its own polling
+    /// trigger only while this holds, so an idle page makes no requests.
+    active: bool,
 }
 
 #[derive(Template)]
@@ -582,22 +592,47 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
     }
 }
 
-async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+/// The ten most recent captures, under the box that made them.
+///
+/// Ten rather than everything: an index of every corpus was a page nobody read,
+/// and anything older than the last handful is found by searching for what it
+/// says rather than by scrolling a list of what it is called.
+async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
-    for s in st.core.store.list_corpora(200, 0).await? {
+    for s in st.core.store.list_corpora(10, 0).await? {
         let (resolved, total) = st.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
+        // Terminal states: nothing else will happen without someone asking.
+        // NeedsReview is terminal in this sense — it is waiting on a person.
+        let in_flight = !matches!(
+            s.status,
+            CorpusStatus::Ready
+                | CorpusStatus::Failed
+                | CorpusStatus::NeedsReview
+                | CorpusStatus::Partial
+        );
         let low_coverage = s
             .coverage
             .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
-        rows.push(BrowseRow {
+        rows.push(QueueRow {
             progress,
-            coverage: s.coverage.map(|c| format!("{:.0}%", c * 100.0)),
+            coverage: s
+                .coverage
+                .map(|c| format!("{:.0}%", c * 100.0))
+                .unwrap_or_else(|| "—".into()),
             low_coverage,
-            label: s
-                .title_hint
-                .clone()
-                .unwrap_or_else(|| markdown::snippet(&s.raw_text, 60)),
+            // A capture on its way is called what it is until synthesis names
+            // it; one that has stopped moving falls back to its opening words,
+            // which is all anything knows about it.
+            label: s.title_hint.clone().unwrap_or_else(|| {
+                if in_flight {
+                    "Untitled capture".to_string()
+                } else {
+                    markdown::snippet(&s.raw_text, 60)
+                }
+            }),
+            unnamed: s.title_hint.is_none() && in_flight,
+            in_flight,
             badge: status_badge(&s.status),
             status: s.status.as_str().to_string(),
             artifact_count: st.core.store.artifacts_for_corpus(&s.id).await?.len() as i64,
@@ -605,11 +640,8 @@ async fn browse(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             id: s.id,
         });
     }
-    Ok(HtmlTemplate(BrowseTemplate {
-        theme: "light".into(),
-        corpora: rows,
-    })
-    .into_response())
+    let active = rows.iter().any(|r| r.in_flight);
+    Ok(HtmlTemplate(QueueTemplate { rows, active }).into_response())
 }
 
 /// Which lines to highlight, when the page was opened from an artifact that
@@ -1258,7 +1290,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
-        .route("/ui/browse", get(browse))
+        .route("/ui/queue", get(queue_fragment))
+        // An installed PWA may still hold /ui/browse as its start URL, and a
+        // bookmark outlives the page it pointed at.
+        // Takes an `Identity` like every other page: a gone page must still send
+        // a signed-out visitor to sign in rather than bouncing them onward.
+        .route(
+            "/ui/browse",
+            get(|_id: Identity| async { Redirect::to("/ui/capture") }),
+        )
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
@@ -1453,6 +1493,22 @@ mod tests {
             format!("engram_session={cid}"),
             handle,
         )
+    }
+
+    async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+        body_of(res).await
     }
 
     async fn body_of(res: axum::response::Response) -> String {
@@ -1837,6 +1893,7 @@ mod tests {
             "/ui/search",
             "/ui/search/results?q=x",
             "/ui/browse",
+            "/ui/queue",
             "/ui/corpora/abc",
             "/ui/ask",
             "/ui/ops",
@@ -2076,13 +2133,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browse_lists_captured_sources() {
-        let (app, cookie) = app_with_session().await;
-        app.clone()
-            .oneshot(form("/ui/capture", &cookie, "text=findable+content"))
+    async fn the_queue_lists_recent_captures_and_polls_only_while_busy() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
 
+        // Freshly captured and still queued: the fragment has to ask to be
+        // refreshed, or the row would sit at "Untitled capture" forever.
+        let body = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            body.contains("Untitled capture"),
+            "a capture nothing has read yet still gets a row"
+        );
+        assert!(body.contains("hx-trigger"), "work in flight keeps polling");
+
+        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let body = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            body.contains("Fake title: alpha line"),
+            "once synthesis names it, the row is called what it is"
+        );
+        assert!(
+            !body.contains("hx-trigger"),
+            "an idle queue stops polling itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_redirects_to_capture() {
+        // An installed PWA may still have /ui/browse as its start URL.
+        let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(
                 Request::builder()
@@ -2093,10 +2179,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        // An unnamed capture is listed by its opening words: nothing has read
-        // it yet, so there is nothing better to call it.
-        assert!(body_of(res).await.contains("findable content"));
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/capture");
     }
 
     #[tokio::test]
