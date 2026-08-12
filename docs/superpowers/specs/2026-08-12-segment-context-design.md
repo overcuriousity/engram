@@ -58,18 +58,26 @@ the document opening is a byte-identical prefix across every window of a
 corpus, which a prompt cache or a llama.cpp slot can reuse. Everything that
 varies sits after it.
 
-## 3. Context is derived, never stored
+## 3. Context comes from the stored windows
 
-Stored spans remain what they are today: contiguous, non-overlapping core
-ranges, one row per window, written `ON CONFLICT DO NOTHING`. There is no
-schema change. Both context kinds are computed at call time from `raw_text`
-and the neighbouring spans, through the `segment_text` slicer that already
-exists.
+> **Revised during implementation, 2026-08-12.** This section originally
+> specified that context be derived at call time from `raw_text` and the
+> neighbouring line ranges, with no schema change. That was wrong, and the
+> pre-send guard of section 6 is what caught it. Line numbers cannot address a
+> unit smaller than a line, and the splitter cuts *inside* a line for a corpus
+> that has none — so re-derivation returned the whole document for window 0 and
+> an empty string for every window after it. The windows now carry their text.
 
-This is the decision the rest of the design rests on. It means a retry of
-window 4 reconstructs byte-identical context from nothing but stored line
-numbers, so the idempotency `upsert_segments` and `pending_segments` depend on
-survives untouched.
+Each window row stores the text the splitter produced for it, alongside the
+line range it came from. The range keeps its one remaining job — rendering
+where an artifact came from — and the text is what is actually sent. Rows are
+still written `ON CONFLICT DO NOTHING`, one per window.
+
+Both context kinds are read from the neighbouring rows. A retry of window 4
+reconstructs byte-identical context from the stored windows, so the
+idempotency `upsert_segments` and `pending_segments` depend on survives — and
+survives more strongly than the original design allowed, since the text no
+longer depends on `raw_text` being sliced the same way twice.
 
 It also fixes the shape of a rejected alternative. A generated summary would
 be denser than a verbatim opening, but producing one requires a call that
@@ -151,16 +159,21 @@ That window is sent to the synthesizer, overflows the model's context, and
 fails; the error is retryable and `store/jobs.rs:179` states there is no
 terminal state, so it retries with growing backoff forever.
 
-`split_into_segments` gains the guarantee `split_by_lines` in `jobs/embed.rs`
-already has: it never returns a window over budget. Boundary preference is
-unchanged — headings, then blank lines, then a hard line cut — with a
-character-level cut added strictly as the last resort, for a single line that
-exceeds the budget on its own.
+`split_into_segments` gains a character-level cut as the last resort, for a
+single line that exceeds the budget on its own. Boundary preference is
+otherwise unchanged — headings, then blank lines, then a hard line cut.
 
-A guard at the top of the synthesize loop rejects an over-budget window before
-it is sent. This is the same lesson as the embed loop of the same week: a
-splitter that can return something it was asked to shrink but did not, plus a
-caller that assumes it shrank, is a job that spins.
+A guard at the top of the synthesize loop checks the window before it is sent.
+It holds windows to **twice** the budget rather than to the budget itself,
+which is what the splitter actually promises: it flushes once the buffer has
+reached the budget, and `flush` then prepends the carried heading, so a window
+legitimately lands somewhat over. Twice is the bound the splitter's own
+`text_with_no_structure_still_splits_by_line_cap` has always asserted. What
+must never happen is unbounded.
+
+This is the same lesson as the embed loop of the same week: a splitter that can
+return something it was asked to shrink but did not, plus a caller that assumes
+it shrank, is a job that spins.
 
 ## 7. Testing
 
@@ -209,3 +222,10 @@ this becomes visible rather than silent.
 **Geometry still depends on live config.** Changing the model or the context
 configuration re-windows every corpus that is not yet complete. This predates
 the change and is unaffected by it.
+
+**A window's stored text and its line range can disagree.** For a corpus the
+splitter had to cut inside a line, several windows report overlapping or
+identical ranges, because a range cannot express a sub-line unit. The text is
+authoritative; the range is a pointer for rendering source, and for such a
+corpus it points coarsely. Nothing reads the range expecting to reproduce the
+window.

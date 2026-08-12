@@ -10,6 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-12-segment-context-design.md`
 
+> **Status: implemented, 2026-08-12.** Tasks 1–8 are committed. Two things did
+> not survive contact with the code, both recorded in the spec:
+>
+> - **Task 1 was insufficient on its own.** Flooring the splitter did not fix
+>   the no-newline corpus, because the job discarded the splitter's text and
+>   re-derived each window from its line range. Windows now store their text
+>   (spec §3, revised). Task 8's guard is what caught this.
+> - **Task 8's assertion was too strict.** The splitter never promised windows
+>   *at* the budget — it flushes once the buffer has reached it, then prepends
+>   the carried heading. The guard holds windows to twice the budget, the bound
+>   the splitter's own tests have always asserted.
+
 ## Global Constraints
 
 - Token counting always goes through `crate::infer::budget::TokenCounter`. Never count characters directly.
