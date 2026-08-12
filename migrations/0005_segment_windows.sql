@@ -7,6 +7,14 @@ CREATE TABLE segment_windows (
   idx        INTEGER NOT NULL,
   start_line INTEGER NOT NULL,
   end_line   INTEGER NOT NULL,
+  -- The window's text as the splitter produced it.
+  --
+  -- Stored rather than re-derived from start_line/end_line, because line
+  -- numbers cannot address a unit smaller than a line: a corpus pasted with
+  -- no newlines is cut into windows the line numbers then all report as
+  -- line 1, so the first re-derived to the whole document and the rest to
+  -- nothing at all. The line range stays for rendering an artifact's source.
+  text       TEXT    NOT NULL DEFAULT '',
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | fallback
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,

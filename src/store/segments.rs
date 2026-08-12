@@ -37,6 +37,10 @@ pub struct Segment {
     pub idx: i64,
     pub start_line: i64,
     pub end_line: i64,
+    /// The window's text, as the splitter produced it. Authoritative: the line
+    /// range describes where it came from, but cannot reproduce it when the
+    /// splitter had to cut inside a line.
+    pub text: String,
     pub state: SegmentState,
     pub attempts: i64,
     pub last_error: Option<String>,
@@ -48,6 +52,7 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
         idx: r.get("idx"),
         start_line: r.get("start_line"),
         end_line: r.get("end_line"),
+        text: r.get("text"),
         state: SegmentState::parse(r.get::<String, _>("state").as_str()),
         attempts: r.get("attempts"),
         last_error: r.get("last_error"),
@@ -57,18 +62,23 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
 impl Store {
     /// Record the windowing of a source. Idempotent by design: a retried job
     /// re-derives the same spans and must not undo the windows that finished.
-    pub async fn upsert_segments(&self, corpus_id: &str, spans: &[(i64, i64)]) -> Result<()> {
+    pub async fn upsert_segments(
+        &self,
+        corpus_id: &str,
+        windows: &[(i64, i64, &str)],
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        for (idx, (start, end)) in spans.iter().enumerate() {
+        for (idx, (start, end, text)) in windows.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO segments (corpus_id, idx, start_line, end_line)
-                 VALUES (?, ?, ?, ?)
+                "INSERT INTO segments (corpus_id, idx, start_line, end_line, text)
+                 VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT(corpus_id, idx) DO NOTHING",
             )
             .bind(corpus_id)
             .bind(idx as i64)
             .bind(start)
             .bind(end)
+            .bind(text)
             .execute(&mut *tx)
             .await?;
         }
@@ -190,9 +200,16 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
 
-        s.upsert_segments(&src.id, &[(1, 10), (11, 20), (21, 30)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                (1, 10, "window 0"),
+                (11, 20, "window 1"),
+                (21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(s.segments_for_corpus(&src.id).await.unwrap().len(), 3);
 
         s.set_segment_state(&src.id, 0, SegmentState::Done, None)
@@ -200,9 +217,16 @@ mod tests {
             .unwrap();
 
         // A second call must not reset the window that already finished.
-        s.upsert_segments(&src.id, &[(1, 10), (11, 20), (21, 30)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                (1, 10, "window 0"),
+                (11, 20, "window 1"),
+                (21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
 
         let pending = s.pending_segments(&src.id).await.unwrap();
         assert_eq!(pending.len(), 2);
@@ -214,9 +238,16 @@ mod tests {
     async fn progress_counts_done_and_failed_as_resolved() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5), (6, 10), (11, 15)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                (1, 5, "window 0"),
+                (6, 10, "window 1"),
+                (11, 15, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
 
         s.set_segment_state(&src.id, 0, SegmentState::Done, None)
             .await
@@ -234,7 +265,9 @@ mod tests {
     async fn attempts_accumulate_and_a_reset_clears_them() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5)]).await.unwrap();
+        s.upsert_segments(&src.id, &[(1, 5, "window 0")])
+            .await
+            .unwrap();
 
         assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 1);
         assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 2);
@@ -253,7 +286,9 @@ mod tests {
     async fn deleting_a_source_cascades_to_its_windows() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5)]).await.unwrap();
+        s.upsert_segments(&src.id, &[(1, 5, "window 0")])
+            .await
+            .unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.segments_for_corpus(&src.id).await.unwrap().is_empty());
     }

@@ -66,7 +66,10 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10), (11, 20)])
+            .upsert_segments(
+                &src.id,
+                &[(1, 10, "first window"), (11, 20, "second window")],
+            )
             .await
             .unwrap();
         core.store
@@ -86,7 +89,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -120,7 +123,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -164,7 +167,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[(1, 10, "the window")])
             .await
             .unwrap();
         run(&core).await.unwrap();

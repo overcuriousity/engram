@@ -1,7 +1,7 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::segment_tokens;
-use crate::infer::split::{segment_text, split_into_segments};
+use crate::infer::split::split_into_segments;
 use crate::store::artifacts::{CorpusSpan, NewArtifact};
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
@@ -39,19 +39,57 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let spans: Vec<(i64, i64)> = windows.iter().map(|w| (w.start_line, w.end_line)).collect();
-    core.store.upsert_segments(corpus_id, &spans).await?;
+    let rows: Vec<(i64, i64, &str)> = windows
+        .iter()
+        .map(|w| (w.start_line, w.end_line, w.text.as_str()))
+        .collect();
+    core.store.upsert_segments(corpus_id, &rows).await?;
+
+    // Every window of the corpus, in order, for the neighbouring context. The
+    // rows are authoritative rather than the freshly split `windows`: a corpus
+    // whose windows were written by an earlier run keeps the text that run
+    // produced, which is what makes a retry reproduce the same prompt.
+    let all = core.store.segments_for_corpus(corpus_id).await?;
+    let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
 
     for w in core.store.pending_segments(corpus_id).await? {
         core.store.bump_segment_attempts(corpus_id, w.idx).await?;
-        let text = segment_text(&src.raw_text, w.start_line, w.end_line);
+        // The stored text, not a re-derivation from the line range: line
+        // numbers cannot address a unit smaller than a line, so a corpus with
+        // no newlines re-derived to the whole document for window 0 and to
+        // nothing at all for every window after it.
+        let text = w.text.clone();
 
-        // Rebuilt from the stored spans on every attempt rather than stored,
-        // so a retried window gets byte-identical context and the job stays
-        // idempotent.
+        // The failure this catches is a job retrying an over-context window
+        // against the endpoint with growing backoff and no terminal state, so
+        // it is worth an assertion even though it cannot fire today.
+        //
+        // The ceiling is twice the budget rather than the budget itself,
+        // because that is what the splitter actually promises: it flushes once
+        // the buffer has *reached* the budget, and `flush` then prepends the
+        // carried heading, so a window legitimately lands somewhat over. Twice
+        // is the bound `text_with_no_structure_still_splits_by_line_cap` has
+        // always asserted. What must never happen is unbounded — the corpus
+        // that came back fifteen times its budget.
+        let window_budget = segment_tokens(core.synthesizer.budget(), prompt_overhead(core));
+        let window_tokens = core.counter.count(&text);
+        debug_assert!(
+            window_tokens <= window_budget * 2,
+            "window {} is {window_tokens} tokens against a budget of {window_budget}",
+            w.idx
+        );
+        if window_tokens > window_budget * 2 {
+            tracing::error!(
+                corpus_id,
+                window = w.idx,
+                window_tokens,
+                window_budget,
+                "window is far over its budget; the splitter did not shrink it"
+            );
+        }
+
         let ctx = crate::infer::context::WindowContext::build(
-            &src.raw_text,
-            &spans,
+            &all_texts,
             w.idx as usize,
             core.synthesizer.budget().context,
             &core.counter,
@@ -462,6 +500,43 @@ mod tests {
             max_output_tokens: 100_000,
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget { opening, overlap },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_is_never_sent_over_its_own_budget() {
+        // The guard is a can't-happen check: split_into_segments now floors
+        // window size. It exists because the failure it catches is a job that
+        // spins against the endpoint forever, and a debug_assert turns that
+        // into a test failure instead of a production incident.
+        let core = crate::core::test_support::test_core().await;
+        let budget = segment_tokens(core.synthesizer.budget(), prompt_overhead(&core));
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        // Ordinary prose, and the case that has no line boundary to cut on at
+        // all — the second is what the floor in split_into_segments is for, so
+        // it is the one that fails if that floor is ever removed.
+        for raw in [lines.join("\n"), "word ".repeat(8000)] {
+            let src = core.store.insert_corpus(&raw, "web", None).await.unwrap();
+
+            run(&core, &src.id).await.unwrap();
+
+            let segments = core.store.segments_for_corpus(&src.id).await.unwrap();
+            assert!(!segments.is_empty(), "a corpus must produce windows");
+            for s in segments {
+                // The stored text, which is what the window is actually sent
+                // as. Re-deriving it from the line range is the bug this
+                // column exists to close.
+                assert!(
+                    core.counter.count(&s.text) <= budget * 2,
+                    "window {} is {} tokens against a budget of {budget}",
+                    s.idx,
+                    core.counter.count(&s.text)
+                );
+                assert!(!s.text.is_empty(), "window {} was stored empty", s.idx);
+            }
         }
     }
 

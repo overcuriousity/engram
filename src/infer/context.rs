@@ -1,5 +1,4 @@
 use crate::infer::budget::TokenCounter;
-use crate::infer::split::segment_text;
 
 /// How many tokens of surrounding material a window may carry on top of its
 /// own text. Absolute rather than a fraction of the window: a large context
@@ -44,37 +43,36 @@ pub struct WindowContext {
 }
 
 impl WindowContext {
+    /// `windows` is every window of the corpus, in order, as the splitter
+    /// produced them — the stored text, not a re-derivation from line numbers.
+    /// A window's line range cannot reproduce its text when the splitter had to
+    /// cut inside a line, and that is precisely the case this has to survive.
     pub fn build(
-        raw_text: &str,
-        spans: &[(i64, i64)],
+        windows: &[&str],
         idx: usize,
         budget: ContextBudget,
         counter: &TokenCounter,
     ) -> WindowContext {
-        let Some(&(start, _)) = spans.get(idx) else {
+        if idx >= windows.len() {
             return WindowContext::default();
-        };
+        }
 
-        // Window 0 opens with the document, so repeating it would spend the
-        // budget on text the model is already reading. Later windows take the
-        // opening only up to their own first line: an opening that ran into
-        // the window would put the same lines in the prompt twice.
-        let opening = (idx > 0 && budget.opening > 0 && start > 1)
-            .then(|| segment_text(raw_text, 1, start - 1))
-            .and_then(|t| head_lines(&t, budget.opening, counter));
+        // Window 0 opens with the document, so repeating it there would spend
+        // the budget on text the model is already reading.
+        let opening = (idx > 0 && budget.opening > 0)
+            .then(|| windows[0])
+            .and_then(|t| head_lines(t, budget.opening, counter));
 
         let before = (budget.overlap > 0)
             .then(|| idx.checked_sub(1))
             .flatten()
-            .and_then(|i| spans.get(i))
-            .map(|&(s, e)| segment_text(raw_text, s, e))
-            .and_then(|t| tail_lines(&t, budget.overlap, counter));
+            .and_then(|i| windows.get(i))
+            .and_then(|t| tail_lines(t, budget.overlap, counter));
 
         let after = (budget.overlap > 0)
-            .then(|| spans.get(idx + 1))
+            .then(|| windows.get(idx + 1))
             .flatten()
-            .map(|&(s, e)| segment_text(raw_text, s, e))
-            .and_then(|t| head_lines(&t, budget.overlap, counter));
+            .and_then(|t| head_lines(t, budget.overlap, counter));
 
         WindowContext {
             opening,
@@ -104,14 +102,40 @@ impl WindowContext {
 /// mid-sentence reads as corruption to a small model.
 fn head_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String> {
     let taken = take_lines(text.lines(), limit, counter);
-    (!taken.is_empty()).then(|| taken.join("\n"))
+    if !taken.is_empty() {
+        return Some(taken.join("\n"));
+    }
+    cut_chars(text, limit, true)
 }
 
 /// As many trailing whole lines as fit, in their original order.
 fn tail_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String> {
     let mut taken = take_lines(text.lines().rev(), limit, counter);
     taken.reverse();
-    (!taken.is_empty()).then(|| taken.join("\n"))
+    if !taken.is_empty() {
+        return Some(taken.join("\n"));
+    }
+    cut_chars(text, limit, false)
+}
+
+/// Not one whole line fits. That is not a pathological case here — it is the
+/// corpus this whole mechanism exists for, pasted with no line boundaries at
+/// all — and no context is worse than context cut mid-word, so the budget is
+/// spent on characters. 3.5 per token is the ratio the estimate uses.
+fn cut_chars(text: &str, limit: usize, from_start: bool) -> Option<String> {
+    if limit == 0 || text.is_empty() {
+        return None;
+    }
+    let max_chars = (limit * 7 / 2).max(16);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return Some(text.to_string());
+    }
+    Some(if from_start {
+        chars[..max_chars].iter().collect()
+    } else {
+        chars[chars.len() - max_chars..].iter().collect()
+    })
 }
 
 fn take_lines<'a>(
@@ -136,19 +160,27 @@ fn take_lines<'a>(
 mod tests {
     use super::*;
 
-    fn corpus() -> String {
-        let mut lines = vec![
-            "# Backup Server Admin Guide".to_string(),
-            "Covers PBS 3.x on Debian 12.".into(),
-        ];
-        for i in 0..60 {
-            lines.push(format!("body line {i} with enough words to cost tokens"));
-        }
-        lines.join("\n")
+    /// Three windows as the splitter would hand them over: the first opens the
+    /// document, the rest are body.
+    fn windows() -> Vec<String> {
+        let body = |from: usize, to: usize| {
+            (from..to)
+                .map(|i| format!("body line {i} with enough words to cost tokens"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        vec![
+            format!(
+                "# Backup Server Admin Guide\nCovers PBS 3.x on Debian 12.\n{}",
+                body(0, 18)
+            ),
+            body(18, 38),
+            body(38, 60),
+        ]
     }
 
-    fn spans() -> Vec<(i64, i64)> {
-        vec![(1, 20), (21, 40), (41, 62)]
+    fn refs(w: &[String]) -> Vec<&str> {
+        w.iter().map(|s| s.as_str()).collect()
     }
 
     fn budget() -> ContextBudget {
@@ -160,7 +192,8 @@ mod tests {
 
     #[test]
     fn the_first_window_gets_no_opening_and_no_preceding_context() {
-        let c = WindowContext::build(&corpus(), &spans(), 0, budget(), &TokenCounter::Estimate);
+        let w = windows();
+        let c = WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::Estimate);
         assert_eq!(c.opening, None, "window 0 already contains the opening");
         assert_eq!(c.before, None, "window 0 has nothing before it");
         assert!(c.after.is_some(), "window 0 has a window after it");
@@ -168,7 +201,8 @@ mod tests {
 
     #[test]
     fn the_last_window_gets_no_following_context() {
-        let c = WindowContext::build(&corpus(), &spans(), 2, budget(), &TokenCounter::Estimate);
+        let w = windows();
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::Estimate);
         assert_eq!(c.after, None);
         assert!(c.before.is_some());
         assert!(c.opening.is_some());
@@ -176,8 +210,8 @@ mod tests {
 
     #[test]
     fn a_middle_window_gets_all_three_blocks_from_the_right_places() {
-        let text = corpus();
-        let c = WindowContext::build(&text, &spans(), 1, budget(), &TokenCounter::Estimate);
+        let w = windows();
+        let c = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::Estimate);
 
         assert!(
             c.opening
@@ -186,13 +220,13 @@ mod tests {
                 .starts_with("# Backup Server Admin Guide"),
             "the opening must be the document's first lines verbatim"
         );
-        // The preceding block is the tail of window 0, which ends at line 20.
+        // The preceding block is the tail of window 0, which ends at line 17.
         assert!(
             c.before.as_deref().unwrap().contains("body line 17"),
             "got {:?}",
             c.before
         );
-        // The following block is the head of window 2, which starts at line 41.
+        // The following block is the head of window 2, which starts at line 38.
         assert!(
             c.after.as_deref().unwrap().contains("body line 38"),
             "got {:?}",
@@ -203,31 +237,39 @@ mod tests {
     #[test]
     fn every_block_stays_inside_its_budget() {
         let counter = TokenCounter::Estimate;
-        let c = WindowContext::build(&corpus(), &spans(), 1, budget(), &counter);
+        let w = windows();
+        let c = WindowContext::build(&refs(&w), 1, budget(), &counter);
         assert!(counter.count(c.opening.as_deref().unwrap()) <= 30);
         assert!(counter.count(c.before.as_deref().unwrap()) <= 20);
         assert!(counter.count(c.after.as_deref().unwrap()) <= 20);
     }
 
     #[test]
-    fn the_opening_never_runs_into_the_window_it_introduces() {
-        // Window 1 starts at line 2, so an opening of 30 tokens would cover
-        // lines the window already holds. It must be cut at line 1.
-        let text = corpus();
-        let spans = vec![(1, 1), (2, 30), (31, 62)];
-        let c = WindowContext::build(&text, &spans, 1, budget(), &TokenCounter::Estimate);
-        let opening = c.opening.as_deref().unwrap();
+    fn a_corpus_with_no_line_structure_still_gets_context() {
+        // The case the stored window text exists for. Line numbers cannot
+        // address a unit smaller than a line, so a corpus pasted with no
+        // newlines used to re-derive as the whole document for window 0 and as
+        // nothing at all for every window after it.
+        let w: Vec<String> = (0..4).map(|i| format!("part{i} ").repeat(40)).collect();
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::Estimate);
         assert!(
-            !opening.contains("Covers PBS 3.x"),
-            "line 2 belongs to the window itself: {opening:?}"
+            c.before.as_deref().unwrap().contains("part1"),
+            "got {:?}",
+            c.before
         );
+        assert!(
+            c.after.as_deref().unwrap().contains("part3"),
+            "got {:?}",
+            c.after
+        );
+        assert!(c.opening.as_deref().unwrap().contains("part0"));
     }
 
     #[test]
     fn a_zero_budget_produces_nothing() {
+        let w = windows();
         let c = WindowContext::build(
-            &corpus(),
-            &spans(),
+            &refs(&w),
             1,
             ContextBudget::default(),
             &TokenCounter::Estimate,
@@ -238,20 +280,36 @@ mod tests {
     }
 
     #[test]
+    fn an_index_past_the_end_produces_nothing() {
+        let w = windows();
+        let c = WindowContext::build(&refs(&w), 9, budget(), &TokenCounter::Estimate);
+        assert_eq!(c, WindowContext::default());
+    }
+
+    #[test]
     fn assembly_is_reproducible() {
-        // A retry rebuilds context from stored line numbers alone, so the same
-        // spans must always give the same bytes.
-        let text = corpus();
-        let a = WindowContext::build(&text, &spans(), 1, budget(), &TokenCounter::Estimate);
-        let b = WindowContext::build(&text, &spans(), 1, budget(), &TokenCounter::Estimate);
+        // A retry rebuilds context from the stored windows alone, so the same
+        // rows must always give the same bytes.
+        let w = windows();
+        let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::Estimate);
+        let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::Estimate);
         assert_eq!(a, b);
     }
 
     #[test]
     fn blocks_yields_every_populated_block() {
-        let c = WindowContext::build(&corpus(), &spans(), 1, budget(), &TokenCounter::Estimate);
-        assert_eq!(c.blocks().count(), 3);
-        let c0 = WindowContext::build(&corpus(), &spans(), 0, budget(), &TokenCounter::Estimate);
-        assert_eq!(c0.blocks().count(), 1);
+        let w = windows();
+        assert_eq!(
+            WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::Estimate)
+                .blocks()
+                .count(),
+            3
+        );
+        assert_eq!(
+            WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::Estimate)
+                .blocks()
+                .count(),
+            1
+        );
     }
 }
