@@ -522,9 +522,16 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
     padding-bottom: env(safe-area-inset-bottom);
   }
   .tabbar a {
+    position: relative;
     flex: 1; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 2px; min-height: 52px; text-decoration: none;
     font-size: 0.6875rem; color: var(--color-fg-muted);
+  }
+  /* Over the icon, not beside the label: the tab is 52px tall and a number
+     would either shrink the label or push it off centre. */
+  .tab-dot {
+    position: absolute; top: 8px; right: 50%; margin-right: -14px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
   }
   .tabbar a[aria-current="page"] { color: var(--color-accent); }
   .tabbar svg { width: 20px; height: 20px; }

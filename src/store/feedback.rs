@@ -380,6 +380,19 @@ impl Store {
         Ok(())
     }
 
+    /// How many searches are waiting for a verdict.
+    ///
+    /// Split out of `feedback_stats`, which runs half a dozen queries and two
+    /// joins: this one is read on every page render to draw the nav, and the
+    /// nav must not cost what the ops page costs.
+    pub async fn pending_count(&self) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM search_events WHERE judged_at IS NULL")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     /// The field value: recall@10 and MRR read from the ranks the searches
     /// actually gave. No vector store and no embedding are involved, so the
     /// number can move on every single judgement — which is what makes it worth

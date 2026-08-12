@@ -273,6 +273,8 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[template(path = "capture.html")]
 struct CaptureTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
     pairs: Vec<PairRow>,
@@ -297,6 +299,8 @@ struct CapturedTemplate {
 #[template(path = "search.html")]
 struct SearchTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     /// Kept so a reload or a deep link restores the box with its results.
     q: String,
     /// What this collection can actually be narrowed by. Rendered as chips, so
@@ -334,6 +338,8 @@ struct QueueTemplate {
 #[template(path = "corpus.html")]
 struct CorpusTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     id: String,
     /// The whole source, one row per line, each anchored so a link can name it.
     lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -364,6 +370,8 @@ struct ArtifactDetailFragment {
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     d: ArtifactDetail,
 }
 
@@ -371,6 +379,8 @@ struct ArtifactDetailPage {
 #[template(path = "ops.html")]
 struct OpsTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -396,6 +406,8 @@ struct TokenCreatedTemplate {
 #[template(path = "ask.html")]
 struct AskTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
 }
 
 #[derive(Template)]
@@ -412,6 +424,7 @@ async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Respo
     let (pairs, more_pairs) = pair_rows(&st).await?;
     Ok(HtmlTemplate(CaptureTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
     })
@@ -478,6 +491,7 @@ async fn search_page(
     ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
         tag,
@@ -708,6 +722,7 @@ async fn corpus_detail(
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
         lines,
         badge: status_badge(&s.status),
@@ -994,6 +1009,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         retrying,
         parked,
         superseded,
@@ -1215,9 +1231,10 @@ async fn verify_ui(
     Ok(Redirect::to(back.path()).into_response())
 }
 
-async fn ask_page(_id: Identity) -> impl IntoResponse {
+async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
     })
 }
 
@@ -1345,6 +1362,7 @@ async fn artifact_detail(
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         d,
     })
     .into_response())
@@ -1661,6 +1679,89 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
         body_of(res).await
+    }
+
+    /// A session on an installation that is recording searches, with `pending`
+    /// of them captured and waiting for a verdict.
+    async fn app_recording_searches(pending: usize) -> (axum::Router, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        for i in 0..pending {
+            core.store
+                .record_search(
+                    crate::store::feedback::NewEvent {
+                        query: format!("search number {i}"),
+                        door: crate::store::feedback::Door::Ui,
+                        filters: "{}".into(),
+                        query_vec: vec![0.1, 0.2],
+                        embed_model: "fake".into(),
+                        candidates: vec![],
+                    },
+                    // No folding: these stand for separate searches, not one
+                    // being typed.
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        let cid = crate::store::new_id();
+        core.store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        let state = crate::web::state::AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+        };
+        (crate::web::router(state), format!("engram_session={cid}"))
+    }
+
+    #[tokio::test]
+    async fn judging_is_a_destination_in_the_nav_with_what_is_waiting_on_it() {
+        // It used to be reachable only from one conditional sentence on Ops —
+        // the page you open when something is wrong, which is the wrong place
+        // for the screen that has to be visited often for the dataset to grow.
+        let (app, cookie) = app_recording_searches(3).await;
+        for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/ops"] {
+            let html = flat(&get(&app, page, &cookie).await);
+            assert!(
+                html.contains(r#"<a href="/ui/judge">Judge"#),
+                "{page} offers no way to judge"
+            );
+            assert!(
+                html.contains(r#"<span class="badge badge-accent">3</span>"#),
+                "{page} does not say how many are waiting"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_queue_asks_for_nothing() {
+        // The entry stays — judging is where the metrics live, and they are
+        // worth reading with nothing pending — but a badge reading zero is an
+        // invitation to a screen that has no work on it.
+        let (app, cookie) = app_recording_searches(0).await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+        assert!(html.contains(r#"<a href="/ui/judge">Judge"#));
+        assert!(
+            !html.contains(r#"badge-accent">0<"#),
+            "an empty queue was badged"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_about_judging_appears_where_nothing_is_captured() {
+        // Capture is off by default. A door to a queue that can never fill is
+        // an offer the installation cannot keep.
+        let (app, cookie) = app_with_session().await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+        assert!(!html.contains("/ui/judge"), "judging was advertised anyway");
     }
 
     #[tokio::test]
