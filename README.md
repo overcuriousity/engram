@@ -55,7 +55,10 @@ telling of all. Later, at `/ui/judge`, each recorded search comes back as a card
 with its candidates shuffled and unlabelled, and one question: which of these
 was the one you needed? Four answers, all one keystroke: a number, `N` for none
 of these (then find what should have answered), `S` to skip, `X` if it was not a
-real search.
+real search. Every candidate can be opened and read in full before you confirm
+it, and `U` takes the last verdict back — a keystroke fast enough to judge with
+is a keystroke fast enough to slip on, and a mislabelled pair is worse than none
+at all.
 
 The counter at the top is not a score standing in for the measurement — it *is*
 recall@10 and MRR, read from the positions those searches actually gave.
@@ -153,7 +156,7 @@ the file — the loader warns if it finds one.
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `sample`, `per_point`, `interval_hours`, `judge`, `max_judgements`. |
-| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days`. Off by default. |
+| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days`, `sweep_hours`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |

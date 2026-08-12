@@ -2045,7 +2045,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let html = flat(&body_of(res).await);
+        let html = flat(&body_of(res).await).to_lowercase();
         assert!(
             html.contains("waiting on a decision"),
             "the parked capture rendered as an ordinary one: {html}"
@@ -2089,14 +2089,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capturing_text_stores_it_and_confirms() {
-        let (app, cookie) = app_with_session().await;
+    async fn capturing_text_stores_it_and_says_nothing() {
+        // The confirmation is the row that appears under "Recent" — same link,
+        // same progress badge. A card above the list saying it again was the
+        // one capture reported twice.
+        let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_of(res).await.to_lowercase().contains("captured"));
+        assert!(
+            body_of(res).await.trim().is_empty(),
+            "an ordinary capture repeats what the queue already shows"
+        );
+        assert_eq!(
+            core.store.list_corpora(10, 0).await.unwrap().len(),
+            1,
+            "the capture itself still landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn capturing_the_same_text_twice_says_so() {
+        // The one thing the queue cannot report: the second paste adds no row,
+        // so without this the page looks like nothing happened at all.
+        let (app, cookie) = app_with_session().await;
+        for _ in 0..1 {
+            app.clone()
+                .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
+                .await
+                .unwrap();
+        }
+        let res = app
+            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
+            .await
+            .unwrap();
+        assert!(
+            body_of(res).await.to_lowercase().contains("already stored"),
+            "a duplicate paste must say why nothing new appeared"
+        );
     }
 
     #[tokio::test]
@@ -2395,7 +2427,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_detail_shows_the_raw_text() {
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .clone()
             .oneshot(form(
@@ -2405,15 +2437,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        let html = body_of(res).await;
-        let id = html
-            .split("/ui/corpora/")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap()
-            .to_string();
+        assert_eq!(res.status(), StatusCode::OK);
+        // An ordinary capture answers with nothing to read the id out of — the
+        // queue fragment is what names it on the page.
+        let id = core.store.list_corpora(10, 0).await.unwrap()[0].id.clone();
 
         let res = app
             .oneshot(

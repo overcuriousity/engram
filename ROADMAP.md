@@ -118,10 +118,9 @@ to the query path.
   together, so recovery does not mean paying for every embedding again. The
   snapshot is the artifact of record for a rebuild; a reindex is the fallback,
   not the plan.
-- ~~**Delete the FTS5 index and its triggers.**~~ Done — the tables are simply
-  absent from `src/store/schema.sql`
-  drops `artifacts_fts` and its three write triggers, and `keyword_search` /
-  `fts_quote` are gone from `src/store/artifacts.rs`. Hybrid search runs in
+- ~~**Delete the FTS5 index and its triggers.**~~ Done — `src/store/schema.sql`
+  never creates `artifacts_fts` or its three write triggers, and
+  `keyword_search` / `fts_quote` are gone from `src/store/artifacts.rs`. Hybrid search runs in
   Qdrant instead — dense and sparse as prefetch branches fused by RRF in one
   round trip (`src/vector/qdrant.rs`) — where the lexical index cannot drift
   from the vectors. The SQLite index was never read by any production path and

@@ -36,6 +36,10 @@ pub struct FeedbackConfig {
     pub coalesce_secs: i64,
     /// Days captured searches are kept. `0` keeps them forever.
     pub retain_days: i64,
+    /// How often the retention sweep runs. Hours rather than minutes because
+    /// `retain_days` is the only thing it enforces: a window measured in days
+    /// does not need checking more than a few times a day.
+    pub sweep_hours: u64,
 }
 
 impl Default for FeedbackConfig {
@@ -45,6 +49,7 @@ impl Default for FeedbackConfig {
             candidates: 20,
             coalesce_secs: 15,
             retain_days: 0,
+            sweep_hours: 6,
         }
     }
 }

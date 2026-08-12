@@ -1,12 +1,21 @@
+{# Nothing to say on the ordinary path: the capture arrives in "Recent" below
+   within the same second, carrying the same link and the same progress badge,
+   and a card repeating it directly above the list was the same row said twice.
+   What survives is what the list cannot say — a paste that was already stored,
+   or one parked pending a decision, both of which look like nothing happening
+   unless they are named here. #}
+{% if duplicate || near_dupe_of.is_some() %}
 <div class="card">
   <div class="card-head">
-    <span class="card-title">Captured</span>
-    <span class="card-meta">
-      {% if duplicate %}<span class="badge badge-muted">already stored</span>
-      {% else if near_dupe_of.is_some() %}<span class="badge badge-muted">waiting on a decision</span>
-      {% else %}<span class="badge badge-accent">processing</span>{% endif %}
+    <span class="card-title">
+      {% if duplicate %}Already stored{% else %}Waiting on a decision{% endif %}
     </span>
   </div>
+  {% if duplicate %}
+  <p class="muted">
+    This text is already in the base, so nothing was processed a second time.
+  </p>
+  {% endif %}
   {% if let Some(other) = near_dupe_of %}
   <p class="muted">
     This looks {{ near_dupe_percent }}% like
@@ -17,3 +26,4 @@
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>
+{% endif %}

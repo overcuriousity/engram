@@ -3,10 +3,14 @@
    is why it is a first-class screen and not a footnote on the card. #}
 <article class="judge-card judge-assign">
   <p class="muted mono">you were looking for</p>
-  <h2 class="judge-query">{{ query }}</h2>
+  <h2 class="judge-query">{{ event_query }}</h2>
   <p class="muted hint">Find what should have answered it.</p>
 
-  <input class="input" type="search" name="q" placeholder="Search the base…"
+  {# The swap replaces this input along with the rest of the card, so the box
+     has to carry what was typed back into its own replacement. The `id` is what
+     htmx restores focus by; without it the caret leaves the box mid-word. #}
+  <input class="input" type="search" name="q" id="judge-assign-q"
+         value="{{ typed }}" placeholder="Search the base…"
          hx-get="/ui/judge/{{ event_id }}/assign/results"
          hx-trigger="keyup changed delay:250ms, search"
          hx-target="#card" hx-swap="innerHTML" autofocus>
@@ -22,6 +26,15 @@
         <span class="judge-title">{{ o.title }}</span>
         <span class="judge-snippet">{{ o.snippet }}</span>
       </button>
+      {# Same reason as on the card, and more so: here the operator is choosing
+         from search results they have never seen ranked, on a query they wrote
+         from memory. #}
+      <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
+               hx-trigger="toggle once" hx-target="find .judge-full"
+               hx-swap="innerHTML">
+        <summary>Read it in full</summary>
+        <div class="judge-full"><span class="muted">loading…</span></div>
+      </details>
     </li>
     {% endfor %}
   </ol>

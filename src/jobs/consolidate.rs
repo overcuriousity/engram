@@ -188,16 +188,10 @@ async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usi
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
-    // Ahead of the enabled check and outside it: retention is the operator's
-    // instruction about their own query log, and it must be honoured whether or
-    // not duplicate hygiene happens to be switched on. Failing to expire is not
-    // worth taking the sweep down for.
-    match core.store.expire_feedback(core.feedback.retain_days).await {
-        Ok(n) if n > 0 => tracing::info!(dropped = n, "expired captured searches"),
-        Err(e) => tracing::warn!(error = %e, "could not expire captured searches"),
-        _ => {}
-    }
-
+    // Retention used to ride along here. It has its own ticker now
+    // (`spawn_retention_ticker`): riding along meant that switching duplicate
+    // hygiene off silently switched off the operator's instruction about how
+    // long their query log is kept, which is not consolidation's call to make.
     let cfg = &core.consolidate;
     if !cfg.enabled {
         return Ok(Outcome::default());

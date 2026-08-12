@@ -273,10 +273,19 @@ and swaps in the next card. The target is one judgement in five seconds.
 | `N` | "None of these." | Opens the normal search inline to find and assign the right artifact → also `hit`, but with an artifact the ranker did not return. If nothing fits: `verdict='gap'` |
 | `S` | "Can't remember." | Stays pending, `skips` incremented, sinks in the order |
 | `X` | "Not a real search." | `verdict='discard'` |
+| `U` | "That was the wrong key." | Clears `judged_at`, `verdict` and `expect_id`; the event returns to the queue on the card it was judged from |
 
 The `N` path is what makes the exercise worth anything: it is the only source of
 pairs whose confirmed answer lay outside what the system offered, and therefore
 the only thing that can distinguish a ranking failure from a success.
+
+**Reading before confirming.** Each candidate carries an expander that fetches
+the full artifact text in place, on the card and in the `N` results alike. The
+snippet is 140 characters — enough to recognise an artifact, not enough to be
+sure of one — and the click after it writes a line the ranker is scored against.
+The reading view says nothing about rank, score or whether the search showed the
+artifact at all; leaking any of that here would undo what the shuffle protects.
+`U` covers what reading cannot, which is the misfired digit.
 
 **The assignment search inside `N` runs as `Door::Judge` and is never captured.**
 Otherwise judging would flood the dataset with queries composed in full knowledge
@@ -502,6 +511,7 @@ enabled       = false   # off by default; query wording is personal
 candidates    = 20      # stored candidates per event
 coalesce_secs = 15      # window for prefix folding
 retain_days   = 0       # 0 = unlimited
+sweep_hours   = 6       # how often retention is enforced
 
 [feedback.tune]
 enabled        = false
@@ -514,7 +524,9 @@ auto_apply     = false
 ```
 
 With `feedback.enabled = false` nothing is written; the tables exist from the
-migration and stay empty, so toggling needs no migration step.
+schema and stay empty, so toggling needs no migration step. Retention runs on
+its own ticker rather than inside the consolidation sweep: a window over
+personal data must not lapse because an unrelated feature was switched off.
 
 ## Testing
 

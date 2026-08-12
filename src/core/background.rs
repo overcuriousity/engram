@@ -124,6 +124,48 @@ pub fn spawn_consolidation_ticker(
     })
 }
 
+/// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after.
+///
+/// Its own ticker rather than a passenger on the consolidation sweep, which is
+/// where it used to live: an operator who switches duplicate hygiene off is not
+/// asking to keep their query log forever, and that is what the coupling
+/// quietly did. Runs even with capture disabled, so turning capture off also
+/// expires what it recorded while it was on.
+pub fn spawn_retention_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if core.feedback.retain_days <= 0 {
+            tracing::info!("captured searches kept indefinitely");
+            return;
+        }
+        let period = std::time::Duration::from_secs(core.feedback.sweep_hours.max(1) * 3600);
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    match core.store.expire_feedback(core.feedback.retain_days).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(dropped = n, "expired captured searches")
+                        }
+                        // A failed sweep is retried on the next tick; there is
+                        // nothing here worth taking the process down for.
+                        Err(e) => {
+                            tracing::warn!(error = %e, "could not expire captured searches")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        tracing::info!("retention ticker stopped");
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +207,77 @@ mod tests {
             core.store.claim_job().await.unwrap().is_none(),
             "a disabled sweep must not be queued"
         );
+    }
+
+    /// One captured search, aged past any plausible window.
+    async fn seed_old_event(core: &crate::core::Core) {
+        let id = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "old".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    filters: "{}".into(),
+                    query_vec: vec![0.0],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 40 * 86_400)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn captured(core: &crate::core::Core) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM search_events")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retention_runs_with_consolidation_switched_off() {
+        // Retention used to ride on the consolidation sweep, so switching
+        // duplicate hygiene off silently kept the query log forever.
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.enabled = false;
+        core.feedback.enabled = true;
+        core.feedback.retain_days = 30;
+        seed_old_event(&core).await;
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_retention_ticker(core.clone(), rx);
+        for _ in 0..50 {
+            if captured(&core).await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = tx.send(true);
+        let _ = h.await;
+
+        assert_eq!(
+            captured(&core).await,
+            0,
+            "an event past the window outlived the retention ticker"
+        );
+    }
+
+    #[tokio::test]
+    async fn keeping_forever_starts_no_ticker() {
+        let core = crate::core::test_support::test_core().await; // retain_days defaults to 0
+        seed_old_event(&core).await;
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_retention_ticker(core.clone(), rx);
+        // Returns rather than looping, so awaiting it cannot hang.
+        let _ = h.await;
+        assert_eq!(captured(&core).await, 1, "`0` must keep them forever");
     }
 
     #[tokio::test]

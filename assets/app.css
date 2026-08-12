@@ -582,7 +582,20 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 .judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: 0.8125rem; }
 .judge-title { font-weight: 500; }
 .judge-snippet { grid-column: 2; color: var(--color-fg-secondary); font-size: 0.875rem; }
+/* Reading a candidate before confirming it. Indented under its option and
+   quiet, because the snippet answers most of the time and this is the second
+   question, not the first. Capped and scrollable so a long artifact cannot
+   push the other options off the screen. */
+.judge-peek { margin: 0.125rem 0 0 2.125rem; font-size: 0.8125rem; }
+.judge-peek > summary {
+  cursor: pointer; color: var(--color-fg-muted); padding: 0.125rem 0;
+  width: fit-content;
+}
+.judge-peek > summary:hover { color: var(--color-fg-secondary); }
+.judge-full { max-height: 22rem; overflow-y: auto; margin-top: 0.25rem; }
+.judge-full .md { font-size: 0.875rem; }
 .judge-outs { margin-bottom: 1rem; }
+.judge-undo { margin-left: 0.5rem; }
 
 /* Read from the ranks the searches actually gave, so it moves on every
    verdict. It is the measurement, not a score standing in for one. */

@@ -3,7 +3,15 @@
 {# What the last verdict revealed. Loudest where the ranking did worst: a
    first-position confirmation is the least informative card of the day, and
    celebrating it would breed agreement rather than judgement. #}
-<p class="judge-flash">{{ f.line }} <span class="mono muted">{{ f.delta }}</span></p>
+{# Undo sits on the flash because that is where the operator is already looking
+   when they realise the digit was wrong. A mislabelled pair is worse than no
+   pair: it is scored against the ranker as though it were true. #}
+<p class="judge-flash">{{ f.line }} <span class="mono muted">{{ f.delta }}</span>
+  {% if let Some(undo_id) = f.undo %}
+  <button class="btn btn-ghost btn-sm judge-undo" hx-post="/ui/judge/{{ undo_id }}/undo"
+          hx-target="#card" hx-swap="innerHTML">Undo <kbd>U</kbd></button>
+  {% endif %}
+</p>
 {% when None %}
 {% endmatch %}
 {% match card %}
@@ -25,6 +33,18 @@
         <span class="judge-title">{{ o.title }}</span>
         <span class="judge-snippet">{{ o.snippet }}</span>
       </button>
+      {# A hundred and forty characters is enough to recognise an artifact and
+         not enough to be sure of one, and the click after it is a line in the
+         dataset. Fetched on first open and kept: reading two candidates and
+         comparing them is exactly the case this exists for. Outside the
+         option rather than inside it — a button within a button is neither
+         valid nor clickable — so opening this can never fire a verdict. #}
+      <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
+               hx-trigger="toggle once" hx-target="find .judge-full"
+               hx-swap="innerHTML">
+        <summary>Read it in full</summary>
+        <div class="judge-full"><span class="muted">loading…</span></div>
+      </details>
     </li>
     {% endfor %}
   </ol>

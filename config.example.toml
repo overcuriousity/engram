@@ -204,3 +204,6 @@ candidates = 20
 coalesce_secs = 15
 # Days captured searches are kept. 0 keeps them forever.
 retain_days = 0
+# How often retention is enforced. A window measured in days does not need
+# checking more often than this, and the sweep is a single DELETE.
+sweep_hours = 6

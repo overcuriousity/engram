@@ -76,6 +76,9 @@ pub struct Flash {
     /// `MRR 0.54 → 0.57`, so the figure the work is measured by visibly moves
     /// as the work is done.
     pub delta: String,
+    /// The event this verdict was recorded against, so it can be taken back.
+    /// `None` after a skip, which recorded nothing to undo.
+    pub undo: Option<String>,
 }
 
 /// What the judgement just revealed, said plainly.
@@ -203,7 +206,12 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
 ///
 /// The MRR is read on both sides of the write, so the delta shown is the one
 /// this judgement actually caused rather than a figure recomputed later.
-async fn card_after(st: &AppState, before: f64, line: &'static str) -> Result<Response> {
+async fn card_after(
+    st: &AppState,
+    before: f64,
+    line: &'static str,
+    judged: &str,
+) -> Result<Response> {
     use axum::response::IntoResponse;
     let after = st.core.store.feedback_stats().await?.mrr;
     Ok(HtmlTemplate(CardTemplate {
@@ -211,9 +219,52 @@ async fn card_after(st: &AppState, before: f64, line: &'static str) -> Result<Re
         flash: Some(Flash {
             line: line.to_string(),
             delta: format!("MRR {before:.2} → {after:.2}"),
+            undo: Some(judged.to_string()),
         }),
     })
     .into_response())
+}
+
+/// One candidate's full text, for reading before confirming it.
+///
+/// The snippet on the card is 140 characters, which is enough to recognise an
+/// artifact and not enough to be sure of one — and a verdict is a line in the
+/// dataset the ranker is scored against. Deliberately says nothing about rank,
+/// score or whether the search showed this at all: the card withholds that on
+/// purpose, and a detail view that leaked it would undo the whole arrangement.
+async fn read_artifact(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(artifact_id): Path<String>,
+) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let a = st.core.store.get_artifact(&artifact_id).await?;
+    Ok(HtmlTemplate(FullTemplate {
+        html: crate::web::markdown::render(&a.text),
+    })
+    .into_response())
+}
+
+/// Take back the verdict just recorded and return to that card.
+///
+/// The keyboard shortcuts make judging fast enough to be done at all, and fast
+/// enough to misfire; without this, a slipped digit is a wrong pair scored as
+/// truth forever. The event comes back to the card it was on rather than to
+/// whatever now heads the queue.
+async fn undo(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(event_id): Path<String>,
+) -> Result<Response> {
+    use axum::response::IntoResponse;
+    st.core.store.unjudge(&event_id).await?;
+    let card = match st.core.store.pending_by_id(&event_id).await? {
+        Some(event) => Some(card_for(&st, event).await?),
+        // Expired out from under the operator, or never existed. The next card
+        // is a better answer than an error page.
+        None => next_pending_card(&st).await?,
+    };
+    Ok(HtmlTemplate(CardTemplate { card, flash: None }).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -236,7 +287,7 @@ async fn hit(
         .await?;
     let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge_hit(&event_id, &f.artifact_id).await?;
-    card_after(&st, before, diagnosis(rank, Verdict::Hit)).await
+    card_after(&st, before, diagnosis(rank, Verdict::Hit), &event_id).await
 }
 
 async fn gap(
@@ -246,7 +297,7 @@ async fn gap(
 ) -> Result<Response> {
     let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge(&event_id, Verdict::Gap).await?;
-    card_after(&st, before, diagnosis(None, Verdict::Gap)).await
+    card_after(&st, before, diagnosis(None, Verdict::Gap), &event_id).await
 }
 
 async fn discard(
@@ -256,7 +307,7 @@ async fn discard(
 ) -> Result<Response> {
     let before = st.core.store.feedback_stats().await?.mrr;
     st.core.store.judge(&event_id, Verdict::Discard).await?;
-    card_after(&st, before, diagnosis(None, Verdict::Discard)).await
+    card_after(&st, before, diagnosis(None, Verdict::Discard), &event_id).await
 }
 
 async fn skip(
@@ -271,10 +322,25 @@ async fn skip(
 // ── The "none of these" path ────────────────────────────────────────────────
 
 #[derive(Template)]
+#[template(path = "_judge_full.html")]
+struct FullTemplate {
+    /// Rendered and sanitized markdown — chunk text is model output shown
+    /// inside an authenticated session, so it is untrusted by definition.
+    html: String,
+}
+
+#[derive(Template)]
 #[template(path = "_judge_assign.html")]
 struct AssignTemplate {
     event_id: String,
-    query: String,
+    /// The query as it was captured — the thing being judged. Fixed for the
+    /// life of the screen: it is the operator's reference for what they are
+    /// looking for, so typing must not overwrite it.
+    event_query: String,
+    /// What is in the search box. Separate from `event_query` because the swap
+    /// rebuilds the input, and a box that renders empty loses whatever was
+    /// being typed.
+    typed: String,
     results: Vec<Choice>,
     /// Whether a search has been run yet, so an empty list can say "nothing
     /// matched" instead of appearing before anything was asked.
@@ -287,17 +353,19 @@ async fn assign(
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let query = st
+    // By id, not by "whichever is next to judge": a capture landing between the
+    // card being drawn and this click would otherwise win the ordering and
+    // leave the screen with no query on it at all.
+    let event_query = st
         .core
         .store
-        .next_pending()
+        .event_query(&event_id)
         .await?
-        .filter(|e| e.id == event_id)
-        .map(|e| e.query)
         .unwrap_or_default();
     Ok(HtmlTemplate(AssignTemplate {
         event_id,
-        query,
+        event_query,
+        typed: String::new(),
         results: vec![],
         searched: false,
     })
@@ -317,6 +385,12 @@ async fn assign_results(
     axum::extract::Query(p): axum::extract::Query<AssignQuery>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
+    let event_query = st
+        .core
+        .store
+        .event_query(&event_id)
+        .await?
+        .unwrap_or_default();
     let mut results = vec![];
     if !p.q.trim().is_empty() {
         let query = crate::core::search::SearchQuery {
@@ -348,7 +422,8 @@ async fn assign_results(
     }
     Ok(HtmlTemplate(AssignTemplate {
         event_id,
-        query: p.q,
+        event_query,
+        typed: p.q,
         results,
         searched: true,
     })
@@ -365,6 +440,8 @@ pub fn judge_router() -> Router<AppState> {
         .route("/ui/judge/{id}/skip", post(skip))
         .route("/ui/judge/{id}/assign", get(assign))
         .route("/ui/judge/{id}/assign/results", get(assign_results))
+        .route("/ui/judge/{id}/undo", post(undo))
+        .route("/ui/judge/read/{artifact_id}", get(read_artifact))
 }
 
 #[cfg(test)]
@@ -530,6 +607,115 @@ mod tests {
         let s = core.store.feedback_stats().await.unwrap();
         assert_eq!(s.hits, 1);
         assert!(core.store.next_pending().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_candidate_can_be_read_in_full_before_it_is_confirmed() {
+        // The snippet stops at 140 characters, and the click after it writes a
+        // line into the dataset the ranker is scored against.
+        let (app, cookie, core, ids) = judge_app(1, &[]).await;
+        let card = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(
+            card.contains(&format!("/ui/judge/read/{}", ids[0])),
+            "the card offers no way to read a candidate: {card}"
+        );
+
+        let full = get(&app, &format!("/ui/judge/read/{}", ids[0]), &cookie).await;
+        let stored = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            full.contains(&stored.text),
+            "the reading view is not the artifact: {full}"
+        );
+        // Reading must stay a read: the event is still waiting for a verdict.
+        assert!(core.store.next_pending().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_reading_view_says_nothing_about_rank_or_score() {
+        let (app, cookie, _core, ids) = judge_app(1, &[]).await;
+        let full = get(&app, &format!("/ui/judge/read/{}", ids[0]), &cookie).await;
+        assert!(
+            !full.contains("rank"),
+            "a rank leaked into the reading view"
+        );
+        assert!(
+            !full.contains("score"),
+            "a score leaked into the reading view"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verdict_can_be_taken_back() {
+        // Judging is driven by digit keys because it has to cost seconds, and
+        // that is exactly what makes it misfire. A pair labelled by a slipped
+        // key is scored as truth.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let flash = {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/ui/judge/{}/hit", event.id))
+                        .method("POST")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("artifact_id={}", ids[0])))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            body_of(res).await
+        };
+        assert!(
+            flash.contains(&format!("/ui/judge/{}/undo", event.id)),
+            "the verdict was recorded with no way back: {flash}"
+        );
+        assert_eq!(core.store.feedback_stats().await.unwrap().hits, 1);
+
+        let back = {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/ui/judge/{}/undo", event.id))
+                        .method("POST")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            body_of(res).await
+        };
+
+        let s = core.store.feedback_stats().await.unwrap();
+        assert_eq!((s.hits, s.judged), (0, 0), "the verdict outlived its undo");
+        let pending = core.store.next_pending().await.unwrap().unwrap();
+        assert_eq!(pending.id, event.id, "a different event came back");
+        assert!(
+            back.contains(&event.id),
+            "undo did not return to the card it undid: {back}"
+        );
+        // The answer goes with the verdict: a stale `expect_id` would keep
+        // counting towards recall for a judgement nobody stands behind.
+        assert_eq!(
+            core.store.rank_in_event(&event.id, &ids[0]).await.unwrap(),
+            Some(0),
+            "the pool is history and must survive the undo"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT expect_id FROM search_events WHERE id = ?"
+            )
+            .bind(&event.id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

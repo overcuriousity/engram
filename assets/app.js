@@ -148,10 +148,20 @@
   // an option, N/S/X take the three ways out. Ignored while a text field has
   // focus, so typing in the assignment search does not fire a verdict.
   document.addEventListener('keydown', function (e) {
-    var card = document.querySelector('.judge-card');
-    if (!card || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     var tag = document.activeElement && document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+    // Ahead of the card check, and not gated on one: the digit that has just
+    // been regretted is the one that judged the last event, and if it emptied
+    // the queue there is no card left to hang the shortcut off.
+    if (e.key.toLowerCase() === 'u') {
+      var undo = document.querySelector('.judge-undo');
+      if (undo) { e.preventDefault(); undo.click(); }
+      return;
+    }
+    var card = document.querySelector('.judge-card');
+    if (!card) return;
 
     if (/^[1-9]$/.test(e.key)) {
       var pick = card.querySelectorAll('.judge-option')[Number(e.key) - 1];

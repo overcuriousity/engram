@@ -417,7 +417,18 @@ impl Core {
             && !results.is_empty()
         {
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
-            match reranker.rerank(&query.q, &docs, limit).await {
+            // Reranked wider than the answer when the search is being recorded:
+            // the reranker scores every document either way, so asking it to
+            // return more costs nothing, while asking for `limit` would hand
+            // capture a pool exactly as wide as what the searcher saw. A hit
+            // the reranker buried would then be unconfirmable, and the whole
+            // point of storing a pool is that it can be.
+            let top_n = if self.feedback.enabled && door.captured() {
+                limit.max(self.feedback.candidates)
+            } else {
+                limit
+            };
+            match reranker.rerank(&query.q, &docs, top_n).await {
                 Ok(order) => {
                     results = order
                         .into_iter()
@@ -1230,6 +1241,41 @@ mod tests {
         assert_eq!(
             shown, 3,
             "exactly the answer the searcher saw is flagged shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reranked_search_stores_a_pool_wider_than_its_answer() {
+        // The reranker returns at most `top_n`, so asking it for `limit` would
+        // hand capture a pool exactly as wide as the answer — and a hit the
+        // reranker buried would become unconfirmable.
+        let (mut core, _r) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        core.feedback.enabled = true;
+        let texts: Vec<(&str, &str, &[&str])> = (0..12)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha text about it");
+        query.limit = 3;
+        let answer = core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(answer.len(), 3, "the searcher still sees only the answer");
+        core.background.wait_idle().await;
+
+        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(
+            rows.len() > 3,
+            "the reranked pool collapsed to the answer, got {}",
+            rows.len()
+        );
+        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        assert_eq!(
+            shown, 3,
+            "only the answer the searcher saw is flagged shown"
         );
     }
 

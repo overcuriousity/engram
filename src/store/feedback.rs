@@ -256,8 +256,26 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else { return Ok(None) };
-        let id: String = row.get("id");
+        self.hydrate(row).await.map(Some)
+    }
 
+    /// One event by id, judged or not.
+    ///
+    /// What undo needs: the event it just put back is not necessarily the one
+    /// the judging order now puts first, and the operator expects to land back
+    /// on the card they were looking at rather than somewhere else.
+    pub async fn pending_by_id(&self, event_id: &str) -> Result<Option<PendingEvent>> {
+        let row = sqlx::query("SELECT id, query, door, created_at FROM search_events WHERE id = ?")
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        self.hydrate(row).await.map(Some)
+    }
+
+    /// An event row plus the pool it recorded.
+    async fn hydrate(&self, row: sqlx::sqlite::SqliteRow) -> Result<PendingEvent> {
+        let id: String = row.get("id");
         let candidates = sqlx::query(
             "SELECT artifact_id, rank, shown FROM search_candidates
              WHERE event_id = ? ORDER BY rank",
@@ -273,13 +291,28 @@ impl Store {
         })
         .collect();
 
-        Ok(Some(PendingEvent {
+        Ok(PendingEvent {
             id,
             query: row.get("query"),
             door: row.get("door"),
             created_at: row.get("created_at"),
             candidates,
-        }))
+        })
+    }
+
+    /// The query one event recorded, by id.
+    ///
+    /// Deliberately not `next_pending` with a filter: the judging order moves
+    /// under a screen that is already open, and the operator's own event is not
+    /// necessarily the one at the front of it. Judged events answer too — the
+    /// caller wants the text, not a verdict.
+    pub async fn event_query(&self, event_id: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT query FROM search_events WHERE id = ?")
+                .bind(event_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
     }
 
     /// Where this artifact stood in what the search returned, if it was in the
@@ -315,6 +348,24 @@ impl Store {
             .bind(event_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Take a verdict back, returning the event to the pending queue.
+    ///
+    /// A misfired digit is a mislabelled pair, and a mislabelled pair is worse
+    /// than no pair at all: it is scored against the ranker as truth. Clearing
+    /// `expect_id` with the verdict matters — a stale answer left behind would
+    /// keep counting towards recall for a judgement nobody stands behind.
+    pub async fn unjudge(&self, event_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE search_events
+             SET judged_at = NULL, verdict = NULL, expect_id = NULL
+             WHERE id = ?",
+        )
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -414,8 +465,9 @@ impl Store {
 
     /// Drop captured searches older than the window. `0` keeps them forever.
     ///
-    /// Ridden along with the consolidation sweep rather than given a ticker of
-    /// its own: a periodic `DELETE` is not worth a second moving part.
+    /// Driven by its own ticker rather than by the consolidation sweep: a
+    /// retention window is a promise about personal data, and a promise that
+    /// quietly lapses when an unrelated feature is switched off is not one.
     pub async fn expire_feedback(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
@@ -651,6 +703,23 @@ mod tests {
         assert_eq!((s.gaps, s.discards, s.hits), (1, 1, 0));
         // Neither can score: one has no answer, the other was not a question.
         assert_eq!(s.mrr, 0.0);
+    }
+
+    #[tokio::test]
+    async fn an_event_is_read_by_id_not_by_judging_order() {
+        // The assign screen asks for the event it was opened on. A capture
+        // landing while it is open takes the front of the judging order, and
+        // must not take the query off the screen with it.
+        let store = Store::memory().await.unwrap();
+        let older = seed(&store, "older", &["a"]).await;
+        seed(&store, "newer", &["b"]).await;
+
+        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "newer");
+        assert_eq!(
+            store.event_query(&older).await.unwrap().as_deref(),
+            Some("older")
+        );
+        assert_eq!(store.event_query("no such event").await.unwrap(), None);
     }
 
     #[tokio::test]
