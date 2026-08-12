@@ -226,6 +226,24 @@ pub struct SynthesizeRole {
     pub cooldown_secs: u64,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Tokens of the document's verbatim opening prepended to every window, so
+    /// an artifact from deep in a long document still knows what product and
+    /// version it belongs to. Zero disables it.
+    #[serde(default = "default_context_opening_tokens")]
+    pub context_opening_tokens: usize,
+    /// Tokens of each neighbouring window carried on both sides, so a window
+    /// that opens mid-procedure can still resolve what its pronouns point at.
+    /// Zero disables it.
+    #[serde(default = "default_context_overlap_tokens")]
+    pub context_overlap_tokens: usize,
+}
+
+fn default_context_opening_tokens() -> usize {
+    200
+}
+
+fn default_context_overlap_tokens() -> usize {
+    150
 }
 
 #[derive(Debug, Deserialize, Clone)]

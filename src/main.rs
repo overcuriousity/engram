@@ -363,6 +363,8 @@ mod startup_tests {
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     cooldown_secs: 0,
+                    context_opening_tokens: 200,
+                    context_overlap_tokens: 150,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),

@@ -86,6 +86,10 @@ impl HttpSynthesizer {
                 context_tokens: cfg.context_tokens,
                 max_output_tokens: cfg.max_output_tokens,
                 output_ratio: cfg.output_ratio,
+                context: crate::infer::context::ContextBudget {
+                    opening: cfg.context_opening_tokens,
+                    overlap: cfg.context_overlap_tokens,
+                },
             },
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
@@ -474,6 +478,8 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             cooldown_secs: 0,
+            context_opening_tokens: 200,
+            context_overlap_tokens: 150,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {

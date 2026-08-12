@@ -119,6 +119,9 @@ impl Synthesizer for FakeSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 
@@ -200,6 +203,9 @@ impl Synthesizer for ParaphrasingSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 }
@@ -255,6 +261,9 @@ impl Synthesizer for LyingSpanSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 }
@@ -281,6 +290,9 @@ impl Synthesizer for HallucinatingSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 }

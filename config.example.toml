@@ -77,6 +77,17 @@ output_ratio = 8.0
 # tokens are generated either way — so it is off by default and exists for the
 # machine sitting next to you.
 # cooldown_secs = 15
+# Tokens of the document's verbatim opening prepended to every window, so an
+# artifact from deep in a long document still knows what product, version and
+# platform it belongs to — which is what the caveats field asks for and what a
+# window eight hundred lines in has no other way to learn.
+# context_opening_tokens = 200
+# Tokens of each neighbouring window carried on both sides, so a window that
+# opens mid-procedure can still resolve what "this command" points at. Both of
+# these come out of the window itself: at 200 and 150 that is 540 tokens of
+# prompt, so a smaller window and proportionally more calls per corpus. Set
+# either to 0 to turn that half off.
+# context_overlap_tokens = 150
 # Optional path to a tokenizer.json for exact token counting. Without it,
 # budgets fall back to a conservative characters/3.5 estimate.
 # tokenizer_path = "/models/qwen/tokenizer.json"

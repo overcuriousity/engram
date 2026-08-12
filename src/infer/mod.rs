@@ -1,4 +1,5 @@
 pub mod budget;
+pub mod context;
 pub mod facts;
 pub mod fake;
 pub mod openai;
@@ -27,6 +28,9 @@ pub struct SynthesisBudget {
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub output_ratio: f32,
+    /// What the window gives up so each call can carry the document's opening
+    /// and its neighbours' edges.
+    pub context: crate::infer::context::ContextBudget,
 }
 
 #[async_trait]
