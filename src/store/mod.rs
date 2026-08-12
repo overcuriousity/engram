@@ -37,14 +37,23 @@ impl Store {
         Ok(store)
     }
 
+    /// Bring the database up to the schema this binary expects.
+    ///
+    /// One statement of what the schema *is*, rather than a chain of diffs
+    /// describing how it came to be. Every object is `IF NOT EXISTS`, so this
+    /// creates what is missing on a fresh database and is a no-op on one that
+    /// already has it. It deliberately cannot alter an existing table: while
+    /// the project is in testing, changing a column means editing `schema.sql`
+    /// and recreating the database.
     pub async fn migrate(&self) -> Result<()> {
-        sqlx::migrate!("./migrations")
-            .run(&self.pool)
+        sqlx::raw_sql(include_str!("schema.sql"))
+            .execute(&self.pool)
             .await
-            .map_err(|e| crate::error::Error::Store(e.to_string()))
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        Ok(())
     }
 
-    /// Fresh in-memory database with migrations applied. For the tests, and
+    /// Fresh in-memory database with the schema applied. For the tests, and
     /// for tooling whose output is a file rather than a running instance —
     /// `eval-prepare` segments a corpus and writes JSON, and has no reason to
     /// leave a database behind.
@@ -73,4 +82,74 @@ pub fn now() -> i64 {
 
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn applying_the_schema_twice_changes_nothing() {
+        // migrate() runs on every connect, so a second application has to be a
+        // no-op rather than an error. This is what `IF NOT EXISTS` on every
+        // object buys, and it is the whole reason the schema can be a
+        // statement of shape rather than a chain of diffs.
+        let store = Store::memory().await.unwrap();
+        let before: Vec<(String, String)> =
+            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+
+        store.migrate().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let after: Vec<(String, String)> =
+            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        assert!(
+            before.iter().any(|(_, n)| n == "artifacts"),
+            "the schema must actually have been applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_file_database_gets_the_whole_schema() {
+        let dir = std::env::temp_dir().join(format!("engram-schema-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("engram.db");
+        let cfg = crate::config::StoreConfig {
+            path: path.to_str().unwrap().to_string(),
+        };
+
+        let store = Store::connect(&cfg).await.unwrap();
+        let tables: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        let names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
+        for expected in [
+            "api_tokens",
+            "artifact_pairs",
+            "artifacts",
+            "corpora",
+            "jobs",
+            "search_candidates",
+            "search_events",
+            "segments",
+            "sessions",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "{expected} is missing: {names:?}"
+            );
+        }
+
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
