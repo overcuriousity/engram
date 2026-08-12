@@ -82,6 +82,23 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
                 .await?;
         }
 
+        if !ctx.is_empty() {
+            let before = chunks.len();
+            chunks.retain(|c| !from_context_only(&c.text, &text, &ctx));
+            let dropped = before - chunks.len();
+            if dropped > 0 {
+                // A rising count here means the configured model is ignoring
+                // the prompt's context-only instruction. Better as a number in
+                // the log than as duplicates in the base.
+                tracing::info!(
+                    corpus_id,
+                    window = w.idx,
+                    dropped,
+                    "artifacts drawn from context blocks were dropped"
+                );
+            }
+        }
+
         // The span is ours to compute.
         //
         // Asking the model for `corpus_lines`, checking the answer, and having
@@ -155,6 +172,27 @@ async fn write_segment_artifacts(
         }
     }
     core.store.insert_artifacts(corpus_id, &new).await
+}
+
+/// Did this artifact come from a context block rather than from the window?
+///
+/// The prompt says not to extract from context, and a small local model obeys
+/// that unevenly, so the check is structural. Three outcomes matter and only
+/// the middle one is a duplicate: located in the window, keep; located only in
+/// context, drop, because the window that owns the material will emit it
+/// properly; located nowhere, keep — that is an artifact the model reworded
+/// hard, which flag_unverified has always handled and which must not start
+/// silently disappearing.
+fn from_context_only(
+    text: &str,
+    core_text: &str,
+    ctx: &crate::infer::context::WindowContext,
+) -> bool {
+    if crate::infer::verify::locate_span(text, core_text, 1).is_some() {
+        return false;
+    }
+    ctx.blocks()
+        .any(|b| crate::infer::verify::locate_span(text, b, 1).is_some())
 }
 
 /// Did any proposed chunk lose a literal its window contains?
@@ -425,6 +463,70 @@ mod tests {
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget { opening, overlap },
         }
+    }
+
+    #[test]
+    fn an_artifact_found_only_in_context_is_recognised() {
+        use crate::infer::context::WindowContext;
+
+        let core_text = "the window says something quite specific here\nand more of it";
+        let ctx = WindowContext {
+            opening: Some("the document opening states the version clearly".into()),
+            before: None,
+            after: Some("the following window describes another procedure".into()),
+        };
+
+        // Drawn from the window itself: keep.
+        assert!(!from_context_only(
+            "the window says something quite specific here",
+            core_text,
+            &ctx
+        ));
+        // Drawn from a context block and nowhere in the window: drop.
+        assert!(from_context_only(
+            "the following window describes another procedure",
+            core_text,
+            &ctx
+        ));
+        // Located nowhere at all — a heavily reworded artifact. Keep it, so it
+        // reaches flag_unverified the way it does today instead of vanishing.
+        assert!(!from_context_only(
+            "an entirely reworded statement about unrelated matters",
+            core_text,
+            &ctx
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_extracts_from_context_does_not_duplicate_artifacts() {
+        use crate::infer::fake::GreedySynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesizer = std::sync::Arc::new(GreedySynthesizer {
+            budget: context_budget(30, 20),
+        });
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let written = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        let mut texts: Vec<&str> = written.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        let before = texts.len();
+        texts.dedup();
+        assert_eq!(
+            texts.len(),
+            before,
+            "the same line was stored as an artifact more than once"
+        );
     }
 
     #[tokio::test]

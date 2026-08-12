@@ -214,6 +214,37 @@ impl Synthesizer for ParaphrasingSynthesizer {
     }
 }
 
+/// Emits one artifact per line it is given, context blocks included. Stands in
+/// for a small model that ignores the instruction not to extract from context.
+pub struct GreedySynthesizer {
+    pub budget: SynthesisBudget,
+}
+
+#[async_trait]
+impl Synthesizer for GreedySynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let mut out: Vec<ProposedArtifact> = Vec::new();
+        let from_context = input.context.blocks().flat_map(|b| b.lines());
+        for line in input.core.lines().chain(from_context) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            out.push(ProposedArtifact {
+                text: line.to_string(),
+                title: Some("greedy".into()),
+                category: Some("note".into()),
+                tags: vec![],
+                corpus_lines: None,
+                caveats: vec![],
+            });
+        }
+        Ok(out)
+    }
+    fn budget(&self) -> SynthesisBudget {
+        self.budget
+    }
+}
+
 /// Records the input of the last call, so a test can assert what the window
 /// was actually given rather than what it was supposed to be given.
 pub struct RecordingSynthesizer {
