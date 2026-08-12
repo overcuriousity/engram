@@ -10,6 +10,12 @@
 -- creates what is missing and leaves what is there alone; it does not alter an
 -- existing table. Changing a column means changing it here and recreating the
 -- database.
+--
+-- Because it cannot alter a table, `migrate` reads the columns back out of this
+-- file and checks them against the database afterwards. A table that predates a
+-- column added here would otherwise survive startup and panic later, in a
+-- request, on a column nothing ever added. One column per line is what that
+-- check parses, so keep it that way.
 
 -- ── Corpora ──────────────────────────────────────────────────────────────────
 -- A captured source in full. The raw text is kept verbatim and forever: every
@@ -89,6 +95,10 @@ CREATE TABLE IF NOT EXISTS segments (
   end_line   INTEGER NOT NULL,
   -- The window itself, as the splitter produced it. Authoritative.
   text       TEXT    NOT NULL DEFAULT '',
+  -- How many leading lines of `text` come from outside start_line..end_line:
+  -- the heading the splitter carries into a window that continues a section.
+  -- An offset measured inside the window is that much too high without it.
+  carry_lines INTEGER NOT NULL DEFAULT 0,
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,

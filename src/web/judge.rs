@@ -149,13 +149,18 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
     let mut choices = Vec::with_capacity(event.candidates.len());
     for c in &event.candidates {
         // A deleted artifact keeps its candidate row — the pool is history —
-        // but it cannot be offered as something to choose.
-        if let Ok(a) = st.core.store.get_artifact(&c.artifact_id).await {
-            choices.push(Choice {
+        // but it cannot be offered as something to choose. Only that: any other
+        // failure is raised, because a pool quietly one short is one the
+        // operator judges anyway, and the verdict is recorded as though the
+        // missing candidate had been seen and rejected.
+        match st.core.store.get_artifact(&c.artifact_id).await {
+            Ok(a) => choices.push(Choice {
                 artifact_id: a.id,
                 title: a.title.unwrap_or_else(|| "Untitled".into()),
                 snippet: snippet_of(&a.text),
-            });
+            }),
+            Err(crate::error::Error::NotFound) => continue,
+            Err(e) => return Err(e),
         }
     }
     Ok(Card {

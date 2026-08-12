@@ -5,6 +5,11 @@ pub struct Window {
     pub text: String,
     pub start_line: i64,
     pub end_line: i64,
+    /// Leading lines of `text` that come from outside `start_line..=end_line` —
+    /// the heading `flush` carries over, and nothing else. Anything measuring an
+    /// offset within the window against the document has to skip them, or every
+    /// line it reports is one too high.
+    pub carry_lines: i64,
 }
 
 fn is_heading(line: &str) -> bool {
@@ -31,6 +36,7 @@ pub fn split_into_segments(
             text: text.to_string(),
             start_line: 1,
             end_line: lines,
+            carry_lines: 0,
         }];
     }
 
@@ -38,20 +44,35 @@ pub fn split_into_segments(
     // loop below places is guaranteed to fit in a window on its own. Without
     // this the loop can only ever emit one window for such a line, and that
     // window is however large the line was.
-    let owned: Vec<String> = text
+    //
+    // Each piece keeps the number of the line it was cut from, because that is
+    // the only number the document has: numbering the pieces instead shifted
+    // every window after a cut line off the end of the source. Consecutive
+    // windows can therefore report the same line, which is the honest answer —
+    // a line number cannot address a unit smaller than a line, and it is why
+    // the window's text is stored rather than re-derived from the range.
+    let owned: Vec<(String, i64)> = text
         .lines()
-        .flat_map(|l| cut_long_line(l, segment_tokens, counter))
+        .enumerate()
+        .flat_map(|(i, l)| {
+            cut_long_line(l, segment_tokens, counter)
+                .into_iter()
+                .map(move |p| (p, i as i64 + 1))
+        })
         .collect();
-    let lines: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+    let lines: Vec<(&str, i64)> = owned.iter().map(|(s, n)| (s.as_str(), *n)).collect();
     let mut windows: Vec<Window> = Vec::new();
     let mut buf: Vec<&str> = Vec::new();
     let mut buf_tokens = 0usize;
     let mut start_line = 1i64;
+    // The line the buffer currently reaches, which is not always the line
+    // before the one being placed: cutting a long line puts several pieces on
+    // one number, so a window can begin and end on the same line.
+    let mut buf_end = 1i64;
     let mut last_heading: Option<String> = None;
     let mut carry: Option<String> = None;
 
-    for (idx, line) in lines.iter().enumerate() {
-        let line_no = idx as i64 + 1;
+    for (line, line_no) in lines.iter().copied() {
         let line_tokens = counter.count(line) + 1; // +1 for the newline
         let at_boundary = is_heading(line) || line.trim().is_empty();
 
@@ -70,13 +91,14 @@ pub fn split_into_segments(
                 start_line = line_no + 1;
             } else {
                 // A heading opens the window it introduces.
-                flush(&mut windows, &mut buf, start_line, line_no - 1, &carry);
+                flush(&mut windows, &mut buf, start_line, buf_end, &carry);
                 start_line = line_no;
                 if is_heading(line) {
                     last_heading = Some(line.to_string());
                 }
                 buf.push(line);
             }
+            buf_end = line_no;
             buf_tokens = if blank { 0 } else { line_tokens };
             carry = last_heading.clone();
             continue;
@@ -86,15 +108,10 @@ pub fn split_into_segments(
             last_heading = Some(line.to_string());
         }
         buf.push(line);
+        buf_end = line_no;
         buf_tokens += line_tokens;
     }
-    flush(
-        &mut windows,
-        &mut buf,
-        start_line,
-        lines.len() as i64,
-        &carry,
-    );
+    flush(&mut windows, &mut buf, start_line, buf_end, &carry);
     windows
 }
 
@@ -109,16 +126,17 @@ fn flush(
         return;
     }
     let body = buf.join("\n");
-    let text = match carry {
+    let (text, carry_lines) = match carry {
         // Only prepend context when the window does not already open with a
         // heading of its own.
-        Some(h) if !body.trim_start().starts_with('#') => format!("{h}\n{body}"),
-        _ => body,
+        Some(h) if !body.trim_start().starts_with('#') => (format!("{h}\n{body}"), 1),
+        _ => (body, 0),
     };
     windows.push(Window {
         text,
         start_line: start,
         end_line: end,
+        carry_lines,
     });
     buf.clear();
 }
@@ -252,6 +270,38 @@ mod tests {
             windows.iter().map(|w| w.text.as_str()).collect::<String>(),
             blob,
             "cutting must not lose or duplicate text"
+        );
+    }
+
+    #[test]
+    fn a_cut_line_does_not_renumber_the_lines_after_it() {
+        // Cutting an over-budget line used to expand the vector the loop
+        // numbers from, so every window after the blob claimed lines the
+        // document does not have — and those numbers are what an artifact's
+        // corpus_span is clamped into and rendered from.
+        let counter = TokenCounter::Estimate;
+        let mut lines = vec!["word ".repeat(2000)];
+        for i in 1..=40 {
+            lines.push(format!("ordinary line {i} with a few words on it"));
+        }
+        let text = lines.join("\n");
+        let total = text.lines().count() as i64;
+
+        let w = split_into_segments(&text, &counter, 256);
+
+        assert!(w.len() > 2, "the fixture must produce several windows");
+        for win in &w {
+            assert!(
+                win.start_line >= 1 && win.end_line <= total,
+                "window {}-{} is outside a source of {total} lines",
+                win.start_line,
+                win.end_line
+            );
+        }
+        assert_eq!(
+            w.last().unwrap().end_line,
+            total,
+            "the last window must end at the last line of the source"
         );
     }
 

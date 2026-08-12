@@ -70,8 +70,19 @@ varies sits after it.
 
 Each window row stores the text the splitter produced for it, alongside the
 line range it came from. The range keeps its one remaining job — rendering
-where an artifact came from — and the text is what is actually sent. Rows are
-still written `ON CONFLICT DO NOTHING`, one per window.
+where an artifact came from — and the text is what is actually sent.
+
+Two corrections since, both from review:
+
+- The row also stores `carry_lines`, the number of leading lines of the stored
+  text that lie *outside* the range: the heading a continuing window repeats
+  from further up the document. Without it, the offset `locate_span` measures
+  inside the window landed one line too far down the source for every artifact
+  in every window after a heading.
+- Rows are no longer written `ON CONFLICT DO NOTHING`. A window that has
+  finished is still left untouched — its artifacts were written from that text
+  — but one still owed a model call is rewritten, and rows past the end of the
+  new split are deleted. See section 8.
 
 Both context kinds are read from the neighbouring rows. A retry of window 4
 reconstructs byte-identical context from the stored windows, so the
@@ -200,19 +211,19 @@ Each of these is a failing test before it is an implemented behaviour.
 
 ## 8. Risks accepted
 
-**Mid-flight corpora will have double-covered tails.** Window geometry is
-re-derived from config on every run, but spans are written `ON CONFLICT DO
-NOTHING`. A corpus already holds rows for all of its windows; under the
-smaller core budget the same text needs more of them, so the next run appends
-rows at indices past the old count, describing the tail of the document under
-the *new* geometry — lines the old rows already cover. Those lines are
-synthesized twice, and the duplicates are flagged rather than merged.
+**Mid-flight corpora will have double-covered tails.** ~~Accepted.~~ Taken
+back, after review. Window geometry is re-derived from config on every run,
+and writing the rows `ON CONFLICT DO NOTHING` meant a corpus kept whatever
+geometry it was first given: under a smaller core budget the same text needs
+more windows, so the next run left the old rows describing the old geometry
+and queued surplus ones past their end. The stale rows were then sent to the
+model as though they were current — and `pending_segments` includes `failed`
+windows on purpose, so a corpus could sit that way indefinitely.
 
-This was a live decision: the guard is a `DELETE FROM segments WHERE
-corpus_id = ?` for any corpus not fully `done`, a few lines and no schema
-change, and it was deliberately not taken. Note that `pending_segments`
-includes `failed` windows on purpose, so a corpus can sit in the affected
-state indefinitely.
+`upsert_segments` now rewrites any row not yet `done` and deletes the ones the
+new split does not reach. A `done` row is still left exactly as it is, which
+is the idempotency a retry depends on; a `done` row past the new end is kept
+and logged, because its artifacts point at it.
 
 **The backstop is not total.** An artifact the model extracted from
 `FOLLOWING CONTEXT` *and* reworded past recognition locates in neither block

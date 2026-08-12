@@ -168,11 +168,14 @@
       if (pick) { e.preventDefault(); pick.click(); }
       return;
     }
-    var outs = { n: 0, s: 1, x: 2 };
-    var idx = outs[e.key.toLowerCase()];
-    if (idx !== undefined) {
-      var row = card.querySelectorAll('.judge-outs button');
-      if (row[idx]) { e.preventDefault(); row[idx].click(); }
+    // By name, never by position: the assign screen carries a judge-outs row of
+    // its own whose first button is an immediate gap verdict, and N landed on
+    // it whenever focus had left the search box — opening a "Read it in full"
+    // is enough. Only the buttons that declare a key answer to one.
+    var key = e.key.toLowerCase();
+    if (/^[nsx]$/.test(key)) {
+      var out = card.querySelector('.judge-outs button[data-key="' + key + '"]');
+      if (out) { e.preventDefault(); out.click(); }
     }
   });
 })();

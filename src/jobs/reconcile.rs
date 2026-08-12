@@ -60,6 +60,16 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
+    use crate::store::segments::NewSegment;
+
+    fn seg(start_line: i64, end_line: i64, text: &str) -> NewSegment<'_> {
+        NewSegment {
+            start_line,
+            end_line,
+            text,
+            carry_lines: 0,
+        }
+    }
 
     #[tokio::test]
     async fn a_corpus_with_an_unfinished_segment_and_no_job_gets_one() {
@@ -68,7 +78,7 @@ mod tests {
         core.store
             .upsert_segments(
                 &src.id,
-                &[(1, 10, "first window"), (11, 20, "second window")],
+                &[seg(1, 10, "first window"), seg(11, 20, "second window")],
             )
             .await
             .unwrap();
@@ -89,7 +99,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10, "the window")])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -123,7 +133,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10, "the window")])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -167,7 +177,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10, "the window")])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         run(&core).await.unwrap();

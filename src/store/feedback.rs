@@ -90,6 +90,11 @@ impl Store {
     /// from the same door, within `coalesce_secs`, replaces it. What survives is
     /// the final wording — the query that was actually meant.
     pub async fn record_search(&self, ev: NewEvent, coalesce_secs: i64) -> Result<String> {
+        // One capture at a time. Two of these overlapping would read the same
+        // previous event and both try to upgrade to a write, which fails
+        // outright rather than waiting — and a lost capture is a search nobody
+        // can judge.
+        let _serialised = self.capture.lock().await;
         let mut tx = self.pool.begin().await?;
         let at = now();
 
@@ -102,16 +107,49 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let extends = prev.as_ref().and_then(|r| {
-            let prior: String = r.get("query");
-            let created: i64 = r.get("created_at");
-            // A window of zero means folding is off, not "fold within the same
-            // second" — which is what a plain `<=` gives, since both events
-            // usually land on one timestamp.
-            let fresh = coalesce_secs > 0 && at - created <= coalesce_secs;
-            let grew = ev.query.len() > prior.len() && ev.query.starts_with(&prior);
-            (fresh && grew).then(|| r.get::<String, _>("id"))
-        });
+        // Same typing burst, in either direction. A keystroke is one HTTP
+        // request among several in flight, so "fat" can land after "fat32"; the
+        // test asks whether one query is a prefix of the other rather than
+        // whether this one grew, so the burst folds the same way regardless of
+        // the order the requests happened to arrive in.
+        enum Fold {
+            /// The stored event is an earlier keystroke of this one.
+            Extends(String),
+            /// This is an earlier keystroke of the stored event, arriving late.
+            Superseded(String),
+            New,
+        }
+        let fold = match prev.as_ref() {
+            Some(r) => {
+                let prior: String = r.get("query");
+                let created: i64 = r.get("created_at");
+                // A window of zero means folding is off, not "fold within the
+                // same second" — which is what a plain `<=` gives, since both
+                // events usually land on one timestamp.
+                let fresh = coalesce_secs > 0 && at - created <= coalesce_secs;
+                let id: String = r.get("id");
+                if !fresh {
+                    Fold::New
+                } else if ev.query.len() > prior.len() && ev.query.starts_with(&prior) {
+                    Fold::Extends(id)
+                } else if prior.len() > ev.query.len() && prior.starts_with(&ev.query) {
+                    Fold::Superseded(id)
+                } else {
+                    Fold::New
+                }
+            }
+            None => Fold::New,
+        };
+
+        // Nothing to write: the final wording is already stored, and it was
+        // answered by a pool drawn for the query that was actually meant.
+        if let Fold::Superseded(id) = fold {
+            return Ok(id);
+        }
+        let extends = match fold {
+            Fold::Extends(id) => Some(id),
+            _ => None,
+        };
 
         let id = match extends {
             Some(id) => {
@@ -543,6 +581,50 @@ mod tests {
             store.record_search(ev(q, Door::Ui), 15).await.unwrap();
         }
         assert_eq!(queries(&store).await, vec!["datenträger nicht erkannt"]);
+    }
+
+    #[tokio::test]
+    async fn a_keystroke_that_arrives_late_folds_into_the_wording_it_preceded() {
+        // Each keystroke is its own request, so "fat" can be committed after
+        // "fat32". Testing only whether the query grew left the earlier
+        // keystroke standing as a second event, and the judging queue filled
+        // with half-typed prefixes — the thing coalescing exists to prevent.
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+        store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
+
+        assert_eq!(queries(&store).await, vec!["fat32"]);
+        let candidates: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(candidates, 1, "the surviving event lost its pool");
+    }
+
+    #[tokio::test]
+    async fn a_typing_burst_recorded_concurrently_still_collapses() {
+        // Every keystroke fires its own background write, so the order they
+        // commit in is not the order they were typed in. What this pins is that
+        // the burst still folds under any order — the in-memory store runs on
+        // one connection, so it cannot reproduce the busy-snapshot failure the
+        // capture mutex is there for; only the file-backed store can.
+        let store = Store::memory().await.unwrap();
+        let mut tasks = Vec::new();
+        for n in 1..="datenträger".chars().count() {
+            let store = store.clone();
+            let q: String = "datenträger".chars().take(n).collect();
+            tasks.push(tokio::spawn(async move {
+                store.record_search(ev(&q, Door::Ui), 15).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().expect("a capture was dropped");
+        }
+
+        assert_eq!(queries(&store).await, vec!["datenträger"]);
     }
 
     #[tokio::test]

@@ -48,19 +48,25 @@
     </li>
     {% endfor %}
   </ol>
+  {# `data-key` is what the shortcut binds to. By position it bound to whatever
+     button happened to sit at that index, and the assign screen's row is a
+     different row: N there was an immediate gap verdict. #}
   <div class="row judge-outs">
     {# Not a verdict yet: it opens the search for what should have answered.
        Only if nothing there fits does it become a gap. #}
-    <button class="btn btn-ghost btn-sm" hx-get="/ui/judge/{{ c.id }}/assign"
+    <button class="btn btn-ghost btn-sm" data-key="n"
+            hx-get="/ui/judge/{{ c.id }}/assign"
             hx-target="#card" hx-swap="innerHTML">
       None of these <kbd>N</kbd>
     </button>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/judge/{{ c.id }}/skip"
+    <button class="btn btn-ghost btn-sm" data-key="s"
+            hx-post="/ui/judge/{{ c.id }}/skip"
             hx-target="#card" hx-swap="innerHTML">
       Can't remember <kbd>S</kbd>
     </button>
     <span class="spacer"></span>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/judge/{{ c.id }}/discard"
+    <button class="btn btn-ghost btn-sm" data-key="x"
+            hx-post="/ui/judge/{{ c.id }}/discard"
             hx-target="#card" hx-swap="innerHTML">
       Not a real search <kbd>X</kbd>
     </button>

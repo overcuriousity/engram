@@ -39,9 +39,14 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let rows: Vec<(i64, i64, &str)> = windows
+    let rows: Vec<crate::store::segments::NewSegment<'_>> = windows
         .iter()
-        .map(|w| (w.start_line, w.end_line, w.text.as_str()))
+        .map(|w| crate::store::segments::NewSegment {
+            start_line: w.start_line,
+            end_line: w.end_line,
+            text: w.text.as_str(),
+            carry_lines: w.carry_lines,
+        })
         .collect();
     core.store.upsert_segments(corpus_id, &rows).await?;
 
@@ -147,11 +152,20 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         // claim is worth what it is: a hint for the case where nothing matches
         // at all. Nothing here can disagree with the artifact, so nothing here
         // has anything to report.
+        // Without the carried heading, which is prepended text from further up
+        // the document and occupies none of the window's lines. Measuring an
+        // offset against it put every span in a continuing section one line too
+        // low in the source.
+        let body: String = text
+            .lines()
+            .skip(w.carry_lines as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
         for c in &mut chunks {
             let hinted = c
                 .corpus_lines
                 .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1));
-            let span = crate::infer::verify::locate_span(&c.text, &text, w.start_line)
+            let span = crate::infer::verify::locate_span(&c.text, &body, w.start_line)
                 .or(hinted)
                 .unwrap_or((w.start_line, w.end_line));
             // A span outside its own window would render as the wrong text.
@@ -1320,6 +1334,43 @@ Then run sync.";
             core.store.get_corpus(&src.id).await.unwrap().status,
             CorpusStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn a_carried_heading_does_not_shift_the_spans_of_its_window() {
+        // A window that continues a section opens with the heading copied from
+        // further up the document, and that line occupies none of the window's
+        // own lines. Measuring an artifact's offset against it put every span in
+        // every continuing window one line too far down the source.
+        let core = test_core().await;
+        let mut lines = vec!["## Section one".to_string(), String::new()];
+        for i in 0..400 {
+            lines.push(format!("paragraph number {i} with some filler text"));
+            lines.push(String::new());
+        }
+        let body = lines.join("\n");
+        let out = core.ingest(&body, "web", None).await.unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(
+            windows.iter().any(|w| w.carry_lines == 1),
+            "the fixture must produce windows that carry the heading"
+        );
+
+        let raw = core.store.get_corpus(&out.id).await.unwrap().raw_text;
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            let needle = c.text.lines().next_back().unwrap();
+            let span = c.corpus_span.expect("every artifact keeps a span");
+            let claimed = crate::infer::split::segment_text(&raw, span.start_line, span.end_line);
+            assert!(
+                claimed.contains(needle),
+                "artifact claims lines {}-{}, which read {claimed:?}, not {needle:?}",
+                span.start_line,
+                span.end_line
+            );
+        }
     }
 
     #[tokio::test]
