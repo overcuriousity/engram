@@ -503,6 +503,7 @@ mod tests {
                     NewEvent {
                         query: "the image will not mount".into(),
                         door: Door::Ui,
+                        scope: None,
                         filters: "{}".into(),
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
@@ -773,6 +774,7 @@ mod tests {
                 NewEvent {
                     query: "the one being judged".into(),
                     door: Door::Ui,
+                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![0.1, 0.2],
                     embed_model: "fake".into(),

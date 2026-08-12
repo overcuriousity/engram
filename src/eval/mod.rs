@@ -29,8 +29,9 @@ pub fn eval_dir() -> PathBuf {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrozenArtifact {
     pub id: String,
-    /// Corpus file this came from. Also what the per-source cap groups by, so
-    /// it has to survive the freeze.
+    /// The corpus this came from, by id. What the per-source cap groups by, so
+    /// it has to survive the freeze and it has to be unique — two captures of
+    /// one document share a title and are still two corpora.
     pub source: String,
     pub text: String,
     pub title: Option<String>,

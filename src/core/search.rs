@@ -1,7 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::feedback::Door;
+use crate::store::feedback::Origin;
 use crate::vector::SearchFilter;
 use std::collections::HashMap;
 
@@ -281,9 +281,13 @@ impl Core {
     /// rerank call. No completion, ever.
     ///
     /// Results are capped per source so one long document cannot fill the list.
-    pub async fn search(&self, query: &SearchQuery, door: Door) -> Result<Vec<SearchResult>> {
+    pub async fn search(
+        &self,
+        query: &SearchQuery,
+        origin: impl Into<Origin>,
+    ) -> Result<Vec<SearchResult>> {
         Ok(self
-            .search_inner(query, Some(MAX_PER_CORPUS), door)
+            .search_inner(query, Some(MAX_PER_CORPUS), origin.into())
             .await?
             .0)
     }
@@ -294,9 +298,10 @@ impl Core {
     pub async fn search_timed(
         &self,
         query: &SearchQuery,
-        door: Door,
+        origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        self.search_inner(query, Some(MAX_PER_CORPUS), door).await
+        self.search_inner(query, Some(MAX_PER_CORPUS), origin.into())
+            .await
     }
 
     /// `cap` of `None` lets a single source supply every result. `ask` wants
@@ -306,17 +311,18 @@ impl Core {
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
-        door: Door,
+        origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, cap, door).await?.0)
+        Ok(self.search_inner(query, cap, origin.into()).await?.0)
     }
 
     async fn search_inner(
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
-        door: Door,
+        origin: Origin,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        let door = origin.door;
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
         }
@@ -464,10 +470,13 @@ impl Core {
             let event = crate::store::feedback::NewEvent {
                 query: query.q.trim().to_string(),
                 door,
+                scope: origin.scope.clone(),
                 filters: serde_json::json!({
                     "tags": query.tags,
                     "category": query.category,
                     "limit": limit,
+                    "include_deprecated": query.include_deprecated,
+                    "include_superseded": query.include_superseded,
                 })
                 .to_string(),
                 query_vec: vector.clone(),
@@ -508,6 +517,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::feedback::Door;
     use crate::core::test_support::{test_core, test_core_with_rerank};
     use crate::store::artifacts::NewArtifact;
     use sqlx::Row;
@@ -1276,6 +1286,40 @@ mod tests {
         assert_eq!(
             shown, 3,
             "only the answer the searcher saw is flagged shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_captured_filters_record_every_narrowing_the_search_used() {
+        // `filters` exists so a replay can reproduce the same narrowing. A
+        // search that opted into deprecated artifacts drew its pool from a
+        // wider base than the default, and a replay reading only tags and
+        // category would score the judged pair against a base the search
+        // never saw.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed(&core, &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha text");
+        query.include_deprecated = true;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        let filters: String = sqlx::query_scalar("SELECT filters FROM search_events")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&filters).unwrap();
+        assert_eq!(
+            v["include_deprecated"],
+            serde_json::json!(true),
+            "{filters}"
+        );
+        assert_eq!(
+            v["include_superseded"],
+            serde_json::json!(false),
+            "a flag the search left off still has to be recorded as off: {filters}"
         );
     }
 

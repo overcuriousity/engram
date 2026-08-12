@@ -150,6 +150,10 @@ CREATE TABLE IF NOT EXISTS search_events (
   id          TEXT PRIMARY KEY,
   query       TEXT NOT NULL,
   door        TEXT NOT NULL,
+  -- Who searched, where the door knows. Coalescing needs it: a typing burst
+  -- belongs to one person, and folding keyed on the door alone let one
+  -- operator's half-typed query swallow another's finished one.
+  scope       TEXT,
   filters     TEXT NOT NULL DEFAULT '{}',
   query_vec   BLOB NOT NULL,
   vec_dim     INTEGER NOT NULL,

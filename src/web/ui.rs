@@ -553,7 +553,7 @@ fn split_tags(t: Option<String>) -> Vec<String> {
 
 async fn search_results(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // Clearing the box fires a request with an empty query. That is not an
@@ -586,7 +586,10 @@ async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
             },
-            crate::store::feedback::Door::Ui,
+            // Scoped to the operator, because coalescing folds a keystroke into
+            // the query it was an early spelling of, and two people typing at
+            // once are not spelling the same thing.
+            crate::store::feedback::Door::Ui.by(id.subject),
         )
         .await?;
 
@@ -1692,6 +1695,7 @@ mod tests {
                     crate::store::feedback::NewEvent {
                         query: format!("search number {i}"),
                         door: crate::store::feedback::Door::Ui,
+                        scope: None,
                         filters: "{}".into(),
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),

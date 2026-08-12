@@ -47,6 +47,36 @@ impl Door {
     }
 }
 
+/// A door, plus who came through it where that is known.
+///
+/// A separate type rather than a second argument on every search entry point:
+/// only the UI has a scope to give, so a `scope` parameter would be `None` at
+/// almost every call site, and `From<Door>` lets the doors that have nothing to
+/// say keep saying nothing.
+#[derive(Debug, Clone)]
+pub struct Origin {
+    pub door: Door,
+    /// The authenticated subject, for coalescing. `None` means unscoped, which
+    /// folds only with other unscoped events from the same door.
+    pub scope: Option<String>,
+}
+
+impl From<Door> for Origin {
+    fn from(door: Door) -> Self {
+        Origin { door, scope: None }
+    }
+}
+
+impl Door {
+    /// This door, on behalf of a named subject.
+    pub fn by(self, scope: impl Into<String>) -> Origin {
+        Origin {
+            door: self,
+            scope: Some(scope.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewCandidate {
     pub artifact_id: String,
@@ -62,6 +92,9 @@ pub struct NewCandidate {
 pub struct NewEvent {
     pub query: String,
     pub door: Door,
+    /// Who searched, where the door knows — the authenticated subject for the
+    /// UI, `None` everywhere else. Only coalescing reads it.
+    pub scope: Option<String>,
     /// JSON, so a replay can reproduce the same narrowing.
     pub filters: String,
     pub query_vec: Vec<f32>,
@@ -87,8 +120,13 @@ impl Store {
     /// `mark` is set on open, expand and submit, so a search where the operator
     /// found nothing useful and gave up would never be recorded. So everything
     /// is captured, and an event whose query strictly extends the previous one
-    /// from the same door, within `coalesce_secs`, replaces it. What survives is
-    /// the final wording — the query that was actually meant.
+    /// from the same searcher, within `coalesce_secs`, replaces it. What
+    /// survives is the final wording — the query that was actually meant.
+    ///
+    /// Only the UI folds, and only within one `scope`. A keystroke burst is
+    /// something a text box produces; a call through the API or MCP is a
+    /// deliberate query, and an agent narrowing one search into a longer one
+    /// made two decisions worth judging separately.
     pub async fn record_search(&self, ev: NewEvent, coalesce_secs: i64) -> Result<String> {
         // One capture at a time. Two of these overlapping would read the same
         // previous event and both try to upgrade to a write, which fails
@@ -98,14 +136,22 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let at = now();
 
-        let prev = sqlx::query(
-            "SELECT id, query, created_at FROM search_events
-             WHERE door = ? AND judged_at IS NULL
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-        )
-        .bind(ev.door.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
+        // `scope IS ?` rather than `=`, so a UI event recorded without a
+        // subject still finds its own predecessor instead of matching nothing.
+        let prev = match ev.door {
+            Door::Ui => {
+                sqlx::query(
+                    "SELECT id, query, created_at FROM search_events
+                     WHERE door = ? AND scope IS ? AND judged_at IS NULL
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                )
+                .bind(ev.door.as_str())
+                .bind(&ev.scope)
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+            _ => None,
+        };
 
         // Same typing burst, in either direction. A keystroke is one HTTP
         // request among several in flight, so "fat" can land after "fat32"; the
@@ -178,12 +224,14 @@ impl Store {
                 let id = new_id();
                 sqlx::query(
                     "INSERT INTO search_events
-                       (id, query, door, filters, query_vec, vec_dim, embed_model, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (id, query, door, scope, filters, query_vec, vec_dim, embed_model,
+                        created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&id)
                 .bind(&ev.query)
                 .bind(ev.door.as_str())
+                .bind(&ev.scope)
                 .bind(&ev.filters)
                 .bind(vec_to_blob(&ev.query_vec))
                 .bind(ev.query_vec.len() as i64)
@@ -549,9 +597,14 @@ mod tests {
     use super::*;
 
     fn ev(query: &str, door: Door) -> NewEvent {
+        scoped(query, door, None)
+    }
+
+    fn scoped(query: &str, door: Door, scope: Option<&str>) -> NewEvent {
         NewEvent {
             query: query.into(),
             door,
+            scope: scope.map(str::to_string),
             filters: "{}".into(),
             query_vec: vec![0.5, -0.25],
             embed_model: "fake".into(),
@@ -572,6 +625,52 @@ mod tests {
             .iter()
             .map(|r| r.get::<String, _>("query"))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn two_operators_typing_at_once_keep_their_own_events() {
+        // Folding is a statement about one person's keystrokes. Keyed on the
+        // door alone it also folded across people: B's `backup` arriving while
+        // A's `backup restore` was the newest pending event was read as an
+        // early keystroke of it, and B's search — and its whole pool — was
+        // never recorded at all.
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(scoped("backup restore", Door::Ui, Some("alice")), 15)
+            .await
+            .unwrap();
+        store
+            .record_search(scoped("backup", Door::Ui, Some("bob")), 15)
+            .await
+            .unwrap();
+
+        let mut got = queries(&store).await;
+        got.sort();
+        assert_eq!(got, vec!["backup", "backup restore"]);
+    }
+
+    #[tokio::test]
+    async fn deliberate_calls_through_the_other_doors_never_fold() {
+        // An agent narrowing `list files` to `list files in dir` made two
+        // decisions, and both are worth judging. Only a text box produces the
+        // keystroke bursts folding exists for.
+        for door in [Door::Mcp, Door::Api] {
+            let store = Store::memory().await.unwrap();
+            store
+                .record_search(ev("list files", door), 15)
+                .await
+                .unwrap();
+            store
+                .record_search(ev("list files in dir", door), 15)
+                .await
+                .unwrap();
+            assert_eq!(
+                queries(&store).await,
+                vec!["list files", "list files in dir"],
+                "{} folded a deliberate call",
+                door.as_str()
+            );
+        }
     }
 
     #[tokio::test]

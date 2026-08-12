@@ -200,7 +200,10 @@ enabled = false
 # artifact the ranking buried still be confirmed as the right one.
 candidates = 20
 # Window in which a longer query replaces the previous one instead of starting
-# its own event. 0 turns folding off.
+# its own event. 0 turns folding off. Applies to the search box only, and only
+# within one signed-in operator: a call through the API or MCP is a deliberate
+# query, not a keystroke, and two people typing at once are not typing the same
+# thing.
 coalesce_secs = 15
 # Days captured searches are kept. 0 keeps them forever.
 retain_days = 0

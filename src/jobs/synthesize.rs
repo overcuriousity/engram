@@ -13,6 +13,45 @@ fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
 }
 
+/// Where an artifact sits in the source document.
+///
+/// Asking the model for `corpus_lines`, checking the answer, and having a third
+/// outcome for a claim that fails the check produced a flag on the artifact and
+/// a button offering to re-synthesise an entire segment over a line number.
+/// Since `locate_span` finds an artifact's own text even where the source is
+/// hard-wrapped and synthesis reflowed it, the claim is worth what it is: a
+/// hint for the case where nothing matches at all. Nothing here can disagree
+/// with the artifact, so nothing here has anything to report.
+///
+/// `body` is the window without its carried heading — text prepended from
+/// further up the document, occupying none of the window's own lines. Both
+/// paths have to discount it: `locate_span` because it searches `body`, and the
+/// hint because the model numbered its lines from the top of what it was shown,
+/// and line 1 of that is the carried heading. Correcting only the first left
+/// every hinted span in a continuing section `carry_lines` too far down.
+fn resolve_span(
+    artifact: &str,
+    body: &str,
+    w: &crate::store::segments::Segment,
+    hint: Option<(i64, i64)>,
+) -> (i64, i64) {
+    let shift = w.start_line - 1 - w.carry_lines;
+    let hinted = hint.map(|(a, b)| (a + shift, b + shift));
+    let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
+        .or(hinted)
+        .unwrap_or((w.start_line, w.end_line));
+    // A span outside its own window would render as the wrong text.
+    let clamped = (
+        span.0.clamp(w.start_line, w.end_line),
+        span.1.clamp(w.start_line, w.end_line),
+    );
+    if clamped.0 <= clamped.1 {
+        clamped
+    } else {
+        (w.start_line, w.end_line)
+    }
+}
+
 /// LLM-assisted segmentation, one window at a time.
 ///
 /// The window rows are the job's memory. A window that succeeds is written and
@@ -144,40 +183,15 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
 
         // The span is ours to compute.
         //
-        // Asking the model for `corpus_lines`, checking the answer, and having
-        // a third outcome for a claim that fails the check produced a flag on
-        // the artifact and a button offering to re-synthesise an entire segment
-        // over a line number. Since `locate_span` finds an artifact's own text
-        // even where the source is hard-wrapped and synthesis reflowed it, the
-        // claim is worth what it is: a hint for the case where nothing matches
-        // at all. Nothing here can disagree with the artifact, so nothing here
-        // has anything to report.
         // Without the carried heading, which is prepended text from further up
-        // the document and occupies none of the window's lines. Measuring an
-        // offset against it put every span in a continuing section one line too
-        // low in the source.
+        // the document and occupies none of the window's lines.
         let body: String = text
             .lines()
             .skip(w.carry_lines as usize)
             .collect::<Vec<_>>()
             .join("\n");
         for c in &mut chunks {
-            let hinted = c
-                .corpus_lines
-                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1));
-            let span = crate::infer::verify::locate_span(&c.text, &body, w.start_line)
-                .or(hinted)
-                .unwrap_or((w.start_line, w.end_line));
-            // A span outside its own window would render as the wrong text.
-            let clamped = (
-                span.0.clamp(w.start_line, w.end_line),
-                span.1.clamp(w.start_line, w.end_line),
-            );
-            c.corpus_lines = Some(if clamped.0 <= clamped.1 {
-                clamped
-            } else {
-                (w.start_line, w.end_line)
-            });
+            c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
         }
 
         let written =
@@ -1334,6 +1348,72 @@ Then run sync.";
             core.store.get_corpus(&src.id).await.unwrap().status,
             CorpusStatus::Failed
         );
+    }
+
+    fn window(start_line: i64, end_line: i64, carry_lines: i64) -> crate::store::segments::Segment {
+        crate::store::segments::Segment {
+            corpus_id: "c".into(),
+            idx: 1,
+            start_line,
+            end_line,
+            text: String::new(),
+            carry_lines,
+            state: SegmentState::Pending,
+            attempts: 0,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_hinted_span_discounts_the_carried_heading_too() {
+        // The window covers source lines 50-60 and opens with one heading
+        // carried from further up, so the model's line 2 is source line 50.
+        // The artifact is reworded past recognition, which is exactly when the
+        // hint is all there is — and the path that used it was the one place
+        // the carried heading was still being counted.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span(
+                "nothing here matches the source at all",
+                body,
+                &w,
+                Some((2, 3))
+            ),
+            (50, 51)
+        );
+    }
+
+    #[test]
+    fn a_window_carrying_nothing_reads_the_hint_straight_through() {
+        let w = window(50, 60, 0);
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
+            (51, 52)
+        );
+    }
+
+    #[test]
+    fn the_artifacts_own_text_beats_the_hint() {
+        // `locate_span` reads the artifact; the hint is only a claim about it.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span("second body line", body, &w, Some((9, 9))),
+            (51, 51)
+        );
+    }
+
+    #[test]
+    fn a_hint_pointing_outside_the_window_falls_back_to_the_whole_window() {
+        let w = window(50, 60, 1);
+        // Discounting the carry can push a hint of line 1 — the heading
+        // itself — below the window's first line. Clamping keeps it inside.
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((1, 1))),
+            (50, 50)
+        );
+        assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
     }
 
     #[tokio::test]

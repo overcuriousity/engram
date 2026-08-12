@@ -77,14 +77,32 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
 impl Store {
     /// Record the windowing of a source.
     ///
-    /// Idempotent where it matters: a window that finished is left exactly as it
-    /// is, because its artifacts were written from that text and re-deriving it
-    /// must not undo them. A window still owed a model call is rewritten
-    /// instead, and one the new split no longer reaches is deleted — otherwise a
-    /// changed token budget leaves the old text behind to be synthesised, and
-    /// the surplus windows queued forever against a document that has none.
+    /// A corpus that has finished any window keeps the split it started with,
+    /// whatever the current token budget would produce. The two cannot be
+    /// mixed: a window that finished holds the text its artifacts were written
+    /// from and cannot be re-derived without orphaning them, so a re-split
+    /// around it moves only the boundaries it does not own. Window 0 stays
+    /// `done` at lines 1-100 while window 1 is rewritten as 91-180, and the
+    /// overlap is synthesised twice — or, shifted the other way, the gap
+    /// between them is never synthesised at all. Neither is visible afterwards.
+    ///
+    /// So the split is settled by the first window to finish. Until then it is
+    /// rewritten freely, and windows the new split no longer reaches are
+    /// dropped — otherwise a corpus that never started carries stale text into
+    /// the model and queues surplus windows forever.
     pub async fn upsert_segments(&self, corpus_id: &str, windows: &[NewSegment<'_>]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+
+        let finished: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM segments WHERE corpus_id = ? AND state = 'done'",
+        )
+        .bind(corpus_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if finished > 0 {
+            return Ok(());
+        }
+
         for (idx, w) in windows.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)
@@ -93,8 +111,7 @@ impl Store {
                    start_line = excluded.start_line,
                    end_line = excluded.end_line,
                    text = excluded.text,
-                   carry_lines = excluded.carry_lines
-                 WHERE segments.state != 'done'",
+                   carry_lines = excluded.carry_lines",
             )
             .bind(corpus_id)
             .bind(idx as i64)
@@ -106,33 +123,13 @@ impl Store {
             .await?;
         }
 
-        // Windows past the end of the new split. A done one is left alone: its
-        // artifacts point at it, and an orphan the operator can see beats one
-        // deleted quietly underneath them.
-        let stranded: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM segments
-             WHERE corpus_id = ? AND idx >= ? AND state = 'done'",
-        )
-        .bind(corpus_id)
-        .bind(windows.len() as i64)
-        .fetch_one(&mut *tx)
-        .await?;
-        if stranded > 0 {
-            tracing::warn!(
-                corpus_id,
-                windows = stranded,
-                "the new split is shorter than the old one; finished windows past its \
-                 end were kept, and their artifacts now belong to no window"
-            );
-        }
-        sqlx::query(
-            "DELETE FROM segments
-             WHERE corpus_id = ? AND idx >= ? AND state != 'done'",
-        )
-        .bind(corpus_id)
-        .bind(windows.len() as i64)
-        .execute(&mut *tx)
-        .await?;
+        // Windows past the end of the new split. Nothing here is `done` — the
+        // early return above saw to that — so none of them owns an artifact.
+        sqlx::query("DELETE FROM segments WHERE corpus_id = ? AND idx >= ?")
+            .bind(corpus_id)
+            .bind(windows.len() as i64)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         Ok(())
@@ -296,11 +293,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_re_split_rewrites_pending_windows_and_drops_the_surplus() {
+    async fn a_corpus_that_never_started_is_re_split_and_the_surplus_dropped() {
         // The token budget can change under a corpus — the context blocks now
         // subtract from it — and the old windowing then survived as text no
         // splitter would produce, sent to the model as though it were current,
         // with the windows past the new end queued forever.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 10, "window 0"),
+                seg(11, 20, "window 1"),
+                seg(21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        s.upsert_segments(
+            &src.id,
+            &[seg(1, 15, "wider window 0"), seg(16, 30, "wider window 1")],
+        )
+        .await
+        .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 2, "the surplus window was left queued");
+        assert_eq!(w[0].text, "wider window 0");
+        assert_eq!(w[1].start_line, 16);
+    }
+
+    #[tokio::test]
+    async fn a_split_is_settled_by_the_first_window_to_finish() {
+        // Re-splitting around a done window moves only the boundaries it does
+        // not own. Here the budget shrank: window 0 stays done at 1-10, and a
+        // re-split would leave window 1 starting at 16 — so source lines 11-15
+        // would be synthesised by nothing, silently and unrecoverably. The
+        // opposite drift duplicates instead. Neither is visible afterwards, so
+        // the split stops moving once any of it has been acted on.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(
@@ -325,17 +356,36 @@ mod tests {
         .unwrap();
 
         let w = s.segments_for_corpus(&src.id).await.unwrap();
-        assert_eq!(w.len(), 2, "the surplus window was left queued");
+        assert_eq!(w.len(), 3, "the old split must survive intact");
+        assert_eq!(w[0].text, "window 0");
         assert_eq!(
-            w[0].text, "window 0",
-            "a finished window keeps the text its artifacts were written from"
+            (w[1].start_line, w[1].end_line),
+            (11, 20),
+            "the window after a finished one must still start where that one ended"
         );
-        assert_eq!(w[0].end_line, 10);
-        assert_eq!(
-            w[1].text, "wider window 1",
-            "a window still owed a model call must be re-split, not kept stale"
-        );
-        assert_eq!(w[1].start_line, 16);
+        assert_eq!(w[2].text, "window 2");
+    }
+
+    #[tokio::test]
+    async fn a_failed_window_does_not_settle_the_split() {
+        // Failure leaves no artifacts behind, so there is nothing for a new
+        // split to orphan. Only a window that produced something settles it.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
+            .await
+            .unwrap();
+        s.set_segment_state(&src.id, 0, SegmentState::Failed, Some("endpoint down"))
+            .await
+            .unwrap();
+
+        s.upsert_segments(&src.id, &[seg(1, 20, "one wide window")])
+            .await
+            .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].text, "one wide window");
     }
 
     #[tokio::test]

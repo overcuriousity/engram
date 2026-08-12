@@ -217,6 +217,7 @@ mod tests {
                 crate::store::feedback::NewEvent {
                     query: "old".into(),
                     door: crate::store::feedback::Door::Ui,
+                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![0.0],
                     embed_model: "fake".into(),

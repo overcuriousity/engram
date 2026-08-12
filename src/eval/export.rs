@@ -15,14 +15,13 @@ use std::path::Path;
 /// Returns how many artifacts and how many pairs were written.
 pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize)> {
     let artifacts = store.all_active_artifacts().await?;
-    let known: std::collections::HashSet<String> =
-        artifacts.iter().map(|(c, _)| c.id.clone()).collect();
+    let known: std::collections::HashSet<String> = artifacts.iter().map(|c| c.id.clone()).collect();
 
     let frozen: Vec<FrozenArtifact> = artifacts
         .iter()
-        .map(|(c, corpus)| FrozenArtifact {
+        .map(|c| FrozenArtifact {
             id: c.id.clone(),
-            source: corpus.clone(),
+            source: c.corpus_id.clone(),
             text: c.text.clone(),
             title: c.title.clone(),
             category: c.category.clone(),
@@ -75,8 +74,15 @@ mod tests {
     use crate::store::feedback::{Door, NewCandidate, NewEvent, Verdict};
 
     async fn seed_one_artifact(store: &Store) -> String {
+        seed_titled(store, "raw text for export").await
+    }
+
+    /// Same `title_hint`, different text — two captures of what the operator
+    /// thinks of as the same document. `content_hash` is unique, so the raw
+    /// text has to differ for them to be two corpora at all.
+    async fn seed_titled(store: &Store, raw: &str) -> String {
         let src = store
-            .insert_corpus("raw text for export", "test", Some("fat.txt"))
+            .insert_corpus(raw, "test", Some("fat.txt"))
             .await
             .unwrap();
         let made = store
@@ -104,6 +110,7 @@ mod tests {
                 NewEvent {
                     query: query.into(),
                     door: Door::Ui,
+                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![0.1, 0.2],
                     embed_model: "fake".into(),
@@ -136,11 +143,38 @@ mod tests {
             frozen[0].id, artifact_id,
             "ids must stay the production ones, or a re-export invalidates every pair"
         );
-        assert_eq!(frozen[0].source, "fat.txt", "the cap groups by this");
+        let corpus = store.get_artifact(&artifact_id).await.unwrap().corpus_id;
+        assert_eq!(
+            frozen[0].source, corpus,
+            "the cap groups by this, so it has to name a corpus uniquely"
+        );
 
         let loaded = crate::eval::load_pairs(dir.path()).unwrap();
         assert_eq!(loaded[0].expect, artifact_id);
         assert_eq!(loaded[0].query, "how do I read a deleted entry");
+    }
+
+    #[tokio::test]
+    async fn two_corpora_sharing_a_title_stay_two_sources() {
+        // `source` is what the per-corpus cap groups by when the harness
+        // rebuilds the base, so it has to identify a corpus and not merely
+        // describe one. Two pasted documents both called `fat.txt` merged into
+        // one source, and the cap that lets each corpus contribute three
+        // results started applying across both — the harness then measured a
+        // narrower base than the search page actually runs.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::memory().await.unwrap();
+        let first = seed_titled(&store, "one capture of the manual").await;
+        let second = seed_titled(&store, "a later capture of the same manual").await;
+        assert_ne!(first, second);
+
+        export(&store, dir.path()).await.unwrap();
+        let frozen = crate::eval::load_artifacts(dir.path()).unwrap();
+        assert_eq!(frozen.len(), 2);
+        assert_ne!(
+            frozen[0].source, frozen[1].source,
+            "artifacts from different corpora collapsed into one source"
+        );
     }
 
     #[tokio::test]
