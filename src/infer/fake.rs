@@ -214,6 +214,43 @@ impl Synthesizer for ParaphrasingSynthesizer {
     }
 }
 
+/// Records the input of the last call, so a test can assert what the window
+/// was actually given rather than what it was supposed to be given.
+pub struct RecordingSynthesizer {
+    pub seen: std::sync::Mutex<Vec<(String, crate::infer::context::WindowContext)>>,
+    pub budget: SynthesisBudget,
+}
+
+impl RecordingSynthesizer {
+    pub fn new(budget: SynthesisBudget) -> Self {
+        Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+            budget,
+        }
+    }
+}
+
+#[async_trait]
+impl Synthesizer for RecordingSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.core.to_string(), input.context.clone()));
+        Ok(vec![ProposedArtifact {
+            text: input.core.lines().next().unwrap_or("empty").to_string(),
+            title: Some("recorded".into()),
+            category: Some("note".into()),
+            tags: vec![],
+            corpus_lines: None,
+            caveats: vec![],
+        }])
+    }
+    fn budget(&self) -> SynthesisBudget {
+        self.budget
+    }
+}
+
 /// Segments like `FakeSynthesizer` but reports a cooldown, so a test can assert
 /// the job actually paces itself instead of running flat out.
 pub struct PacedSynthesizer {

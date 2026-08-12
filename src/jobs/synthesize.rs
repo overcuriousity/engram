@@ -46,7 +46,16 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         core.store.bump_segment_attempts(corpus_id, w.idx).await?;
         let text = segment_text(&src.raw_text, w.start_line, w.end_line);
 
-        let ctx = crate::infer::context::WindowContext::default();
+        // Rebuilt from the stored spans on every attempt rather than stored,
+        // so a retried window gets byte-identical context and the job stays
+        // idempotent.
+        let ctx = crate::infer::context::WindowContext::build(
+            &src.raw_text,
+            &spans,
+            w.idx as usize,
+            core.synthesizer.budget().context,
+            &core.counter,
+        );
         let mut chunks = core
             .synthesizer
             .segment(crate::infer::SegmentInput {
@@ -406,6 +415,102 @@ mod tests {
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+
+    /// A budget with room for several windows and an output ceiling that never
+    /// binds, so the context blocks are what shape the windowing.
+    fn context_budget(opening: usize, overlap: usize) -> crate::infer::SynthesisBudget {
+        crate::infer::SynthesisBudget {
+            context_tokens: 2000,
+            max_output_tokens: 100_000,
+            output_ratio: 1.0,
+            context: crate::infer::context::ContextBudget { opening, overlap },
+        }
+    }
+
+    #[tokio::test]
+    async fn every_window_after_the_first_is_given_the_document_opening() {
+        use crate::infer::fake::RecordingSynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
+        core.synthesizer = rec.clone();
+
+        let mut lines = vec!["# Backup Guide".to_string(), "PBS 3.x on Debian 12.".into()];
+        for i in 0..400 {
+            lines.push(format!(
+                "body line {i} with enough words to cost real tokens"
+            ));
+        }
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let seen = rec.seen.lock().unwrap();
+        assert!(seen.len() > 1, "the fixture must produce several windows");
+        assert_eq!(
+            seen[0].1.opening, None,
+            "window 0 already holds the opening"
+        );
+        assert_eq!(seen[0].1.before, None);
+        for (i, (_, ctx)) in seen.iter().enumerate().skip(1) {
+            assert!(
+                ctx.opening.as_deref().unwrap().contains("# Backup Guide"),
+                "window {i} lost the document opening"
+            );
+            assert!(
+                ctx.before.is_some(),
+                "window {i} lost its preceding context"
+            );
+        }
+        assert_eq!(
+            seen.last().unwrap().1.after,
+            None,
+            "the last window has nothing after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_windows_context_is_the_text_of_its_neighbours() {
+        use crate::infer::fake::RecordingSynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
+        core.synthesizer = rec.clone();
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let seen = rec.seen.lock().unwrap();
+        // Window 1's preceding context must be the literal end of window 0's
+        // own text, and its following context the literal start of window 2's.
+        let w0_tail_line = seen[0].0.lines().last().unwrap();
+        assert!(
+            seen[1].1.before.as_deref().unwrap().ends_with(w0_tail_line),
+            "preceding context is not the previous window's tail"
+        );
+        let w2_head_line = seen[2].0.lines().next().unwrap();
+        assert!(
+            seen[1]
+                .1
+                .after
+                .as_deref()
+                .unwrap()
+                .starts_with(w2_head_line),
+            "following context is not the next window's head"
+        );
+    }
 
     #[tokio::test]
     async fn synthesis_names_the_corpus() {
