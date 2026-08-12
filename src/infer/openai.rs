@@ -144,7 +144,12 @@ impl HttpSynthesizer {
 #[async_trait]
 impl Synthesizer for HttpSynthesizer {
     async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
-        let user = prompt::user_prompt(text, 1, self.max_artifact_tokens);
+        let user = prompt::user_prompt(
+            text,
+            1,
+            self.max_artifact_tokens,
+            &crate::infer::context::WindowContext::default(),
+        );
         let first = self
             .chat(json!([
                 {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
