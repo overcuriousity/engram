@@ -1,4 +1,6 @@
-use super::{Completer, Embedder, ProposedArtifact, Reranker, SynthesisBudget, Synthesizer};
+use super::{
+    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
+};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -84,7 +86,8 @@ impl FakeSynthesizer {
 
 #[async_trait]
 impl Synthesizer for FakeSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         if let Some(marker) = &self.fail_on_marker
             && text.contains(marker.as_str())
         {
@@ -180,7 +183,8 @@ impl ParaphrasingSynthesizer {
 
 #[async_trait]
 impl Synthesizer for ParaphrasingSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         let n = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -228,8 +232,8 @@ impl PacedSynthesizer {
 
 #[async_trait]
 impl Synthesizer for PacedSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
-        self.inner.segment(text).await
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        self.inner.segment(input).await
     }
     fn budget(&self) -> SynthesisBudget {
         self.inner.budget()
@@ -246,7 +250,8 @@ pub struct LyingSpanSynthesizer;
 
 #[async_trait]
 impl Synthesizer for LyingSpanSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         Ok(vec![ProposedArtifact {
             text: text.to_string(),
             title: Some("mislabelled".into()),
@@ -275,7 +280,7 @@ pub struct HallucinatingSynthesizer;
 
 #[async_trait]
 impl Synthesizer for HallucinatingSynthesizer {
-    async fn segment(&self, _text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, _input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         Ok(vec![ProposedArtifact {
             text: "Entirely invented material about unrelated subjects".into(),
             title: Some("invented".into()),
@@ -464,6 +469,22 @@ impl Completer for ScriptedCompleter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The empty context every one of these tests wants: they exercise the
+    /// transport and the parser, not the windowing.
+    static EMPTY_CONTEXT: crate::infer::context::WindowContext =
+        crate::infer::context::WindowContext {
+            opening: None,
+            before: None,
+            after: None,
+        };
+
+    fn window(text: &str) -> SegmentInput<'_> {
+        SegmentInput {
+            core: text,
+            context: &EMPTY_CONTEXT,
+        }
+    }
     use crate::infer::{Embedder, Reranker, Synthesizer};
 
     #[tokio::test]
@@ -502,7 +523,10 @@ mod tests {
     #[tokio::test]
     async fn fake_chunker_splits_on_blank_lines() {
         let c = FakeSynthesizer::default();
-        let out = c.segment("first para\n\nsecond para").await.unwrap();
+        let out = c
+            .segment(window("first para\n\nsecond para"))
+            .await
+            .unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "first para");
         assert!(out[0].title.is_some());
@@ -512,7 +536,7 @@ mod tests {
     async fn fake_chunker_can_be_told_to_fail() {
         let c = FakeSynthesizer::failing("endpoint down");
         assert!(matches!(
-            c.segment("x").await,
+            c.segment(window("x")).await,
             Err(crate::error::Error::Inference { .. })
         ));
     }

@@ -46,7 +46,14 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         core.store.bump_segment_attempts(corpus_id, w.idx).await?;
         let text = segment_text(&src.raw_text, w.start_line, w.end_line);
 
-        let mut chunks = core.synthesizer.segment(&text).await?;
+        let ctx = crate::infer::context::WindowContext::default();
+        let mut chunks = core
+            .synthesizer
+            .segment(crate::infer::SegmentInput {
+                core: &text,
+                context: &ctx,
+            })
+            .await?;
         // The model was told to keep commands, paths and flags verbatim. If it
         // did not, one more attempt usually gets it right; a second failure is
         // stored with a flag rather than dropped, because a visible warning
@@ -57,7 +64,13 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
                 window = w.idx,
                 "literals missing; re-segmenting once"
             );
-            chunks = core.synthesizer.segment(&text).await?;
+            chunks = core
+                .synthesizer
+                .segment(crate::infer::SegmentInput {
+                    core: &text,
+                    context: &ctx,
+                })
+                .await?;
         }
 
         // The span is ours to compute.

@@ -33,10 +33,20 @@ pub struct SynthesisBudget {
     pub context: crate::infer::context::ContextBudget,
 }
 
+/// One window as the synthesizer sees it: the text artifacts are drawn from,
+/// and the surrounding material that exists only so references can be
+/// resolved. They are separate fields rather than one assembled string
+/// because everything downstream — span location, literal checking,
+/// paraphrase detection — has to be told which is which.
+pub struct SegmentInput<'a> {
+    pub core: &'a str,
+    pub context: &'a crate::infer::context::WindowContext,
+}
+
 #[async_trait]
 pub trait Synthesizer: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>>;
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>>;
     fn budget(&self) -> SynthesisBudget;
     /// How long to idle between windows, so a long source is not one
     /// unbroken thermal load on a desktop GPU. Zero for anything remote.
