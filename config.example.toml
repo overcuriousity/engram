@@ -77,6 +77,17 @@ output_ratio = 8.0
 # tokens are generated either way — so it is off by default and exists for the
 # machine sitting next to you.
 # cooldown_secs = 15
+# Tokens of the document's verbatim opening prepended to every window, so an
+# artifact from deep in a long document still knows what product, version and
+# platform it belongs to — which is what the caveats field asks for and what a
+# window eight hundred lines in has no other way to learn.
+# context_opening_tokens = 200
+# Tokens of each neighbouring window carried on both sides, so a window that
+# opens mid-procedure can still resolve what "this command" points at. Both of
+# these come out of the window itself: at 200 and 150 that is 540 tokens of
+# prompt, so a smaller window and proportionally more calls per corpus. Set
+# either to 0 to turn that half off.
+# context_overlap_tokens = 150
 # Optional path to a tokenizer.json for exact token counting. Without it,
 # budgets fall back to a conservative characters/3.5 estimate.
 # tokenizer_path = "/models/qwen/tokenizer.json"
@@ -168,3 +179,41 @@ interval_hours = 24
 # only ever sees pairs whose numbers, versions or dates already differ.
 judge = false
 max_judgements = 20
+
+# Recording real searches so they can be judged later, and turned into the
+# query/artifact pairs the evaluation harness scores against. Off by default: a
+# query log is personal, and it is useful to nobody but you.
+#
+# The queries a benchmark needs cannot be written from memory. Phrased while
+# looking at an artifact, they reuse its wording, and every retrieval system
+# passes such a pair. Only a search made in earnest — before anything came back
+# — is worth scoring against, and this is the only moment it can be recorded.
+#
+# Everything is recorded, not only deliberate searches: the search where you
+# found nothing and gave up leaves no other trace, and it is the most valuable
+# one there is. Typing bursts fold into their final wording, so `daten`,
+# `datentr`, `datenträger nicht erkannt` is one event rather than three.
+[feedback]
+enabled = false
+# Candidates stored per search. Wider than the answer on purpose — retrieval
+# over-fetches anyway, so the extra rows cost nothing, and they are what lets an
+# artifact the ranking buried still be confirmed as the right one. 0 is not a
+# setting — an empty pool leaves every card with nothing to choose — and is put
+# back to the default with a line in the log.
+candidates = 20
+# Window in which a longer query — or the same one again — replaces the previous
+# event instead of starting its own. 0 turns folding off. Applies to the search
+# box only, and only
+# within one signed-in operator: a call through the API or MCP is a deliberate
+# query, not a keystroke, and two people typing at once are not typing the same
+# thing.
+coalesce_secs = 15
+# Days an unjudged captured search is kept. 0 keeps them forever. A judged hit
+# or gap is exempt: it is the labelled pair the whole feature exists to produce,
+# and expiring it would empty `--export-eval` a month at a time. A `discard` is
+# not exempt — that verdict says the search was never real. The purge button on
+# Ops still takes everything.
+retain_days = 0
+# How often retention is enforced. A window measured in days does not need
+# checking more often than this, and the sweep is a single DELETE.
+sweep_hours = 6

@@ -209,59 +209,88 @@ pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()
 /// split at a paragraph boundary. Truncating would silently discard knowledge,
 /// and one vector per fragment keeps the data model unchanged.
 async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) -> Result<()> {
-    let paragraphs: Vec<&str> = chunk
-        .text
-        .split("\n\n")
-        .filter(|p| !p.trim().is_empty())
-        .collect();
+    // The limit is checked against what actually gets embedded, and that is the
+    // title followed by the text. Siblings inherit the title, so only what the
+    // title leaves over is available to their text. Giving the text the whole
+    // limit produced siblings that measured oversize again the instant they
+    // were re-queued, each one replaced by another exactly like it, forever.
+    let title_cost = chunk
+        .title
+        .as_deref()
+        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    let budget = limit.saturating_sub(title_cost);
 
-    if paragraphs.len() < 2 {
+    // A title that fills the limit on its own cannot be cut out of the way:
+    // every sibling would carry it too, so no split of the text can help.
+    if budget > 0 {
+        let parts = split_by_paragraphs(&chunk.text, budget, &core.counter);
+        if parts.len() > 1 {
+            return replace_with_siblings(core, chunk, parts).await;
+        }
         // No blank line to cut on. Code, tables and reference entries look like
         // this, and they are exactly what a local embedding server refuses for
         // exceeding its physical batch — so when the refusal is real, cut on
         // lines and then on characters rather than trying the same thing again.
         if hard {
-            let parts = split_by_lines(&chunk.text, limit, &core.counter);
+            let parts = split_by_lines(&chunk.text, budget, &core.counter);
             if parts.len() > 1 {
                 return replace_with_siblings(core, chunk, parts).await;
             }
         }
-        // Optimism, once: our token estimate may simply be wrong, and one
-        // over-long vector beats shredding a chunk on a guess. But if the
-        // server refuses it, the guess is settled and the text has to be cut.
-        tracing::warn!(artifact_id = %chunk.id, "oversize chunk has no paragraph boundary; embedding as-is");
-        let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
-            Ok(v) => v,
-            Err(e) if input_too_large(&e) => {
-                let parts = split_by_lines(&chunk.text, limit, &core.counter);
-                if parts.len() > 1 {
-                    tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
-                    return replace_with_siblings(core, chunk, parts).await;
-                }
-                return Err(e);
-            }
-            Err(e) => return Err(e),
-        };
-        core.vectors
-            .upsert(vec![VectorPoint {
-                vector: vectors.into_iter().next().unwrap(),
-                sparse: crate::vector::sparse::encode_document(&chunk.text),
-                payload: payload_of(chunk),
-            }])
-            .await?;
-        mark_indexed(core, chunk).await?;
-        return settle_corpus(core, &chunk.corpus_id).await;
     }
 
+    // Optimism, once: our token estimate may simply be wrong, and one
+    // over-long vector beats shredding a chunk on a guess. But if the
+    // server refuses it, the guess is settled and the text has to be cut.
+    tracing::warn!(
+        artifact_id = %chunk.id,
+        title_cost,
+        "oversize chunk has nothing left to cut on; embedding as-is"
+    );
+    let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
+        Ok(v) => v,
+        // Still nothing to cut with when the title alone fills the limit:
+        // `split_by_lines` at a budget of zero puts every line in a part of its
+        // own and then falls to the 64-character floor, which shreds the text
+        // into fragments that are each still oversize once they inherit the
+        // title. A refusal we cannot act on is reported as one.
+        Err(e) if input_too_large(&e) && budget > 0 => {
+            let parts = split_by_lines(&chunk.text, budget, &core.counter);
+            if parts.len() > 1 {
+                tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
+                return replace_with_siblings(core, chunk, parts).await;
+            }
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
+    core.vectors
+        .upsert(vec![VectorPoint {
+            vector: vectors.into_iter().next().unwrap(),
+            sparse: crate::vector::sparse::encode_document(&chunk.text),
+            payload: payload_of(chunk),
+        }])
+        .await?;
+    mark_indexed(core, chunk).await?;
+    settle_corpus(core, &chunk.corpus_id).await
+}
+
+/// Cut text on blank lines, packing as many paragraphs into each part as the
+/// budget allows. Returns one part when there is no boundary that helps.
+fn split_by_paragraphs(
+    text: &str,
+    limit: usize,
+    counter: &crate::infer::budget::TokenCounter,
+) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
-    for p in paragraphs {
+    for p in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
         let candidate = if current.is_empty() {
             p.to_string()
         } else {
             format!("{current}\n\n{p}")
         };
-        if core.counter.count(&candidate) > limit && !current.is_empty() {
+        if counter.count(&candidate) > limit && !current.is_empty() {
             parts.push(std::mem::take(&mut current));
             current = p.to_string();
         } else {
@@ -271,8 +300,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     if !current.is_empty() {
         parts.push(current);
     }
-
-    replace_with_siblings(core, chunk, parts).await
+    parts
 }
 
 /// Cut text that has no paragraph breaks. Lines first, and a single line that
@@ -322,6 +350,18 @@ fn split_by_lines(
 }
 
 async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -> Result<()> {
+    // A single part is the parent again under a new id: the replacement is
+    // re-queued, measured the same way, and replaced again — a loop that
+    // burns a core and grows the table until someone notices. No caller can
+    // recover from it, so it is refused here rather than trusted upstream.
+    if parts.len() < 2 {
+        return Err(Error::Validation(format!(
+            "refusing to replace artifact {} with {} sibling(s)",
+            chunk.id,
+            parts.len()
+        )));
+    }
+
     tracing::info!(artifact_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
@@ -582,6 +622,113 @@ mod tests {
 
         let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
         assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_chunk_only_its_title_pushes_over_the_limit_does_not_respawn_itself() {
+        // The loop this closes: the limit is checked against title + text, the
+        // split only ever cut text, so a chunk whose text fits on its own was
+        // "split" into one identical sibling — which was enqueued, measured
+        // with its title again, and split into one identical sibling, forever.
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+
+        // 3.5 characters per estimated token: the two paragraphs fit under the
+        // limit by themselves, and the title is what puts them over it.
+        let title = "a rather long heading that costs real tokens".to_string();
+        let text = format!("{}\n\n{}", "alpha ".repeat(10), "beta ".repeat(10));
+        let limit = 40;
+        assert!(core.counter.count(&text) <= limit, "text must fit alone");
+        assert!(
+            core.counter.count(&format!("{title}\n{text}")) > limit,
+            "the title must be what pushes it over"
+        );
+
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.clone(),
+                    corpus_span: None,
+                    title: Some(title),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        run_with_limit(&core, &made[0].id, limit).await.unwrap();
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert!(
+            !chunks.iter().any(|c| c.text == text && c.id != made[0].id),
+            "the parent was replaced by an identical copy of itself"
+        );
+        // Every sibling has to fit with the title it inherited, or the next
+        // pass splits it again and the loop is only slower.
+        for c in &chunks {
+            assert!(
+                core.counter.count(&embed_text(c)) <= limit,
+                "sibling is still oversize: {:?}",
+                c.text
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_with_no_budget_left_is_reported_rather_than_shredded() {
+        // A title costing the whole limit leaves the text nothing, which is why
+        // the paragraph and line splits are skipped. The as-is attempt then ran
+        // the line split anyway, at a budget of zero: every line becomes a part
+        // of its own and the character floor cuts the rest to 64 at a time, so
+        // the chunk was replaced by dozens of fragments that are each still
+        // oversize once they inherit the same title — and mean nothing on their
+        // own. Failing is the honest answer; the operator can shorten a title.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            1,
+        ));
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+
+        let title = "a heading long enough to cost the entire limit by itself".to_string();
+        let text = (0..12)
+            .map(|i| format!("line {i} of something that has no blank lines in it"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let limit = core.counter.count(&format!("{title}\n"));
+
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.clone(),
+                    corpus_span: None,
+                    title: Some(title),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        let err = run_with_limit(&core, &made[0].id, limit)
+            .await
+            .expect_err("a refusal nothing can act on has to surface");
+        assert!(input_too_large(&err), "wrong error: {err}");
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert_eq!(chunks.len(), 1, "the chunk was cut into meaningless pieces");
+        assert_eq!(chunks[0].text, text);
     }
 
     #[tokio::test]

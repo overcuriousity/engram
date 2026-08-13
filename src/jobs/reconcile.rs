@@ -17,12 +17,13 @@ use crate::store::segments::SegmentState;
 
 pub async fn run(core: &Core) -> Result<usize> {
     let mut armed = 0;
-    let mut offset = 0;
+    // A cursor, not an offset: captures land while this runs, and an offset
+    // over a newest-first list would step over one corpus per insertion.
+    let mut cursor: Option<(i64, String)> = None;
     loop {
-        let page = core.store.list_corpora(100, offset).await?;
-        if page.is_empty() {
-            break;
-        }
+        let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
+        let Some(last) = page.last() else { break };
+        cursor = Some((last.created_at, last.id.clone()));
         for c in &page {
             // A corpus parked as a near-duplicate is waiting on a person by
             // design, and segmenting it is the decision they have not made.
@@ -47,7 +48,6 @@ pub async fn run(core: &Core) -> Result<usize> {
                 armed += 1;
             }
         }
-        offset += page.len() as i64;
     }
     if armed > 0 {
         tracing::info!(armed, "reconciliation queued unfinished work");
@@ -60,13 +60,26 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
+    use crate::store::segments::NewSegment;
+
+    fn seg(start_line: i64, end_line: i64, text: &str) -> NewSegment<'_> {
+        NewSegment {
+            start_line,
+            end_line,
+            text,
+            carry_lines: 0,
+        }
+    }
 
     #[tokio::test]
     async fn a_corpus_with_an_unfinished_segment_and_no_job_gets_one() {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10), (11, 20)])
+            .upsert_segments(
+                &src.id,
+                &[seg(1, 10, "first window"), seg(11, 20, "second window")],
+            )
             .await
             .unwrap();
         core.store
@@ -86,7 +99,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -120,7 +133,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         core.store
@@ -164,7 +177,7 @@ mod tests {
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
-            .upsert_segments(&src.id, &[(1, 10)])
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
             .await
             .unwrap();
         run(&core).await.unwrap();

@@ -61,7 +61,10 @@ fn estimate(text: &str) -> usize {
 /// the output itself is capped by `max_output_tokens`. The smaller wins.
 pub fn segment_tokens(budget: SynthesisBudget, prompt_overhead: usize) -> usize {
     let ratio = budget.output_ratio.max(0.1);
-    let usable = budget.context_tokens.saturating_sub(prompt_overhead);
+    let usable = budget
+        .context_tokens
+        .saturating_sub(prompt_overhead)
+        .saturating_sub(budget.context.total());
     let by_context = (usable as f32 / (1.0 + ratio)) as usize;
     let by_output = (budget.max_output_tokens as f32 / ratio) as usize;
     by_context.min(by_output).max(MIN_SEGMENT_TOKENS)
@@ -91,7 +94,41 @@ mod tests {
             context_tokens: ctx,
             max_output_tokens: max_out,
             output_ratio: ratio,
+            context: crate::infer::context::ContextBudget::default(),
         }
+    }
+
+    #[test]
+    fn the_context_budget_comes_out_of_the_window() {
+        use crate::infer::context::ContextBudget;
+
+        // A generous output ceiling, so the context window is the binding
+        // constraint and the subtraction is visible. Under the other ceiling
+        // — `by_output` — the window is capped by what the model can emit and
+        // context costs nothing, which is correct but proves nothing here.
+        let mut b = budget(32768, 100_000, 1.4);
+        let without = segment_tokens(b, 1000);
+
+        b.context = ContextBudget {
+            opening: 200,
+            overlap: 150,
+        };
+        let with = segment_tokens(b, 1000);
+
+        // 200 + 2*150 + 40 fences = 540 prompt tokens. The window loses that
+        // divided by (1 + output_ratio), because every input token it gives up
+        // frees output budget too: 540 / 2.4 = 225.
+        assert_eq!(without, 13236);
+        assert_eq!(with, 13011);
+        assert_eq!(without - with, 225);
+    }
+
+    #[test]
+    fn no_context_budget_leaves_the_window_exactly_as_it_was() {
+        let b = budget(32768, 8192, 1.4);
+        assert_eq!(b.context, crate::infer::context::ContextBudget::default());
+        assert_eq!(segment_tokens(b, 1000), segment_tokens(b, 1000));
+        assert_eq!(b.context.total(), 0);
     }
 
     #[test]

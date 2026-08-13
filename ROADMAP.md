@@ -28,10 +28,17 @@ original wording — that is the one failure mode this design exists to avoid.
 a layer crossing without a measured retrieval gain does not go in.
 
 The evaluation harness is built and is not on this list: `cargo test --test
-eval` scores hand-written query/artifact pairs against a corpus that stays on
-the operator's own machine. It is unpopulated by design — writing pairs and
-freezing a corpus costs real GPU time, and it is worth spending only when a
-decision actually turns on the answer.
+eval` scores query/artifact pairs against a corpus that stays on the operator's
+own machine. The pairs are no longer hand-written, which was the thing standing
+in the way — a query composed while reading an artifact borrows its vocabulary,
+and every retrieval system passes such a pair. With `feedback.enabled`, real
+searches are recorded as they are made and judged afterwards at `/ui/judge`;
+`--export-eval` hands the result to the harness. The corpus comes out of the
+live database, so it costs no GPU time to freeze and keeps its production ids.
+
+What remains true is that the harness is the only figure comparable across
+months: it runs against a frozen corpus, while the field value on the judging
+page describes how search behaved on the day it was used.
 
 ## [Retrieval]
 
@@ -111,9 +118,9 @@ to the query path.
   together, so recovery does not mean paying for every embedding again. The
   snapshot is the artifact of record for a rebuild; a reindex is the fallback,
   not the plan.
-- ~~**Delete the FTS5 index and its triggers.**~~ Done — `migrations/0008_drop_fts.sql`
-  drops `artifacts_fts` and its three write triggers, and `keyword_search` /
-  `fts_quote` are gone from `src/store/artifacts.rs`. Hybrid search runs in
+- ~~**Delete the FTS5 index and its triggers.**~~ Done — `src/store/schema.sql`
+  never creates `artifacts_fts` or its three write triggers, and
+  `keyword_search` / `fts_quote` are gone from `src/store/artifacts.rs`. Hybrid search runs in
   Qdrant instead — dense and sparse as prefetch branches fused by RRF in one
   round trip (`src/vector/qdrant.rs`) — where the lexical index cannot drift
   from the vectors. The SQLite index was never read by any production path and

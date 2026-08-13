@@ -72,6 +72,9 @@ pub struct Core {
     /// Cosine similarity below which a result is reported as only loosely
     /// related. See `VectorConfig::weak_below`.
     pub weak_below: f32,
+    /// Whether and how real searches are recorded for later judging. Read on
+    /// the search path, so it lives here rather than being threaded down.
+    pub feedback: crate::config::FeedbackConfig,
 }
 
 impl Core {
@@ -105,6 +108,7 @@ impl Core {
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
             weak_below: cfg.vector.weak_below,
+            feedback: cfg.feedback.clone(),
         }
     }
 }
@@ -164,6 +168,8 @@ pub mod test_support {
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
             weak_below: 0.0,
+            // Off, like the shipped default. The capture tests switch it on.
+            feedback: crate::config::FeedbackConfig::default(),
         }
     }
 }

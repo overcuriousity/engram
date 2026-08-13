@@ -291,7 +291,11 @@ async fn search(
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
     };
-    Ok(Json(st.core.search(&query).await?))
+    Ok(Json(
+        st.core
+            .search(&query, crate::store::feedback::Door::Api)
+            .await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]

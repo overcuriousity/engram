@@ -1,0 +1,95 @@
+{% match flash %}
+{% when Some with (f) %}
+{# What the last verdict revealed. Loudest where the ranking did worst: a
+   first-position confirmation is the least informative card of the day, and
+   celebrating it would breed agreement rather than judgement. #}
+{# Undo sits on the flash because that is where the operator is already looking
+   when they realise the digit was wrong. A mislabelled pair is worse than no
+   pair: it is scored against the ranker as though it were true. #}
+<p class="judge-flash">{{ f.line }} <span class="mono muted">{{ f.delta }}</span>
+  {% if let Some(undo_id) = f.undo %}
+  <button class="btn btn-ghost btn-sm judge-undo" hx-post="/ui/judge/{{ undo_id }}/undo"
+          hx-target="#card" hx-swap="innerHTML">Undo <kbd>U</kbd></button>
+  {% endif %}
+</p>
+{% when None %}
+{% endmatch %}
+{% match card %}
+{% when Some with (c) %}
+<article class="judge-card" data-judge-id="{{ c.id }}">
+  <p class="muted mono">{{ c.when }} · {{ c.door }}</p>
+  <h2 class="judge-query">{{ c.query }}</h2>
+  <p class="muted hint">Which of these was the one you needed?</p>
+  {# Numbered for the keyboard only. The order is a hash of the event id, so it
+     carries no information about how the search ranked them — seeing that would
+     turn judging into agreeing. #}
+  <ol class="judge-options">
+    {% for o in c.choices %}
+    <li>
+      {# Deprecated and superseded artifacts stay in the pool at full length so
+         the operator sees what the search actually returned, but they are
+         disabled: `hit` would refuse them, and a refusal arriving after the
+         keystroke re-renders an identical card with nothing to show which
+         option was the bad one. Said here instead, before the choice. #}
+      <button class="judge-option{% if !o.usable %} judge-option-unusable{% endif %}"
+              {% if o.usable %}
+              hx-post="/ui/judge/{{ c.id }}/hit"
+              hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
+              hx-target="#card" hx-swap="innerHTML"
+              {% else %}disabled{% endif %}>
+        {# Only the first nine choosable options carry a number. The shortcut is
+           a single digit and `feedback.candidates` is 20 by default, so a badge
+           on the tenth would advertise a key that does nothing; a badge on a
+           disabled one would advertise a key that refuses. The column stays
+           either way so the titles line up. #}
+        <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
+        <span class="judge-title">{{ o.title }}</span>
+        {% if o.usable %}
+        <span class="judge-snippet">{{ o.snippet }}</span>
+        {% else %}
+        <span class="judge-snippet muted">deprecated or superseded — the benchmark can't hold
+          this one, so it can't be the answer</span>
+        {% endif %}
+      </button>
+      {# A hundred and forty characters is enough to recognise an artifact and
+         not enough to be sure of one, and the click after it is a line in the
+         dataset. Fetched on first open and kept: reading two candidates and
+         comparing them is exactly the case this exists for. Outside the
+         option rather than inside it — a button within a button is neither
+         valid nor clickable — so opening this can never fire a verdict. #}
+      <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
+               hx-trigger="toggle once" hx-target="find .judge-full"
+               hx-swap="innerHTML">
+        <summary>Read it in full</summary>
+        <div class="judge-full"><span class="muted">loading…</span></div>
+      </details>
+    </li>
+    {% endfor %}
+  </ol>
+  {# `data-key` is what the shortcut binds to. By position it bound to whatever
+     button happened to sit at that index, and the assign screen's row is a
+     different row: N there was an immediate gap verdict. #}
+  <div class="row judge-outs">
+    {# Not a verdict yet: it opens the search for what should have answered.
+       Only if nothing there fits does it become a gap. #}
+    <button class="btn btn-ghost btn-sm" data-key="n"
+            hx-get="/ui/judge/{{ c.id }}/assign"
+            hx-target="#card" hx-swap="innerHTML">
+      None of these <kbd>N</kbd>
+    </button>
+    <button class="btn btn-ghost btn-sm" data-key="s"
+            hx-post="/ui/judge/{{ c.id }}/skip"
+            hx-target="#card" hx-swap="innerHTML">
+      Can't remember <kbd>S</kbd>
+    </button>
+    <span class="spacer"></span>
+    <button class="btn btn-ghost btn-sm" data-key="x"
+            hx-post="/ui/judge/{{ c.id }}/discard"
+            hx-target="#card" hx-swap="innerHTML">
+      Not a real search <kbd>X</kbd>
+    </button>
+  </div>
+</article>
+{% when None %}
+<p class="muted">Nothing to judge. <a href="/ui/search">Back to search.</a></p>
+{% endmatch %}

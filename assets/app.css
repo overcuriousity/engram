@@ -221,6 +221,9 @@ table.grid td { padding: 8px 12px; border-bottom: 1px solid var(--color-border-s
 table.grid tr:hover td { background: var(--color-bg-hover); }
 
 .muted { color: var(--color-fg-muted); font-size: 0.875rem; }
+/* A line of guidance under the field it belongs to: smaller than the label it
+   follows, and close enough to it to read as part of the same control. */
+.hint { margin: 0.375rem 0 0; font-size: 0.8125rem; line-height: 1.45; }
 .row { display: flex; gap: 0.5rem; align-items: center; }
 .stack { display: flex; flex-direction: column; gap: 0.75rem; }
 .spinner { visibility: hidden; color: var(--color-fg-muted); font-size: 0.75rem; }
@@ -519,9 +522,16 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
     padding-bottom: env(safe-area-inset-bottom);
   }
   .tabbar a {
+    position: relative;
     flex: 1; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 2px; min-height: 52px; text-decoration: none;
     font-size: 0.6875rem; color: var(--color-fg-muted);
+  }
+  /* Over the icon, not beside the label: the tab is 52px tall and a number
+     would either shrink the label or push it off centre. */
+  .tab-dot {
+    position: absolute; top: 8px; right: 50%; margin-right: -14px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
   }
   .tabbar a[aria-current="page"] { color: var(--color-accent); }
   .tabbar svg { width: 20px; height: 20px; }
@@ -555,3 +565,61 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   table.grid td { border: none; height: auto; padding: 0.125rem 0; }
   table.grid tr:hover td { background: transparent; }
 }
+
+/* ── Judging ─────────────────────────────────────────────────────────────── */
+
+/* One card at a time, wide enough to read a snippet without every line
+   wrapping. The options are buttons rather than links: they act, they do not
+   navigate. */
+.judge-header { max-width: 52rem; margin-bottom: 1.25rem; }
+.judge-card { max-width: 52rem; }
+.judge-query { font-size: 1.25rem; font-weight: 500; margin: 0.25rem 0 0.75rem; }
+.judge-options {
+  list-style: none; margin: 0 0 1rem; padding: 0;
+  display: flex; flex-direction: column; gap: 0.375rem;
+}
+.judge-option {
+  display: grid; grid-template-columns: 1.5rem 1fr; gap: 0.125rem 0.5rem;
+  width: 100%; text-align: left; padding: 0.5rem 0.625rem; cursor: pointer;
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); color: inherit; font: inherit;
+}
+.judge-option:hover { background: var(--color-bg-hover); }
+.judge-option:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+/* Still legible, plainly not choosable: the pool is shown at full length so the
+   operator can see what the search returned, and a candidate the benchmark
+   cannot hold is greyed rather than dropped. */
+.judge-option-unusable {
+  cursor: not-allowed; opacity: 0.55; background: transparent;
+  border-style: dashed;
+}
+.judge-option-unusable:hover { background: transparent; }
+.judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
+.judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: 0.8125rem; }
+.judge-title { font-weight: 500; }
+.judge-snippet { grid-column: 2; color: var(--color-fg-secondary); font-size: 0.875rem; }
+/* Reading a candidate before confirming it. Indented under its option and
+   quiet, because the snippet answers most of the time and this is the second
+   question, not the first. Capped and scrollable so a long artifact cannot
+   push the other options off the screen. */
+.judge-peek { margin: 0.125rem 0 0 2.125rem; font-size: 0.8125rem; }
+.judge-peek > summary {
+  cursor: pointer; color: var(--color-fg-muted); padding: 0.125rem 0;
+  width: fit-content;
+}
+.judge-peek > summary:hover { color: var(--color-fg-secondary); }
+.judge-full { max-height: 22rem; overflow-y: auto; margin-top: 0.25rem; }
+.judge-full .md { font-size: 0.875rem; }
+.judge-outs { margin-bottom: 1rem; }
+.judge-undo { margin-left: 0.5rem; }
+
+/* Read from the ranks the searches actually gave, so it moves on every
+   verdict. It is the measurement, not a score standing in for one. */
+.progress { height: 4px; background: var(--color-bg-active); border-radius: 2px; overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--color-accent); }
+.misses { max-width: 52rem; margin-bottom: 1.25rem; }
+.misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; }
+/* The line after a verdict. Quiet by design — its job is to say what was just
+   learned, not to congratulate. */
+.judge-flash { margin: 0 0 1rem; font-size: 0.875rem; color: var(--color-fg-secondary); }
+.judge-assign .input { max-width: 32rem; }

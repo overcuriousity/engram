@@ -273,6 +273,8 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[template(path = "capture.html")]
 struct CaptureTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
     pairs: Vec<PairRow>,
@@ -297,6 +299,8 @@ struct CapturedTemplate {
 #[template(path = "search.html")]
 struct SearchTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     /// Kept so a reload or a deep link restores the box with its results.
     q: String,
     /// What this collection can actually be narrowed by. Rendered as chips, so
@@ -334,6 +338,8 @@ struct QueueTemplate {
 #[template(path = "corpus.html")]
 struct CorpusTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     id: String,
     /// The whole source, one row per line, each anchored so a link can name it.
     lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -364,6 +370,8 @@ struct ArtifactDetailFragment {
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     d: ArtifactDetail,
 }
 
@@ -371,6 +379,8 @@ struct ArtifactDetailPage {
 #[template(path = "ops.html")]
 struct OpsTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -381,6 +391,9 @@ struct OpsTemplate {
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     tokens: Vec<TokenRow>,
+    /// `None` when capture is switched off, which renders nothing at all: a
+    /// section about a log nobody is keeping is noise.
+    feedback: Option<crate::store::feedback::Stats>,
 }
 
 #[derive(Template)]
@@ -393,6 +406,8 @@ struct TokenCreatedTemplate {
 #[template(path = "ask.html")]
 struct AskTemplate {
     theme: String,
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
 }
 
 #[derive(Template)]
@@ -409,6 +424,7 @@ async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Respo
     let (pairs, more_pairs) = pair_rows(&st).await?;
     Ok(HtmlTemplate(CaptureTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
     })
@@ -475,6 +491,7 @@ async fn search_page(
     ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
         tag,
@@ -536,7 +553,7 @@ fn split_tags(t: Option<String>) -> Vec<String> {
 
 async fn search_results(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // Clearing the box fires a request with an empty query. That is not an
@@ -558,16 +575,22 @@ async fn search_results(
     let terms = highlightable_terms(p.q.trim());
     let (hits, t) = st
         .core
-        .search_timed(&SearchQuery {
-            q: p.q,
-            limit: 0,
-            tags: split_tags(p.tags),
-            category: p.category.filter(|c| !c.is_empty()),
-            // Incremental: a prefix must not stamp what it happened to match.
-            mark: false,
-            include_deprecated: false,
-            include_superseded: false,
-        })
+        .search_timed(
+            &SearchQuery {
+                q: p.q,
+                limit: 0,
+                tags: split_tags(p.tags),
+                category: p.category.filter(|c| !c.is_empty()),
+                // Incremental: a prefix must not stamp what it happened to match.
+                mark: false,
+                include_deprecated: false,
+                include_superseded: false,
+            },
+            // Scoped to the operator, because coalescing folds a keystroke into
+            // the query it was an early spelling of, and two people typing at
+            // once are not spelling the same thing.
+            crate::store::feedback::Door::Ui.by(id.subject),
+        )
         .await?;
 
     let results: Vec<RenderedResult> = hits
@@ -702,6 +725,7 @@ async fn corpus_detail(
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
         lines,
         badge: status_badge(&s.status),
@@ -988,6 +1012,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     Ok(HtmlTemplate(OpsTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         retrying,
         parked,
         superseded,
@@ -1000,8 +1025,23 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
         tokens,
+        feedback: match st.core.feedback.enabled {
+            true => Some(st.core.store.feedback_stats().await?),
+            false => None,
+        },
     })
     .into_response())
+}
+
+/// Forget every captured search.
+///
+/// Judgements go with them: a verdict is a statement about a query, and one
+/// whose query no longer exists records nothing. Accepted settings and their
+/// history stay, because they describe how the application is configured now.
+async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    let n = st.core.store.purge_feedback().await?;
+    tracing::info!(dropped = n, "captured searches deleted by the operator");
+    Ok(Redirect::to("/ui/ops").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1194,9 +1234,10 @@ async fn verify_ui(
     Ok(Redirect::to(back.path()).into_response())
 }
 
-async fn ask_page(_id: Identity) -> impl IntoResponse {
+async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
     })
 }
 
@@ -1324,6 +1365,7 @@ async fn artifact_detail(
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         theme: "light".into(),
+        judge_pending: crate::web::state::judge_pending(&st).await,
         d,
     })
     .into_response())
@@ -1364,6 +1406,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
+        .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/corpora/{id}/resolve", post(resolve_near_dupe_ui))
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
@@ -1413,15 +1456,18 @@ mod tests {
             .unwrap();
 
         let hits = core
-            .search(&crate::core::search::SearchQuery {
-                q: "alpha".into(),
-                limit: 0,
-                tags: vec![],
-                category: None,
-                mark: false,
-                include_deprecated: false,
-                include_superseded: false,
-            })
+            .search(
+                &crate::core::search::SearchQuery {
+                    q: "alpha".into(),
+                    limit: 0,
+                    tags: vec![],
+                    category: None,
+                    mark: false,
+                    include_deprecated: false,
+                    include_superseded: false,
+                },
+                crate::store::feedback::Door::Ui,
+            )
             .await
             .unwrap();
         let r = super::render_hit(0, hits[0].clone());
@@ -1636,6 +1682,90 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
         body_of(res).await
+    }
+
+    /// A session on an installation that is recording searches, with `pending`
+    /// of them captured and waiting for a verdict.
+    async fn app_recording_searches(pending: usize) -> (axum::Router, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        for i in 0..pending {
+            core.store
+                .record_search(
+                    crate::store::feedback::NewEvent {
+                        query: format!("search number {i}"),
+                        door: crate::store::feedback::Door::Ui,
+                        scope: None,
+                        filters: "{}".into(),
+                        query_vec: vec![0.1, 0.2],
+                        embed_model: "fake".into(),
+                        candidates: vec![],
+                    },
+                    // No folding: these stand for separate searches, not one
+                    // being typed.
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        let cid = crate::store::new_id();
+        core.store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        let state = crate::web::state::AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+        };
+        (crate::web::router(state), format!("engram_session={cid}"))
+    }
+
+    #[tokio::test]
+    async fn judging_is_a_destination_in_the_nav_with_what_is_waiting_on_it() {
+        // It used to be reachable only from one conditional sentence on Ops —
+        // the page you open when something is wrong, which is the wrong place
+        // for the screen that has to be visited often for the dataset to grow.
+        let (app, cookie) = app_recording_searches(3).await;
+        for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/ops"] {
+            let html = flat(&get(&app, page, &cookie).await);
+            assert!(
+                html.contains(r#"<a href="/ui/judge">Judge"#),
+                "{page} offers no way to judge"
+            );
+            assert!(
+                html.contains(r#"<span class="badge badge-accent">3</span>"#),
+                "{page} does not say how many are waiting"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_queue_asks_for_nothing() {
+        // The entry stays — judging is where the metrics live, and they are
+        // worth reading with nothing pending — but a badge reading zero is an
+        // invitation to a screen that has no work on it.
+        let (app, cookie) = app_recording_searches(0).await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+        assert!(html.contains(r#"<a href="/ui/judge">Judge"#));
+        assert!(
+            !html.contains(r#"badge-accent">0<"#),
+            "an empty queue was badged"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_about_judging_appears_where_nothing_is_captured() {
+        // Capture is off by default. A door to a queue that can never fill is
+        // an offer the installation cannot keep.
+        let (app, cookie) = app_with_session().await;
+        let html = flat(&get(&app, "/ui/search", &cookie).await);
+        assert!(!html.contains("/ui/judge"), "judging was advertised anyway");
     }
 
     #[tokio::test]
@@ -2020,7 +2150,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let html = flat(&body_of(res).await);
+        let html = flat(&body_of(res).await).to_lowercase();
         assert!(
             html.contains("waiting on a decision"),
             "the parked capture rendered as an ordinary one: {html}"
@@ -2064,14 +2194,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capturing_text_stores_it_and_confirms() {
-        let (app, cookie) = app_with_session().await;
+    async fn capturing_text_stores_it_and_says_nothing() {
+        // The confirmation is the row that appears under "Recent" — same link,
+        // same progress badge. A card above the list saying it again was the
+        // one capture reported twice.
+        let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_of(res).await.to_lowercase().contains("captured"));
+        assert!(
+            body_of(res).await.trim().is_empty(),
+            "an ordinary capture repeats what the queue already shows"
+        );
+        assert_eq!(
+            core.store.list_corpora(10, 0).await.unwrap().len(),
+            1,
+            "the capture itself still landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn capturing_the_same_text_twice_says_so() {
+        // The one thing the queue cannot report: the second paste adds no row,
+        // so without this the page looks like nothing happened at all.
+        let (app, cookie) = app_with_session().await;
+        for _ in 0..1 {
+            app.clone()
+                .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
+                .await
+                .unwrap();
+        }
+        let res = app
+            .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
+            .await
+            .unwrap();
+        assert!(
+            body_of(res).await.to_lowercase().contains("already stored"),
+            "a duplicate paste must say why nothing new appeared"
+        );
     }
 
     #[tokio::test]
@@ -2370,7 +2532,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_detail_shows_the_raw_text() {
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .clone()
             .oneshot(form(
@@ -2380,15 +2542,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        let html = body_of(res).await;
-        let id = html
-            .split("/ui/corpora/")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap()
-            .to_string();
+        assert_eq!(res.status(), StatusCode::OK);
+        // An ordinary capture answers with nothing to read the id out of — the
+        // queue fragment is what names it on the page.
+        let id = core.store.list_corpora(10, 0).await.unwrap()[0].id.clone();
 
         let res = app
             .oneshot(

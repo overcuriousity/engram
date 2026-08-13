@@ -18,6 +18,8 @@ pub const SYNTHESIZER_SYSTEM: &str = r#"You turn reference material into atomic,
 Each artifact holds exactly one thing: one technique, one procedure, one fact,
 one configuration. If a passage covers three techniques, emit three artifacts.
 
+Always use the language the input was written in.
+
 Rewrite each artifact so it stands alone without the surrounding document. Resolve
 pronouns and implicit references: "this command" becomes the actual command,
 "the above directory" becomes the actual path.
@@ -26,6 +28,13 @@ Reproduce commands, file paths, registry keys, error strings, code, and version
 numbers VERBATIM. Never paraphrase, reformat, correct, or abbreviate them. The
 rewriting applies to the connective prose around them, never to the literals
 themselves.
+
+A block labelled "context only" is there so you can resolve references — what a
+pronoun points at, which version or platform the document is about. Use it to
+write artifacts that stand alone. Never emit an artifact for material that
+appears only in a context block: the window that owns that material will emit
+it, and emitting it twice puts two copies in the knowledge base. Extract
+exclusively from the INPUT block.
 
 Write artifact text as markdown: fenced code blocks with a language tag, lists for
 step-by-step procedures, tables where they fit. Do NOT use an H1 (`# `) heading;
@@ -46,12 +55,40 @@ Reply with JSON only, no commentary, in exactly this shape:
   and never put a command in a caveat that is not in the input. Use an empty
   list when the input states none, which is the common case."#;
 
-pub fn user_prompt(segment_text: &str, first_line: i64, max_artifact_tokens: usize) -> String {
-    format!(
+pub fn user_prompt(
+    segment_text: &str,
+    first_line: i64,
+    max_artifact_tokens: usize,
+    context: &crate::infer::context::WindowContext,
+) -> String {
+    let mut out = String::new();
+    // The opening leads so that the system prompt followed by it is a
+    // byte-identical prefix for every window of a corpus, which a prompt cache
+    // or a llama.cpp slot can reuse. Everything per-window follows.
+    if let Some(o) = &context.opening {
+        out.push_str(&format!(
+            "----- DOCUMENT OPENING (context only) -----\n{o}\n\
+             ----- END DOCUMENT OPENING -----\n\n"
+        ));
+    }
+    if let Some(b) = &context.before {
+        out.push_str(&format!(
+            "----- PRECEDING CONTEXT (context only) -----\n{b}\n\
+             ----- END PRECEDING CONTEXT -----\n\n"
+        ));
+    }
+    out.push_str(&format!(
         "The input below starts at line {first_line}. Keep each artifact under roughly \
          {max_artifact_tokens} tokens; split into more artifacts rather than exceeding it.\n\n\
          ----- INPUT -----\n{segment_text}\n----- END INPUT -----"
-    )
+    ));
+    if let Some(a) = &context.after {
+        out.push_str(&format!(
+            "\n\n----- FOLLOWING CONTEXT (context only) -----\n{a}\n\
+             ----- END FOLLOWING CONTEXT -----"
+        ));
+    }
+    out
 }
 
 pub fn repair_prompt(previous: &str, err: &str) -> String {
@@ -408,6 +445,51 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_blocks_are_fenced_and_labelled_as_context_only() {
+        use crate::infer::context::WindowContext;
+
+        let ctx = WindowContext {
+            opening: Some("# Guide\nPBS 3.x on Debian 12.".into()),
+            before: Some("previous window tail".into()),
+            after: Some("next window head".into()),
+        };
+        let p = user_prompt("the window body", 1, 1024, &ctx);
+
+        assert!(p.contains("PBS 3.x on Debian 12."));
+        assert!(p.contains("previous window tail"));
+        assert!(p.contains("next window head"));
+        assert!(p.contains("----- INPUT -----\nthe window body\n----- END INPUT -----"));
+
+        // The opening leads, so system prompt + opening is a byte-identical
+        // prefix across every window of a corpus and a prompt cache can reuse
+        // it. Everything that varies per window sits after it.
+        let opening_at = p.find("PBS 3.x").unwrap();
+        let before_at = p.find("previous window tail").unwrap();
+        let input_at = p.find("----- INPUT -----").unwrap();
+        let after_at = p.find("next window head").unwrap();
+        assert!(opening_at < before_at && before_at < input_at && input_at < after_at);
+    }
+
+    #[test]
+    fn an_empty_context_renders_exactly_the_prompt_of_before() {
+        use crate::infer::context::WindowContext;
+
+        let p = user_prompt("body", 1, 1024, &WindowContext::default());
+        assert!(
+            !p.contains("context only"),
+            "an empty context must not emit empty fences: {p}"
+        );
+        assert!(p.starts_with("The input below starts at line 1."));
+        assert!(p.ends_with("----- END INPUT -----"));
+    }
+
+    #[test]
+    fn the_system_prompt_forbids_extracting_from_context() {
+        assert!(SYNTHESIZER_SYSTEM.contains("context only"));
+        assert!(SYNTHESIZER_SYSTEM.contains("INPUT"));
+    }
 
     #[test]
     fn the_judge_is_told_what_each_artifact_is_about() {

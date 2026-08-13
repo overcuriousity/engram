@@ -178,4 +178,20 @@
   {% endfor %}
   </tbody>
 </table>
+{% match feedback %}
+{% when Some with (f) %}
+<h3>Feedback</h3>
+{# Said plainly and where the operator already looks. A recording indicator
+   beside the search box would be in view during every keystroke; this is the
+   page for things that are true about the installation. #}
+<p class="muted">
+  Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
+  {% if f.pending > 0 %}<a href="/ui/judge">Judge them</a>{% endif %}
+</p>
+<form method="post" action="/ui/ops/feedback/purge"
+      onsubmit="return confirm('Delete every captured search and every verdict given on one?')">
+  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches</button>
+</form>
+{% when None %}
+{% endmatch %}
 {% endblock %}

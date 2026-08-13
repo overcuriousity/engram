@@ -50,6 +50,10 @@ impl Core {
                     include_superseded: false,
                 },
                 None,
+                // Deliberately not captured: the right answer to a question is
+                // a synthesis across several artifacts, so "which one was it"
+                // has no well-defined meaning for someone judging it later.
+                crate::store::feedback::Door::Ask,
             )
             .await?;
 

@@ -1,4 +1,6 @@
-use super::{Completer, Embedder, ProposedArtifact, Reranker, SynthesisBudget, Synthesizer};
+use super::{
+    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
+};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -84,7 +86,8 @@ impl FakeSynthesizer {
 
 #[async_trait]
 impl Synthesizer for FakeSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         if let Some(marker) = &self.fail_on_marker
             && text.contains(marker.as_str())
         {
@@ -119,6 +122,9 @@ impl Synthesizer for FakeSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 
@@ -177,7 +183,8 @@ impl ParaphrasingSynthesizer {
 
 #[async_trait]
 impl Synthesizer for ParaphrasingSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         let n = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -200,7 +207,78 @@ impl Synthesizer for ParaphrasingSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
+    }
+}
+
+/// Emits one artifact per line it is given, context blocks included. Stands in
+/// for a small model that ignores the instruction not to extract from context.
+pub struct GreedySynthesizer {
+    pub budget: SynthesisBudget,
+}
+
+#[async_trait]
+impl Synthesizer for GreedySynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let mut out: Vec<ProposedArtifact> = Vec::new();
+        let from_context = input.context.blocks().flat_map(|b| b.lines());
+        for line in input.core.lines().chain(from_context) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            out.push(ProposedArtifact {
+                text: line.to_string(),
+                title: Some("greedy".into()),
+                category: Some("note".into()),
+                tags: vec![],
+                corpus_lines: None,
+                caveats: vec![],
+            });
+        }
+        Ok(out)
+    }
+    fn budget(&self) -> SynthesisBudget {
+        self.budget
+    }
+}
+
+/// Records the input of the last call, so a test can assert what the window
+/// was actually given rather than what it was supposed to be given.
+pub struct RecordingSynthesizer {
+    pub seen: std::sync::Mutex<Vec<(String, crate::infer::context::WindowContext)>>,
+    pub budget: SynthesisBudget,
+}
+
+impl RecordingSynthesizer {
+    pub fn new(budget: SynthesisBudget) -> Self {
+        Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+            budget,
+        }
+    }
+}
+
+#[async_trait]
+impl Synthesizer for RecordingSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.core.to_string(), input.context.clone()));
+        Ok(vec![ProposedArtifact {
+            text: input.core.lines().next().unwrap_or("empty").to_string(),
+            title: Some("recorded".into()),
+            category: Some("note".into()),
+            tags: vec![],
+            corpus_lines: None,
+            caveats: vec![],
+        }])
+    }
+    fn budget(&self) -> SynthesisBudget {
+        self.budget
     }
 }
 
@@ -222,8 +300,8 @@ impl PacedSynthesizer {
 
 #[async_trait]
 impl Synthesizer for PacedSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
-        self.inner.segment(text).await
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        self.inner.segment(input).await
     }
     fn budget(&self) -> SynthesisBudget {
         self.inner.budget()
@@ -240,7 +318,8 @@ pub struct LyingSpanSynthesizer;
 
 #[async_trait]
 impl Synthesizer for LyingSpanSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let text = input.core;
         Ok(vec![ProposedArtifact {
             text: text.to_string(),
             title: Some("mislabelled".into()),
@@ -255,6 +334,9 @@ impl Synthesizer for LyingSpanSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 }
@@ -266,7 +348,7 @@ pub struct HallucinatingSynthesizer;
 
 #[async_trait]
 impl Synthesizer for HallucinatingSynthesizer {
-    async fn segment(&self, _text: &str) -> Result<Vec<ProposedArtifact>> {
+    async fn segment(&self, _input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         Ok(vec![ProposedArtifact {
             text: "Entirely invented material about unrelated subjects".into(),
             title: Some("invented".into()),
@@ -281,6 +363,9 @@ impl Synthesizer for HallucinatingSynthesizer {
             context_tokens: 4096,
             max_output_tokens: 1024,
             output_ratio: 1.4,
+            // Zero on purpose: a fake reproduces today's windowing exactly, so
+            // a test that did not ask for context cannot be moved by it.
+            context: Default::default(),
         }
     }
 }
@@ -452,6 +537,22 @@ impl Completer for ScriptedCompleter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The empty context every one of these tests wants: they exercise the
+    /// transport and the parser, not the windowing.
+    static EMPTY_CONTEXT: crate::infer::context::WindowContext =
+        crate::infer::context::WindowContext {
+            opening: None,
+            before: None,
+            after: None,
+        };
+
+    fn window(text: &str) -> SegmentInput<'_> {
+        SegmentInput {
+            core: text,
+            context: &EMPTY_CONTEXT,
+        }
+    }
     use crate::infer::{Embedder, Reranker, Synthesizer};
 
     #[tokio::test]
@@ -490,7 +591,10 @@ mod tests {
     #[tokio::test]
     async fn fake_chunker_splits_on_blank_lines() {
         let c = FakeSynthesizer::default();
-        let out = c.segment("first para\n\nsecond para").await.unwrap();
+        let out = c
+            .segment(window("first para\n\nsecond para"))
+            .await
+            .unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "first para");
         assert!(out[0].title.is_some());
@@ -500,7 +604,7 @@ mod tests {
     async fn fake_chunker_can_be_told_to_fail() {
         let c = FakeSynthesizer::failing("endpoint down");
         assert!(matches!(
-            c.segment("x").await,
+            c.segment(window("x")).await,
             Err(crate::error::Error::Inference { .. })
         ));
     }

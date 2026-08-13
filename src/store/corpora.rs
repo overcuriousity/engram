@@ -3,6 +3,27 @@ use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
+/// Which side of the `content_hash` constraint an insert came down on.
+///
+/// The distinction is the caller's to act on: capture reports a duplicate
+/// rather than creating a second source, and must not queue synthesis for a
+/// corpus somebody else already queued.
+#[derive(Debug, Clone)]
+pub enum Insertion {
+    /// The row this call wrote.
+    Created(Corpus),
+    /// The same bytes were already stored; this is the row that won.
+    Existing(Corpus),
+}
+
+impl Insertion {
+    pub fn into_corpus(self) -> Corpus {
+        match self {
+            Insertion::Created(c) | Insertion::Existing(c) => c,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
@@ -117,8 +138,10 @@ impl Store {
         title_hint: Option<&str>,
     ) -> Result<Corpus> {
         let sig = super::shingle::signature(raw_text);
-        self.insert_corpus_with_signature(raw_text, origin, title_hint, sig)
-            .await
+        Ok(self
+            .insert_corpus_with_signature(raw_text, origin, title_hint, sig)
+            .await?
+            .into_corpus())
     }
 
     /// Insert a capture whose shingle signature the caller already computed.
@@ -127,13 +150,20 @@ impl Store {
     /// a near-duplicate of something already stored. Handing it over rather
     /// than recomputing it here is what makes that one pass over the document
     /// instead of two.
+    ///
+    /// Answers whether the row is ours because the check for an existing
+    /// `content_hash` happens in the caller, before the near-duplicate scan —
+    /// and that scan decodes every stored signature, so the window between the
+    /// check and this insert grows with the base. Two identical captures in
+    /// flight (a double-submitted form, an agent retrying) both pass the check.
+    /// The loser must get the winner's row back, not a UNIQUE-constraint 500.
     pub async fn insert_corpus_with_signature(
         &self,
         raw_text: &str,
         origin: &str,
         title_hint: Option<&str>,
         shingles: Vec<u64>,
-    ) -> Result<Corpus> {
+    ) -> Result<Insertion> {
         let src = Corpus {
             id: new_id(),
             raw_text: raw_text.to_string(),
@@ -150,9 +180,10 @@ impl Store {
             // A capture, not a placeholder. See `ensure_restored_corpus`.
             restored_at: None,
         };
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(content_hash) DO NOTHING",
         )
         .bind(&src.id)
         .bind(&src.raw_text)
@@ -165,7 +196,18 @@ impl Store {
         .bind(super::shingle::encode(&src.shingles))
         .execute(&self.pool)
         .await?;
-        Ok(src)
+        if res.rows_affected() == 0 {
+            // Somebody else got there between the caller's hash check and this
+            // statement. Their row is as good as ours would have been — same
+            // bytes, by definition of the constraint that rejected us.
+            let existing = self.find_by_hash(&src.content_hash).await?.ok_or_else(|| {
+                // Only reachable if the winning row was deleted in the moment
+                // between the conflict and this read.
+                Error::Store("capture conflicted with a corpus that then vanished".into())
+            })?;
+            return Ok(Insertion::Existing(existing));
+        }
+        Ok(Insertion::Created(src))
     }
 
     /// Insert the placeholder parent a restored artifact needs, if it is not
@@ -342,6 +384,37 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// A page for a sweep that has to see every corpus exactly once: oldest
+    /// first, resumed from the last row of the previous page.
+    ///
+    /// `list_corpora` cannot do this job. It orders newest-first, so a capture
+    /// landing mid-sweep shifts every later page down by one and exactly one
+    /// corpus is stepped over — by the sweep whose entire purpose is to pick up
+    /// what was left unfinished. A cursor over (created_at, id) is stable under
+    /// inserts and deletes alike; the pair is unique because ids are uuid v7.
+    pub async fn list_corpora_after(
+        &self,
+        after: Option<&(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<Corpus>> {
+        let (ts, id) = match after {
+            Some((ts, id)) => (*ts, id.as_str()),
+            None => (i64::MIN, ""),
+        };
+        let rows = sqlx::query(
+            "SELECT * FROM corpora
+             WHERE created_at > ? OR (created_at = ? AND id > ?)
+             ORDER BY created_at ASC, id ASC LIMIT ?",
+        )
+        .bind(ts)
+        .bind(ts)
+        .bind(id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
     pub async fn delete_corpus(&self, id: &str) -> Result<()> {
         let res = sqlx::query("DELETE FROM corpora WHERE id = ?")
             .bind(id)
@@ -372,6 +445,67 @@ mod tests {
         let got = s.get_corpus(&src.id).await.unwrap();
         assert_eq!(got.raw_text, "hello world");
         assert_eq!(got.title_hint.as_deref(), Some("greeting"));
+    }
+
+    #[tokio::test]
+    async fn a_second_insert_of_the_same_bytes_yields_the_stored_row() {
+        // The caller's duplicate check and this insert are two statements, and
+        // between them sits a scan over every stored signature. Losing that
+        // race must hand back the winner's row, not a UNIQUE-constraint error
+        // dressed up as a server fault.
+        let s = Store::memory().await.unwrap();
+        let sig = super::super::shingle::signature("the same text");
+        let first = s
+            .insert_corpus_with_signature("the same text", "web", None, sig.clone())
+            .await
+            .unwrap();
+        let second = s
+            .insert_corpus_with_signature("the same text", "mcp", Some("later"), sig)
+            .await
+            .unwrap();
+
+        let (Insertion::Created(a), Insertion::Existing(b)) = (first, second) else {
+            panic!("the second insert did not report the first one's row");
+        };
+        assert_eq!(a.id, b.id);
+        assert_eq!(b.origin, "web", "the loser overwrote the stored capture");
+        assert_eq!(s.list_corpora(10, 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_page_survives_a_capture_landing_between_pages() {
+        // Offset paging over a newest-first list steps over exactly one corpus
+        // per insertion, and the sweep that pages this way exists to find what
+        // was left unfinished.
+        let s = Store::memory().await.unwrap();
+        let mut expected = vec![];
+        for i in 0..6 {
+            expected.push(
+                s.insert_corpus(&format!("text {i}"), "web", None)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+
+        let mut seen = vec![];
+        let mut cursor: Option<(i64, String)> = None;
+        loop {
+            let page = s.list_corpora_after(cursor.as_ref(), 3).await.unwrap();
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.created_at, last.id.clone()));
+            seen.extend(page.iter().map(|c| c.id.clone()));
+            // A capture arriving mid-sweep, once.
+            if seen.len() == 3 {
+                s.insert_corpus("a capture mid-sweep", "web", None)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        for id in &expected {
+            assert!(seen.contains(id), "corpus {id} was stepped over: {seen:?}");
+        }
     }
 
     #[tokio::test]

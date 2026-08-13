@@ -9,6 +9,7 @@
 //! whatever documents the operator actually wants to search. What lives here is
 //! the shape of the files and the arithmetic over ranks.
 
+pub mod export;
 pub mod metrics;
 
 use anyhow::{Context, Result};
@@ -28,8 +29,9 @@ pub fn eval_dir() -> PathBuf {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrozenArtifact {
     pub id: String,
-    /// Corpus file this came from. Also what the per-source cap groups by, so
-    /// it has to survive the freeze.
+    /// The corpus this came from, by id. What the per-source cap groups by, so
+    /// it has to survive the freeze and it has to be unique — two captures of
+    /// one document share a title and are still two corpora.
     pub source: String,
     pub text: String,
     pub title: Option<String>,
@@ -71,6 +73,13 @@ pub fn save_artifacts(dir: &Path, artifacts: &[FrozenArtifact]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = artifacts_path(dir);
     let json = serde_json::to_string_pretty(artifacts)?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
+pub fn save_pairs(dir: &Path, pairs: &[EvalPair]) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = pairs_path(dir);
+    let json = serde_json::to_string_pretty(pairs)?;
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
 }
 

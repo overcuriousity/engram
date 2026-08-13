@@ -143,6 +143,8 @@ pub struct OidcClient {
     /// release. Rebuilding per call costs nothing (no I/O) and lets inference
     /// carry the type.
     metadata: openidconnect::core::CoreProviderMetadata,
+    /// The credential-bearing client: no redirects. The permissive one built
+    /// for discovery is deliberately not kept — see `discover`.
     http: openidconnect::reqwest::Client,
     cfg: OidcConfig,
 }
@@ -163,20 +165,33 @@ impl OidcClient {
             ));
         }
 
-        let http = openidconnect::reqwest::ClientBuilder::new()
-            // Nextcloud's documented nginx recipe 301s the bare .well-known
-            // path to /index.php/.well-known/...; issuer_url stays the bare
-            // domain, since that is what the discovery document itself
-            // declares as `issuer` and what ID tokens carry as `iss`. A bounded
-            // hop count, not zero: this still refuses to be walked anywhere
-            // unbounded, matching what a typical OIDC client allows by default.
+        // Two clients, because the two kinds of request carry different things.
+        //
+        // Discovery follows redirects: Nextcloud's documented nginx recipe 301s
+        // the bare .well-known path to /index.php/.well-known/..., while
+        // issuer_url stays the bare domain, since that is what the discovery
+        // document declares as `issuer` and what ID tokens carry as `iss`. The
+        // request is an unauthenticated GET, so a hop costs nothing but the
+        // hop; the count is bounded anyway.
+        let discovery_http = openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| Error::Validation(e.to_string()))?;
+
+        // Everything after discovery refuses to follow one. The token exchange
+        // POSTs `client_secret` and the authorization code, and on a 307/308
+        // reqwest replays method and body at the redirect target — so a
+        // provider that could be made to answer with a redirect would be
+        // handed our credentials for an arbitrary host. userinfo is on this
+        // client too: it bears the access token.
+        let http = openidconnect::reqwest::ClientBuilder::new()
+            .redirect(openidconnect::reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| Error::Validation(e.to_string()))?;
 
         let issuer = IssuerUrl::new(cfg.issuer_url.clone())
             .map_err(|e| Error::Validation(format!("issuer_url: {e}")))?;
-        let metadata = CoreProviderMetadata::discover_async(issuer, &http)
+        let metadata = CoreProviderMetadata::discover_async(issuer, &discovery_http)
             .await
             .map_err(|e| Error::Validation(format!("OIDC discovery failed: {e}")))?;
 

@@ -1,5 +1,6 @@
 use super::{
-    Completer, Embedder, ProposedArtifact, Reranker, SynthesisBudget, Synthesizer, prompt,
+    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
+    prompt,
 };
 use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
 use crate::error::{Error, Result};
@@ -86,6 +87,10 @@ impl HttpSynthesizer {
                 context_tokens: cfg.context_tokens,
                 max_output_tokens: cfg.max_output_tokens,
                 output_ratio: cfg.output_ratio,
+                context: crate::infer::context::ContextBudget {
+                    opening: cfg.context_opening_tokens,
+                    overlap: cfg.context_overlap_tokens,
+                },
             },
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
@@ -139,8 +144,8 @@ impl HttpSynthesizer {
 
 #[async_trait]
 impl Synthesizer for HttpSynthesizer {
-    async fn segment(&self, text: &str) -> Result<Vec<ProposedArtifact>> {
-        let user = prompt::user_prompt(text, 1, self.max_artifact_tokens);
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let user = prompt::user_prompt(input.core, 1, self.max_artifact_tokens, input.context);
         let first = self
             .chat(json!([
                 {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
@@ -457,6 +462,22 @@ pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The empty context every one of these tests wants: they exercise the
+    /// transport and the parser, not the windowing.
+    static EMPTY_CONTEXT: crate::infer::context::WindowContext =
+        crate::infer::context::WindowContext {
+            opening: None,
+            before: None,
+            after: None,
+        };
+
+    fn window(text: &str) -> SegmentInput<'_> {
+        SegmentInput {
+            core: text,
+            context: &EMPTY_CONTEXT,
+        }
+    }
     use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
     use crate::infer::{Completer, Embedder, Reranker, Synthesizer};
     use wiremock::matchers::{header, method, path};
@@ -474,6 +495,8 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             cooldown_secs: 0,
+            context_opening_tokens: 200,
+            context_overlap_tokens: 150,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {
@@ -504,7 +527,7 @@ mod tests {
             .await;
 
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
-        let out = c.segment("anything").await.unwrap();
+        let out = c.segment(window("anything")).await.unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("A"));
     }
@@ -531,7 +554,7 @@ mod tests {
             .await;
 
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
-        let out = c.segment("anything").await.unwrap();
+        let out = c.segment(window("anything")).await.unwrap();
         assert_eq!(out[0].text, "ok");
     }
 
@@ -548,7 +571,7 @@ mod tests {
 
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         assert!(matches!(
-            c.segment("x").await,
+            c.segment(window("x")).await,
             Err(crate::error::Error::MalformedLlmOutput(_))
         ));
     }
@@ -562,7 +585,7 @@ mod tests {
             .mount(&server)
             .await;
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
-        let e = c.segment("x").await.unwrap_err();
+        let e = c.segment(window("x")).await.unwrap_err();
         assert!(matches!(
             e,
             crate::error::Error::Inference { role: "chunk", .. }

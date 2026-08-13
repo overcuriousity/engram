@@ -144,4 +144,41 @@
     items[next].focus();
     e.preventDefault();
   });
+  // Judging has to cost about five seconds, or it will not happen. Digits pick
+  // an option, N/S/X take the three ways out. Ignored while a text field has
+  // focus, so typing in the assignment search does not fire a verdict.
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+    // Ahead of the card check, and not gated on one: the digit that has just
+    // been regretted is the one that judged the last event, and if it emptied
+    // the queue there is no card left to hang the shortcut off.
+    if (e.key.toLowerCase() === 'u') {
+      var undo = document.querySelector('.judge-undo');
+      if (undo) { e.preventDefault(); undo.click(); }
+      return;
+    }
+    var card = document.querySelector('.judge-card');
+    if (!card) return;
+
+    if (/^[1-9]$/.test(e.key)) {
+      // Disabled options are skipped, matching the badges: a deprecated or
+      // superseded candidate is shown at its place in the pool but carries no
+      // digit, and the numbering runs over the choosable ones without a gap.
+      var pick = card.querySelectorAll('.judge-option:not([disabled])')[Number(e.key) - 1];
+      if (pick) { e.preventDefault(); pick.click(); }
+      return;
+    }
+    // By name, never by position: the assign screen carries a judge-outs row of
+    // its own whose first button is an immediate gap verdict, and N landed on
+    // it whenever focus had left the search box — opening a "Read it in full"
+    // is enough. Only the buttons that declare a key answer to one.
+    var key = e.key.toLowerCase();
+    if (/^[nsx]$/.test(key)) {
+      var out = card.querySelector('.judge-outs button[data-key="' + key + '"]');
+      if (out) { e.preventDefault(); out.click(); }
+    }
+  });
 })();

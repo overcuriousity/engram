@@ -10,6 +10,48 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub consolidate: ConsolidateConfig,
+    #[serde(default)]
+    pub feedback: FeedbackConfig,
+}
+
+/// Recording real searches so they can be judged later.
+///
+/// The queries a benchmark needs cannot be written from memory: phrased while
+/// looking at an artifact, they reuse its vocabulary, and every retrieval system
+/// passes such a pair. Only a search made in earnest, before anything came back,
+/// is worth scoring against.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct FeedbackConfig {
+    /// Whether real searches are recorded at all. Off by default: the wording of
+    /// a query is personal, and nothing here is useful to anyone but the
+    /// operator.
+    pub enabled: bool,
+    /// Candidates stored per event. Wider than the answer on purpose — search
+    /// over-fetches anyway, so the extra rows are free, and they are what lets a
+    /// buried hit be confirmed later.
+    pub candidates: usize,
+    /// Window in which a query that extends the previous one replaces it
+    /// instead of starting a new event. `0` turns folding off.
+    pub coalesce_secs: i64,
+    /// Days captured searches are kept. `0` keeps them forever.
+    pub retain_days: i64,
+    /// How often the retention sweep runs. Hours rather than minutes because
+    /// `retain_days` is the only thing it enforces: a window measured in days
+    /// does not need checking more than a few times a day.
+    pub sweep_hours: u64,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidates: 20,
+            coalesce_secs: 15,
+            retain_days: 0,
+            sweep_hours: 6,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -189,6 +231,24 @@ pub struct SynthesizeRole {
     pub cooldown_secs: u64,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Tokens of the document's verbatim opening prepended to every window, so
+    /// an artifact from deep in a long document still knows what product and
+    /// version it belongs to. Zero disables it.
+    #[serde(default = "default_context_opening_tokens")]
+    pub context_opening_tokens: usize,
+    /// Tokens of each neighbouring window carried on both sides, so a window
+    /// that opens mid-procedure can still resolve what its pronouns point at.
+    /// Zero disables it.
+    #[serde(default = "default_context_overlap_tokens")]
+    pub context_overlap_tokens: usize,
+}
+
+fn default_context_opening_tokens() -> usize {
+    200
+}
+
+fn default_context_overlap_tokens() -> usize {
+    150
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -306,10 +366,52 @@ impl Config {
                     .list_separator(","),
             )
             .build()?;
-        let cfg: Config = raw.try_deserialize()?;
+        let mut cfg: Config = raw.try_deserialize()?;
+        cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         Ok(cfg)
+    }
+
+    /// Values that would make a feature quietly useless, put back rather than
+    /// refused.
+    ///
+    /// `feedback.candidates = 0` stores an empty pool for every captured
+    /// search: every card renders with nothing to choose, every judgement is
+    /// forced through "none of these", and every one of those is recorded as a
+    /// find — a ranking failure that never happened, permanently in the
+    /// dataset. Nobody types a zero meaning that. It goes back to the default
+    /// with a line in the log rather than stopping a server over a number that
+    /// only affects an optional feature.
+    ///
+    /// The ceiling is the other end of the same argument. A captured search
+    /// fetches at least `candidates` vectors whatever the caller asked for, so
+    /// the number is the width of every search through a captured door, not
+    /// just the depth of the pool stored behind it. Left unbounded, a four-digit
+    /// value read as "keep plenty" turns every API call into a four-digit vector
+    /// fetch, and nothing in the file says so. The ceiling is what the widest
+    /// legal search already costs: `MAX_LIMIT` results over-fetched by the
+    /// candidate multiplier.
+    fn normalize(&mut self) {
+        if self.feedback.candidates == 0 {
+            let d = FeedbackConfig::default().candidates;
+            self.feedback.candidates = d;
+            tracing::warn!(
+                using = d,
+                "feedback.candidates = 0 would store an empty pool for every captured search; \
+                 using the default"
+            );
+        }
+        let ceiling = crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER;
+        if self.feedback.candidates > ceiling {
+            tracing::warn!(
+                configured = self.feedback.candidates,
+                using = ceiling,
+                "feedback.candidates is the fetch width of every captured search; \
+                 capping it at the widest ordinary search"
+            );
+            self.feedback.candidates = ceiling;
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.
@@ -406,6 +508,49 @@ mod tests {
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
+    }
+
+    #[test]
+    fn a_zero_candidate_pool_is_put_back_to_the_default() {
+        // Zero would store an empty pool for every captured search: nothing to
+        // choose on any card, so every judgement is forced through "none of
+        // these" and recorded as a find that never happened.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 0\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.feedback.candidates,
+            FeedbackConfig::default().candidates
+        );
+        assert!(cfg.feedback.enabled, "the rest of the section was dropped");
+    }
+
+    #[test]
+    fn an_oversized_candidate_pool_is_capped_at_the_widest_ordinary_search() {
+        // A captured search fetches at least this many vectors whatever the
+        // caller asked for, so the number is the width of every UI, API and MCP
+        // search — not just the depth of the pool stored behind it. Four digits
+        // here silently made every API call a four-digit vector fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 2000\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.feedback.candidates,
+            crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn a_deliberate_candidate_count_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
+        assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {

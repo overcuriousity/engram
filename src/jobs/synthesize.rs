@@ -1,7 +1,7 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::segment_tokens;
-use crate::infer::split::{segment_text, split_into_segments};
+use crate::infer::split::split_into_segments;
 use crate::store::artifacts::{CorpusSpan, NewArtifact};
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
@@ -11,6 +11,45 @@ use crate::store::segments::SegmentState;
 /// real prompt rather than guessed.
 fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
+}
+
+/// Where an artifact sits in the source document.
+///
+/// Asking the model for `corpus_lines`, checking the answer, and having a third
+/// outcome for a claim that fails the check produced a flag on the artifact and
+/// a button offering to re-synthesise an entire segment over a line number.
+/// Since `locate_span` finds an artifact's own text even where the source is
+/// hard-wrapped and synthesis reflowed it, the claim is worth what it is: a
+/// hint for the case where nothing matches at all. Nothing here can disagree
+/// with the artifact, so nothing here has anything to report.
+///
+/// `body` is the window without its carried heading — text prepended from
+/// further up the document, occupying none of the window's own lines. Both
+/// paths have to discount it: `locate_span` because it searches `body`, and the
+/// hint because the model numbered its lines from the top of what it was shown,
+/// and line 1 of that is the carried heading. Correcting only the first left
+/// every hinted span in a continuing section `carry_lines` too far down.
+fn resolve_span(
+    artifact: &str,
+    body: &str,
+    w: &crate::store::segments::Segment,
+    hint: Option<(i64, i64)>,
+) -> (i64, i64) {
+    let shift = w.start_line - 1 - w.carry_lines;
+    let hinted = hint.map(|(a, b)| (a + shift, b + shift));
+    let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
+        .or(hinted)
+        .unwrap_or((w.start_line, w.end_line));
+    // A span outside its own window would render as the wrong text.
+    let clamped = (
+        span.0.clamp(w.start_line, w.end_line),
+        span.1.clamp(w.start_line, w.end_line),
+    );
+    if clamped.0 <= clamped.1 {
+        clamped
+    } else {
+        (w.start_line, w.end_line)
+    }
 }
 
 /// LLM-assisted segmentation, one window at a time.
@@ -39,14 +78,73 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let spans: Vec<(i64, i64)> = windows.iter().map(|w| (w.start_line, w.end_line)).collect();
-    core.store.upsert_segments(corpus_id, &spans).await?;
+    let rows: Vec<crate::store::segments::NewSegment<'_>> = windows
+        .iter()
+        .map(|w| crate::store::segments::NewSegment {
+            start_line: w.start_line,
+            end_line: w.end_line,
+            text: w.text.as_str(),
+            carry_lines: w.carry_lines,
+        })
+        .collect();
+    core.store.upsert_segments(corpus_id, &rows).await?;
+
+    // Every window of the corpus, in order, for the neighbouring context. The
+    // rows are authoritative rather than the freshly split `windows`: a corpus
+    // whose windows were written by an earlier run keeps the text that run
+    // produced, which is what makes a retry reproduce the same prompt.
+    let all = core.store.segments_for_corpus(corpus_id).await?;
+    let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
 
     for w in core.store.pending_segments(corpus_id).await? {
         core.store.bump_segment_attempts(corpus_id, w.idx).await?;
-        let text = segment_text(&src.raw_text, w.start_line, w.end_line);
+        // The stored text, not a re-derivation from the line range: line
+        // numbers cannot address a unit smaller than a line, so a corpus with
+        // no newlines re-derived to the whole document for window 0 and to
+        // nothing at all for every window after it.
+        let text = w.text.clone();
 
-        let mut chunks = core.synthesizer.segment(&text).await?;
+        // The failure this catches is a job retrying an over-context window
+        // against the endpoint with growing backoff and no terminal state, so
+        // it is worth an assertion even though it cannot fire today.
+        //
+        // The ceiling is twice the budget rather than the budget itself,
+        // because that is what the splitter actually promises: it flushes once
+        // the buffer has *reached* the budget, and `flush` then prepends the
+        // carried heading, so a window legitimately lands somewhat over. Twice
+        // is the bound `text_with_no_structure_still_splits_by_line_cap` has
+        // always asserted. What must never happen is unbounded — the corpus
+        // that came back fifteen times its budget.
+        let window_budget = segment_tokens(core.synthesizer.budget(), prompt_overhead(core));
+        let window_tokens = core.counter.count(&text);
+        debug_assert!(
+            window_tokens <= window_budget * 2,
+            "window {} is {window_tokens} tokens against a budget of {window_budget}",
+            w.idx
+        );
+        if window_tokens > window_budget * 2 {
+            tracing::error!(
+                corpus_id,
+                window = w.idx,
+                window_tokens,
+                window_budget,
+                "window is far over its budget; the splitter did not shrink it"
+            );
+        }
+
+        let ctx = crate::infer::context::WindowContext::build(
+            &all_texts,
+            w.idx as usize,
+            core.synthesizer.budget().context,
+            &core.counter,
+        );
+        let mut chunks = core
+            .synthesizer
+            .segment(crate::infer::SegmentInput {
+                core: &text,
+                context: &ctx,
+            })
+            .await?;
         // The model was told to keep commands, paths and flags verbatim. If it
         // did not, one more attempt usually gets it right; a second failure is
         // stored with a flag rather than dropped, because a visible warning
@@ -57,36 +155,43 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
                 window = w.idx,
                 "literals missing; re-segmenting once"
             );
-            chunks = core.synthesizer.segment(&text).await?;
+            chunks = core
+                .synthesizer
+                .segment(crate::infer::SegmentInput {
+                    core: &text,
+                    context: &ctx,
+                })
+                .await?;
+        }
+
+        if !ctx.is_empty() {
+            let before = chunks.len();
+            chunks.retain(|c| !from_context_only(&c.text, &text, &ctx));
+            let dropped = before - chunks.len();
+            if dropped > 0 {
+                // A rising count here means the configured model is ignoring
+                // the prompt's context-only instruction. Better as a number in
+                // the log than as duplicates in the base.
+                tracing::info!(
+                    corpus_id,
+                    window = w.idx,
+                    dropped,
+                    "artifacts drawn from context blocks were dropped"
+                );
+            }
         }
 
         // The span is ours to compute.
         //
-        // Asking the model for `corpus_lines`, checking the answer, and having
-        // a third outcome for a claim that fails the check produced a flag on
-        // the artifact and a button offering to re-synthesise an entire segment
-        // over a line number. Since `locate_span` finds an artifact's own text
-        // even where the source is hard-wrapped and synthesis reflowed it, the
-        // claim is worth what it is: a hint for the case where nothing matches
-        // at all. Nothing here can disagree with the artifact, so nothing here
-        // has anything to report.
+        // Without the carried heading, which is prepended text from further up
+        // the document and occupies none of the window's lines.
+        let body: String = text
+            .lines()
+            .skip(w.carry_lines as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
         for c in &mut chunks {
-            let hinted = c
-                .corpus_lines
-                .map(|(a, b)| (a + w.start_line - 1, b + w.start_line - 1));
-            let span = crate::infer::verify::locate_span(&c.text, &text, w.start_line)
-                .or(hinted)
-                .unwrap_or((w.start_line, w.end_line));
-            // A span outside its own window would render as the wrong text.
-            let clamped = (
-                span.0.clamp(w.start_line, w.end_line),
-                span.1.clamp(w.start_line, w.end_line),
-            );
-            c.corpus_lines = Some(if clamped.0 <= clamped.1 {
-                clamped
-            } else {
-                (w.start_line, w.end_line)
-            });
+            c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
         }
 
         let written =
@@ -133,6 +238,27 @@ async fn write_segment_artifacts(
         }
     }
     core.store.insert_artifacts(corpus_id, &new).await
+}
+
+/// Did this artifact come from a context block rather than from the window?
+///
+/// The prompt says not to extract from context, and a small local model obeys
+/// that unevenly, so the check is structural. Three outcomes matter and only
+/// the middle one is a duplicate: located in the window, keep; located only in
+/// context, drop, because the window that owns the material will emit it
+/// properly; located nowhere, keep — that is an artifact the model reworded
+/// hard, which flag_unverified has always handled and which must not start
+/// silently disappearing.
+fn from_context_only(
+    text: &str,
+    core_text: &str,
+    ctx: &crate::infer::context::WindowContext,
+) -> bool {
+    if crate::infer::verify::locate_span(text, core_text, 1).is_some() {
+        return false;
+    }
+    ctx.blocks()
+        .any(|b| crate::infer::verify::locate_span(text, b, 1).is_some())
 }
 
 /// Did any proposed chunk lose a literal its window contains?
@@ -393,6 +519,203 @@ mod tests {
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+
+    /// A budget with room for several windows and an output ceiling that never
+    /// binds, so the context blocks are what shape the windowing.
+    fn context_budget(opening: usize, overlap: usize) -> crate::infer::SynthesisBudget {
+        crate::infer::SynthesisBudget {
+            context_tokens: 2000,
+            max_output_tokens: 100_000,
+            output_ratio: 1.0,
+            context: crate::infer::context::ContextBudget { opening, overlap },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_is_never_sent_over_its_own_budget() {
+        // The guard is a can't-happen check: split_into_segments now floors
+        // window size. It exists because the failure it catches is a job that
+        // spins against the endpoint forever, and a debug_assert turns that
+        // into a test failure instead of a production incident.
+        let core = crate::core::test_support::test_core().await;
+        let budget = segment_tokens(core.synthesizer.budget(), prompt_overhead(&core));
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        // Ordinary prose, and the case that has no line boundary to cut on at
+        // all — the second is what the floor in split_into_segments is for, so
+        // it is the one that fails if that floor is ever removed.
+        for raw in [lines.join("\n"), "word ".repeat(8000)] {
+            let src = core.store.insert_corpus(&raw, "web", None).await.unwrap();
+
+            run(&core, &src.id).await.unwrap();
+
+            let segments = core.store.segments_for_corpus(&src.id).await.unwrap();
+            assert!(!segments.is_empty(), "a corpus must produce windows");
+            for s in segments {
+                // The stored text, which is what the window is actually sent
+                // as. Re-deriving it from the line range is the bug this
+                // column exists to close.
+                assert!(
+                    core.counter.count(&s.text) <= budget * 2,
+                    "window {} is {} tokens against a budget of {budget}",
+                    s.idx,
+                    core.counter.count(&s.text)
+                );
+                assert!(!s.text.is_empty(), "window {} was stored empty", s.idx);
+            }
+        }
+    }
+
+    #[test]
+    fn an_artifact_found_only_in_context_is_recognised() {
+        use crate::infer::context::WindowContext;
+
+        let core_text = "the window says something quite specific here\nand more of it";
+        let ctx = WindowContext {
+            opening: Some("the document opening states the version clearly".into()),
+            before: None,
+            after: Some("the following window describes another procedure".into()),
+        };
+
+        // Drawn from the window itself: keep.
+        assert!(!from_context_only(
+            "the window says something quite specific here",
+            core_text,
+            &ctx
+        ));
+        // Drawn from a context block and nowhere in the window: drop.
+        assert!(from_context_only(
+            "the following window describes another procedure",
+            core_text,
+            &ctx
+        ));
+        // Located nowhere at all — a heavily reworded artifact. Keep it, so it
+        // reaches flag_unverified the way it does today instead of vanishing.
+        assert!(!from_context_only(
+            "an entirely reworded statement about unrelated matters",
+            core_text,
+            &ctx
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_extracts_from_context_does_not_duplicate_artifacts() {
+        use crate::infer::fake::GreedySynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesizer = std::sync::Arc::new(GreedySynthesizer {
+            budget: context_budget(30, 20),
+        });
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let written = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        let mut texts: Vec<&str> = written.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        let before = texts.len();
+        texts.dedup();
+        assert_eq!(
+            texts.len(),
+            before,
+            "the same line was stored as an artifact more than once"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_window_after_the_first_is_given_the_document_opening() {
+        use crate::infer::fake::RecordingSynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
+        core.synthesizer = rec.clone();
+
+        let mut lines = vec!["# Backup Guide".to_string(), "PBS 3.x on Debian 12.".into()];
+        for i in 0..400 {
+            lines.push(format!(
+                "body line {i} with enough words to cost real tokens"
+            ));
+        }
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let seen = rec.seen.lock().unwrap();
+        assert!(seen.len() > 1, "the fixture must produce several windows");
+        assert_eq!(
+            seen[0].1.opening, None,
+            "window 0 already holds the opening"
+        );
+        assert_eq!(seen[0].1.before, None);
+        for (i, (_, ctx)) in seen.iter().enumerate().skip(1) {
+            assert!(
+                ctx.opening.as_deref().unwrap().contains("# Backup Guide"),
+                "window {i} lost the document opening"
+            );
+            assert!(
+                ctx.before.is_some(),
+                "window {i} lost its preceding context"
+            );
+        }
+        assert_eq!(
+            seen.last().unwrap().1.after,
+            None,
+            "the last window has nothing after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_windows_context_is_the_text_of_its_neighbours() {
+        use crate::infer::fake::RecordingSynthesizer;
+
+        let mut core = crate::core::test_support::test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
+        core.synthesizer = rec.clone();
+
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+
+        run(&core, &src.id).await.unwrap();
+
+        let seen = rec.seen.lock().unwrap();
+        // Window 1's preceding context must be the literal end of window 0's
+        // own text, and its following context the literal start of window 2's.
+        let w0_tail_line = seen[0].0.lines().last().unwrap();
+        assert!(
+            seen[1].1.before.as_deref().unwrap().ends_with(w0_tail_line),
+            "preceding context is not the previous window's tail"
+        );
+        let w2_head_line = seen[2].0.lines().next().unwrap();
+        assert!(
+            seen[1]
+                .1
+                .after
+                .as_deref()
+                .unwrap()
+                .starts_with(w2_head_line),
+            "following context is not the next window's head"
+        );
+    }
 
     #[tokio::test]
     async fn synthesis_names_the_corpus() {
@@ -1025,6 +1348,109 @@ Then run sync.";
             core.store.get_corpus(&src.id).await.unwrap().status,
             CorpusStatus::Failed
         );
+    }
+
+    fn window(start_line: i64, end_line: i64, carry_lines: i64) -> crate::store::segments::Segment {
+        crate::store::segments::Segment {
+            corpus_id: "c".into(),
+            idx: 1,
+            start_line,
+            end_line,
+            text: String::new(),
+            carry_lines,
+            state: SegmentState::Pending,
+            attempts: 0,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_hinted_span_discounts_the_carried_heading_too() {
+        // The window covers source lines 50-60 and opens with one heading
+        // carried from further up, so the model's line 2 is source line 50.
+        // The artifact is reworded past recognition, which is exactly when the
+        // hint is all there is — and the path that used it was the one place
+        // the carried heading was still being counted.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span(
+                "nothing here matches the source at all",
+                body,
+                &w,
+                Some((2, 3))
+            ),
+            (50, 51)
+        );
+    }
+
+    #[test]
+    fn a_window_carrying_nothing_reads_the_hint_straight_through() {
+        let w = window(50, 60, 0);
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
+            (51, 52)
+        );
+    }
+
+    #[test]
+    fn the_artifacts_own_text_beats_the_hint() {
+        // `locate_span` reads the artifact; the hint is only a claim about it.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span("second body line", body, &w, Some((9, 9))),
+            (51, 51)
+        );
+    }
+
+    #[test]
+    fn a_hint_pointing_outside_the_window_falls_back_to_the_whole_window() {
+        let w = window(50, 60, 1);
+        // Discounting the carry can push a hint of line 1 — the heading
+        // itself — below the window's first line. Clamping keeps it inside.
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((1, 1))),
+            (50, 50)
+        );
+        assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
+    }
+
+    #[tokio::test]
+    async fn a_carried_heading_does_not_shift_the_spans_of_its_window() {
+        // A window that continues a section opens with the heading copied from
+        // further up the document, and that line occupies none of the window's
+        // own lines. Measuring an artifact's offset against it put every span in
+        // every continuing window one line too far down the source.
+        let core = test_core().await;
+        let mut lines = vec!["## Section one".to_string(), String::new()];
+        for i in 0..400 {
+            lines.push(format!("paragraph number {i} with some filler text"));
+            lines.push(String::new());
+        }
+        let body = lines.join("\n");
+        let out = core.ingest(&body, "web", None).await.unwrap();
+
+        run(&core, &out.id).await.unwrap();
+
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(
+            windows.iter().any(|w| w.carry_lines == 1),
+            "the fixture must produce windows that carry the heading"
+        );
+
+        let raw = core.store.get_corpus(&out.id).await.unwrap().raw_text;
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            let needle = c.text.lines().next_back().unwrap();
+            let span = c.corpus_span.expect("every artifact keeps a span");
+            let claimed = crate::infer::split::segment_text(&raw, span.start_line, span.end_line);
+            assert!(
+                claimed.contains(needle),
+                "artifact claims lines {}-{}, which read {claimed:?}, not {needle:?}",
+                span.start_line,
+                span.end_line
+            );
+        }
     }
 
     #[tokio::test]

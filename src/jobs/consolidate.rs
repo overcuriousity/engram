@@ -188,6 +188,10 @@ async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usi
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
+    // Retention used to ride along here. It has its own ticker now
+    // (`spawn_retention_ticker`): riding along meant that switching duplicate
+    // hygiene off silently switched off the operator's instruction about how
+    // long their query log is kept, which is not consolidation's call to make.
     let cfg = &core.consolidate;
     if !cfg.enabled {
         return Ok(Outcome::default());
@@ -373,8 +377,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         // The prefilter used to run only when the judge was enabled, which it
         // is not by default, so the cheap answer was reached only by bases
         // already paying for the expensive one.
+        // Both writes below warn and carry on, like the supersede calls above:
+        // a pair is one row about two artifacts, and a transient BUSY on it is
+        // no reason to abandon the rest of the band, the judge pass and the
+        // sweep's tally. The sweep re-finds the pair next run.
         if !crate::infer::facts::may_disagree(&a.text, &b.text) {
-            if core
+            match core
                 .store
                 .record_settled_pair(
                     &p.a,
@@ -382,17 +390,29 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                     p.score,
                     crate::store::pairs::PairState::NoConflict,
                 )
-                .await?
+                .await
             {
-                out.closed += 1;
-                tracing::debug!(a = %p.a, b = %p.b, score = p.score, "pair states nothing differently");
+                Ok(true) => {
+                    out.closed += 1;
+                    tracing::debug!(a = %p.a, b = %p.b, score = p.score, "pair states nothing differently");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not file a settled pair; it will be re-examined next sweep");
+                }
             }
             continue;
         }
 
-        if core.store.record_pair(&p.a, &p.b, p.score).await? {
-            out.queued += 1;
-            tracing::info!(a = %p.a, b = %p.b, score = p.score, "queued a pair for review");
+        match core.store.record_pair(&p.a, &p.b, p.score).await {
+            Ok(true) => {
+                out.queued += 1;
+                tracing::info!(a = %p.a, b = %p.b, score = p.score, "queued a pair for review");
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not queue a pair for review; it will be re-examined next sweep");
+            }
         }
     }
 

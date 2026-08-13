@@ -37,9 +37,27 @@ pub struct Segment {
     pub idx: i64,
     pub start_line: i64,
     pub end_line: i64,
+    /// The window's text, as the splitter produced it. Authoritative: the line
+    /// range describes where it came from, but cannot reproduce it when the
+    /// splitter had to cut inside a line.
+    pub text: String,
+    /// Leading lines of `text` that lie outside `start_line..=end_line`.
+    pub carry_lines: i64,
     pub state: SegmentState,
     pub attempts: i64,
     pub last_error: Option<String>,
+}
+
+/// One window as the splitter produced it, on its way into the table.
+///
+/// A struct rather than a tuple because the fourth number is the one that means
+/// nothing on its own: `(1, 40, text, 1)` cannot be read at a call site.
+#[derive(Debug, Clone)]
+pub struct NewSegment<'a> {
+    pub start_line: i64,
+    pub end_line: i64,
+    pub text: &'a str,
+    pub carry_lines: i64,
 }
 
 fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
@@ -48,6 +66,8 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
         idx: r.get("idx"),
         start_line: r.get("start_line"),
         end_line: r.get("end_line"),
+        text: r.get("text"),
+        carry_lines: r.get("carry_lines"),
         state: SegmentState::parse(r.get::<String, _>("state").as_str()),
         attempts: r.get("attempts"),
         last_error: r.get("last_error"),
@@ -55,23 +75,77 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
 }
 
 impl Store {
-    /// Record the windowing of a source. Idempotent by design: a retried job
-    /// re-derives the same spans and must not undo the windows that finished.
-    pub async fn upsert_segments(&self, corpus_id: &str, spans: &[(i64, i64)]) -> Result<()> {
+    /// Record the windowing of a source.
+    ///
+    /// A corpus that has finished any window keeps the split it started with,
+    /// whatever the current token budget would produce. The two cannot be
+    /// mixed: a window that finished holds the text its artifacts were written
+    /// from and cannot be re-derived without orphaning them, so a re-split
+    /// around it moves only the boundaries it does not own. Window 0 stays
+    /// `done` at lines 1-100 while window 1 is rewritten as 91-180, and the
+    /// overlap is synthesised twice — or, shifted the other way, the gap
+    /// between them is never synthesised at all. Neither is visible afterwards.
+    ///
+    /// So the split is settled by the first window to write anything. Until
+    /// then it is
+    /// rewritten freely, and windows the new split no longer reaches are
+    /// dropped — otherwise a corpus that never started carries stale text into
+    /// the model and queues surplus windows forever.
+    pub async fn upsert_segments(&self, corpus_id: &str, windows: &[NewSegment<'_>]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        for (idx, (start, end)) in spans.iter().enumerate() {
+
+        let finished: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM segments WHERE corpus_id = ? AND state = 'done'",
+        )
+        .bind(corpus_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        // Owning artifacts settles the split too, not just being marked `done`.
+        // `write_segment_artifacts` commits the artifacts and only then sets the
+        // state, so a process killed between the two leaves a window that owns
+        // artifacts while still reading `pending` — and `done` alone would let
+        // the split move out from under it. A window that produced no chunks is
+        // why the state is still consulted: it owns nothing and has still
+        // finished.
+        let owned: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifacts WHERE corpus_id = ? AND segment_idx IS NOT NULL",
+        )
+        .bind(corpus_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if finished > 0 || owned > 0 {
+            return Ok(());
+        }
+
+        for (idx, w) in windows.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO segments (corpus_id, idx, start_line, end_line)
-                 VALUES (?, ?, ?, ?)
-                 ON CONFLICT(corpus_id, idx) DO NOTHING",
+                "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(corpus_id, idx) DO UPDATE SET
+                   start_line = excluded.start_line,
+                   end_line = excluded.end_line,
+                   text = excluded.text,
+                   carry_lines = excluded.carry_lines",
             )
             .bind(corpus_id)
             .bind(idx as i64)
-            .bind(start)
-            .bind(end)
+            .bind(w.start_line)
+            .bind(w.end_line)
+            .bind(w.text)
+            .bind(w.carry_lines)
             .execute(&mut *tx)
             .await?;
         }
+
+        // Windows past the end of the new split. None of them owns an artifact:
+        // the early return above leaves only corpora where no window has written
+        // one, whatever state the rows are in.
+        sqlx::query("DELETE FROM segments WHERE corpus_id = ? AND idx >= ?")
+            .bind(corpus_id)
+            .bind(windows.len() as i64)
+            .execute(&mut *tx)
+            .await?;
+
         tx.commit().await?;
         Ok(())
     }
@@ -185,14 +259,30 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
+    fn seg(start_line: i64, end_line: i64, text: &str) -> NewSegment<'_> {
+        NewSegment {
+            start_line,
+            end_line,
+            text,
+            carry_lines: 0,
+        }
+    }
+
     #[tokio::test]
     async fn windows_are_upserted_once_and_resume_reads_only_the_pending_ones() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
 
-        s.upsert_segments(&src.id, &[(1, 10), (11, 20), (21, 30)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 10, "window 0"),
+                seg(11, 20, "window 1"),
+                seg(21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
         assert_eq!(s.segments_for_corpus(&src.id).await.unwrap().len(), 3);
 
         s.set_segment_state(&src.id, 0, SegmentState::Done, None)
@@ -200,9 +290,16 @@ mod tests {
             .unwrap();
 
         // A second call must not reset the window that already finished.
-        s.upsert_segments(&src.id, &[(1, 10), (11, 20), (21, 30)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 10, "window 0"),
+                seg(11, 20, "window 1"),
+                seg(21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
 
         let pending = s.pending_segments(&src.id).await.unwrap();
         assert_eq!(pending.len(), 2);
@@ -211,12 +308,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_corpus_that_never_started_is_re_split_and_the_surplus_dropped() {
+        // The token budget can change under a corpus — the context blocks now
+        // subtract from it — and the old windowing then survived as text no
+        // splitter would produce, sent to the model as though it were current,
+        // with the windows past the new end queued forever.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 10, "window 0"),
+                seg(11, 20, "window 1"),
+                seg(21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        s.upsert_segments(
+            &src.id,
+            &[seg(1, 15, "wider window 0"), seg(16, 30, "wider window 1")],
+        )
+        .await
+        .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 2, "the surplus window was left queued");
+        assert_eq!(w[0].text, "wider window 0");
+        assert_eq!(w[1].start_line, 16);
+    }
+
+    #[tokio::test]
+    async fn a_split_is_settled_by_the_first_window_to_finish() {
+        // Re-splitting around a done window moves only the boundaries it does
+        // not own. Here the budget shrank: window 0 stays done at 1-10, and a
+        // re-split would leave window 1 starting at 16 — so source lines 11-15
+        // would be synthesised by nothing, silently and unrecoverably. The
+        // opposite drift duplicates instead. Neither is visible afterwards, so
+        // the split stops moving once any of it has been acted on.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 10, "window 0"),
+                seg(11, 20, "window 1"),
+                seg(21, 30, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
+        s.set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+
+        s.upsert_segments(
+            &src.id,
+            &[seg(1, 15, "wider window 0"), seg(16, 30, "wider window 1")],
+        )
+        .await
+        .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 3, "the old split must survive intact");
+        assert_eq!(w[0].text, "window 0");
+        assert_eq!(
+            (w[1].start_line, w[1].end_line),
+            (11, 20),
+            "the window after a finished one must still start where that one ended"
+        );
+        assert_eq!(w[2].text, "window 2");
+    }
+
+    #[tokio::test]
+    async fn a_failed_window_does_not_settle_the_split() {
+        // Failure leaves no artifacts behind, so there is nothing for a new
+        // split to orphan. Only a window that produced something settles it.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
+            .await
+            .unwrap();
+        s.set_segment_state(&src.id, 0, SegmentState::Failed, Some("endpoint down"))
+            .await
+            .unwrap();
+
+        s.upsert_segments(&src.id, &[seg(1, 20, "one wide window")])
+            .await
+            .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].text, "one wide window");
+    }
+
+    #[tokio::test]
     async fn progress_counts_done_and_failed_as_resolved() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5), (6, 10), (11, 15)])
-            .await
-            .unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                seg(1, 5, "window 0"),
+                seg(6, 10, "window 1"),
+                seg(11, 15, "window 2"),
+            ],
+        )
+        .await
+        .unwrap();
 
         s.set_segment_state(&src.id, 0, SegmentState::Done, None)
             .await
@@ -234,7 +434,9 @@ mod tests {
     async fn attempts_accumulate_and_a_reset_clears_them() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5)]).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 5, "window 0")])
+            .await
+            .unwrap();
 
         assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 1);
         assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 2);
@@ -250,10 +452,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_window_that_wrote_artifacts_settles_the_split_before_it_is_done() {
+        // `write_segment_artifacts` commits the artifacts and only then marks
+        // the window `done`, so a process killed between the two leaves a
+        // window that owns artifacts while still reading `pending`. Judged on
+        // state alone, the resume re-split that follows would rewrite the
+        // boundaries under it — and, if the new split were shorter, delete the
+        // row while leaving its artifacts in the base with no window that will
+        // ever replace them.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
+            .await
+            .unwrap();
+        let a = crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: "what window 1 produced".into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(1),
+            caveats: vec![],
+        };
+        s.insert_artifacts(&src.id, &[a]).await.unwrap();
+
+        s.upsert_segments(&src.id, &[seg(1, 20, "one wide window")])
+            .await
+            .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 2, "the split moved out from under an artifact");
+        assert_eq!(w[1].text, "window 1");
+        assert_eq!(
+            s.artifact_ids_for_segment(&src.id, 1).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_a_source_cascades_to_its_windows() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.upsert_segments(&src.id, &[(1, 5)]).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 5, "window 0")])
+            .await
+            .unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.segments_for_corpus(&src.id).await.unwrap().is_empty());
     }

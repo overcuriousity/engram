@@ -31,6 +31,9 @@ impl<T: Template> IntoResponse for HtmlTemplate<T> {
 #[template(path = "login.html")]
 struct LoginTemplate {
     theme: String,
+    /// Always `None`: the sign-in page has no nav, and a count of what is
+    /// waiting inside is not something to tell someone who is still outside.
+    judge_pending: Option<i64>,
     oidc: bool,
     error: Option<String>,
 }
@@ -56,6 +59,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
             }
             Ok(HtmlTemplate(LoginTemplate {
                 theme: "light".into(),
+                judge_pending: None,
                 oidc: true,
                 error: None,
             })
@@ -63,6 +67,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
         }
         AuthMode::Local => Ok(HtmlTemplate(LoginTemplate {
             theme: "light".into(),
+            judge_pending: None,
             oidc: false,
             error: None,
         })
@@ -90,6 +95,7 @@ async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> R
             StatusCode::UNAUTHORIZED,
             HtmlTemplate(LoginTemplate {
                 theme: "light".into(),
+                judge_pending: None,
                 oidc: false,
                 error: Some("Incorrect username or password.".into()),
             }),

@@ -1,7 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::corpora::{CorpusStatus, NearDuplicate, content_hash};
+use crate::store::corpora::{CorpusStatus, Insertion, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
 use crate::store::now;
 
@@ -82,10 +82,29 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
-        let src = self
+        let src = match self
             .store
             .insert_corpus_with_signature(text, origin, title_hint, sig)
-            .await?;
+            .await?
+        {
+            Insertion::Created(src) => src,
+            // Another capture of the same bytes landed while this one was
+            // scanning for near-duplicates. That scan reads every stored
+            // signature, so the window is wide enough to hit in practice — a
+            // double-submitted form is enough. The other writer owns the row
+            // and has already queued whatever it queued; saying "duplicate" is
+            // both true and the same answer this call would have given a
+            // moment earlier.
+            Insertion::Existing(existing) => {
+                tracing::info!(corpus_id = %existing.id, "concurrent duplicate ingest, returning the stored source");
+                return Ok(IngestOutcome {
+                    id: existing.id,
+                    status: existing.status,
+                    duplicate: true,
+                    near_duplicate: None,
+                });
+            }
+        };
 
         match &near {
             // Parked. Synthesis is the expensive stage and this text may not
@@ -890,6 +909,26 @@ mod tests {
         let b = core.ingest("same words", "mcp", None).await.unwrap();
         assert_eq!(a.id, b.id);
         assert!(b.duplicate);
+        assert_eq!(core.store.list_corpora(10, 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn two_captures_of_the_same_text_at_once_both_get_an_answer() {
+        // The duplicate check and the insert are separated by a scan over every
+        // stored signature, so a double-submitted form is enough to have both
+        // calls pass the check. The loser used to hit the UNIQUE constraint and
+        // surface as a 500 on a capture that was, in fact, a duplicate.
+        let core = test_core().await;
+        let (a, b) = tokio::join!(
+            core.ingest("filed twice at once", "web", None),
+            core.ingest("filed twice at once", "mcp", None),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.id, b.id);
+        assert!(
+            a.duplicate ^ b.duplicate,
+            "exactly one of the two should be the duplicate: {a:?} {b:?}"
+        );
         assert_eq!(core.store.list_corpora(10, 0).await.unwrap().len(), 1);
     }
 

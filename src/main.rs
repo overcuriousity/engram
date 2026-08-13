@@ -29,6 +29,12 @@ struct Args {
     /// before engram addressed vectors through an alias.
     #[arg(long)]
     replace_legacy: bool,
+    /// Write artifacts.json and pairs.json for the evaluation harness into DIR,
+    /// then exit. Reads only SQLite: no inference, no vector store. The pairs
+    /// are the searches you judged; the artifacts keep their production ids, so
+    /// re-exporting does not invalidate them.
+    #[arg(long, value_name = "DIR")]
+    export_eval: Option<std::path::PathBuf>,
     /// Re-measure every corpus's coverage from the artifacts already stored,
     /// then exit. Local work over existing rows: no inference, no vector calls,
     /// nothing re-synthesised. Run it after upgrading past a change to how
@@ -196,6 +202,25 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(dir) = &args.export_eval {
+        // SQLite only. The artifacts are already synthesised and the pairs are
+        // already judged, so this costs nothing and needs neither Qdrant nor an
+        // inference endpoint to be up.
+        let store = engram::store::Store::connect(&cfg.store).await?;
+        let (artifacts, pairs) = engram::eval::export::export(&store, dir).await?;
+        println!(
+            "wrote {artifacts} artifacts and {pairs} pairs to {}",
+            dir.display()
+        );
+        if pairs == 0 {
+            println!(
+                "no judged searches yet — set feedback.enabled, use the base, \
+                 then judge what it recorded at /ui/judge"
+            );
+        }
+        return Ok(());
+    }
+
     if args.recompute_coverage {
         // No vector store and no inference: this only reads artifacts and
         // writes one number per corpus, so it must not need either to be up.
@@ -205,12 +230,13 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(engram::vector::memory::MemoryVectors::new()),
             store,
         );
-        let mut offset = 0;
+        // Keyset, for the same reason the reconcile sweep uses one: a capture
+        // arriving while this runs must not push a corpus past the window.
+        let mut cursor: Option<(i64, String)> = None;
         loop {
-            let page = core.store.list_corpora(100, offset).await?;
-            if page.is_empty() {
-                break;
-            }
+            let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.created_at, last.id.clone()));
             for c in &page {
                 let before = c.coverage;
                 let after = engram::jobs::synthesize::recompute_coverage(&core, &c.id).await?;
@@ -221,7 +247,6 @@ async fn main() -> anyhow::Result<()> {
                     after
                 );
             }
-            offset += page.len() as i64;
         }
         return Ok(());
     }
@@ -262,10 +287,13 @@ async fn main() -> anyhow::Result<()> {
     let background = core.background.clone();
     let ticker =
         engram::core::background::spawn_consolidation_ticker(core.clone(), shutdown_rx.clone());
+    let retention =
+        engram::core::background::spawn_retention_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
-    // Joined with the workers so shutdown waits for it too, rather than leaving
-    // a task the runtime drops mid-enqueue.
+    // Joined with the workers so shutdown waits for them too, rather than
+    // leaving tasks the runtime drops mid-enqueue.
     handles.push(ticker);
+    handles.push(retention);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
@@ -338,6 +366,8 @@ mod startup_tests {
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     cooldown_secs: 0,
+                    context_opening_tokens: 200,
+                    context_overlap_tokens: 150,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
@@ -366,6 +396,7 @@ mod startup_tests {
                 }),
             },
             consolidate: ConsolidateConfig::default(),
+            feedback: FeedbackConfig::default(),
         }
     }
 
