@@ -11,6 +11,7 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::{CorpusSpan, NewArtifact};
+use crate::store::jobs::MAX_ATTEMPTS;
 use crate::store::segments::SegmentState;
 
 /// A window's address in the queue.
@@ -163,9 +164,50 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     settle(core, corpus_id).await
 }
 
-/// Filled in by the task that makes the corpus settle around its windows.
-async fn settle(_core: &Core, _corpus_id: &str) -> Result<()> {
-    Ok(())
+/// Everything that can only be decided once every window has resolved.
+///
+/// "Resolved" has to include a window that has spent its attempts, and that is
+/// the whole subtlety here. Engram never abandons work, so a window the model
+/// will not read stays queued at the six-hour ceiling forever — and if settling
+/// waited for it, the thirty-three windows that came back perfectly would never
+/// be embedded, never be searchable, and the document would sit in `segmenting`
+/// for good. The corpus settles around such a window and reports `partial`.
+///
+/// If it later succeeds this runs again, which is why every step of `finish` is
+/// idempotent: ordinals are renumbered, coverage recomputed, the embed job
+/// re-armed for the artifacts that have appeared since.
+async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
+    for w in core.store.segments_for_corpus(corpus_id).await? {
+        let resolved = match w.state {
+            SegmentState::Done => true,
+            // `jobs.attempts` rather than a counter on the segment: the unit is
+            // the job now, and two counters for one thing is what made the
+            // original incident so hard to read.
+            SegmentState::Failed => attempts_for(core, corpus_id, w.idx).await >= MAX_ATTEMPTS,
+            SegmentState::Pending => false,
+        };
+        if !resolved {
+            return Ok(());
+        }
+    }
+    crate::jobs::synthesize::finish(core, corpus_id).await
+}
+
+/// How many times this window's unit has been claimed.
+///
+/// A missing row means the unit is gone — dropped as stale, or never armed —
+/// and nothing is going to try that window again, so it counts as spent rather
+/// than holding up the document forever.
+async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT attempts FROM jobs WHERE stage = 'segment_window' AND target_id = ?",
+    )
+    .bind(unit_target(corpus_id, idx))
+    .fetch_optional(&core.store.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(MAX_ATTEMPTS)
 }
 
 /// Where an artifact sits in the source document.
@@ -391,5 +433,105 @@ mod tests {
                 .is_some_and(|e| e.contains("duplicate field")),
             "the window must carry the parser's own complaint"
         );
+    }
+
+    /// A window fixture for the span tests: the text is irrelevant to them, the
+    /// line range and the carried heading are the whole point.
+    fn window(start_line: i64, end_line: i64, carry_lines: i64) -> crate::store::segments::Segment {
+        crate::store::segments::Segment {
+            corpus_id: "c".into(),
+            idx: 1,
+            start_line,
+            end_line,
+            text: String::new(),
+            carry_lines,
+            state: SegmentState::Pending,
+            attempts: 0,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_hinted_span_discounts_the_carried_heading_too() {
+        // The window covers source lines 50-60 and opens with one heading
+        // carried from further up, so the model's line 2 is source line 50.
+        // The artifact is reworded past recognition, which is exactly when the
+        // hint is all there is — and the path that used it was the one place
+        // the carried heading was still being counted.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span(
+                "nothing here matches the source at all",
+                body,
+                &w,
+                Some((2, 3))
+            ),
+            (50, 51)
+        );
+    }
+
+    #[test]
+    fn a_window_carrying_nothing_reads_the_hint_straight_through() {
+        let w = window(50, 60, 0);
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
+            (51, 52)
+        );
+    }
+
+    #[test]
+    fn the_artifacts_own_text_beats_the_hint() {
+        // `locate_span` reads the artifact; the hint is only a claim about it.
+        let w = window(50, 60, 1);
+        let body = "first body line\nsecond body line";
+        assert_eq!(
+            resolve_span("second body line", body, &w, Some((9, 9))),
+            (51, 51)
+        );
+    }
+
+    #[test]
+    fn a_hint_pointing_outside_the_window_falls_back_to_the_whole_window() {
+        let w = window(50, 60, 1);
+        // Discounting the carry can push a hint of line 1 — the heading
+        // itself — below the window's first line. Clamping keeps it inside.
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, Some((1, 1))),
+            (50, 50)
+        );
+        assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
+    }
+
+    #[test]
+    fn an_artifact_found_only_in_context_is_recognised() {
+        use crate::infer::context::WindowContext;
+
+        let core_text = "the window says something quite specific here\nand more of it";
+        let ctx = WindowContext {
+            opening: Some("the document opening states the version clearly".into()),
+            before: None,
+            after: Some("the following window describes another procedure".into()),
+        };
+
+        // Drawn from the window itself: keep.
+        assert!(!from_context_only(
+            "the window says something quite specific here",
+            core_text,
+            &ctx
+        ));
+        // Drawn from a context block and nowhere in the window: drop.
+        assert!(from_context_only(
+            "the following window describes another procedure",
+            core_text,
+            &ctx
+        ));
+        // Located nowhere at all — a heavily reworded artifact. Keep it, so it
+        // reaches flag_unverified the way it does today instead of vanishing.
+        assert!(!from_context_only(
+            "an entirely reworded statement about unrelated matters",
+            core_text,
+            &ctx
+        ));
     }
 }

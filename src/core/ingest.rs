@@ -1040,7 +1040,7 @@ mod tests {
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         let first = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1059,7 +1059,7 @@ mod tests {
             "reprocess must forget the windowing so it can be redone"
         );
 
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         assert_eq!(
             core.store
                 .artifacts_for_corpus(&out.id)

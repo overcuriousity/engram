@@ -37,7 +37,7 @@ pub async fn run_one(core: &Core) -> Result<bool> {
 
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Synthesize | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
+        (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
@@ -69,41 +69,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // Out of attempts against the synthesizer. The windows that were
-                // actually tried are recorded as failed; the ones that never
-                // ran go back in the queue.
-                (Stage::Synthesize, _) if exhausted => {
-                    tracing::warn!(error = %e, "segmentation is not getting through; backing off");
-                    match synthesize::fail_pending_segments(core, &job.target_id, &e.to_string())
-                        .await
-                    {
-                        Ok(_) => {
-                            core.store.complete_job(job.id).await?;
-                            // Always, not only when a window went untried. A
-                            // segment the endpoint refused is not a verdict on
-                            // the text — the endpoint was loading a model, or
-                            // the machine was asleep — and the state it records
-                            // is what the next attempt starts from rather than
-                            // where it stops. After closing this job, never
-                            // before: the queue is keyed by (stage, target), so
-                            // an earlier enqueue would be the very row
-                            // `complete_job` then marks done.
-                            core.store
-                                .enqueue_after(
-                                    Stage::Synthesize,
-                                    "corpus",
-                                    &job.target_id,
-                                    job.attempts,
-                                )
-                                .await?;
-                        }
-                        Err(fe) => {
-                            core.store
-                                .fail_job(job.id, job.attempts, &fe.to_string())
-                                .await?;
-                        }
-                    }
-                }
                 // A whole source failing together usually means the endpoint is
                 // down, but it can also be one chunk the embedder rejects.
                 // Retrying chunk by chunk isolates the culprit either way.

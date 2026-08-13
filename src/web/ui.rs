@@ -1450,7 +1450,7 @@ mod tests {
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
@@ -1490,7 +1490,7 @@ mod tests {
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         let c = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1520,7 +1520,7 @@ mod tests {
     async fn a_chunk_whose_source_vanished_is_not_a_500() {
         let core = crate::core::test_support::test_core().await;
         let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         let c = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1545,7 +1545,7 @@ mod tests {
             .ingest("first para\n\nsecond para", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         core.store
             .set_segment_state(
                 &out.id,
@@ -1639,7 +1639,7 @@ mod tests {
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
@@ -1866,7 +1866,7 @@ mod tests {
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
@@ -2004,7 +2004,7 @@ mod tests {
         // beside its source and simply offer no neighbours.
         let core = crate::core::test_support::test_core().await;
         let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         let c = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -2381,7 +2381,7 @@ mod tests {
         );
         assert!(body.contains("every 3s"), "work in flight keeps polling");
 
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
