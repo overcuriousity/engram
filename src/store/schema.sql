@@ -121,6 +121,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_error  TEXT,
   claimed_at  INTEGER,
   created_at  INTEGER NOT NULL DEFAULT 0,
+  -- Position within the batch of units armed together: the window index, the
+  -- judge pair's index, the embed batch number. Zero for singletons. Claiming
+  -- orders by it, so every document's first window runs before any document's
+  -- second — which is what stops a large ingest starving a small one behind it.
+  seq         INTEGER NOT NULL DEFAULT 0,
   UNIQUE(stage, target_id)
 );
 -- Ready work in the order `claim_job` takes it: least-tried first, then oldest.
@@ -134,11 +139,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 --
 -- Dropped by its old name rather than widened in place. `migrate` applies this
 -- file to every database on every start, and `CREATE INDEX IF NOT EXISTS` on a
--- name that already exists is a silent no-op, so a deployment carrying the old
--- two-column `idx_jobs_ready` would have kept it. The drop is how an existing
--- base actually picks this up.
+-- name that already exists is a silent no-op, so a deployment carrying an
+-- earlier version of this index would have kept it. The drop is how an existing
+-- base actually picks the new one up.
 DROP INDEX IF EXISTS idx_jobs_ready;
-CREATE INDEX IF NOT EXISTS idx_jobs_claim   ON jobs(state, attempts, id, run_after);
+DROP INDEX IF EXISTS idx_jobs_claim;
+CREATE INDEX IF NOT EXISTS idx_jobs_claim2  ON jobs(state, attempts, seq, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 
 -- ── Consolidation ────────────────────────────────────────────────────────────

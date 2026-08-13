@@ -43,6 +43,13 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
         // The sweep looks at the whole collection, so it ignores the target.
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
+        // Handlers land in the tasks that introduce them; nothing arms these
+        // stages yet, so this arm is unreachable until then. `NotFound` is the
+        // safe shape: `run_one` closes such a job rather than retrying it.
+        (Stage::SegmentWindow | Stage::Title | Stage::Judge, _) => {
+            tracing::error!(stage = job.stage.as_str(), "no handler for this stage yet");
+            Err(Error::NotFound)
+        }
     };
 
     match result {

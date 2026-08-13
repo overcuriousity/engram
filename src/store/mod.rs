@@ -53,16 +53,66 @@ impl Store {
     /// One statement of what the schema *is*, rather than a chain of diffs
     /// describing how it came to be. Every object is `IF NOT EXISTS`, so this
     /// creates what is missing on a fresh database and is a no-op on one that
-    /// already has it. It deliberately cannot alter an existing table: while
-    /// the project is in testing, changing a column means editing `schema.sql`
-    /// and recreating the database.
+    /// already has it — then `ADDED_COLUMNS` appends the few columns that
+    /// arrived after a table was already deployed, since `IF NOT EXISTS` cannot.
     ///
-    /// Which is exactly why it then checks. A table that already exists is left
+    /// It still checks afterwards. A table that already exists is otherwise left
     /// as it is, columns and all, so a database from before a column was added
-    /// survives this call and fails much later, in a request, with a bare
+    /// would survive this call and fail much later, in a request, with a bare
     /// `ColumnNotFound` panic that says nothing about the real cause.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
+
+        // Columns that arrived after their table was already deployed.
+        //
+        // `schema.sql` says what the schema *is*, and `CREATE TABLE IF NOT
+        // EXISTS` is a no-op against a table that is already there — so a column
+        // added to that file never reaches a running base, and the check below
+        // then refuses to start, correctly, saying the database is older than
+        // the schema. That is the right answer while nothing is deployed and the
+        // wrong one afterwards: it asks an operator to recreate a knowledge base
+        // to gain a column with a default.
+        //
+        // So each such column is named here once. SQLite's `ALTER TABLE` can
+        // only append, and only with a default, which is exactly the shape of
+        // every entry this list is allowed to hold. Adding one is safe; changing
+        // or reordering one is not. A column needing more than an append does
+        // not belong here — it belongs in a recreate.
+        const ADDED_COLUMNS: &[(&str, &str, &str)] =
+            &[("jobs", "seq", "INTEGER NOT NULL DEFAULT 0")];
+
+        // Before the schema, not after. `schema.sql` builds an index over `seq`,
+        // and an index cannot name a column that is not there yet — applying the
+        // file first fails on exactly the databases this list exists to rescue.
+        // On a fresh one the table does not exist yet, the loop skips, and the
+        // schema creates it with the column already in place.
+        for (table, column, decl) in ADDED_COLUMNS {
+            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+                .bind(table)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| r.get::<String, _>("name"))
+                .collect();
+            // An empty list means the table does not exist yet, in which case
+            // `schema.sql` just created it with the column already in place.
+            if have.is_empty() || have.iter().any(|h| h.eq_ignore_ascii_case(column)) {
+                continue;
+            }
+            // A table name cannot be a bind parameter, so this statement has to
+            // be built as a string, and sqlx rightly demands the assertion be
+            // made explicitly. The audit it asks for: all three parts come from
+            // `ADDED_COLUMNS` above, which is a compile-time constant in this
+            // file. No caller, request or database value reaches it.
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {decl}"
+            )))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            tracing::info!(table, column, "added a column to an existing database");
+        }
+
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
             .await
@@ -172,6 +222,51 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_column_added_after_deployment_reaches_a_database_that_predates_it() {
+        // The upgrade path, and the trap in it. `CREATE TABLE IF NOT EXISTS` is
+        // a no-op against a table that already exists, so a column added to
+        // schema.sql never reaches a running base — and the check at the end of
+        // migrate() then refuses to start it. An operator would have been asked
+        // to recreate a knowledge base to gain a column with a default.
+        let store = Store::memory().await.unwrap();
+        // The index names the column, so it goes first — which is the same
+        // ordering constraint migrate() itself has to respect.
+        sqlx::query("DROP INDEX IF EXISTS idx_jobs_claim2")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE jobs DROP COLUMN seq")
+            .execute(&store.pool)
+            .await
+            .expect("the fixture needs a jobs table without seq");
+
+        store
+            .migrate()
+            .await
+            .expect("migrate refused an older base");
+
+        let has_seq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'seq'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(has_seq, 1, "seq was never added to the existing table");
+
+        // And the default has to be usable, or every pre-existing row would sort
+        // as NULL and the claim ordering would be undefined for them.
+        store
+            .enqueue(jobs::Stage::Embed, "corpus", "c-1")
+            .await
+            .unwrap();
+        let seq = store
+            .job_seq(jobs::Stage::Embed, "c-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seq, 0);
+    }
 
     #[tokio::test]
     async fn applying_the_schema_twice_changes_nothing() {

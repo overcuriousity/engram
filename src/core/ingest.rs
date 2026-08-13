@@ -667,6 +667,16 @@ impl Core {
                     "consolidate is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
+            // Units the queue arms for itself, one per inference call. An
+            // operator reprocesses a document, not one of its windows: asking
+            // for `synthesize` re-windows the whole thing and arms them all.
+            Stage::SegmentWindow | Stage::Title | Stage::Judge => {
+                return Err(Error::Validation(
+                    "that stage is a single inference call the queue arms itself; \
+                     reprocess the document instead"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }

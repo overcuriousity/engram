@@ -11,13 +11,21 @@ pub const MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    /// Splits a corpus into windows and arms one `SegmentWindow` per window.
+    /// Makes no inference call itself.
     Synthesize,
     Enrich,
+    /// One window, one call. The unit the job model is built around.
+    SegmentWindow,
+    /// Naming one document. One call.
+    Title,
     Embed,
     /// The periodic consolidation sweep. Its target is the collection rather
     /// than any one corpus, so there is exactly one of these in the queue at a
-    /// time.
+    /// time. Local work: it arms `Judge` units rather than calling the model.
     Consolidate,
+    /// One pair, one call.
+    Judge,
 }
 
 impl Stage {
@@ -25,16 +33,22 @@ impl Stage {
         match self {
             Stage::Synthesize => "synthesize",
             Stage::Enrich => "enrich",
+            Stage::SegmentWindow => "segment_window",
+            Stage::Title => "title",
             Stage::Embed => "embed",
             Stage::Consolidate => "consolidate",
+            Stage::Judge => "judge",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
             "enrich" => Some(Stage::Enrich),
+            "segment_window" => Some(Stage::SegmentWindow),
+            "title" => Some(Stage::Title),
             "embed" => Some(Stage::Embed),
             "consolidate" => Some(Stage::Consolidate),
+            "judge" => Some(Stage::Judge),
             _ => None,
         }
     }
@@ -85,23 +99,52 @@ pub fn backoff_secs(attempts: i64) -> i64 {
 
 impl Store {
     pub async fn enqueue(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
-        // Idempotent per (stage, target). A conflicting row that already
-        // finished or failed is re-armed, which is exactly what a manual
-        // reprocess needs.
+        self.enqueue_seq(stage, target_kind, target_id, 0).await
+    }
+
+    /// Arm a unit at a given position within its batch.
+    ///
+    /// `enqueue` is this with `seq = 0`, which is right for a singleton and
+    /// wrong for the thirty-four windows of one document: left at zero they
+    /// would sort among themselves by row id, and a document captured later
+    /// would wait behind all of them.
+    ///
+    /// Idempotent per (stage, target). A conflicting row that already finished
+    /// or failed is re-armed, which is exactly what a manual reprocess needs.
+    pub async fn enqueue_seq(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        seq: i64,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
-             VALUES (?, ?, ?, 'pending', 0, 0, ?)
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq)
+             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)
              ON CONFLICT(stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
-               claimed_at = NULL, created_at = excluded.created_at",
+               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq",
         )
         .bind(stage.as_str())
         .bind(target_kind)
         .bind(target_id)
         .bind(now())
+        .bind(seq)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The `seq` a job currently carries, so a unit that re-arms itself can
+    /// climb rather than re-entering at the front of its batch.
+    pub async fn job_seq(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT seq FROM jobs WHERE stage = ? AND target_id = ?")
+                .bind(stage.as_str())
+                .bind(target_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
     }
 
     /// Queue work that has already been tried, so the next attempt waits.
@@ -140,15 +183,20 @@ impl Store {
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
     ///
-    /// Least-tried first, then oldest. Ordering by id alone made the queue
-    /// strictly sequential in the one case where that hurts: `enqueue_after`
-    /// re-arms the existing row, so a job that cannot get through keeps its
-    /// original id and reclaims the front of the queue every time its backoff
-    /// expires, ahead of everything captured since. One document the model
-    /// would not parse therefore held up every document behind it. Sorting by
-    /// `attempts` puts work that has already had its turn behind work that has
-    /// not — a reordering rather than a demotion, since the sore thumb still
-    /// runs as soon as nothing fresher is ready.
+    /// Least-tried first, then earliest position in its batch, then oldest.
+    ///
+    /// Ordering by id alone made the queue strictly sequential in the one case
+    /// where that hurts: `enqueue_after` re-arms the existing row, so a job that
+    /// cannot get through keeps its original id and reclaims the front of the
+    /// queue every time its backoff expires, ahead of everything captured since.
+    /// One document the model would not parse therefore held up every document
+    /// behind it. Sorting by `attempts` puts work that has already had its turn
+    /// behind work that has not — a reordering rather than a demotion, since the
+    /// sore thumb still runs as soon as nothing fresher is ready.
+    ///
+    /// `seq` then interleaves whole documents. Without it, a corpus armed as
+    /// thirty-four units takes thirty-four consecutive ids and reproduces the
+    /// same head-of-line blocking one level down.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE jobs
@@ -156,7 +204,7 @@ impl Store {
               WHERE id = (
                 SELECT id FROM jobs
                  WHERE state = 'pending' AND run_after <= ?
-                 ORDER BY attempts, id LIMIT 1
+                 ORDER BY attempts, seq, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
         )
@@ -479,6 +527,60 @@ mod tests {
             next.expect("the failing job was abandoned").target_id,
             "sore-thumb"
         );
+    }
+
+    #[tokio::test]
+    async fn units_of_two_documents_interleave_rather_than_queueing_behind_each_other() {
+        // A thirty-four window document takes thirty-four consecutive row ids.
+        // Under id ordering a capture made during that ingest waits for every
+        // one of them before producing a single artifact.
+        let s = Store::memory().await.unwrap();
+        for i in 0..3 {
+            s.enqueue_seq(Stage::SegmentWindow, "segment", &format!("doc-a#{i}"), i)
+                .await
+                .unwrap();
+        }
+        for i in 0..3 {
+            s.enqueue_seq(Stage::SegmentWindow, "segment", &format!("doc-b#{i}"), i)
+                .await
+                .unwrap();
+        }
+
+        let mut order = Vec::new();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            order.push(j.target_id);
+            s.complete_job(j.id).await.unwrap();
+        }
+        assert_eq!(
+            order,
+            vec![
+                "doc-a#0", "doc-b#0", "doc-a#1", "doc-b#1", "doc-a#2", "doc-b#2"
+            ],
+            "the second document waited for the whole of the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn attempts_still_outrank_seq() {
+        // The fairness fix must survive the interleaving one: a unit that keeps
+        // failing sinks below fresher work whatever its position in a document.
+        let s = Store::memory().await.unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "segment", "sore#0", 0)
+            .await
+            .unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+
+        s.enqueue_seq(Stage::SegmentWindow, "segment", "fresh#9", 9)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(next.target_id, "fresh#9", "a failing unit kept the front");
     }
 
     #[tokio::test]
