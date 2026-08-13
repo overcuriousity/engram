@@ -30,12 +30,33 @@ pub async fn run(core: &Core) -> Result<usize> {
             if c.near_dupe_of.is_some() {
                 continue;
             }
+            // A corpus with no window rows at all is deliberately left alone:
+            // its artifacts pre-date windows, and planning it would re-segment
+            // a document that is already fine. Capture arms the planning job;
+            // this sweep is for work that started and stopped.
             let segments = core.store.segments_for_corpus(&c.id).await?;
-            if segments.iter().any(|w| w.state != SegmentState::Done) {
-                core.store
-                    .enqueue(Stage::Synthesize, "corpus", &c.id)
-                    .await?;
-                armed += 1;
+            let unresolved: Vec<_> = segments
+                .iter()
+                .filter(|w| w.state != SegmentState::Done)
+                .collect();
+            if !unresolved.is_empty() {
+                // Windows exist but their units may not: a database written
+                // before units existed has none at all, and a process killed
+                // between two writes can be missing one. This is what makes a
+                // materialised queue safe — the units stay derivable from the
+                // rows that describe the work, so drift heals on a sweep rather
+                // than needing to be noticed.
+                for w in unresolved {
+                    core.store
+                        .enqueue_seq(
+                            Stage::SegmentWindow,
+                            "segment",
+                            &crate::jobs::window::unit_target(&c.id, w.idx),
+                            w.idx,
+                        )
+                        .await?;
+                    armed += 1;
+                }
                 continue;
             }
             if !core
@@ -61,6 +82,42 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
     use crate::store::segments::NewSegment;
+
+    #[tokio::test]
+    async fn an_old_corpus_level_job_becomes_per_window_units() {
+        // The upgrade path. A database written before units existed holds one
+        // Synthesize row per unfinished corpus and no window units at all, so
+        // without this the windows would sit unsegmented until someone noticed.
+        let core = test_core().await;
+        let body = (0..400)
+            .map(|i| format!("paragraph {i} with filler text"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        // Wind the clock back to the old shape: windows, no units.
+        sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store
+            .enqueue(Stage::Synthesize, "corpus", &out.id)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap().len();
+        assert!(windows > 2, "the fixture must span several windows");
+        let armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(armed as usize, windows, "the old job did not become units");
+    }
 
     fn seg(start_line: i64, end_line: i64, text: &str) -> NewSegment<'_> {
         NewSegment {
@@ -88,10 +145,12 @@ mod tests {
             .unwrap();
 
         // Segment 1 never ran and nothing is queued: the crack this closes.
+        // One unit, addressed to that window — not a job for the whole corpus,
+        // which would re-plan a document whose other window is already done.
         assert_eq!(run(&core).await.unwrap(), 1);
         let job = core.store.claim_job().await.unwrap().expect("a job");
-        assert_eq!(job.stage, Stage::Synthesize);
-        assert_eq!(job.target_id, src.id);
+        assert_eq!(job.stage, Stage::SegmentWindow);
+        assert_eq!(job.target_id, crate::jobs::window::unit_target(&src.id, 1));
     }
 
     #[tokio::test]

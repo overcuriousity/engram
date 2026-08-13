@@ -1559,8 +1559,9 @@ mod tests {
 
         assert_eq!(crate::jobs::reconcile::run(&core).await.unwrap(), 1);
         let mut found = false;
+        let want = crate::jobs::window::unit_target(&out.id, 0);
         while let Some(j) = core.store.claim_job().await.unwrap() {
-            if j.stage == crate::store::jobs::Stage::Synthesize && j.target_id == out.id {
+            if j.stage == crate::store::jobs::Stage::SegmentWindow && j.target_id == want {
                 found = true;
             }
         }
