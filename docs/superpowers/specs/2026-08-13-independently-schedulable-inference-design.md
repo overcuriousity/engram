@@ -261,11 +261,25 @@ larger than the behaviour change is.
 | `jobs` | add `seq INTEGER NOT NULL DEFAULT 0` |
 | `segments` | drop `attempts` |
 
-`migrate()` applies `schema.sql` on every connect and cannot alter a table, so
-`seq` is additive (safe) while dropping `segments.attempts` is not. The column is
-therefore left in place and unused rather than dropped, and removed whenever the
-database is next recreated. This is recorded so the next reader does not mistake
-a dead column for live state.
+`migrate()` applies `schema.sql` on every connect and cannot alter a table.
+
+**Corrected during implementation.** This section originally claimed `seq` was
+"additive (safe)". It is not: `CREATE TABLE IF NOT EXISTS` is a no-op against a
+table that already exists, so a column added to `schema.sql` never reaches a
+deployed base — and the column check at the end of `migrate()` then refuses to
+start it. Deploying as originally specified would have taken engram down.
+
+`migrate()` therefore grows a short list of columns that arrived after their
+table was deployed, appended with `ALTER TABLE ... ADD COLUMN` when absent. Two
+constraints on that list, both learned the hard way: SQLite can only append, and
+only with a default; and the appends must run **before** `schema.sql`, because
+the file builds an index over `seq` and an index cannot name a column that does
+not exist yet.
+
+Dropping `segments.attempts` remains impossible, so the column is left in place
+and unused rather than dropped, and removed whenever the database is next
+recreated. Recorded so the next reader does not mistake a dead column for live
+state.
 
 Index: `idx_jobs_claim` becomes `(state, attempts, seq, id, run_after)`. As with
 the 2026-08-13 change, it is dropped by its old name first — `CREATE INDEX IF NOT
