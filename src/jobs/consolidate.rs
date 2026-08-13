@@ -29,7 +29,6 @@ pub struct Outcome {
     /// Pairs this sweep armed a judge unit for. The calls happen later, one
     /// unit at a time, so this counts what was asked for rather than answered.
     pub judged: usize,
-    pub contradictions: usize,
 }
 
 /// Disjoint-set over artifact ids, so a run of near-identical pairs collapses
@@ -421,9 +420,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 
     if cfg.judge {
         // Armed, not asked. `judged` counts the calls this sweep is responsible
-        // for rather than the calls it made, since it now makes none;
-        // `contradictions` is no longer knowable here at all, because the answer
-        // arrives one unit at a time long after the sweep has returned.
+        // for rather than the calls it made, since it now makes none. There is
+        // deliberately no contradiction count beside it: the answers arrive one
+        // unit at a time long after the sweep has returned, and a zero logged
+        // here read as "the judge found nothing" rather than "the judge has not
+        // been asked yet". `pairs_by_state(Contradiction, ..)` is where that
+        // number actually lives, and the API and Ops both read it from there.
         out.judged = arm_judgements(core).await?;
     }
 
@@ -433,7 +435,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             superseded = out.superseded,
             queued = out.queued,
             judged = out.judged,
-            contradictions = out.contradictions,
             "consolidation sweep finished"
         );
     }
