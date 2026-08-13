@@ -51,6 +51,10 @@ rmcp = { version = "3.1.2", features = ["server", "transport-streamable-http-ser
 schemars = "1.2.2"
 
 [dev-dependencies]
+# `test-util` is not part of tokio's `full`. It carries the pausable clock the
+# gate's tests run on, so a cooldown is asserted exactly rather than slept
+# through.
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
 tempfile = "3"
 temp-env = "0.3"
 wiremock = "0.6.5"

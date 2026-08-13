@@ -2,6 +2,7 @@ pub mod budget;
 pub mod context;
 pub mod facts;
 pub mod fake;
+pub mod gate;
 pub mod openai;
 pub mod prompt;
 pub mod split;

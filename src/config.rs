@@ -12,6 +12,38 @@ pub struct Config {
     pub consolidate: ConsolidateConfig,
     #[serde(default)]
     pub feedback: FeedbackConfig,
+    #[serde(default)]
+    pub pacing: PacingConfig,
+}
+
+/// Pacing for every inference call, not just synthesis.
+///
+/// The roles share one GPU, so a per-role gap could not bound total load: three
+/// roles each honouring their own cooldown still interleave into unbroken work.
+/// One gap in front of all of them is the only version of this setting that
+/// means what it says.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PacingConfig {
+    /// Minimum seconds between the end of one background call and the start of
+    /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
+    /// and the pacer exists to protect the GPU from batch work, not from them.
+    pub cooldown_secs: u64,
+    /// Consecutive transport failures before background calls are held.
+    /// Unreadable model output does not count — the endpoint answered.
+    pub breaker_after: usize,
+    /// How long to hold them for before letting one through to probe.
+    pub breaker_probe_secs: u64,
+}
+
+impl Default for PacingConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_secs: 0,
+            breaker_after: 3,
+            breaker_probe_secs: 60,
+        }
+    }
 }
 
 /// Recording real searches so they can be judged later.
