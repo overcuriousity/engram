@@ -2,6 +2,7 @@ pub mod consolidate;
 pub mod embed;
 pub mod reconcile;
 pub mod synthesize;
+pub mod window;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -43,10 +44,11 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
         // The sweep looks at the whole collection, so it ignores the target.
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
+        (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         // Handlers land in the tasks that introduce them; nothing arms these
         // stages yet, so this arm is unreachable until then. `NotFound` is the
         // safe shape: `run_one` closes such a job rather than retrying it.
-        (Stage::SegmentWindow | Stage::Title | Stage::Judge, _) => {
+        (Stage::Title | Stage::Judge, _) => {
             tracing::error!(stage = job.stage.as_str(), "no handler for this stage yet");
             Err(Error::NotFound)
         }

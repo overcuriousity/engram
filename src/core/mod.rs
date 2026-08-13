@@ -75,6 +75,10 @@ pub struct Core {
     /// Whether and how real searches are recorded for later judging. Read on
     /// the search path, so it lives here rather than being threaded down.
     pub feedback: crate::config::FeedbackConfig,
+    /// The pacer every inference call passes through. Shared by every clone,
+    /// because a per-clone gate would pace nothing: the point is one queue of
+    /// calls in front of one GPU.
+    pub gate: Arc<crate::infer::gate::InferenceGate>,
 }
 
 impl Core {
@@ -109,6 +113,15 @@ impl Core {
             consolidate: cfg.consolidate.clone(),
             weak_below: cfg.vector.weak_below,
             feedback: cfg.feedback.clone(),
+            gate: Arc::new(
+                crate::infer::gate::InferenceGate::new(std::time::Duration::from_secs(
+                    cfg.pacing.cooldown_secs,
+                ))
+                .with_breaker(
+                    cfg.pacing.breaker_after,
+                    std::time::Duration::from_secs(cfg.pacing.breaker_probe_secs),
+                ),
+            ),
         }
     }
 }
@@ -170,6 +183,11 @@ pub mod test_support {
             weak_below: 0.0,
             // Off, like the shipped default. The capture tests switch it on.
             feedback: crate::config::FeedbackConfig::default(),
+            // No cooldown and no breaker: a test that wants pacing builds its
+            // own gate, and every other test would otherwise pay for one.
+            gate: Arc::new(crate::infer::gate::InferenceGate::new(
+                std::time::Duration::ZERO,
+            )),
         }
     }
 }

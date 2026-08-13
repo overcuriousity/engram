@@ -2,10 +2,15 @@ use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::segment_tokens;
 use crate::infer::split::split_into_segments;
-use crate::store::artifacts::{CorpusSpan, NewArtifact};
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
+// Scaffolding, gone with `run` in the next commit: these moved to `window`
+// alongside the handler that owns them, and the loop below is the last caller.
+use crate::jobs::window::{
+    flag_unverified, from_context_only, paraphrased, proposed_to_new, resolve_span,
+    write_segment_artifacts,
+};
 
 /// Unreadable replies in a row before the pass stops working through the
 /// document.
@@ -25,58 +30,12 @@ fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
 }
 
-/// Where an artifact sits in the source document.
+/// Split a document into windows and record them. No inference call.
 ///
-/// Asking the model for `corpus_lines`, checking the answer, and having a third
-/// outcome for a claim that fails the check produced a flag on the artifact and
-/// a button offering to re-synthesise an entire segment over a line number.
-/// Since `locate_span` finds an artifact's own text even where the source is
-/// hard-wrapped and synthesis reflowed it, the claim is worth what it is: a
-/// hint for the case where nothing matches at all. Nothing here can disagree
-/// with the artifact, so nothing here has anything to report.
-///
-/// `body` is the window without its carried heading — text prepended from
-/// further up the document, occupying none of the window's own lines. Both
-/// paths have to discount it: `locate_span` because it searches `body`, and the
-/// hint because the model numbered its lines from the top of what it was shown,
-/// and line 1 of that is the carried heading. Correcting only the first left
-/// every hinted span in a continuing section `carry_lines` too far down.
-fn resolve_span(
-    artifact: &str,
-    body: &str,
-    w: &crate::store::segments::Segment,
-    hint: Option<(i64, i64)>,
-) -> (i64, i64) {
-    let shift = w.start_line - 1 - w.carry_lines;
-    let hinted = hint.map(|(a, b)| (a + shift, b + shift));
-    let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
-        .or(hinted)
-        .unwrap_or((w.start_line, w.end_line));
-    // A span outside its own window would render as the wrong text.
-    let clamped = (
-        span.0.clamp(w.start_line, w.end_line),
-        span.1.clamp(w.start_line, w.end_line),
-    );
-    if clamped.0 <= clamped.1 {
-        clamped
-    } else {
-        (w.start_line, w.end_line)
-    }
-}
-
-/// LLM-assisted segmentation, one window at a time.
-///
-/// The window rows are the job's memory. A window that succeeds is written and
-/// marked `done` before the next is attempted, so the job retries and resumes
-/// from the first window that has not resolved.
-///
-/// What a failure costs depends on whose failure it is. A reply the parser
-/// cannot read is the window's own problem — the pass records it against that
-/// window and carries on through the document, and the job ends in an error so
-/// the queue brings it back for another try. An endpoint that will not answer
-/// at all is everyone's problem, and the pass stops on the spot rather than
-/// spending a timeout per remaining window to learn the same thing again.
-pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
+/// This is the whole of the `Synthesize` stage now: deciding what the units of
+/// work are, which is local arithmetic over the text. The calls belong to the
+/// units it arms.
+pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     core.store
         .set_corpus_status(corpus_id, CorpusStatus::Segmenting)
@@ -106,6 +65,18 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         })
         .collect();
     core.store.upsert_segments(corpus_id, &rows).await?;
+    Ok(())
+}
+
+/// LLM-assisted segmentation, one window at a time.
+///
+/// Superseded by the per-window units `plan` will arm, and kept only until the
+/// pipeline is flipped over to them.
+pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
+    plan(core, corpus_id).await?;
+    if core.store.segments_for_corpus(corpus_id).await?.is_empty() {
+        return Ok(());
+    }
 
     // Every window of the corpus, in order, for the neighbouring context. The
     // rows are authoritative rather than the freshly split `windows`: a corpus
@@ -308,97 +279,6 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     finish(core, corpus_id).await
 }
 
-/// Replace the chunks of one window. Same "replace, never append" guarantee as
-/// before; the key is the window rather than the whole source, so a retry of
-/// window 4 cannot disturb windows 0 to 3.
-async fn write_segment_artifacts(
-    core: &Core,
-    corpus_id: &str,
-    segment_idx: i64,
-    new: Vec<NewArtifact>,
-) -> Result<Vec<crate::store::artifacts::Chunk>> {
-    let old = core
-        .store
-        .artifact_ids_for_segment(corpus_id, segment_idx)
-        .await?;
-    if !old.is_empty() {
-        core.vectors.delete_artifacts(&old).await?;
-        for id in &old {
-            core.store.delete_artifact(id).await?;
-        }
-    }
-    core.store.insert_artifacts(corpus_id, &new).await
-}
-
-/// Did this artifact come from a context block rather than from the window?
-///
-/// The prompt says not to extract from context, and a small local model obeys
-/// that unevenly, so the check is structural. Three outcomes matter and only
-/// the middle one is a duplicate: located in the window, keep; located only in
-/// context, drop, because the window that owns the material will emit it
-/// properly; located nowhere, keep — that is an artifact the model reworded
-/// hard, which flag_unverified has always handled and which must not start
-/// silently disappearing.
-fn from_context_only(
-    text: &str,
-    core_text: &str,
-    ctx: &crate::infer::context::WindowContext,
-) -> bool {
-    if crate::infer::verify::locate_span(text, core_text, 1).is_some() {
-        return false;
-    }
-    ctx.blocks()
-        .any(|b| crate::infer::verify::locate_span(text, b, 1).is_some())
-}
-
-/// Did any proposed chunk lose a literal its window contains?
-///
-/// The chunk body only, deliberately — this gates a second synthesis call over
-/// the whole window, the most expensive thing here. A caveat is prose the model
-/// is asked to write freely ("only on `/dev/sd*` devices", "requires `sudo`"),
-/// so a path it names in passing need not appear verbatim in the source, and
-/// re-synthesising a window over one is paying the largest cost in the system
-/// for the smallest reason. `flag_unverified` still checks caveats: a command
-/// invented in one is flagged for the reader like any other.
-fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &str) -> bool {
-    chunks
-        .iter()
-        .any(|c| !crate::infer::verify::missing_literals(&c.text, &[], window).is_empty())
-}
-
-/// Mark what verification could not vouch for. The chunk is kept — a warning
-/// the reader can see beats a chapter silently missing from the base.
-///
-/// One check, not two. A span is derived rather than adjudicated, so there is
-/// nothing left to disbelieve about it; what remains is the literal check,
-/// which is about the text itself and speaks to whoever reads the artifact.
-async fn flag_unverified(
-    core: &Core,
-    written: &[crate::store::artifacts::Chunk],
-    segment_body: &str,
-) -> Result<()> {
-    use crate::infer::verify;
-
-    for c in written {
-        let mut flags = Vec::new();
-        let mut detail: Option<String> = None;
-
-        let missing = verify::missing_literals(&c.text, &c.caveats, segment_body);
-        if let Some(first) = missing.first() {
-            flags.push(verify::FLAG_LITERALS.to_string());
-            detail = Some(format!("missing literal: {first}"));
-            tracing::warn!(artifact_id = %c.id, literal = %first, "literal not found in source window");
-        }
-
-        if !flags.is_empty() {
-            core.store
-                .set_artifact_flags(&c.id, &flags, detail.as_deref())
-                .await?;
-        }
-    }
-    Ok(())
-}
-
 /// Measure how much of a corpus survived into its artifacts, and store it.
 ///
 /// Pure local work over rows that are already there — no inference and no
@@ -578,29 +458,6 @@ pub async fn fail_pending_segments(core: &Core, corpus_id: &str, reason: &str) -
         return Ok(false);
     }
     Ok(true)
-}
-
-fn proposed_to_new(
-    segment_idx: i64,
-    proposed: Vec<crate::infer::ProposedArtifact>,
-) -> Vec<NewArtifact> {
-    proposed
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| NewArtifact {
-            ordinal: i as i64,
-            text: p.text,
-            corpus_span: p.corpus_lines.map(|(a, b)| CorpusSpan {
-                start_line: a,
-                end_line: b,
-            }),
-            title: p.title,
-            category: p.category,
-            tags: p.tags,
-            caveats: p.caveats,
-            segment_idx: Some(segment_idx),
-        })
-        .collect()
 }
 
 #[cfg(test)]
