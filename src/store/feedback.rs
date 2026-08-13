@@ -119,9 +119,10 @@ impl Store {
     /// Capturing only deliberate searches would lose the most valuable case:
     /// `mark` is set on open, expand and submit, so a search where the operator
     /// found nothing useful and gave up would never be recorded. So everything
-    /// is captured, and an event whose query strictly extends the previous one
-    /// from the same searcher, within `coalesce_secs`, replaces it. What
-    /// survives is the final wording — the query that was actually meant.
+    /// is captured, and an event whose query extends the previous one from the
+    /// same searcher — or repeats it verbatim — within `coalesce_secs` replaces
+    /// it. What survives is the final wording: the query that was actually
+    /// meant, asked once.
     ///
     /// Only the UI folds, and only within one `scope`. A keystroke burst is
     /// something a text box produces; a call through the API or MCP is a
@@ -141,9 +142,12 @@ impl Store {
         let prev = match ev.door {
             Door::Ui => {
                 sqlx::query(
-                    "SELECT id, query, created_at FROM search_events
-                     WHERE door = ? AND scope IS ? AND judged_at IS NULL
-                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                    "SELECT id, query, created_at,
+                            (SELECT COUNT(*) FROM search_candidates
+                              WHERE event_id = search_events.id) AS pool
+                       FROM search_events
+                      WHERE door = ? AND scope IS ? AND judged_at IS NULL
+                      ORDER BY created_at DESC, id DESC LIMIT 1",
                 )
                 .bind(ev.door.as_str())
                 .bind(&ev.scope)
@@ -157,7 +161,12 @@ impl Store {
         // request among several in flight, so "fat" can land after "fat32"; the
         // test asks whether one query is a prefix of the other rather than
         // whether this one grew, so the burst folds the same way regardless of
-        // the order the requests happened to arrive in.
+        // the order the requests happened to arrive in. A prefix of equal
+        // length is the same query twice — the form fires on load, on submit
+        // and on every filter change, so one search reaches here several times
+        // over — and it folds forward like any other, taking the newer filters
+        // and pool with it. Left unfolded it would be a second thing to judge
+        // that says nothing new, and a second identical pair in the eval set.
         enum Fold {
             /// The stored event is an earlier keystroke of this one.
             Extends(String),
@@ -174,9 +183,21 @@ impl Store {
                 // events usually land on one timestamp.
                 let fresh = coalesce_secs > 0 && at - created <= coalesce_secs;
                 let id: String = r.get("id");
+                // Folding forward replaces the stored pool with this one, and
+                // the filters travel with it — that is the point, since the
+                // form re-fires the same `q` on every chip. What it must not do
+                // is fold a pool away to nothing: a narrowing that matched
+                // zero artifacts would leave the event that is actually going
+                // to be judged holding no candidates at all, and a card with no
+                // options is unanswerable except by skip, gap or discard. The
+                // earlier pool answered the same query and is the better record
+                // of it, so the empty search starts its own event instead.
+                let pool: i64 = r.get("pool");
+                let empties = ev.candidates.is_empty() && pool > 0;
                 if !fresh {
                     Fold::New
-                } else if ev.query.len() > prior.len() && ev.query.starts_with(&prior) {
+                } else if ev.query.len() >= prior.len() && ev.query.starts_with(&prior) && !empties
+                {
                     Fold::Extends(id)
                 } else if prior.len() > ev.query.len() && prior.starts_with(&ev.query) {
                     Fold::Superseded(id)
@@ -578,22 +599,35 @@ impl Store {
         .collect())
     }
 
-    /// Drop captured searches older than the window. `0` keeps them forever.
+    /// Drop captured *unjudged* searches older than the window. `0` keeps them
+    /// forever.
     ///
     /// Driven by its own ticker rather than by the consolidation sweep: a
     /// retention window is a promise about personal data, and a promise that
     /// quietly lapses when an unrelated feature is switched off is not one.
+    ///
+    /// A judged event is exempt. The window exists to stop unexamined searches
+    /// accumulating; a verdict is the operator's own considered work, and it is
+    /// the only thing this whole feature produces — expiring it would delete
+    /// the eval pair silently, move recall and MRR for no visible reason, and
+    /// leave `--export-eval` poorer every month. `purge_feedback` still takes
+    /// everything, so the way out remains a deliberate one.
+    ///
+    /// `discard` is not exempt. It is the operator saying this was never a
+    /// search — a typo, or poking at the box — and holding those forever would
+    /// be keeping exactly the material the window exists to shed.
     pub async fn expire_feedback(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(
-            sqlx::query("DELETE FROM search_events WHERE created_at < ?")
-                .bind(now() - retain_days * 86_400)
-                .execute(&self.pool)
-                .await?
-                .rows_affected(),
+        Ok(sqlx::query(
+            "DELETE FROM search_events
+                 WHERE created_at < ? AND (verdict IS NULL OR verdict = 'discard')",
         )
+        .bind(now() - retain_days * 86_400)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Everything captured, gone. Judgements included: they are statements
@@ -743,6 +777,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_same_search_arriving_twice_stays_one_event() {
+        // The form fires on load, on submit and on every filter change, so one
+        // search reaches capture several times over — and a bookmarked
+        // `/ui/search?q=fat32` fires again on every reload. Requiring the
+        // query to have *grown* left each repeat standing as its own event:
+        // one thing to judge became five, each needing its own verdict, and
+        // `--export-eval` emitted five identical pairs that weighted that one
+        // query five times over in recall@10 and MRR.
+        let store = Store::memory().await.unwrap();
+        for _ in 0..3 {
+            store
+                .record_search(ev("fat32", Door::Ui), 15)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(queries(&store).await, vec!["fat32"]);
+        let candidates: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(candidates, 1, "the pool was written once per repeat");
+    }
+
+    #[tokio::test]
+    async fn the_same_search_outside_the_window_is_asked_again() {
+        // Folding is about one burst at the keyboard, not about a query being
+        // unique forever. Coming back to the same question an hour later is a
+        // second occasion, and it is judged as one.
+        let store = Store::memory().await.unwrap();
+        let first = store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(now() - 3600)
+            .bind(&first)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+
+        assert_eq!(queries(&store).await, vec!["fat32", "fat32"]);
+    }
+
+    #[tokio::test]
     async fn a_query_that_is_not_a_prefix_starts_its_own_event() {
         let store = Store::memory().await.unwrap();
         store
@@ -786,6 +869,60 @@ mod tests {
         second.candidates[0].artifact_id = "a2".into();
         store.record_search(second, 15).await.unwrap();
 
+        let rows = sqlx::query("SELECT artifact_id FROM search_candidates")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<String, _>("artifact_id"), "a2");
+    }
+
+    #[tokio::test]
+    async fn a_narrowing_that_found_nothing_does_not_empty_the_stored_pool() {
+        // The search form fires the same `q` again on every filter change, and
+        // a repeat folds forward taking the newer pool with it. When the newer
+        // pool is empty — a category chip that nothing in the base matches —
+        // that left the event holding no candidates, and its card offered
+        // nothing to choose: unjudgeable except by skip, gap or discard, on a
+        // query that had twenty perfectly good answers a moment earlier. The
+        // empty search is still recorded; it just does not overwrite the pool
+        // that answered the same words.
+        let store = Store::memory().await.unwrap();
+        let first = store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+
+        let mut filtered = ev("fat32", Door::Ui);
+        filtered.filters = r#"{"category":"recipes"}"#.into();
+        filtered.candidates.clear();
+        let second = store.record_search(filtered, 15).await.unwrap();
+
+        assert_ne!(first, second, "the empty search started its own event");
+        let kept = sqlx::query("SELECT artifact_id FROM search_candidates WHERE event_id = ?")
+            .bind(&first)
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 1, "the pool that answered the query survived");
+    }
+
+    #[tokio::test]
+    async fn a_narrowing_that_found_something_still_folds() {
+        // The guard is only about emptying a pool. A filter change that returns
+        // results is the documented case: one search, judged once, against the
+        // narrowing that was actually meant.
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+        let mut filtered = ev("fat32", Door::Ui);
+        filtered.filters = r#"{"category":"disks"}"#.into();
+        filtered.candidates[0].artifact_id = "a2".into();
+        store.record_search(filtered, 15).await.unwrap();
+
+        assert_eq!(queries(&store).await, vec!["fat32"]);
         let rows = sqlx::query("SELECT artifact_id FROM search_candidates")
             .fetch_all(&store.pool)
             .await
@@ -972,6 +1109,45 @@ mod tests {
             .execute(&store.pool)
             .await
             .unwrap();
+        assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_judged_event_outlives_the_retention_window() {
+        // The window is for unexamined searches. A verdict is the operator's
+        // own work and the only thing the feature produces: expiring it would
+        // delete an eval pair silently and move recall for no visible reason.
+        let store = Store::memory().await.unwrap();
+        let kept = seed(&store, "judged", &["a"]).await;
+        let gone = seed(&store, "never looked at", &["a"]).await;
+        store.judge_hit(&kept, "a").await.unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ?")
+            .bind(now() - 40 * 86_400)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
+        assert_eq!(
+            store.event_query(&kept).await.unwrap().as_deref(),
+            Some("judged")
+        );
+        assert_eq!(store.event_query(&gone).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_discarded_event_expires_like_any_other() {
+        // `discard` is the operator saying this was never a search. Holding
+        // typos forever is keeping exactly what the window exists to shed.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "asdf", &["a"]).await;
+        store.judge(&id, Verdict::Discard).await.unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ?")
+            .bind(now() - 40 * 86_400)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
         assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
     }
 

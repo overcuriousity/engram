@@ -586,6 +586,15 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 }
 .judge-option:hover { background: var(--color-bg-hover); }
 .judge-option:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+/* Still legible, plainly not choosable: the pool is shown at full length so the
+   operator can see what the search returned, and a candidate the benchmark
+   cannot hold is greyed rather than dropped. */
+.judge-option-unusable {
+  cursor: not-allowed; opacity: 0.55; background: transparent;
+  border-style: dashed;
+}
+.judge-option-unusable:hover { background: transparent; }
+.judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
 .judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: 0.8125rem; }
 .judge-title { font-weight: 500; }
 .judge-snippet { grid-column: 2; color: var(--color-fg-secondary); font-size: 0.875rem; }

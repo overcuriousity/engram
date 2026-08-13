@@ -383,6 +383,15 @@ impl Config {
     /// dataset. Nobody types a zero meaning that. It goes back to the default
     /// with a line in the log rather than stopping a server over a number that
     /// only affects an optional feature.
+    ///
+    /// The ceiling is the other end of the same argument. A captured search
+    /// fetches at least `candidates` vectors whatever the caller asked for, so
+    /// the number is the width of every search through a captured door, not
+    /// just the depth of the pool stored behind it. Left unbounded, a four-digit
+    /// value read as "keep plenty" turns every API call into a four-digit vector
+    /// fetch, and nothing in the file says so. The ceiling is what the widest
+    /// legal search already costs: `MAX_LIMIT` results over-fetched by the
+    /// candidate multiplier.
     fn normalize(&mut self) {
         if self.feedback.candidates == 0 {
             let d = FeedbackConfig::default().candidates;
@@ -392,6 +401,16 @@ impl Config {
                 "feedback.candidates = 0 would store an empty pool for every captured search; \
                  using the default"
             );
+        }
+        let ceiling = crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER;
+        if self.feedback.candidates > ceiling {
+            tracing::warn!(
+                configured = self.feedback.candidates,
+                using = ceiling,
+                "feedback.candidates is the fetch width of every captured search; \
+                 capping it at the widest ordinary search"
+            );
+            self.feedback.candidates = ceiling;
         }
     }
 
@@ -507,6 +526,24 @@ mod tests {
             FeedbackConfig::default().candidates
         );
         assert!(cfg.feedback.enabled, "the rest of the section was dropped");
+    }
+
+    #[test]
+    fn an_oversized_candidate_pool_is_capped_at_the_widest_ordinary_search() {
+        // A captured search fetches at least this many vectors whatever the
+        // caller asked for, so the number is the width of every UI, API and MCP
+        // search — not just the depth of the pool stored behind it. Four digits
+        // here silently made every API call a four-digit vector fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 2000\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.feedback.candidates,
+            crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER
+        );
     }
 
     #[test]

@@ -249,7 +249,12 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     );
     let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
         Ok(v) => v,
-        Err(e) if input_too_large(&e) => {
+        // Still nothing to cut with when the title alone fills the limit:
+        // `split_by_lines` at a budget of zero puts every line in a part of its
+        // own and then falls to the 64-character floor, which shreds the text
+        // into fragments that are each still oversize once they inherit the
+        // title. A refusal we cannot act on is reported as one.
+        Err(e) if input_too_large(&e) && budget > 0 => {
             let parts = split_by_lines(&chunk.text, budget, &core.counter);
             if parts.len() > 1 {
                 tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
@@ -673,6 +678,57 @@ mod tests {
                 c.text
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_with_no_budget_left_is_reported_rather_than_shredded() {
+        // A title costing the whole limit leaves the text nothing, which is why
+        // the paragraph and line splits are skipped. The as-is attempt then ran
+        // the line split anyway, at a budget of zero: every line becomes a part
+        // of its own and the character floor cuts the rest to 64 at a time, so
+        // the chunk was replaced by dozens of fragments that are each still
+        // oversize once they inherit the same title — and mean nothing on their
+        // own. Failing is the honest answer; the operator can shorten a title.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            1,
+        ));
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+
+        let title = "a heading long enough to cost the entire limit by itself".to_string();
+        let text = (0..12)
+            .map(|i| format!("line {i} of something that has no blank lines in it"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let limit = core.counter.count(&format!("{title}\n"));
+
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.clone(),
+                    corpus_span: None,
+                    title: Some(title),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        let err = run_with_limit(&core, &made[0].id, limit)
+            .await
+            .expect_err("a refusal nothing can act on has to surface");
+        assert!(input_too_large(&err), "wrong error: {err}");
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert_eq!(chunks.len(), 1, "the chunk was cut into meaningless pieces");
+        assert_eq!(chunks[0].text, text);
     }
 
     #[tokio::test]

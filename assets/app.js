@@ -164,7 +164,10 @@
     if (!card) return;
 
     if (/^[1-9]$/.test(e.key)) {
-      var pick = card.querySelectorAll('.judge-option')[Number(e.key) - 1];
+      // Disabled options are skipped, matching the badges: a deprecated or
+      // superseded candidate is shown at its place in the pool but carries no
+      // digit, and the numbering runs over the choosable ones without a gap.
+      var pick = card.querySelectorAll('.judge-option:not([disabled])')[Number(e.key) - 1];
       if (pick) { e.preventDefault(); pick.click(); }
       return;
     }

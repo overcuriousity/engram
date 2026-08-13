@@ -369,6 +369,21 @@ impl Core {
         } else {
             limit
         };
+        // Capture needs a pool wider than the answer — that is the whole point
+        // of storing one, since a hit the ranking buried is unconfirmable
+        // otherwise. The fetch is the ceiling on that pool, and the width above
+        // is derived from `limit` alone: a `feedback.candidates` larger than it
+        // was silently cut back, either by a small `limit` (three results
+        // over-fetched to nine, against a configured pool of twenty) or by
+        // raising `candidates` past the multiplier. Neither said so anywhere.
+        // Widening the fetch is also the cost of the setting: `Config::normalize`
+        // caps `candidates` at `MAX_LIMIT * CANDIDATE_MULTIPLIER` so this can
+        // never exceed what the widest ordinary search already fetches.
+        let candidates = if self.feedback.enabled && door.captured() {
+            candidates.max(self.feedback.candidates)
+        } else {
+            candidates
+        };
         // The lexical half of the query. Computed locally and for free, so it
         // costs nothing when the store ignores it.
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
@@ -1251,6 +1266,37 @@ mod tests {
         assert_eq!(
             shown, 3,
             "exactly the answer the searcher saw is flagged shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stored_pool_is_as_wide_as_it_was_configured_to_be() {
+        // The fetch width came from `limit` alone, so a pool configured wider
+        // than the over-fetch was quietly truncated to it and nothing warned.
+        // At a limit of two the pool was six, not the twelve asked for — and
+        // the six missing candidates are exactly the buried ones the judging
+        // card exists to surface.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.feedback.candidates = 12;
+        let texts: Vec<(&str, &str, &[&str])> = (0..20)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let mut query = q("alpha text about it");
+        query.limit = 2;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        let pool: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            pool, 12,
+            "the configured pool was cut back to the over-fetch"
         );
     }
 

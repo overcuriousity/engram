@@ -156,7 +156,7 @@ the file — the loader warns if it finds one.
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `sample`, `per_point`, `interval_hours`, `judge`, `max_judgements`. |
-| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days`, `sweep_hours`. Off by default. |
+| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |

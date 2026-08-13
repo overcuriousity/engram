@@ -22,7 +22,10 @@
       <button class="judge-option" hx-post="/ui/judge/{{ event_id }}/hit"
               hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
               hx-target="#card" hx-swap="innerHTML">
-        <span class="judge-key">{{ loop.index }}</span>
+        {# Same single-digit shortcut as the card, and the same rule: this
+           search returns ten, so a full set would otherwise always end on a
+           badge reading 10 that no key can press. #}
+        <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
         <span class="judge-title">{{ o.title }}</span>
         <span class="judge-snippet">{{ o.snippet }}</span>
       </button>

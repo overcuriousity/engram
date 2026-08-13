@@ -26,12 +26,30 @@
   <ol class="judge-options">
     {% for o in c.choices %}
     <li>
-      <button class="judge-option" hx-post="/ui/judge/{{ c.id }}/hit"
+      {# Deprecated and superseded artifacts stay in the pool at full length so
+         the operator sees what the search actually returned, but they are
+         disabled: `hit` would refuse them, and a refusal arriving after the
+         keystroke re-renders an identical card with nothing to show which
+         option was the bad one. Said here instead, before the choice. #}
+      <button class="judge-option{% if !o.usable %} judge-option-unusable{% endif %}"
+              {% if o.usable %}
+              hx-post="/ui/judge/{{ c.id }}/hit"
               hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
-              hx-target="#card" hx-swap="innerHTML">
-        <span class="judge-key">{{ loop.index }}</span>
+              hx-target="#card" hx-swap="innerHTML"
+              {% else %}disabled{% endif %}>
+        {# Only the first nine choosable options carry a number. The shortcut is
+           a single digit and `feedback.candidates` is 20 by default, so a badge
+           on the tenth would advertise a key that does nothing; a badge on a
+           disabled one would advertise a key that refuses. The column stays
+           either way so the titles line up. #}
+        <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
         <span class="judge-title">{{ o.title }}</span>
+        {% if o.usable %}
         <span class="judge-snippet">{{ o.snippet }}</span>
+        {% else %}
+        <span class="judge-snippet muted">deprecated or superseded — the benchmark can't hold
+          this one, so it can't be the answer</span>
+        {% endif %}
       </button>
       {# A hundred and forty characters is enough to recognise an artifact and
          not enough to be sure of one, and the click after it is a line in the

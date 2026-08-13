@@ -201,13 +201,18 @@ enabled = false
 # setting — an empty pool leaves every card with nothing to choose — and is put
 # back to the default with a line in the log.
 candidates = 20
-# Window in which a longer query replaces the previous one instead of starting
-# its own event. 0 turns folding off. Applies to the search box only, and only
+# Window in which a longer query — or the same one again — replaces the previous
+# event instead of starting its own. 0 turns folding off. Applies to the search
+# box only, and only
 # within one signed-in operator: a call through the API or MCP is a deliberate
 # query, not a keystroke, and two people typing at once are not typing the same
 # thing.
 coalesce_secs = 15
-# Days captured searches are kept. 0 keeps them forever.
+# Days an unjudged captured search is kept. 0 keeps them forever. A judged hit
+# or gap is exempt: it is the labelled pair the whole feature exists to produce,
+# and expiring it would empty `--export-eval` a month at a time. A `discard` is
+# not exempt — that verdict says the search was never real. The purge button on
+# Ops still takes everything.
 retain_days = 0
 # How often retention is enforced. A window measured in days does not need
 # checking more often than this, and the sweep is a single DELETE.

@@ -86,7 +86,8 @@ impl Store {
     /// overlap is synthesised twice — or, shifted the other way, the gap
     /// between them is never synthesised at all. Neither is visible afterwards.
     ///
-    /// So the split is settled by the first window to finish. Until then it is
+    /// So the split is settled by the first window to write anything. Until
+    /// then it is
     /// rewritten freely, and windows the new split no longer reaches are
     /// dropped — otherwise a corpus that never started carries stale text into
     /// the model and queues surplus windows forever.
@@ -99,7 +100,20 @@ impl Store {
         .bind(corpus_id)
         .fetch_one(&mut *tx)
         .await?;
-        if finished > 0 {
+        // Owning artifacts settles the split too, not just being marked `done`.
+        // `write_segment_artifacts` commits the artifacts and only then sets the
+        // state, so a process killed between the two leaves a window that owns
+        // artifacts while still reading `pending` — and `done` alone would let
+        // the split move out from under it. A window that produced no chunks is
+        // why the state is still consulted: it owns nothing and has still
+        // finished.
+        let owned: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifacts WHERE corpus_id = ? AND segment_idx IS NOT NULL",
+        )
+        .bind(corpus_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if finished > 0 || owned > 0 {
             return Ok(());
         }
 
@@ -123,8 +137,9 @@ impl Store {
             .await?;
         }
 
-        // Windows past the end of the new split. Nothing here is `done` — the
-        // early return above saw to that — so none of them owns an artifact.
+        // Windows past the end of the new split. None of them owns an artifact:
+        // the early return above leaves only corpora where no window has written
+        // one, whatever state the rows are in.
         sqlx::query("DELETE FROM segments WHERE corpus_id = ? AND idx >= ?")
             .bind(corpus_id)
             .bind(windows.len() as i64)
@@ -434,6 +449,45 @@ mod tests {
         assert_eq!(w.state, SegmentState::Pending);
         assert_eq!(w.attempts, 0);
         assert_eq!(w.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn a_window_that_wrote_artifacts_settles_the_split_before_it_is_done() {
+        // `write_segment_artifacts` commits the artifacts and only then marks
+        // the window `done`, so a process killed between the two leaves a
+        // window that owns artifacts while still reading `pending`. Judged on
+        // state alone, the resume re-split that follows would rewrite the
+        // boundaries under it — and, if the new split were shorter, delete the
+        // row while leaving its artifacts in the base with no window that will
+        // ever replace them.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
+            .await
+            .unwrap();
+        let a = crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: "what window 1 produced".into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(1),
+            caveats: vec![],
+        };
+        s.insert_artifacts(&src.id, &[a]).await.unwrap();
+
+        s.upsert_segments(&src.id, &[seg(1, 20, "one wide window")])
+            .await
+            .unwrap();
+
+        let w = s.segments_for_corpus(&src.id).await.unwrap();
+        assert_eq!(w.len(), 2, "the split moved out from under an artifact");
+        assert_eq!(w[1].text, "window 1");
+        assert_eq!(
+            s.artifact_ids_for_segment(&src.id, 1).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]

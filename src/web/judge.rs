@@ -11,6 +11,7 @@
 
 use crate::auth::Identity;
 use crate::error::Result;
+use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::{PendingEvent, Stats, Verdict};
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -34,6 +35,15 @@ pub struct Choice {
     pub artifact_id: String,
     pub title: String,
     pub snippet: String,
+    /// Whether confirming this one would produce a pair the benchmark can hold.
+    /// A deprecated or superseded artifact is offered but not choosable — see
+    /// `card_for` for why it is shown at all.
+    pub usable: bool,
+    /// The digit that presses this option, or `None` where no key reaches it:
+    /// past the ninth, or on something unusable. Assigned after the shuffle,
+    /// over the choosable options only, so the digits an operator can see are
+    /// the digits that work and they run without a gap.
+    pub key: Option<usize>,
 }
 
 pub struct Card {
@@ -140,7 +150,7 @@ fn shuffled(event_id: &str, mut choices: Vec<Choice>) -> Vec<Choice> {
 }
 
 /// Hydrate a pending event into something renderable, dropping candidates whose
-/// artifact has since been deleted.
+/// artifact has since been deleted and marking those the benchmark cannot hold.
 ///
 /// One read per candidate rather than one query for all of them: the pool is at
 /// most `feedback.candidates` long, this is not a hot path, and a hand-built
@@ -155,16 +165,34 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
         // missing candidate had been seen and rejected.
         match st.core.store.get_artifact(&c.artifact_id).await {
             Ok(a) => choices.push(Choice {
+                // Deprecated and superseded artifacts are shown greyed rather
+                // than dropped, for the reason just given: shortening the pool
+                // silently is what makes a verdict mean something it doesn't.
+                // `hit` refuses these anyway — `eval::export` would drop the
+                // pair — so showing them unchoosable says the same thing on the
+                // card, before the keystroke, instead of after it.
+                usable: a.status == ArtifactStatus::Active && a.superseded_by.is_none(),
                 artifact_id: a.id,
                 title: a.title.unwrap_or_else(|| "Untitled".into()),
                 snippet: snippet_of(&a.text),
+                key: None,
             }),
             Err(crate::error::Error::NotFound) => continue,
             Err(e) => return Err(e),
         }
     }
+    let mut choices = shuffled(&event.id, choices);
+    // After the shuffle, because the digits number the card as it is read.
+    let mut next = 1;
+    for c in choices.iter_mut().filter(|c| c.usable) {
+        if next > 9 {
+            break;
+        }
+        c.key = Some(next);
+        next += 1;
+    }
     Ok(Card {
-        choices: shuffled(&event.id, choices),
+        choices,
         id: event.id,
         query: event.query,
         door: event.door,
@@ -231,6 +259,29 @@ async fn card_after(
             line: line.to_string(),
             delta: format!("MRR {before:.2} → {after:.2}"),
             undo: Some(judged.to_string()),
+        }),
+    })
+    .into_response())
+}
+
+/// Put the same card back with a note, having recorded nothing.
+///
+/// Not `card_after` with an empty delta: nothing was judged, so there is no MRR
+/// movement to report and nothing to undo. The event is still pending, so it is
+/// fetched by id rather than taken from the queue — a capture landing in the
+/// meantime would otherwise swap the card out from under the correction.
+async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let card = match st.core.store.pending_by_id(event_id).await? {
+        Some(event) => Some(card_for(st, event).await?),
+        None => next_pending_card(st).await?,
+    };
+    Ok(HtmlTemplate(CardTemplate {
+        card,
+        flash: Some(Flash {
+            line: line.to_string(),
+            delta: String::new(),
+            undo: None,
         }),
     })
     .into_response())
@@ -303,7 +354,24 @@ async fn hit(
     // as a find, and drags recall@10 down for a ranking failure that never
     // happened. Pool membership is deliberately not required — an artifact the
     // search never offered is exactly what the assign path is for.
-    st.core.store.get_artifact(&f.artifact_id).await?;
+    let artifact = st.core.store.get_artifact(&f.artifact_id).await?;
+
+    // Being active is required, though. `eval::export` freezes only active,
+    // un-superseded artifacts and drops any pair naming something else, so a
+    // confirmation here would raise the recall and MRR on this very page while
+    // contributing nothing to `pairs.json` — the two numbers the operator is
+    // asked to trust, disagreeing about the same judgement. Refused rather than
+    // recorded: the card comes back so the answer can be given again against
+    // something the benchmark will still be able to hold.
+    if artifact.status != ArtifactStatus::Active || artifact.superseded_by.is_some() {
+        return card_again(
+            &st,
+            &event_id,
+            "that one is deprecated or superseded, so the benchmark can't hold it. \
+             Pick what answers this now, or call it a gap.",
+        )
+        .await;
+    }
 
     // Read before the write: afterwards the event is no longer pending, and the
     // rank is what decides which diagnosis the operator gets.
@@ -440,10 +508,20 @@ async fn assign_results(
             .await?;
         results = hits
             .into_iter()
-            .map(|h| Choice {
+            .enumerate()
+            .map(|(i, h)| Choice {
                 artifact_id: h.artifact_id,
                 title: h.title.unwrap_or_else(|| "Untitled".into()),
                 snippet: snippet_of(&h.text),
+                // The search that produced these excluded deprecated and
+                // superseded artifacts, so everything offered here is something
+                // the benchmark can hold.
+                usable: true,
+                // `limit` above is ten and the shortcut is one digit, so the
+                // tenth result gets no badge rather than one that cannot be
+                // pressed. Numbered here rather than in the template for the
+                // same reason as the card: the digits are the ones that work.
+                key: (i < 9).then_some(i + 1),
             })
             .collect();
     }
@@ -473,6 +551,7 @@ pub fn judge_router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
+    use crate::store::artifacts::ArtifactStatus;
     use crate::store::feedback::{Door, NewCandidate, NewEvent};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -610,6 +689,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_options_a_key_can_reach_are_numbered() {
+        // The shortcut is a single digit and the pool is twenty deep by
+        // default, so past the ninth the badge advertised a key that does
+        // nothing — half the card looking operable and answering to nothing.
+        let (app, cookie, _core, _) = judge_app(13, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+
+        assert!(body.contains(r#"<span class="judge-key">9</span>"#));
+        assert!(
+            !body.contains(r#"<span class="judge-key">10</span>"#),
+            "the tenth option offers a key that cannot be pressed"
+        );
+        assert_eq!(
+            body.matches(r#"<span class="judge-key"></span>"#).count(),
+            4,
+            "the options past the ninth must keep their column and lose the number"
+        );
+    }
+
+    #[tokio::test]
     async fn the_card_shows_no_ranks_and_no_scores() {
         // Both are the ranker's opinion, which is exactly what must not be
         // heard while judging.
@@ -635,6 +734,72 @@ mod tests {
         let s = core.store.feedback_stats().await.unwrap();
         assert_eq!(s.hits, 1);
         assert!(core.store.next_pending().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_candidate_cannot_be_confirmed() {
+        // `eval::export` freezes only active artifacts and drops any pair
+        // naming something else. Recording this would raise the recall and MRR
+        // on this very page while `pairs.json` gained nothing — the two numbers
+        // the operator is asked to trust, disagreeing about one judgement.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        core.store
+            .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        let event = core.store.next_pending().await.unwrap().unwrap();
+
+        let status = post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[1]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the operator gets the card back");
+
+        assert_eq!(core.store.feedback_stats().await.unwrap().hits, 0);
+        assert_eq!(
+            core.store.next_pending().await.unwrap().map(|e| e.id),
+            Some(event.id),
+            "the event must still be waiting for a verdict it can keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_candidate_is_shown_unchoosable_rather_than_offered() {
+        // The refusal above is correct but arrives too late to be read: the
+        // shuffle is seeded by event id, so the rejected option came back at
+        // the same place with the same digit and nothing marking it, and an
+        // operator judging by keystroke got the same flash every time. The
+        // pool still shows at full length — a card quietly one option short is
+        // one where "none of these" means something it doesn't — but the
+        // option carries no key and cannot be posted.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        core.store
+            .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(
+            body.contains(ids[1].as_str()) || body.contains("judge-option-unusable"),
+            "the deprecated candidate must still appear in the pool"
+        );
+        assert!(
+            body.contains("judge-option-unusable") && body.contains("disabled"),
+            "it must be marked and disabled rather than silently refused later"
+        );
+        assert_eq!(
+            body.matches(r#"<span class="judge-key">1</span>"#).count(),
+            1,
+            "the one choosable option keeps the first digit"
+        );
+        assert_eq!(
+            body.matches(r#"<span class="judge-key">2</span>"#).count(),
+            0,
+            "no digit may point at an option that would be refused"
+        );
     }
 
     #[tokio::test]
