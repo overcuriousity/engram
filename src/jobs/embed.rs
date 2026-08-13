@@ -114,13 +114,27 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     let pending = core.store.pending_artifacts_for_corpus(corpus_id).await?;
 
     // An oversize chunk becomes siblings instead of a vector, so it cannot ride
-    // along in a batch. It leaves behind its own per-chunk jobs.
+    // along in a batch — and finding out how to cut it can itself cost a call.
+    // It gets a unit of its own and this job goes on without it.
     let mut batch: Vec<Chunk> = Vec::with_capacity(pending.len());
     let mut texts: Vec<String> = Vec::with_capacity(pending.len());
     for chunk in pending {
         let text = embed_text(&chunk);
         if core.counter.count(&text) > limit {
-            split_oversize(core, &chunk, limit, false).await?;
+            // Splitting is not free: `split_oversize` falls through to embedding
+            // the chunk whole when there is no boundary to cut on, and that is a
+            // model call. Doing it here made a job that is allowed one call make
+            // one per oversize chunk — fifty of them held the turn for fifty
+            // cooldowns, which is the head-of-line blocking one-batch-per-run
+            // exists to prevent. Its own unit instead, where `run_with_limit`
+            // splits it paced like everything else.
+            //
+            // Idle-only: `rearm_if_more` brings this job back for every batch of
+            // a long document, and `enqueue` would wind the attempts of a unit
+            // already queued back to zero on each of them.
+            core.store
+                .rearm_idle_seq(Stage::Embed, "artifact", &chunk.id, 0)
+                .await?;
         } else {
             texts.push(text);
             batch.push(chunk);
@@ -1068,6 +1082,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversize_chunks_do_not_turn_one_batch_into_many_calls() {
+        // `split_oversize` can cost a model call of its own — its fall-through
+        // embeds the chunk whole to find out whether our estimate was wrong —
+        // and the scan ran it once per oversize chunk. Fifty of them was fifty
+        // sequential calls inside a job that is allowed exactly one, holding the
+        // turn for fifty cooldowns before anything else could run.
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        let big = "alpha ".repeat(400);
+        let (src_id, _) = seed(&core, &[&big, &big, &big, "small"]).await;
+
+        run_corpus_with_limit(&core, &src_id, 200).await.unwrap();
+
+        assert_eq!(
+            embedder.calls(),
+            1,
+            "the batch job made more than one inference call"
+        );
+        let armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs
+              WHERE stage = 'embed' AND target_kind = 'artifact' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(armed, 3, "each oversize chunk should have got its own unit");
+    }
+
+    #[tokio::test]
     async fn a_long_document_re_arms_itself_until_it_is_drained() {
         let core = test_core().await;
         let id = corpus_with_chunks(&core, BATCH * 2 + 5).await;
@@ -1259,10 +1301,12 @@ mod tests {
     #[tokio::test]
     async fn an_oversize_chunk_does_not_block_its_siblings() {
         // It becomes siblings rather than a vector, so it cannot ride along in
-        // the batch. The rest of the source must still be embedded.
+        // the batch. The rest of the source must still be embedded, and the
+        // oversize one must be handed to a unit of its own rather than split
+        // here — splitting can cost a call this job has already spent.
         let core = test_core().await;
         let big = format!("{}\n\n{}", "alpha ".repeat(400), "beta ".repeat(400));
-        let (src_id, _) = seed(&core, &["small one", &big, "small two"]).await;
+        let (src_id, ids) = seed(&core, &["small one", &big, "small two"]).await;
 
         run_corpus_with_limit(&core, &src_id, 200).await.unwrap();
 
@@ -1271,10 +1315,24 @@ mod tests {
             2,
             "the two small chunks should be embedded"
         );
+        let armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs
+              WHERE stage = 'embed' AND target_kind = 'artifact' AND target_id = ?
+                AND state = 'pending'",
+        )
+        .bind(&ids[1])
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(armed, 1, "the oversize chunk was not given its own unit");
+
+        // And that unit does the split, so nothing is lost by deferring it.
+        run_with_limit(&core, &ids[1], 200).await.unwrap();
         let chunks = core.store.artifacts_for_corpus(&src_id).await.unwrap();
         assert!(
             chunks.len() > 3,
-            "the oversize chunk should have become siblings"
+            "the oversize chunk should have become siblings, got {}",
+            chunks.len()
         );
     }
 
