@@ -637,6 +637,12 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // And the units that name those windows, which outlive them.
+                // Planning arms idle-only, so a unit still queued from the run
+                // being replaced would carry its attempts into the rerun — the
+                // person who asked for another try would get a window that gives
+                // up after one.
+                self.store.delete_window_jobs(&src.id).await?;
                 // The title unit is armed once per corpus and never again, so
                 // that a document the model will not name stops costing calls.
                 // The row is what remembers that, which also means a corpus left
@@ -704,6 +710,42 @@ mod tests {
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn reprocessing_gives_every_window_its_attempts_back() {
+        // Planning arms idle-only now, so the window units are the one piece of
+        // the previous run that a reprocess would otherwise inherit: a rerun
+        // asked for by a person would start its windows four attempts in and
+        // give up on them almost at once. `clear_segments` drops the rows the
+        // units name but not the units, which outlive them.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        let attempts: Vec<i64> =
+            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(
+            !attempts.is_empty(),
+            "the rerun should have armed its windows again"
+        );
+        assert!(
+            attempts.iter().all(|&a| a == 0),
+            "the rerun inherited the previous run's attempts: {attempts:?}"
+        );
     }
 
     #[tokio::test]

@@ -105,8 +105,6 @@ pub fn backoff_secs(attempts: i64) -> i64 {
 enum Guard {
     /// Anything, running included. An operator's reprocess.
     Any,
-    /// Anything a worker is not inside right now.
-    NotRunning,
     /// Only a row closed while its work was not.
     Closed,
 }
@@ -130,7 +128,6 @@ impl Guard {
     fn statement(self) -> &'static str {
         match self {
             Guard::Any => arm_job!(""),
-            Guard::NotRunning => arm_job!("WHERE jobs.state != 'running'"),
             Guard::Closed => arm_job!("WHERE jobs.state = 'done'"),
         }
     }
@@ -163,37 +160,17 @@ impl Store {
             .await
     }
 
-    /// Arm a unit without disturbing one that is already running.
-    ///
-    /// It is one row per unit, so re-arming one mid-call put it back in the
-    /// queue for a second worker to claim while the first was still inside the
-    /// model call — two workers segmenting the same window, each deleting the
-    /// artifacts the other had just written, and both then settling the corpus.
-    /// Nothing is lost by waiting: the running attempt either finishes the work
-    /// or fails and re-queues itself.
-    ///
-    /// Everything that arms units on its own — planning a document, a
-    /// consolidation sweep arming a judgement — wants this rather than
-    /// `enqueue_seq`.
-    pub async fn arm_seq(
-        &self,
-        stage: Stage,
-        target_kind: &str,
-        target_id: &str,
-        seq: i64,
-    ) -> Result<()> {
-        self.upsert_job(stage, target_kind, target_id, seq, Guard::NotRunning)
-            .await
-    }
-
     /// Arm a unit only if nothing is going to run it.
     ///
-    /// What the reconciliation sweep wants, and neither of the above is it: a
-    /// unit already queued is already going to run, and winding its `attempts`
-    /// back to zero on every sweep is how a window the model will not read never
-    /// reaches the ceiling that lets its document settle — the sweep would keep
-    /// it forever young and the corpus forever `segmenting`. Only a row closed
-    /// while its work was not is resurrected.
+    /// What every automatic arming wants, and `enqueue_seq` is not it: a unit
+    /// already queued is already going to run, and winding its `attempts` back
+    /// to zero is how a window the model will not read never reaches the ceiling
+    /// that lets its document settle — forever young, and its corpus forever
+    /// `segmenting`. Only a row closed while its work was not is resurrected.
+    ///
+    /// There was once a middle tier that armed anything a worker was not inside,
+    /// on the reasoning that a merely *queued* unit is safe to disturb. It is
+    /// not, for the reason above, and every caller it had has moved here.
     pub async fn rearm_idle_seq(
         &self,
         stage: Stage,
@@ -268,6 +245,30 @@ impl Store {
             .bind(target_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Forget every window unit of one document.
+    ///
+    /// The units are keyed `corpus#idx` and outlive the window rows they name,
+    /// so `clear_segments` on its own leaves a rerun sharing the attempt counts
+    /// of the run it replaces — and since planning arms idle-only, it would keep
+    /// them. Only an operator asking for the work again wants this, for the same
+    /// reason `delete_job` exists: a rerun a person asked for is a clean slate
+    /// or it is not one.
+    ///
+    /// Matched on the `corpus#` prefix rather than with `LIKE`, so an id
+    /// carrying a wildcard character cannot widen the delete.
+    pub async fn delete_window_jobs(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM jobs
+              WHERE stage = 'segment_window'
+                AND substr(target_id, 1, length(?) + 1) = ? || '#'",
+        )
+        .bind(corpus_id)
+        .bind(corpus_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -727,7 +728,7 @@ mod tests {
             .unwrap();
         s.claim_job().await.unwrap().unwrap();
 
-        s.arm_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
+        s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
             .await
             .unwrap();
         assert!(

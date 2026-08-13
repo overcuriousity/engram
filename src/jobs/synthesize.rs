@@ -63,9 +63,16 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
     // One unit per window that has not resolved. `seq` is the window index, so
     // this document's window 0 is claimed before any document's window 1 and a
     // capture made during a long ingest does not wait for all of it.
+    //
+    // Idle-only, like every other automatic arming in the system. A plan job
+    // outlives the units it arms — the case the comment above describes — so
+    // this runs again while those units are queued with attempts against them,
+    // and winding those back keeps a window the model will not read forever
+    // young. An operator's reprocess still gets a clean slate: it deletes the
+    // units outright, which is a decision a person made rather than a sweep.
     for w in pending {
         core.store
-            .arm_seq(
+            .rearm_idle_seq(
                 Stage::SegmentWindow,
                 "segment",
                 &crate::jobs::window::unit_target(corpus_id, w.idx),
@@ -303,6 +310,39 @@ mod tests {
     use super::*;
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
     use crate::store::corpora::CorpusStatus;
+
+    #[tokio::test]
+    async fn re_planning_does_not_wind_back_a_queued_windows_attempts() {
+        // A plan job outlives the units it arms: killed after planning, its row
+        // stays pending, startup re-arms it, the units sort ahead of it and run
+        // and fail — and only then is the stale plan claimed. Re-arming them
+        // from zero there keeps a window the model will not read forever young,
+        // so `settle` never counts it as spent and the document never leaves
+        // `segmenting`. It is the failure the reconciliation sweep was already
+        // fixed for, reached by a second route.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        plan(&core, &out.id).await.unwrap();
+        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        plan(&core, &out.id).await.unwrap();
+
+        let attempts: Vec<i64> =
+            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(
+            attempts.iter().all(|&a| a == 4),
+            "re-planning reset a unit that was already queued: {attempts:?}"
+        );
+    }
 
     /// A budget with room for several windows and an output ceiling that never
     /// binds, so the context blocks are what shape the windowing.
