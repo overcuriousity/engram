@@ -196,23 +196,6 @@ impl Store {
         Ok(())
     }
 
-    pub async fn bump_segment_attempts(&self, corpus_id: &str, idx: i64) -> Result<i64> {
-        sqlx::query(
-            "UPDATE segments SET attempts = attempts + 1
-             WHERE corpus_id = ? AND idx = ?",
-        )
-        .bind(corpus_id)
-        .bind(idx)
-        .execute(&self.pool)
-        .await?;
-        let row = sqlx::query("SELECT attempts FROM segments WHERE corpus_id = ? AND idx = ?")
-            .bind(corpus_id)
-            .bind(idx)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(row.get("attempts"))
-    }
-
     /// Put a window back in the queue's path. The operator's "re-segment this
     /// window" button, and nothing else, calls this.
     pub async fn reset_segment(&self, corpus_id: &str, idx: i64) -> Result<()> {
@@ -431,15 +414,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attempts_accumulate_and_a_reset_clears_them() {
+    async fn a_reset_clears_a_window_back_to_pending() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(&src.id, &[seg(1, 5, "window 0")])
             .await
             .unwrap();
 
-        assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 1);
-        assert_eq!(s.bump_segment_attempts(&src.id, 0).await.unwrap(), 2);
         s.set_segment_state(&src.id, 0, SegmentState::Failed, Some("boom"))
             .await
             .unwrap();

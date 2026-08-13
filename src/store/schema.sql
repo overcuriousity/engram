@@ -81,10 +81,10 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_superseded ON artifacts(superseded_by);
 CREATE INDEX IF NOT EXISTS idx_artifacts_status     ON artifacts(status);
 
 -- ── Segments ─────────────────────────────────────────────────────────────────
--- The windows a corpus was split into for synthesis. These rows are the job's
--- memory: a window that succeeds is written and marked done before the next is
--- attempted, so a failure costs the windows that had not started and nothing
--- else.
+-- The windows a corpus was split into for synthesis. One window is one
+-- inference call and one queue unit, so these rows say what the units are and
+-- which of them have resolved; the attempt count and the backoff belong to the
+-- job, not here.
 CREATE TABLE IF NOT EXISTS segments (
   corpus_id  TEXT    NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
   idx        INTEGER NOT NULL,
@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS segments (
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
+  -- is the count that governs its backoff and its settling, and two counters for
+  -- one thing is exactly what made the incident behind that change so hard to
+  -- read. Left in place because `migrate` cannot drop a column; remove it
+  -- whenever the database is next recreated, and do not start writing to it.
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   PRIMARY KEY (corpus_id, idx)
