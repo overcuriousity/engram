@@ -20,14 +20,16 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let (Ok(a), Ok(b)) = (
-        core.store.get_artifact(&p.a_id).await,
-        core.store.get_artifact(&p.b_id).await,
-    ) else {
-        // One side was deleted while the unit waited. Nothing to compare.
-        core.store.record_judge_attempt(id).await?;
-        return Ok(());
-    };
+    // Reported, not swallowed. This read used to treat any failure as "one side
+    // was deleted while the unit waited" — it recorded an attempt and returned
+    // `Ok`, so a store that was briefly unwell closed the unit and counted the
+    // pair as having had its turn. There is no deletion to handle: `a_id` and
+    // `b_id` are `ON DELETE CASCADE` and every pool sets `foreign_keys`, so a
+    // pair naming an artifact that is gone is a state the schema does not allow.
+    let (a, b) = (
+        core.store.get_artifact(&p.a_id).await?,
+        core.store.get_artifact(&p.b_id).await?,
+    );
 
     // Re-checked here and not only when the unit was armed. A pair can wait out
     // a backoff, and in that time a member can be superseded by a later sweep or

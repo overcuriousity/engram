@@ -471,12 +471,15 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
             );
             break;
         }
-        let (Ok(a), Ok(b)) = (
-            core.store.get_artifact(&p.a_id).await,
-            core.store.get_artifact(&p.b_id).await,
-        ) else {
-            continue;
-        };
+        // Reported, not skipped. Skipping treated a store that was briefly
+        // unwell as a pair not worth arming, and since nothing recorded an
+        // attempt it led the next sweep's ordering all over again. There is no
+        // deletion to skip for: the pair rows are `ON DELETE CASCADE` on both
+        // members, so a pair naming an artifact that is gone cannot exist.
+        let (a, b) = (
+            core.store.get_artifact(&p.a_id).await?,
+            core.store.get_artifact(&p.b_id).await?,
+        );
 
         // A pair queued in the review band can have a member retired after the
         // fact: superseded by a later sweep once a re-embed moves the score
