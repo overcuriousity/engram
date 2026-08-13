@@ -254,13 +254,6 @@ pub struct SynthesizeRole {
     pub reasoning_effort: Option<String>,
     /// Seconds to idle between segmentation calls.
     ///
-    /// Segmenting a long source is minutes of uninterrupted generation, which
-    /// on a desktop GPU is a sustained thermal load rather than a burst. This
-    /// buys the card time to settle between windows. It does not save energy —
-    /// the same tokens are generated either way — so it is off by default and
-    /// exists for the machine sitting next to someone.
-    #[serde(default)]
-    pub cooldown_secs: u64,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Tokens of the document's verbatim opening prepended to every window, so

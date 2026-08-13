@@ -34,6 +34,16 @@ impl Core {
             return Err(Error::Validation("question is empty".into()));
         }
 
+        // Held for the whole answer rather than around the completion, because
+        // a search embeds the query and that is a model call too. A gap between
+        // them is a gap the worker would fill with a window, and a window is
+        // twenty to seventy seconds of somebody waiting.
+        //
+        // Taking the lane does not make an in-flight call stop; nothing here
+        // cancels. It keeps the worker from putting anything new in front of
+        // this one.
+        let _lane = self.gate.interactive();
+
         // No per-source cap: an answer often lives in one document, and
         // withholding its paragraphs to keep the citation list varied would
         // make the answer worse, not fairer.
@@ -129,6 +139,82 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
+
+    /// A completer that asks, from inside the model call, whether background
+    /// work could start right now. That is the question the lane exists to
+    /// answer, and the only place it can be asked honestly.
+    struct LaneProbe {
+        gate: std::sync::Arc<crate::infer::gate::InferenceGate>,
+        background_was_held: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Completer for LaneProbe {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            let held =
+                tokio::time::timeout(std::time::Duration::from_millis(50), self.gate.background())
+                    .await
+                    .is_err();
+            self.background_was_held
+                .store(held, std::sync::atomic::Ordering::SeqCst);
+            Ok("an answer".into())
+        }
+        fn context_tokens(&self) -> usize {
+            4096
+        }
+    }
+
+    #[tokio::test]
+    async fn a_question_holds_the_interactive_lane_for_its_whole_answer() {
+        // Priority, not preemption: the worker must not put a new window in
+        // front of someone who is waiting. What it cannot do is stop the window
+        // already running, which is the ~73s ceiling this deliberately accepts.
+        let mut core = test_core().await;
+        let probe = std::sync::Arc::new(LaneProbe {
+            gate: std::sync::Arc::clone(&core.gate),
+            background_was_held: std::sync::atomic::AtomicBool::new(false),
+        });
+        core.completer = probe.clone();
+        seed(&core, 3, 4).await;
+
+        core.ask(&AskRequest {
+            q: "chunk".into(),
+            limit: Some(3),
+            tags: vec![],
+            category: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            probe
+                .background_was_held
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a window could have started while the question was still being answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_a_question_leaves_the_lane_free_afterwards() {
+        // The lease is RAII, so the interesting failure is one that leaks: a
+        // single question would then hold background work off forever.
+        let core = test_core().await;
+        seed(&core, 3, 4).await;
+
+        core.ask(&AskRequest {
+            q: "chunk".into(),
+            limit: Some(3),
+            tags: vec![],
+            category: None,
+        })
+        .await
+        .unwrap();
+
+        // Returns immediately if the lane was released; hangs the test if not.
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.gate.background())
+            .await
+            .expect("the interactive lane was never released");
+    }
 
     async fn seed(core: &crate::core::Core, n: usize, size: usize) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();

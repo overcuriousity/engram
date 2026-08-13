@@ -306,35 +306,6 @@ impl Synthesizer for RecordingSynthesizer {
     }
 }
 
-/// Segments like `FakeSynthesizer` but reports a cooldown, so a test can assert
-/// the job actually paces itself instead of running flat out.
-pub struct PacedSynthesizer {
-    inner: FakeSynthesizer,
-    cooldown: std::time::Duration,
-}
-
-impl PacedSynthesizer {
-    pub fn new(cooldown: std::time::Duration) -> Self {
-        Self {
-            inner: FakeSynthesizer::default(),
-            cooldown,
-        }
-    }
-}
-
-#[async_trait]
-impl Synthesizer for PacedSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        self.inner.segment(input).await
-    }
-    fn budget(&self) -> SynthesisBudget {
-        self.inner.budget()
-    }
-    fn cooldown(&self) -> std::time::Duration {
-        self.cooldown
-    }
-}
-
 /// Claims every chunk came from lines far outside its window. The span check
 /// exists because the model's line numbers are taken on trust.
 #[derive(Default)]

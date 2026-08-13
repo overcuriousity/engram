@@ -49,11 +49,6 @@ pub trait Synthesizer: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>>;
     fn budget(&self) -> SynthesisBudget;
-    /// How long to idle between windows, so a long source is not one
-    /// unbroken thermal load on a desktop GPU. Zero for anything remote.
-    fn cooldown(&self) -> std::time::Duration {
-        std::time::Duration::ZERO
-    }
     /// A short name for a whole document, given its opening and the titles of
     /// the artifacts drawn from it.
     ///
