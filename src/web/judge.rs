@@ -182,14 +182,11 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
         }
     }
     let mut choices = shuffled(&event.id, choices);
-    // After the shuffle, because the digits number the card as it is read.
-    let mut next = 1;
-    for c in choices.iter_mut().filter(|c| c.usable) {
-        if next > 9 {
-            break;
-        }
-        c.key = Some(next);
-        next += 1;
+    // After the shuffle, because the digits number the card as it is read. The
+    // range is the cap: the shortcut is one digit, so the tenth choosable
+    // option and everything after it keeps its column and loses the number.
+    for (key, c) in (1..=9).zip(choices.iter_mut().filter(|c| c.usable)) {
+        c.key = Some(key);
     }
     Ok(Card {
         choices,
