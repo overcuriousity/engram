@@ -45,10 +45,11 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         // The sweep looks at the whole collection, so it ignores the target.
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
-        // Handlers land in the tasks that introduce them; nothing arms these
-        // stages yet, so this arm is unreachable until then. `NotFound` is the
+        (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
+        // The handler lands in the task that introduces it; nothing arms this
+        // stage yet, so the arm is unreachable until then. `NotFound` is the
         // safe shape: `run_one` closes such a job rather than retrying it.
-        (Stage::Title | Stage::Judge, _) => {
+        (Stage::Judge, _) => {
             tracing::error!(stage = job.stage.as_str(), "no handler for this stage yet");
             Err(Error::NotFound)
         }
@@ -69,6 +70,14 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
+                // A name is decoration and the corpus already has its fallback,
+                // so this is the one unit that stops asking. Everything else
+                // stays queued at the backoff ceiling, because everything else
+                // carries knowledge that would otherwise be lost.
+                (Stage::Title, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not name this corpus; leaving it unnamed");
+                    core.store.complete_job(job.id).await?;
+                }
                 // A whole source failing together usually means the endpoint is
                 // down, but it can also be one chunk the embedder rejects.
                 // Retrying chunk by chunk isolates the culprit either way.

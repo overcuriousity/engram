@@ -135,20 +135,17 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         );
     }
 
-    // Named here rather than at capture, which makes no inference call by
-    // design. The artifact titles are the cheapest description of what the
-    // document turned out to be about, and they only exist now.
+    // Armed rather than called. Naming is a model call like any other, and
+    // making it here would put it inside whichever window happened to finish
+    // last — uncounted, unpaced, and in front of work the queue had ordered.
     //
-    // A failure is logged and dropped: the corpus keeps the snippet the UI
-    // falls back to, and losing a document over a missing name would be a bad
-    // trade. A name given at capture is left alone — someone chose it.
+    // Named at all only now: the artifact titles are the cheapest description
+    // of what the document turned out to be about, and they only exist once its
+    // windows have run. A name given at capture is left alone — someone chose it.
     if src.title_hint.is_none() {
-        let titles: Vec<String> = chunks.iter().filter_map(|c| c.title.clone()).collect();
-        match core.synthesizer.title(&src.raw_text, &titles).await {
-            Ok(Some(t)) => core.store.set_title_hint(corpus_id, &t).await?,
-            Ok(None) => {}
-            Err(e) => tracing::warn!(corpus_id, error = %e, "could not name this corpus"),
-        }
+        core.store
+            .enqueue(Stage::Title, "corpus", corpus_id)
+            .await?;
     }
 
     // One job for the whole source: every chunk was just written, and embedding
@@ -164,6 +161,47 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     core.store.set_corpus_status(corpus_id, status).await?;
     tracing::info!(corpus_id, chunks = chunks.len(), degraded, "segmented");
     Ok(())
+}
+
+/// Name a document, given its opening and the titles of the artifacts drawn
+/// from it.
+///
+/// The only unit whose failure is not worth retrying to the ceiling. A name is
+/// decoration: the corpus keeps the snippet the UI falls back to, and spending
+/// four model calls a day forever on a document the model will not name is a
+/// bad trade against every other thing those calls could do. `run_one` closes
+/// this job once its attempts are spent.
+pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    if src.title_hint.is_some() {
+        return Ok(());
+    }
+    let titles: Vec<String> = core
+        .store
+        .artifacts_for_corpus(corpus_id)
+        .await?
+        .iter()
+        .filter_map(|c| c.title.clone())
+        .collect();
+
+    core.gate.background().await;
+    match core.synthesizer.title(&src.raw_text, &titles).await {
+        Ok(Some(t)) => {
+            core.gate.call_succeeded();
+            core.store.set_title_hint(corpus_id, &t).await?;
+            Ok(())
+        }
+        // The synthesizer has no opinion about titles. Not a failure, and not
+        // worth another call.
+        Ok(None) => {
+            core.gate.call_succeeded();
+            Ok(())
+        }
+        Err(e) => {
+            core.gate.call_failed(&e);
+            Err(e)
+        }
+    }
 }
 
 /// Plan a corpus and work its queue to a standstill — what a worker does,
@@ -203,6 +241,22 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
             break;
         }
     }
+
+    // Settling arms the title unit, so the corpus leaves `segmenting` with one
+    // still queued. The old whole-corpus `run` named the document before it
+    // returned, and these tests were written against that. Settling also arms
+    // embedding, with a fresh `run_after`, so the hold has to be reapplied.
+    for _ in 0..20 {
+        sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'embed' AND state = 'pending'")
+            .bind(crate::store::now() + 86_400)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        if !crate::jobs::run_one(core).await.unwrap_or(false) {
+            break;
+        }
+    }
+
     sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'embed'")
         .execute(&core.store.pool)
         .await
@@ -466,6 +520,87 @@ mod tests {
             segment_tokens(core.synthesizer.budget(), prompt_overhead(core)),
         )
         .len()
+    }
+
+    #[tokio::test]
+    async fn naming_a_corpus_is_its_own_unit() {
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+
+        segment_all(&core, &out.id).await;
+        // The title unit is armed by the settle, so it is still queued here.
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        assert_eq!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .title_hint
+                .as_deref(),
+            Some("Fake title: alpha line")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corpus_the_model_will_not_name_still_reaches_ready() {
+        // A name is decoration. Retrying it to the six-hour ceiling forever
+        // spends real calls on it, and failing the document over it is worse.
+        let mut core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        segment_all(&core, &out.id).await;
+
+        // Put the document back in the state settling leaves it in — named by
+        // nobody, with a title unit queued — and then break the model.
+        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store
+            .enqueue(Stage::Title, "corpus", &out.id)
+            .await
+            .unwrap();
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("no title"));
+        for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 3 {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            let _ = crate::jobs::run_one(&core).await;
+        }
+
+        let still_queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(still_queued, 0, "a cosmetic failure is retried forever");
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .title_hint
+                .is_none()
+        );
+        assert!(
+            !core
+                .store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the document itself must be unharmed by an unnameable title"
+        );
     }
 
     #[tokio::test]
