@@ -510,7 +510,7 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
         // `seq` is the pair's position in this sweep. Left at zero, twenty
         // judge units would all sort ahead of every document's second window.
         core.store
-            .enqueue_seq(Stage::Judge, "pair", &p.id.to_string(), armed as i64)
+            .arm_seq(Stage::Judge, "pair", &p.id.to_string(), armed as i64)
             .await?;
         armed += 1;
     }

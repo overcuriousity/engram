@@ -6,9 +6,12 @@
 //! bug in it. Without it, "the system repairs itself" holds only for the
 //! failures the system happened to be watching at the time.
 //!
-//! Cheap and idempotent: `enqueue` is keyed by (stage, target), so re-arming
-//! something already queued changes nothing, and a base with nothing wrong
-//! costs one query per hundred corpora.
+//! Cheap and idempotent: the queue is keyed by (stage, target), and this arms
+//! only units nothing is going to run — a base with nothing wrong costs one
+//! query per hundred corpora and changes not a row. Deliberately *not*
+//! `enqueue`: that resets attempts, and a sweep that keeps winding a failing
+//! unit's attempts back to zero is a sweep that stops its document ever
+//! settling.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -48,7 +51,7 @@ pub async fn run(core: &Core) -> Result<usize> {
                 // than needing to be noticed.
                 for w in unresolved {
                     core.store
-                        .enqueue_seq(
+                        .rearm_idle_seq(
                             Stage::SegmentWindow,
                             "segment",
                             &crate::jobs::window::unit_target(&c.id, w.idx),
@@ -65,7 +68,9 @@ pub async fn run(core: &Core) -> Result<usize> {
                 .await?
                 .is_empty()
             {
-                core.store.enqueue(Stage::Embed, "corpus", &c.id).await?;
+                core.store
+                    .rearm_idle_seq(Stage::Embed, "corpus", &c.id, 0)
+                    .await?;
                 armed += 1;
             }
         }
@@ -82,6 +87,37 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
     use crate::store::segments::NewSegment;
+
+    #[tokio::test]
+    async fn a_sweep_does_not_wind_back_a_failing_units_attempts() {
+        // A window the model will not read has to reach the ceiling before its
+        // document can settle around it. A sweep that re-armed every unresolved
+        // window from zero kept such a unit forever young, so `settle` never
+        // counted it as spent and the corpus never left `segmenting` — the sweep
+        // meant to heal the base was the thing holding it open.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let attempts: Vec<i64> =
+            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(
+            attempts.iter().all(|&a| a == 4),
+            "the sweep reset a unit that was already queued: {attempts:?}"
+        );
+    }
 
     #[tokio::test]
     async fn an_old_corpus_level_job_becomes_per_window_units() {
