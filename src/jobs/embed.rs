@@ -72,7 +72,10 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
         Ok(()) => permit.succeeded(),
         Err(e) if input_too_large(&e) => {
-            permit.failed(&e);
+            // Refused, not failed: the endpoint answered. Counting this toward
+            // the breaker let a handful of oversize chunks stop every
+            // background call in the system.
+            permit.refused();
             // The endpoint's real ceiling is lower than the configured one, so
             // halving the configured limit would change nothing. Halve what the
             // chunk actually measures instead: that shrinks on every refusal
@@ -139,7 +142,9 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
         // One oversize chunk fails the whole batch, and the batch cannot say
         // which. Per-chunk jobs isolate it, and that path splits it.
         Err(e) if input_too_large(&e) => {
-            permit.failed(&e);
+            // Refused, not failed: the endpoint answered, and what it answered
+            // is about one chunk in this batch rather than about the endpoint.
+            permit.refused();
             tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
             return split_into_artifact_jobs(core, corpus_id).await;
         }
@@ -323,17 +328,23 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
             permit.succeeded();
             v
         }
-        // Still nothing to cut with when the title alone fills the limit:
-        // `split_by_lines` at a budget of zero puts every line in a part of its
-        // own and then falls to the 64-character floor, which shreds the text
-        // into fragments that are each still oversize once they inherit the
-        // title. A refusal we cannot act on is reported as one.
-        Err(e) if input_too_large(&e) && budget > 0 => {
-            permit.failed(&e);
-            let parts = split_by_lines(&chunk.text, budget, &core.counter);
-            if parts.len() > 1 {
-                tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
-                return replace_with_siblings(core, chunk, parts).await;
+        // Refused, not failed: the endpoint answered. This arm no longer tests
+        // `budget`, because a refusal we cannot act on is still a refusal —
+        // reporting it as a sick endpoint was how a single untouchable chunk
+        // could hold the breaker open on every retry of it.
+        Err(e) if input_too_large(&e) => {
+            permit.refused();
+            // Still nothing to cut with when the title alone fills the limit:
+            // `split_by_lines` at a budget of zero puts every line in a part of
+            // its own and then falls to the 64-character floor, which shreds the
+            // text into fragments that are each still oversize once they inherit
+            // the title. A refusal we cannot act on is reported as one.
+            if budget > 0 {
+                let parts = split_by_lines(&chunk.text, budget, &core.counter);
+                if parts.len() > 1 {
+                    tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
+                    return replace_with_siblings(core, chunk, parts).await;
+                }
             }
             return Err(e);
         }
@@ -849,6 +860,65 @@ mod tests {
 
         let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
         assert!(chunks.len() > 1, "got {} chunks", chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_size_refusal_does_not_hold_the_rest_of_the_queue() {
+        // Three unsplittable oversize chunks — code blocks, tables, the exact
+        // thing `split_oversize`'s hard path exists for — used to be three
+        // consecutive transport failures. At the default `breaker_after` that
+        // opened the breaker and stopped synthesis, judging and embedding alike
+        // for the whole probe window, against an endpoint that was answering
+        // every request it was given.
+        let mut core = crate::core::test_support::test_core().await;
+        core.gate = std::sync::Arc::new(
+            crate::infer::gate::InferenceGate::new(std::time::Duration::ZERO)
+                .with_breaker(1, std::time::Duration::from_secs(60)),
+        );
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            200,
+        ));
+
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let body = (0..40)
+            .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: body,
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        // The configured limit is the lie; the endpoint's is what bites.
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        // Asked in real time rather than on a paused clock: building a `Core`
+        // opens a pool, and a pool acquired under `start_paused` waits on a
+        // timer that never fires. An open breaker would hold this for the whole
+        // probe window, so a short timeout tells the two apart.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                core.gate.background()
+            )
+            .await
+            .is_ok(),
+            "a chunk the endpoint refused opened the breaker"
+        );
     }
 
     #[test]
