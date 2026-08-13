@@ -62,6 +62,22 @@ pub async fn run(core: &Core) -> Result<usize> {
                 }
                 continue;
             }
+            // Every window resolved and the document was still never finished.
+            // `finish` measures coverage on every path that produced artifacts,
+            // so a corpus with artifacts and none of it is one whose process
+            // died between the last window's `Done` and the `settle` that
+            // follows it. Nothing else would notice: the embed branch below
+            // still fires and `settle_corpus` gives it a status, while the
+            // renumbering, the coverage measure and the title unit never ran.
+            //
+            // `settle` rather than a job, because there is no inference here —
+            // it is the same local work `finish` does, and re-running it on a
+            // document that is fine is what the coverage test rules out.
+            if c.coverage.is_none() && !core.store.artifacts_for_corpus(&c.id).await?.is_empty() {
+                crate::jobs::window::settle(core, &c.id).await?;
+                armed += 1;
+                continue;
+            }
             if !core
                 .store
                 .pending_artifacts_for_corpus(&c.id)
@@ -218,9 +234,75 @@ mod tests {
             .await
             .unwrap();
 
+        // A corpus that got as far as embedding has been through `finish`, and
+        // `finish` measures it. Without this the fixture is indistinguishable
+        // from a document whose `finish` never ran, which is a different repair.
+        core.store.set_corpus_coverage(&src.id, 0.9).await.unwrap();
+
         assert_eq!(run(&core).await.unwrap(), 1);
         let job = core.store.claim_job().await.unwrap().expect("a job");
         assert_eq!(job.stage, Stage::Embed);
+    }
+
+    #[tokio::test]
+    async fn a_corpus_that_resolved_every_window_but_never_finished_is_healed() {
+        // Killed between the last window's `Done` and the `settle` that
+        // follows it. Every window has resolved, so the branch above arms
+        // nothing, and the embed branch below gives the corpus a status anyway
+        // — which is what makes this invisible. The document was never
+        // renumbered, never measured and never named, and nothing else in the
+        // system would ever do it.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
+            .await
+            .unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "the window".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_corpus(&src.id)
+                .await
+                .unwrap()
+                .coverage
+                .is_none(),
+            "the fixture must start unmeasured"
+        );
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_corpus(&src.id)
+                .await
+                .unwrap()
+                .coverage
+                .is_some(),
+            "the document was never measured, and nothing was left that would"
+        );
+        assert!(
+            core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "the document was never handed to the namer"
+        );
     }
 
     #[tokio::test]
