@@ -414,27 +414,41 @@ impl Store {
         .await?)
     }
 
-    pub async fn judge_hit(&self, event_id: &str, artifact_id: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE search_events SET judged_at = ?, verdict = 'hit', expect_id = ?
-             WHERE id = ?",
-        )
-        .bind(now())
-        .bind(artifact_id)
-        .bind(event_id)
-        .execute(&self.pool)
-        .await?;
+    /// Every write here is a verdict on a row that may not be there any more:
+    /// retention expires events on a timer and Ops can purge them outright,
+    /// both of them under a judging screen that is already open. An UPDATE
+    /// matching nothing is not a recorded judgement, and reporting it as one
+    /// puts a number in front of the operator that no stored row supports.
+    fn judged_one(res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
+        if res.rows_affected() == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
         Ok(())
     }
 
-    pub async fn judge(&self, event_id: &str, verdict: Verdict) -> Result<()> {
-        sqlx::query("UPDATE search_events SET judged_at = ?, verdict = ? WHERE id = ?")
+    pub async fn judge_hit(&self, event_id: &str, artifact_id: &str) -> Result<()> {
+        Self::judged_one(
+            sqlx::query(
+                "UPDATE search_events SET judged_at = ?, verdict = 'hit', expect_id = ?
+                 WHERE id = ?",
+            )
             .bind(now())
-            .bind(verdict.as_str())
+            .bind(artifact_id)
             .bind(event_id)
             .execute(&self.pool)
-            .await?;
-        Ok(())
+            .await?,
+        )
+    }
+
+    pub async fn judge(&self, event_id: &str, verdict: Verdict) -> Result<()> {
+        Self::judged_one(
+            sqlx::query("UPDATE search_events SET judged_at = ?, verdict = ? WHERE id = ?")
+                .bind(now())
+                .bind(verdict.as_str())
+                .bind(event_id)
+                .execute(&self.pool)
+                .await?,
+        )
     }
 
     /// Take a verdict back, returning the event to the pending queue.
@@ -444,26 +458,28 @@ impl Store {
     /// `expect_id` with the verdict matters — a stale answer left behind would
     /// keep counting towards recall for a judgement nobody stands behind.
     pub async fn unjudge(&self, event_id: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE search_events
-             SET judged_at = NULL, verdict = NULL, expect_id = NULL
-             WHERE id = ?",
+        Self::judged_one(
+            sqlx::query(
+                "UPDATE search_events
+                 SET judged_at = NULL, verdict = NULL, expect_id = NULL
+                 WHERE id = ?",
+            )
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?,
         )
-        .bind(event_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     /// Not a verdict: the event stays pending and only sinks in the order. An
     /// honest "I don't remember" must never cost anything, or it stops being
     /// honest.
     pub async fn skip_event(&self, event_id: &str) -> Result<()> {
-        sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
-            .bind(event_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        Self::judged_one(
+            sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
+                .bind(event_id)
+                .execute(&self.pool)
+                .await?,
+        )
     }
 
     /// How many searches are waiting for a verdict.
@@ -849,6 +865,29 @@ mod tests {
         let id = seed(&store, "only one", &["a"]).await;
         store.judge_hit(&id, "a").await.unwrap();
         assert!(store.next_pending().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_an_event_that_is_gone_is_refused() {
+        // Retention expires events on a timer and Ops can purge them, both
+        // under a judging screen that is already open. Reporting success would
+        // put an MRR delta and an Undo button in front of the operator for a
+        // row that does not exist.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "will be purged", &["a"]).await;
+        store.purge_feedback().await.unwrap();
+
+        for res in [
+            store.judge_hit(&id, "a").await,
+            store.judge(&id, Verdict::Gap).await,
+            store.unjudge(&id).await,
+            store.skip_event(&id).await,
+        ] {
+            assert!(
+                matches!(res, Err(crate::error::Error::NotFound)),
+                "a write against a deleted event reported success: {res:?}"
+            );
+        }
     }
 
     #[tokio::test]

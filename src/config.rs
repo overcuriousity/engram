@@ -366,10 +366,33 @@ impl Config {
                     .list_separator(","),
             )
             .build()?;
-        let cfg: Config = raw.try_deserialize()?;
+        let mut cfg: Config = raw.try_deserialize()?;
+        cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         Ok(cfg)
+    }
+
+    /// Values that would make a feature quietly useless, put back rather than
+    /// refused.
+    ///
+    /// `feedback.candidates = 0` stores an empty pool for every captured
+    /// search: every card renders with nothing to choose, every judgement is
+    /// forced through "none of these", and every one of those is recorded as a
+    /// find — a ranking failure that never happened, permanently in the
+    /// dataset. Nobody types a zero meaning that. It goes back to the default
+    /// with a line in the log rather than stopping a server over a number that
+    /// only affects an optional feature.
+    fn normalize(&mut self) {
+        if self.feedback.candidates == 0 {
+            let d = FeedbackConfig::default().candidates;
+            self.feedback.candidates = d;
+            tracing::warn!(
+                using = d,
+                "feedback.candidates = 0 would store an empty pool for every captured search; \
+                 using the default"
+            );
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.
@@ -466,6 +489,31 @@ mod tests {
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
+    }
+
+    #[test]
+    fn a_zero_candidate_pool_is_put_back_to_the_default() {
+        // Zero would store an empty pool for every captured search: nothing to
+        // choose on any card, so every judgement is forced through "none of
+        // these" and recorded as a find that never happened.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 0\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.feedback.candidates,
+            FeedbackConfig::default().candidates
+        );
+        assert!(cfg.feedback.enabled, "the rest of the section was dropped");
+    }
+
+    #[test]
+    fn a_deliberate_candidate_count_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
+        assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {

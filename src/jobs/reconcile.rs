@@ -17,12 +17,13 @@ use crate::store::segments::SegmentState;
 
 pub async fn run(core: &Core) -> Result<usize> {
     let mut armed = 0;
-    let mut offset = 0;
+    // A cursor, not an offset: captures land while this runs, and an offset
+    // over a newest-first list would step over one corpus per insertion.
+    let mut cursor: Option<(i64, String)> = None;
     loop {
-        let page = core.store.list_corpora(100, offset).await?;
-        if page.is_empty() {
-            break;
-        }
+        let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
+        let Some(last) = page.last() else { break };
+        cursor = Some((last.created_at, last.id.clone()));
         for c in &page {
             // A corpus parked as a near-duplicate is waiting on a person by
             // design, and segmenting it is the decision they have not made.
@@ -47,7 +48,6 @@ pub async fn run(core: &Core) -> Result<usize> {
                 armed += 1;
             }
         }
-        offset += page.len() as i64;
     }
     if armed > 0 {
         tracing::info!(armed, "reconciliation queued unfinished work");

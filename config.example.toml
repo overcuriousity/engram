@@ -197,7 +197,9 @@ max_judgements = 20
 enabled = false
 # Candidates stored per search. Wider than the answer on purpose — retrieval
 # over-fetches anyway, so the extra rows cost nothing, and they are what lets an
-# artifact the ranking buried still be confirmed as the right one.
+# artifact the ranking buried still be confirmed as the right one. 0 is not a
+# setting — an empty pool leaves every card with nothing to choose — and is put
+# back to the default with a line in the log.
 candidates = 20
 # Window in which a longer query replaces the previous one instead of starting
 # its own event. 0 turns folding off. Applies to the search box only, and only

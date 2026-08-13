@@ -517,9 +517,9 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::feedback::Door;
     use crate::core::test_support::{test_core, test_core_with_rerank};
     use crate::store::artifacts::NewArtifact;
+    use crate::store::feedback::Door;
     use sqlx::Row;
 
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {

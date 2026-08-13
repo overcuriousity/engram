@@ -268,7 +268,13 @@ async fn undo(
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    st.core.store.unjudge(&event_id).await?;
+    // The event may have expired between the verdict and the second thoughts.
+    // The store says so now rather than reporting a write it did not make; here
+    // that is not an error, for the reason below.
+    match st.core.store.unjudge(&event_id).await {
+        Ok(()) | Err(crate::error::Error::NotFound) => {}
+        Err(e) => return Err(e),
+    }
     let card = match st.core.store.pending_by_id(&event_id).await? {
         Some(event) => Some(card_for(&st, event).await?),
         // Expired out from under the operator, or never existed. The next card
@@ -289,6 +295,16 @@ async fn hit(
     Path(event_id): Path<String>,
     axum::extract::Form(f): axum::extract::Form<HitForm>,
 ) -> Result<Response> {
+    // The id has to name something. Both paths that post here — the card and
+    // the assign search — offer only artifacts that existed when they were
+    // rendered, so a miss means the artifact was deleted since, or the form was
+    // replayed. Either way the expectation would name nothing: `feedback_stats`
+    // reads a missing rank as "search never showed you this", counts the event
+    // as a find, and drags recall@10 down for a ranking failure that never
+    // happened. Pool membership is deliberately not required — an artifact the
+    // search never offered is exactly what the assign path is for.
+    st.core.store.get_artifact(&f.artifact_id).await?;
+
     // Read before the write: afterwards the event is no longer pending, and the
     // rank is what decides which diagnosis the operator gets.
     let rank = st
@@ -747,6 +763,57 @@ mod tests {
         let (app, cookie, _core, _) = judge_app(1, &["gone-for-good"]).await;
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("gone-for-good"));
+    }
+
+    #[tokio::test]
+    async fn confirming_an_artifact_that_no_longer_exists_records_nothing() {
+        // A card drawn before the artifact was deleted, or a replayed POST.
+        // The expectation would name nothing, and a missing rank reads as "the
+        // search would never have shown you this" — a find, and a permanent
+        // dent in recall@10 for a ranking failure that never happened.
+        let (app, cookie, core, _) = judge_app(1, &["gone-for-good"]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let status = post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            "artifact_id=gone-for-good",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let s = core.store.feedback_stats().await.unwrap();
+        assert_eq!(s.finds, 0, "a phantom was counted as a find");
+        assert_eq!(s.judged, 0);
+        assert!(
+            core.store.next_pending().await.unwrap().is_some(),
+            "the event was consumed by a verdict that was refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_a_purged_event_says_so_instead_of_claiming_success() {
+        // Retention or an Ops purge under an open judging screen. The flash
+        // would otherwise show an MRR delta and an Undo for a row that is gone.
+        let (app, cookie, core, ids) = judge_app(1, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        core.store.purge_feedback().await.unwrap();
+
+        for (uri, body) in [
+            (
+                format!("/ui/judge/{}/hit", event.id),
+                format!("artifact_id={}", ids[0]),
+            ),
+            (format!("/ui/judge/{}/gap", event.id), String::new()),
+            (format!("/ui/judge/{}/discard", event.id), String::new()),
+            (format!("/ui/judge/{}/skip", event.id), String::new()),
+        ] {
+            assert_eq!(
+                post(&app, &uri, &cookie, &body).await,
+                StatusCode::NOT_FOUND,
+                "{uri} claimed to record a verdict on an event that is gone"
+            );
+        }
     }
 
     #[test]

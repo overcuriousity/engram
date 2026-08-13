@@ -230,12 +230,13 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(engram::vector::memory::MemoryVectors::new()),
             store,
         );
-        let mut offset = 0;
+        // Keyset, for the same reason the reconcile sweep uses one: a capture
+        // arriving while this runs must not push a corpus past the window.
+        let mut cursor: Option<(i64, String)> = None;
         loop {
-            let page = core.store.list_corpora(100, offset).await?;
-            if page.is_empty() {
-                break;
-            }
+            let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.created_at, last.id.clone()));
             for c in &page {
                 let before = c.coverage;
                 let after = engram::jobs::synthesize::recompute_coverage(&core, &c.id).await?;
@@ -246,7 +247,6 @@ async fn main() -> anyhow::Result<()> {
                     after
                 );
             }
-            offset += page.len() as i64;
         }
         return Ok(());
     }
