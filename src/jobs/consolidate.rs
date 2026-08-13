@@ -15,6 +15,7 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::store::artifacts::{ArtifactStatus, Chunk};
+use crate::store::jobs::Stage;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
@@ -25,6 +26,8 @@ pub struct Outcome {
     /// Pairs settled without asking anyone, because the two artifacts state no
     /// value differently and so have nothing to disagree about.
     pub closed: usize,
+    /// Pairs this sweep armed a judge unit for. The calls happen later, one
+    /// unit at a time, so this counts what was asked for rather than answered.
     pub judged: usize,
     pub contradictions: usize,
 }
@@ -417,9 +420,11 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     }
 
     if cfg.judge {
-        let (judged, contradictions) = judge_pending(core).await?;
-        out.judged = judged;
-        out.contradictions = contradictions;
+        // Armed, not asked. `judged` counts the calls this sweep is responsible
+        // for rather than the calls it made, since it now makes none;
+        // `contradictions` is no longer knowable here at all, because the answer
+        // arrives one unit at a time long after the sweep has returned.
+        out.judged = arm_judgements(core).await?;
     }
 
     if out.superseded > 0 || out.queued > 0 || out.judged > 0 {
@@ -441,12 +446,24 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// Returns how many calls were made and how many found a contradiction. A
 /// failed call leaves its pair pending on purpose: a dead endpoint must never
 /// look like a clean bill of health.
-async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
+/// Decide which pending pairs are worth a model call, and arm one unit each.
+///
+/// Every filter here is local — an artifact's status, and the fact-token
+/// prefilter that is the whole economic argument for this feature: most near
+/// pairs have no value in common to disagree about, and a call is minutes on
+/// this hardware. What survives becomes a `Judge` unit. Nothing in this sweep
+/// talks to a model any more, which is what stops one consolidation run
+/// blocking every capture behind it for as long as twenty calls take.
+///
+/// Returns how many were armed. `max_judgements` is a cap on that rather than a
+/// loop bound, so the meaning of the setting is unchanged: the most model calls
+/// one sweep can be responsible for.
+async fn arm_judgements(core: &Core) -> Result<usize> {
     let pending = core.store.pairs_to_judge(200).await?;
 
-    let (mut judged, mut contradictions) = (0usize, 0usize);
+    let mut armed = 0usize;
     for p in pending {
-        if judged >= core.consolidate.max_judgements {
+        if armed >= core.consolidate.max_judgements {
             tracing::info!(
                 budget = core.consolidate.max_judgements,
                 "judge budget spent; the rest wait for the next sweep"
@@ -463,14 +480,15 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
         // A pair queued in the review band can have a member retired after the
         // fact: superseded by a later sweep once a re-embed moves the score
         // above `auto_supersede`, or deprecated by an operator. Judging it would
-        // spend the scarcest thing here — a model call — to post a
-        // contradiction about an artifact that is no longer in results.
+        // spend the scarcest thing here to post a contradiction about an
+        // artifact that is no longer in results.
         //
         // The status half matters beyond the wasted call. A judgement can
         // propose a supersede, which Ops renders as an "apply supersede" button
         // — and `Core::supersede` refuses a deprecated side, so pressing it
         // returns a validation error and the pair stays pending forever. The
-        // same guard runs in `run`'s cluster pass and review band.
+        // same guard runs in `run`'s cluster pass and review band, and again in
+        // the unit itself, because a pair can be retired while it waits.
         if a.status != ArtifactStatus::Active
             || b.status != ArtifactStatus::Active
             || a.superseded_by.is_some()
@@ -482,8 +500,6 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         }
 
-        // The whole economic argument: most near pairs have no value in common
-        // to disagree about, and a model call is minutes on this hardware.
         if !crate::infer::facts::may_disagree(&a.text, &b.text) {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
@@ -491,89 +507,14 @@ async fn judge_pending(core: &Core) -> Result<(usize, usize)> {
             continue;
         }
 
-        judged += 1;
-        // Counted before the call and regardless of how it goes, so a pair the
-        // model keeps failing on drops behind the rest of the queue instead of
-        // absorbing this budget again on the next sweep.
-        core.store.record_judge_attempt(p.id).await?;
-        let reply = match core
-            .completer
-            .complete(
-                crate::infer::prompt::JUDGE_SYSTEM,
-                &crate::infer::prompt::judge_prompt(
-                    (a.title.as_deref().unwrap_or("untitled"), &a.text),
-                    (b.title.as_deref().unwrap_or("untitled"), &b.text),
-                ),
-            )
-            .await
-        {
-            Ok(r) => r,
-            // A transport failure is a statement about the endpoint, not about
-            // this pair: the next nineteen calls would fail the same way, and
-            // each one costs a full timeout. Stop, keep the pairs pending, and
-            // let the next sweep find out whether anything changed.
-            Err(e) => {
-                tracing::warn!(
-                    pair = p.id,
-                    error = %e,
-                    "judge call failed; pairs stay pending and this sweep stops judging"
-                );
-                break;
-            }
-        };
-
-        match crate::infer::prompt::parse_judgement(&reply) {
-            Ok((true, detail, obsolete)) => {
-                contradictions += 1;
-                // Trust the judge's named direction only when it agrees with
-                // the sweep's own newest-wins bias (see `keeper`): a call that
-                // names the *newer* artifact obsolete is exactly the failure
-                // mode worth guarding against, since it would otherwise
-                // propose hiding the side more likely to be current.
-                let obsolete_id = obsolete.and_then(|side| {
-                    let (named, other) = match side {
-                        'a' => (&a, &b),
-                        _ => (&b, &a),
-                    };
-                    (named.created_at <= other.created_at).then(|| named.id.clone())
-                });
-                match obsolete_id {
-                    Some(obsolete_id) => {
-                        // Proposed, not applied: an operator confirms via the
-                        // pair's "apply supersede" action before anything is
-                        // actually hidden.
-                        core.store
-                            .set_pair_superseded(p.id, &obsolete_id, detail.as_deref())
-                            .await?;
-                        tracing::info!(
-                            pair = p.id,
-                            obsolete = %obsolete_id,
-                            "judge proposed a supersede, pending operator confirmation"
-                        );
-                    }
-                    None => {
-                        core.store
-                            .set_pair_state(
-                                p.id,
-                                crate::store::pairs::PairState::Contradiction,
-                                detail.as_deref(),
-                            )
-                            .await?;
-                        tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
-                    }
-                }
-            }
-            Ok((false, _, _)) => {
-                core.store
-                    .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
-                    .await?;
-            }
-            Err(e) => {
-                tracing::warn!(pair = p.id, error = %e, "judge reply unreadable; pair stays pending");
-            }
-        }
+        // `seq` is the pair's position in this sweep. Left at zero, twenty
+        // judge units would all sort ahead of every document's second window.
+        core.store
+            .enqueue_seq(Stage::Judge, "pair", &p.id.to_string(), armed as i64)
+            .await?;
+        armed += 1;
     }
-    Ok((judged, contradictions))
+    Ok(armed)
 }
 
 #[cfg(test)]
@@ -583,6 +524,25 @@ mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::pairs::PairState;
     use crate::vector::{VectorPayload, VectorPoint};
+
+    /// Sweep, then work the judge units it armed.
+    ///
+    /// The sweep no longer calls the model: it decides which pairs are worth
+    /// asking about and arms a unit each. Tests about what the judge *said*
+    /// therefore have to drive the queue too, which is what a worker does.
+    async fn sweep_and_judge(core: &crate::core::Core) -> Outcome {
+        let out = run(core).await.unwrap();
+        for _ in 0..100 {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            if !crate::jobs::run_one(core).await.unwrap_or(false) {
+                break;
+            }
+        }
+        out
+    }
 
     /// Seed artifacts with hand-placed vectors, so the test controls the exact
     /// similarity rather than depending on what the fake embedder produces.
@@ -1211,8 +1171,8 @@ mod tests {
         ]));
         disagreeing(&core).await;
 
-        let out = run(&core).await.unwrap();
-        assert_eq!((out.judged, out.contradictions), (1, 1), "{out:?}");
+        let out = sweep_and_judge(&core).await;
+        assert_eq!(out.judged, 1, "one pair should have been armed: {out:?}");
         let found = core
             .store
             .pairs_by_state(PairState::Contradiction, 10)
@@ -1233,8 +1193,8 @@ mod tests {
         ]));
         let ids = disagreeing(&core).await;
 
-        let out = run(&core).await.unwrap();
-        assert_eq!((out.judged, out.contradictions), (1, 1), "{out:?}");
+        let out = sweep_and_judge(&core).await;
+        assert_eq!(out.judged, 1, "one pair should have been armed: {out:?}");
         let found = core
             .store
             .pairs_by_state(PairState::Superseded, 10)
@@ -1346,7 +1306,7 @@ mod tests {
         )
         .await;
 
-        run(&core).await.unwrap();
+        sweep_and_judge(&core).await;
         assert_eq!(completer.calls(), 1, "the budget was ignored");
     }
 
@@ -1491,16 +1451,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dead_endpoint_stops_the_judge_instead_of_spending_the_budget_on_it() {
-        // Every call would fail the same way, and each one costs a full
-        // timeout. The pairs stay pending either way; what this saves is
-        // twenty consecutive waits on an endpoint that is not there.
+    async fn the_sweep_makes_no_inference_call_and_arms_one_unit_per_pair() {
+        // Twenty judge calls in one job was the second-worst blocker in the
+        // system after synthesis: a consolidation run held every capture behind
+        // it for as long as twenty calls took. The sweep now decides which
+        // pairs are worth asking about — all of it local — and arms a unit each.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"contradicts":false}"#.into(),
+        ]));
+        core.completer = completer.clone();
+        disagreeing(&core).await;
+
+        let out = run(&core).await.unwrap();
+
+        assert_eq!(completer.calls(), 0, "the sweep called the model");
+        assert_eq!(out.judged, 1, "no judge unit was armed: {out:?}");
+        let armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE stage = 'judge' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(armed, 1);
+
+        // And the unit, when the queue gets to it, is what makes the call.
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert_eq!(completer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dead_endpoint_leaves_every_pair_pending() {
+        // This used to assert that the sweep stopped judging after the first
+        // transport failure, because the next nineteen calls would fail the
+        // same way and each cost a full timeout. That guard still exists, but it
+        // moved: the circuit breaker on the gate holds *all* background calls
+        // after three consecutive transport failures, which covers embedding and
+        // synthesis too rather than only this loop. It has its own test.
+        //
+        // What has to remain true here is the part that was never about calls:
+        // a dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
         core.consolidate.judge = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
         core.completer = completer.clone();
-        // Two pairs, each inside the review band and nowhere near the other, so
-        // there really is a second call for the judge to skip.
         seed(
             &core,
             &[
@@ -1512,21 +1507,16 @@ mod tests {
         )
         .await;
 
-        let out = run(&core).await.unwrap();
+        let out = sweep_and_judge(&core).await;
         assert_eq!(out.queued, 2, "not enough pairs to prove anything: {out:?}");
-        assert_eq!(
-            completer.calls(),
-            1,
-            "the judge kept calling a dead endpoint"
-        );
         assert_eq!(
             core.store
                 .pairs_by_state(PairState::Pending, 10)
                 .await
                 .unwrap()
                 .len(),
-            out.queued,
-            "a failed call must never look like a clean bill of health"
+            2,
+            "a dead endpoint cleared pairs it never actually judged"
         );
     }
 
@@ -1552,8 +1542,8 @@ mod tests {
         )
         .await;
 
-        run(&core).await.unwrap();
-        run(&core).await.unwrap();
+        sweep_and_judge(&core).await;
+        sweep_and_judge(&core).await;
 
         let pending = core.store.pairs_to_judge(10).await.unwrap();
         assert!(

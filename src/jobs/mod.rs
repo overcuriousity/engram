@@ -1,5 +1,6 @@
 pub mod consolidate;
 pub mod embed;
+pub mod judge;
 pub mod reconcile;
 pub mod synthesize;
 pub mod window;
@@ -46,13 +47,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
-        // The handler lands in the task that introduces it; nothing arms this
-        // stage yet, so the arm is unreachable until then. `NotFound` is the
-        // safe shape: `run_one` closes such a job rather than retrying it.
-        (Stage::Judge, _) => {
-            tracing::error!(stage = job.stage.as_str(), "no handler for this stage yet");
-            Err(Error::NotFound)
-        }
+        (Stage::Judge, _) => judge::run(core, &job.target_id).await,
     };
 
     match result {
@@ -76,6 +71,14 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
+                // A pair the model will not judge stays pending, and a later
+                // sweep decides again whether it is worth asking about. Holding
+                // a unit at the six-hour ceiling for it would keep re-asking a
+                // question the sweep may no longer want answered.
+                (Stage::Judge, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not judge this pair; leaving it for a later sweep");
+                    core.store.complete_job(job.id).await?;
+                }
                 // A name is decoration and the corpus already has its fallback,
                 // so this is the one unit that stops asking. Everything else
                 // stays queued at the backoff ceiling, because everything else
