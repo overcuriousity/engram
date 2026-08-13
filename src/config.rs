@@ -30,7 +30,8 @@ pub struct PacingConfig {
     /// and the pacer exists to protect the GPU from batch work, not from them.
     pub cooldown_secs: u64,
     /// Consecutive transport failures before background calls are held.
-    /// Unreadable model output does not count — the endpoint answered.
+    /// Unreadable model output does not count — the endpoint answered. Zero
+    /// disables the breaker, as zero disables the cooldown above.
     pub breaker_after: usize,
     /// How long to hold them for before letting one through to probe.
     pub breaker_probe_secs: u64,

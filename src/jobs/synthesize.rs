@@ -8,7 +8,7 @@ use crate::store::segments::SegmentState;
 
 /// Tokens consumed by the system prompt and scaffolding. Measured from the
 /// real prompt rather than guessed.
-fn prompt_overhead(core: &Core) -> usize {
+pub(super) fn prompt_overhead(core: &Core) -> usize {
     core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
 }
 
@@ -161,6 +161,10 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // unit's attempts each time and spend another `MAX_ATTEMPTS` calls on a name
     // that has already been given up on, forever. That is the exact opposite of
     // what makes this the one unit allowed to stop asking.
+    //
+    // The one way back is an operator's reprocess, which deletes the row — the
+    // rule is about repeated settles of one document, not about refusing a
+    // person who asked for another try.
     if src.title_hint.is_none() && !core.store.has_job(Stage::Title, corpus_id).await? {
         core.store
             .enqueue(Stage::Title, "corpus", corpus_id)
@@ -169,8 +173,20 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
 
     // One job for the whole source: every chunk was just written, and embedding
     // them together is one inference call instead of `chunks.len()`.
+    //
+    // Idle-only, because settling runs afresh every time a window resolves and
+    // this is reached on every one of them. Re-arming a *running* embed job puts
+    // it back in the queue for a second worker while the first is still inside
+    // the embedder — two workers embedding the same batch, and whichever
+    // finishes second closing the row the other's `rearm_if_more` had just
+    // re-armed, leaving the corpus half-embedded. Re-arming a *pending* one is
+    // quieter and no better: it winds `attempts` and `run_after` back every
+    // thirty seconds, so a dead embedder is hammered with no backoff, and resets
+    // the `seq` that `rearm_if_more` climbs. A job already queued will pick up
+    // the chunks this settle just wrote; only one that already finished needs
+    // arming again.
     core.store
-        .enqueue(Stage::Embed, "corpus", corpus_id)
+        .rearm_idle_seq(Stage::Embed, "corpus", corpus_id, 0)
         .await?;
     let status = if degraded {
         CorpusStatus::Partial
@@ -297,6 +313,100 @@ mod tests {
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget { opening, overlap },
         }
+    }
+
+    /// (state, attempts, run_after, seq) of one job row.
+    async fn job_row(core: &Core, stage: Stage, target: &str) -> (String, i64, i64, i64) {
+        sqlx::query_as(
+            "SELECT state, attempts, run_after, seq FROM jobs WHERE stage = ? AND target_id = ?",
+        )
+        .bind(stage.as_str())
+        .bind(target)
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    /// A corpus with its windows resolved and one embed job queued behind them.
+    async fn segmented(core: &Core) -> String {
+        let lines: Vec<String> = (0..40)
+            .map(|i| format!("body line {i} with enough words to cost real tokens"))
+            .collect();
+        let src = core
+            .store
+            .insert_corpus(&lines.join("\n"), "web", None)
+            .await
+            .unwrap();
+        segment_all(core, &src.id).await;
+        src.id
+    }
+
+    #[tokio::test]
+    async fn settling_again_does_not_disturb_an_embed_job_a_worker_is_inside() {
+        // Settling runs afresh every time a window resolves, and a document with
+        // one window the model will not read settles on every failed retry of
+        // it. Re-arming here put a *running* embed job back in the queue for a
+        // second worker: two workers embedding the same batch, and whichever
+        // finished second closed the row the other had just re-armed for the
+        // rest of the chunks — a corpus left half-embedded.
+        let core = test_core().await;
+        let id = segmented(&core).await;
+
+        sqlx::query("UPDATE jobs SET state = 'running', claimed_at = ? WHERE stage = 'embed'")
+            .bind(crate::store::now())
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        finish(&core, &id).await.unwrap();
+
+        let (state, ..) = job_row(&core, Stage::Embed, &id).await;
+        assert_eq!(state, "running", "a settle re-armed an embed job mid-call");
+    }
+
+    #[tokio::test]
+    async fn settling_again_does_not_reset_a_backing_off_embed_job() {
+        // The quieter half of the same bug. A queued job is already going to run
+        // and will pick up everything written since, so winding it back gains
+        // nothing — and costs the backoff that keeps a dead embedder from being
+        // asked every thirty seconds, plus the `seq` that `rearm_if_more` climbs
+        // to walk a corpus through its chunks.
+        let core = test_core().await;
+        let id = segmented(&core).await;
+
+        let later = crate::store::now() + 3600;
+        sqlx::query("UPDATE jobs SET state = 'pending', attempts = 4, run_after = ?, seq = 7 WHERE stage = 'embed'")
+            .bind(later)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        finish(&core, &id).await.unwrap();
+
+        let (state, attempts, run_after, seq) = job_row(&core, Stage::Embed, &id).await;
+        assert_eq!(
+            (state.as_str(), attempts, run_after, seq),
+            ("pending", 4, later, 7),
+            "a settle wound a queued embed job back to the front"
+        );
+    }
+
+    #[tokio::test]
+    async fn settling_after_an_embed_finished_arms_it_again() {
+        // The case the arming is actually for: the chunks this settle just wrote
+        // are not in the batch the finished job embedded.
+        let core = test_core().await;
+        let id = segmented(&core).await;
+
+        sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        finish(&core, &id).await.unwrap();
+
+        let (state, ..) = job_row(&core, Stage::Embed, &id).await;
+        assert_eq!(state, "pending", "new chunks were left unembedded");
     }
 
     #[tokio::test]

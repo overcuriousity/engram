@@ -56,6 +56,39 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // every window after it.
     let text = w.text.clone();
 
+    // The failure this catches is a unit retrying an over-context window against
+    // the endpoint with growing backoff and no terminal state. Per-unit budgets
+    // made it quieter than it used to be, not rarer: the other thirty-three
+    // windows now finish and the document settles `partial`, while the one
+    // window that can never fit keeps asking at the six-hour ceiling with
+    // nothing in the journal naming the cause.
+    //
+    // The ceiling is twice the budget rather than the budget itself, because
+    // that is what the splitter actually promises: it flushes once the buffer
+    // has *reached* the budget, and `flush` then prepends the carried heading,
+    // so a window legitimately lands somewhat over. Twice is the bound
+    // `text_with_no_structure_still_splits_by_line_cap` has always asserted.
+    // What must never happen is unbounded — the corpus that came back fifteen
+    // times its budget.
+    let window_budget = crate::infer::budget::segment_tokens(
+        core.synthesizer.budget(),
+        super::synthesize::prompt_overhead(core),
+    );
+    let window_tokens = core.counter.count(&text);
+    debug_assert!(
+        window_tokens <= window_budget * 2,
+        "window {idx} is {window_tokens} tokens against a budget of {window_budget}"
+    );
+    if window_tokens > window_budget * 2 {
+        tracing::error!(
+            corpus_id,
+            window = idx,
+            window_tokens,
+            window_budget,
+            "window is far over its budget; the splitter did not shrink it"
+        );
+    }
+
     let permit = core.gate.background().await;
     let first = core
         .synthesizer

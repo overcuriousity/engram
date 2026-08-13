@@ -59,8 +59,12 @@ impl InferenceGate {
         }
     }
 
+    /// `after = 0` turns the breaker off, the way `cooldown_secs = 0` turns the
+    /// cooldown off. Clamping it up to 1 instead would read the operator's
+    /// "don't do this" as the most aggressive setting there is — one failed call
+    /// holding every background call for the whole probe window.
     pub fn with_breaker(mut self, after: usize, probe: Duration) -> Self {
-        self.breaker_after = after.max(1);
+        self.breaker_after = if after == 0 { usize::MAX } else { after };
         self.probe_after = probe;
         self
     }
@@ -150,9 +154,12 @@ impl InferenceGate {
         st.consecutive_transport_failures += 1;
         if st.consecutive_transport_failures >= self.breaker_after {
             st.breaker_open_until = Some(Instant::now() + self.probe_after);
-            // Reset, so one further failure after the probe re-opens it rather
-            // than every subsequent call re-arming from an already-tripped count.
-            st.consecutive_transport_failures = 0;
+            // The count is left where it is rather than reset, so the one call
+            // let through after the probe window re-opens the breaker the moment
+            // it fails. Resetting cost `breaker_after` full timeouts — three
+            // quarters of an hour at the default `timeout_secs` — to rediscover
+            // the same dead endpoint on every probe cycle, which is the exact
+            // cost this exists to avoid. `call_succeeded` is what clears it.
             tracing::warn!(
                 probe_secs = self.probe_after.as_secs(),
                 "inference endpoint failed repeatedly; holding background calls"
@@ -331,6 +338,54 @@ mod tests {
         let started = tokio::time::Instant::now();
         g.background().await;
         assert_eq!(started.elapsed(), Duration::ZERO, "the run was not reset");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_failure_after_the_probe_window_re_opens_the_breaker() {
+        // The probe is one call let through to ask whether the endpoint is back.
+        // If it is not, the answer is already in — making the queue earn the
+        // whole run again spends `breaker_after` full timeouts, three quarters
+        // of an hour at the default, rediscovering it on every cycle.
+        let g =
+            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
+        for _ in 0..3 {
+            g.call_failed(&Error::Inference {
+                role: "chunk",
+                detail: "502".into(),
+            });
+        }
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        // The probe goes out, and the endpoint is still down.
+        g.background().await.failed(&Error::Inference {
+            role: "chunk",
+            detail: "502".into(),
+        });
+
+        let started = tokio::time::Instant::now();
+        g.background().await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(60),
+            "the queue was let back onto a dead endpoint"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_breaker_configured_to_zero_is_off() {
+        // Zero reads as "don't do this", the way `cooldown_secs = 0` does.
+        // Clamping it up to one made it the most aggressive setting there is.
+        let g =
+            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(0, Duration::from_secs(60)));
+        for _ in 0..10 {
+            g.call_failed(&Error::Inference {
+                role: "chunk",
+                detail: "502".into(),
+            });
+        }
+        let started = tokio::time::Instant::now();
+        g.background().await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]

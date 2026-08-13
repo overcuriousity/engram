@@ -637,6 +637,14 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // The title unit is armed once per corpus and never again, so
+                // that a document the model will not name stops costing calls.
+                // The row is what remembers that, which also means a corpus left
+                // unnamed by a transient failure could never be named again —
+                // including by the person who noticed and asked for the rerun.
+                // An explicit reprocess is exactly the case that rule is not
+                // meant to cover.
+                self.store.delete_job(Stage::Title, &src.id).await?;
                 // Reprocessing a parked capture is a decision to process it, so
                 // the park has to be lifted with it. Leaving the flag set means
                 // a fully synthesized and embedded corpus sits on the review
@@ -696,6 +704,38 @@ mod tests {
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn reprocessing_gives_a_corpus_that_was_never_named_another_chance() {
+        // A title unit is armed once per corpus and never again, so that a
+        // document the model will not name stops costing four calls a day
+        // forever. The row is what remembers that — and it outlived a
+        // reprocess, so a corpus left unnamed by an endpoint that was briefly
+        // down could never be named again, including by the person who noticed
+        // and asked for the rerun.
+        let core = test_core().await;
+        let src = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        for _ in 0..200 {
+            sqlx::query("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            if !crate::jobs::run_one(&core).await.unwrap_or(false) {
+                break;
+            }
+        }
+        assert!(
+            core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "the fixture must arm a title unit"
+        );
+
+        core.reprocess(&src.id, Stage::Synthesize).await.unwrap();
+
+        assert!(
+            !core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "reprocess left the spent title unit behind, so the corpus can never be named"
+        );
     }
 
     #[tokio::test]

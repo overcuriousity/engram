@@ -237,6 +237,40 @@ impl Store {
         )
     }
 
+    /// Is anything going to run this unit? `Some` for a row that is queued or
+    /// that a worker is inside, `None` for one that is closed or was never
+    /// armed.
+    ///
+    /// What a sweep needs before spending budget on a unit: a pair whose
+    /// judgement is already queued is already going to be judged, and arming it
+    /// again is a no-op that costs another pair its turn.
+    pub async fn live_job(&self, stage: Stage, target_id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM jobs
+              WHERE stage = ? AND target_id = ? AND state IN ('pending', 'running')",
+        )
+        .bind(stage.as_str())
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    /// Forget that this unit was ever armed.
+    ///
+    /// Only an operator asking for the work again wants this. A row surviving
+    /// its completion is what lets a stage give up for good, so removing one
+    /// undoes exactly that — which is the point when the person who owns the
+    /// collection has asked for another try.
+    pub async fn delete_job(&self, stage: Stage, target_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM jobs WHERE stage = ? AND target_id = ?")
+            .bind(stage.as_str())
+            .bind(target_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Has this unit ever been armed? A row survives being completed, so this
     /// distinguishes "never asked" from "asked, and done asking" — which is the
     /// only thing separating a first settle from the fiftieth for a stage that

@@ -507,10 +507,27 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
             continue;
         }
 
+        // A pair whose unit is still queued from an earlier sweep is already
+        // going to be judged. `pairs_to_judge` orders by `judge_attempts`, and a
+        // pair that has not run yet still has none, so it leads every sweep
+        // until it does — spending the budget on itself over and over while
+        // pairs recorded since never get a turn.
+        let target = p.id.to_string();
+        if core.store.live_job(Stage::Judge, &target).await? {
+            continue;
+        }
+
         // `seq` is the pair's position in this sweep. Left at zero, twenty
         // judge units would all sort ahead of every document's second window.
+        //
+        // Idle-only for the same reason the reconciliation sweep is: re-arming
+        // a queued unit winds its `attempts` back to zero, and a pair the model
+        // will not judge would then never reach `MAX_ATTEMPTS` — never reaching
+        // the close-out in `run_one` that hands it back to a later sweep. The
+        // guard above already skips those; this is what keeps it true if the
+        // two ever drift.
         core.store
-            .arm_seq(Stage::Judge, "pair", &p.id.to_string(), armed as i64)
+            .rearm_idle_seq(Stage::Judge, "pair", &target, armed as i64)
             .await?;
         armed += 1;
     }
@@ -1558,6 +1575,77 @@ mod tests {
                 .len(),
             1,
             "the second sweep never reached an unjudged pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_leaves_a_judge_unit_that_is_already_queued_alone() {
+        // Two ways this went wrong at once. Re-arming a queued unit wound its
+        // `attempts` back, so a pair the model will not judge never reached
+        // `MAX_ATTEMPTS` and never reached the close-out that hands it to a
+        // later sweep — forever young, exactly as the reconciliation sweep used
+        // to keep windows. And `pairs_to_judge` orders by `judge_attempts`, so a
+        // pair still waiting for its first call leads every sweep: the budget
+        // went on re-arming it while pairs recorded since never got a turn.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.consolidate.max_judgements = 1;
+        // Two pairs in the review band and nothing near enough to cluster, so
+        // the sweep has a second pair to reach once the first is spoken for.
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.0, 1.0]),
+                ("retry is 3 times", [-1.0, 0.0]),
+                ("retry is 9 times", [0.0, -1.0]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        core.store
+            .record_pair(&ids[2], &ids[3], 0.90)
+            .await
+            .unwrap();
+
+        // A sweep arms one unit. Nothing runs it — the worker is busy.
+        run(&core).await.unwrap();
+        let first: (String, i64) =
+            sqlx::query_as("SELECT target_id, id FROM jobs WHERE stage = 'judge'")
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        let later = crate::store::now() + 3600;
+        sqlx::query("UPDATE jobs SET attempts = 2, run_after = ? WHERE id = ?")
+            .bind(later)
+            .bind(first.1)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let (attempts, run_after): (i64, i64) =
+            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
+                .bind(first.1)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (attempts, run_after),
+            (2, later),
+            "the sweep wound a queued judge unit back to zero attempts"
+        );
+        let armed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'judge'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            armed, 2,
+            "the second sweep spent its budget re-arming the pair it had already queued"
         );
     }
 

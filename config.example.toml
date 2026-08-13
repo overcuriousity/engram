@@ -219,6 +219,8 @@ cooldown_secs = 0
 # Consecutive transport failures before background calls are held back, and how
 # long to hold them for before letting one through to probe. Output the parser
 # cannot read does not count: the endpoint answered, and the window's own text
-# is the problem.
+# is the problem. Zero disables the breaker. Once it has tripped, the single
+# call let through after the probe window re-trips it immediately if it fails
+# too; a call that succeeds closes it.
 breaker_after = 3
 breaker_probe_secs = 60
