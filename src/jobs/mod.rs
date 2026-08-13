@@ -58,6 +58,12 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     match result {
         Ok(()) => {
             core.store.complete_job(job.id).await?;
+            // After completing, never before: the queue is keyed by (stage,
+            // target), so a handler that re-armed itself would be upserting the
+            // very row this `complete_job` then closes.
+            if job.stage == Stage::Embed && job.target_kind == "corpus" {
+                embed::rearm_if_more(core, &job.target_id).await?;
+            }
             Ok(true)
         }
         // The target was deleted while the job waited. Retrying can never

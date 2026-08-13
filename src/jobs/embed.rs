@@ -115,19 +115,72 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
         }
     }
 
-    for (chunks, texts) in batch.chunks(BATCH).zip(texts.chunks(BATCH)) {
-        match embed_batch(core, chunks, texts.to_vec()).await {
-            Ok(()) => {}
-            // One oversize chunk fails the whole batch, and the batch cannot
-            // say which. Per-chunk jobs isolate it, and that path splits it.
-            Err(e) if input_too_large(&e) => {
-                tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
-                return split_into_artifact_jobs(core, corpus_id).await;
-            }
-            Err(e) => return Err(e),
+    // One batch per run, not every batch. A document with 277 chunks is nine
+    // calls, and doing them in one job puts nine of them in front of everything
+    // else the queue holds — unpaced, and with no chance for a question to slip
+    // between them.
+    let take = BATCH.min(batch.len());
+    if take == 0 {
+        return settle_corpus(core, corpus_id).await;
+    }
+
+    core.gate.background().await;
+    match embed_batch(core, &batch[..take], texts[..take].to_vec()).await {
+        Ok(()) => core.gate.call_succeeded(),
+        // One oversize chunk fails the whole batch, and the batch cannot say
+        // which. Per-chunk jobs isolate it, and that path splits it.
+        Err(e) if input_too_large(&e) => {
+            core.gate.call_failed(&e);
+            tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
+            return split_into_artifact_jobs(core, corpus_id).await;
+        }
+        Err(e) => {
+            core.gate.call_failed(&e);
+            return Err(e);
         }
     }
-    settle_corpus(core, corpus_id).await
+
+    // Settling only once nothing is left. Whether to come back for another
+    // batch is the caller's to decide and act on — see `rearm_if_more`.
+    if core
+        .store
+        .pending_artifacts_for_corpus(corpus_id)
+        .await?
+        .is_empty()
+    {
+        return settle_corpus(core, corpus_id).await;
+    }
+    Ok(())
+}
+
+/// Queue the next batch of a corpus that is not finished embedding.
+///
+/// Called by `run_one` *after* the job is completed, never from inside the
+/// handler. The queue is keyed by `(stage, target)`, so re-arming from within
+/// would upsert the very row the `complete_job` that follows then marks done —
+/// and the corpus would silently stop half-embedded. The same trap took the
+/// untried windows of a source once already.
+pub async fn rearm_if_more(core: &Core, corpus_id: &str) -> Result<()> {
+    if core
+        .store
+        .pending_artifacts_for_corpus(corpus_id)
+        .await?
+        .is_empty()
+    {
+        return Ok(());
+    }
+    // `seq` climbs, so later batches of a long document sink below the first
+    // batches of documents captured since, instead of one source owning the
+    // embedder until it is finished.
+    let next_seq = core
+        .store
+        .job_seq(Stage::Embed, corpus_id)
+        .await?
+        .unwrap_or(0)
+        + 1;
+    core.store
+        .enqueue_seq(Stage::Embed, "corpus", corpus_id, next_seq)
+        .await
 }
 
 /// One inference call and one upsert for the whole slice. Chunks are marked
@@ -814,6 +867,98 @@ mod tests {
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::store::corpora::CorpusStatus;
 
+    /// A corpus with `n` chunks already written and none embedded.
+    async fn corpus_with_chunks(core: &Core, n: usize) -> String {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..n)
+            .map(|i| NewArtifact {
+                ordinal: i as i64,
+                text: format!("chunk number {i}"),
+                corpus_span: None,
+                title: Some(format!("t{i}")),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+                segment_idx: Some(0),
+            })
+            .collect();
+        core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        src.id
+    }
+
+    #[tokio::test]
+    async fn one_run_embeds_at_most_one_batch() {
+        // Nine calls in one job is nine calls in front of everything else the
+        // queue is holding, with no chance for a question to slip between them.
+        let core = test_core().await;
+        let id = corpus_with_chunks(&core, BATCH + 10).await;
+
+        let before = core
+            .store
+            .pending_artifacts_for_corpus(&id)
+            .await
+            .unwrap()
+            .len();
+        run_corpus(&core, &id).await.unwrap();
+        let after = core
+            .store
+            .pending_artifacts_for_corpus(&id)
+            .await
+            .unwrap()
+            .len();
+
+        assert_eq!(before - after, BATCH, "a run embedded more than one batch");
+    }
+
+    #[tokio::test]
+    async fn a_long_document_re_arms_itself_until_it_is_drained() {
+        let core = test_core().await;
+        let id = corpus_with_chunks(&core, BATCH * 2 + 5).await;
+        core.store
+            .enqueue(Stage::Embed, "corpus", &id)
+            .await
+            .unwrap();
+
+        let mut claims = 0;
+        while crate::jobs::run_one(&core).await.unwrap() {
+            claims += 1;
+            assert!(claims < 20, "the re-arm never terminated");
+        }
+
+        assert!(
+            core.store
+                .pending_artifacts_for_corpus(&id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the re-arm did not drain the corpus"
+        );
+        assert_eq!(claims, 3, "expected one claim per batch");
+    }
+
+    #[tokio::test]
+    async fn a_re_armed_batch_sinks_below_a_fresher_document() {
+        // The point of climbing `seq`: batch two of a long document must not
+        // outrank batch one of a document captured since.
+        let core = test_core().await;
+        let long = corpus_with_chunks(&core, BATCH * 2).await;
+        core.store
+            .enqueue(Stage::Embed, "corpus", &long)
+            .await
+            .unwrap();
+        // One claim: the re-arm happens in `run_one` after the job is closed,
+        // so calling the handler directly would show nothing.
+        crate::jobs::run_one(&core).await.unwrap();
+
+        let seq = core
+            .store
+            .job_seq(Stage::Embed, &long)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seq, 1, "the re-armed batch stayed at the front");
+    }
+
     async fn seed(core: &crate::core::Core, texts: &[&str]) -> (String, Vec<String>) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = texts
@@ -923,12 +1068,18 @@ mod tests {
     #[tokio::test]
     async fn a_batch_larger_than_the_request_limit_is_split_across_calls() {
         // Endpoints cap how many inputs they accept, so the batch is bounded.
+        // The split is across units now rather than within one job, so the
+        // corpus is driven through the queue to see both calls.
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         let texts: Vec<String> = (0..BATCH + 5).map(|i| format!("chunk {i}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let (src_id, _) = seed(&core, &refs).await;
 
-        run_corpus(&core, &src_id).await.unwrap();
+        core.store
+            .enqueue(Stage::Embed, "corpus", &src_id)
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
 
         assert_eq!(embedder.calls(), 2, "the batch was not bounded");
         assert_eq!(core.vectors.count().await.unwrap(), (BATCH + 5) as u64);
