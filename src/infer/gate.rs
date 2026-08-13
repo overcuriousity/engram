@@ -166,6 +166,18 @@ impl InferenceGate {
             );
         }
     }
+
+    /// A call the endpoint answered by refusing the input.
+    ///
+    /// It occupied the GPU, so it starts the cooldown like any other call. It
+    /// says nothing about whether the endpoint is well, so it must not count
+    /// toward the breaker — the same distinction `MalformedLlmOutput` gets, and
+    /// it has to be made by the caller because a size refusal arrives as an
+    /// `Error::Inference` and is indistinguishable here from a dead server.
+    pub fn call_refused(&self) {
+        let mut st = self.state.lock().expect("gate state");
+        st.last_finished = Some(Instant::now());
+    }
 }
 
 /// The right to make one background inference call, held for as long as the
@@ -186,6 +198,12 @@ impl BackgroundPermit<'_> {
 
     pub fn failed(self, e: &Error) {
         self.gate.call_failed(e);
+    }
+
+    /// The endpoint answered, refusing the input. Starts the cooldown and hands
+    /// the turn on, without counting against the endpoint.
+    pub fn refused(self) {
+        self.gate.call_refused();
     }
 }
 
@@ -369,6 +387,25 @@ mod tests {
             Duration::from_secs(60),
             "the queue was let back onto a dead endpoint"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_input_is_not_an_endpoint_failure() {
+        // The endpoint answered: this input is too big for it. That is a fact
+        // about the input, not about the endpoint's health — the same
+        // distinction `MalformedLlmOutput` gets, arriving here as an
+        // `Error::Inference` only because a size refusal is transport-shaped.
+        // Counted, three unsplittable oversize chunks in one document would
+        // hold every background call in the system — synthesis and judging
+        // included — against a server that is working perfectly.
+        let g =
+            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
+        for _ in 0..5 {
+            g.background().await.refused();
+        }
+        let started = tokio::time::Instant::now();
+        g.background().await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]
