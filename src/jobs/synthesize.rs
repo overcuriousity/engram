@@ -19,10 +19,6 @@ fn prompt_overhead(core: &Core) -> usize {
 /// units it arms.
 pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
-    core.store
-        .set_corpus_status(corpus_id, CorpusStatus::Segmenting)
-        .await?;
-
     let windows = split_into_segments(
         &src.raw_text,
         &core.counter,
@@ -48,12 +44,28 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
         .collect();
     core.store.upsert_segments(corpus_id, &rows).await?;
 
+    // A document whose windows have all resolved arms nothing, and declaring it
+    // `segmenting` would park it there for good — nothing would be left to run
+    // that could call `settle` and move it on. Reachable whenever a plan job
+    // outlives the units it armed: a process killed after planning leaves the
+    // row pending, startup re-arms it, the units (attempts 0) sort ahead of it
+    // and drive the document all the way to `ready`, and only then is the stale
+    // plan claimed. Settling instead is idempotent and says the same thing.
+    let pending = core.store.pending_segments(corpus_id).await?;
+    if pending.is_empty() {
+        return crate::jobs::window::settle(core, corpus_id).await;
+    }
+
+    core.store
+        .set_corpus_status(corpus_id, CorpusStatus::Segmenting)
+        .await?;
+
     // One unit per window that has not resolved. `seq` is the window index, so
     // this document's window 0 is claimed before any document's window 1 and a
     // capture made during a long ingest does not wait for all of it.
-    for w in core.store.pending_segments(corpus_id).await? {
+    for w in pending {
         core.store
-            .enqueue_seq(
+            .arm_seq(
                 Stage::SegmentWindow,
                 "segment",
                 &crate::jobs::window::unit_target(corpus_id, w.idx),
@@ -142,7 +154,14 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // Named at all only now: the artifact titles are the cheapest description
     // of what the document turned out to be about, and they only exist once its
     // windows have run. A name given at capture is left alone — someone chose it.
-    if src.title_hint.is_none() {
+    //
+    // Armed once, and never again. Settling runs afresh every time a window
+    // resolves, so a document with one window the model will not read settles
+    // on every failed retry of it — and re-arming here would reset the title
+    // unit's attempts each time and spend another `MAX_ATTEMPTS` calls on a name
+    // that has already been given up on, forever. That is the exact opposite of
+    // what makes this the one unit allowed to stop asking.
+    if src.title_hint.is_none() && !core.store.has_job(Stage::Title, corpus_id).await? {
         core.store
             .enqueue(Stage::Title, "corpus", corpus_id)
             .await?;
@@ -184,21 +203,21 @@ pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
         .filter_map(|c| c.title.clone())
         .collect();
 
-    core.gate.background().await;
+    let permit = core.gate.background().await;
     match core.synthesizer.title(&src.raw_text, &titles).await {
         Ok(Some(t)) => {
-            core.gate.call_succeeded();
+            permit.succeeded();
             core.store.set_title_hint(corpus_id, &t).await?;
             Ok(())
         }
         // The synthesizer has no opinion about titles. Not a failure, and not
         // worth another call.
         Ok(None) => {
-            core.gate.call_succeeded();
+            permit.succeeded();
             Ok(())
         }
         Err(e) => {
-            core.gate.call_failed(&e);
+            permit.failed(&e);
             Err(e)
         }
     }
@@ -601,6 +620,64 @@ mod tests {
                 .is_empty(),
             "the document itself must be unharmed by an unnameable title"
         );
+    }
+
+    #[tokio::test]
+    async fn planning_a_document_whose_windows_all_finished_does_not_park_it() {
+        // `segmenting` says work is in flight, and only a settle moves a corpus
+        // out of it. A plan that arms nothing has nothing left to settle it, so
+        // declaring `segmenting` first left the document there permanently —
+        // reachable from a plan job that outlived the units it armed.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        segment_all(&core, &out.id).await;
+        let (resolved, total) = core.store.segment_progress(&out.id).await.unwrap();
+        assert_eq!(resolved, total, "the fixture must start fully segmented");
+
+        plan(&core, &out.id).await.unwrap();
+
+        assert_ne!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Segmenting,
+            "a finished document was parked in segmenting with nothing to run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_already_given_up_on_is_not_asked_for_again() {
+        // Settling runs afresh every time a window resolves, so a document with
+        // one window the model will not read settles on every failed retry of
+        // it — once every six hours, forever. Re-arming the title unit there
+        // reset its attempts and spent another `MAX_ATTEMPTS` calls each time on
+        // a name that had already been given up on.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        segment_all(&core, &out.id).await;
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        // What a corpus the model would not name looks like afterwards: no
+        // title, and a title unit that has been closed.
+        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        finish(&core, &out.id).await.unwrap();
+
+        let armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(armed, 0, "a name already given up on was asked for again");
     }
 
     #[tokio::test]

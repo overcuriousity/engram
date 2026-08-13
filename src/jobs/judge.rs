@@ -49,7 +49,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     // the budget again on the next sweep.
     core.store.record_judge_attempt(id).await?;
 
-    core.gate.background().await;
+    let permit = core.gate.background().await;
     let reply = match core
         .completer
         .complete(
@@ -62,11 +62,11 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .await
     {
         Ok(r) => {
-            core.gate.call_succeeded();
+            permit.succeeded();
             r
         }
         Err(e) => {
-            core.gate.call_failed(&e);
+            permit.failed(&e);
             return Err(e);
         }
     };

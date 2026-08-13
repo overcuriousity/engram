@@ -118,20 +118,30 @@ jobs, so the two local stages never wait for a cooldown they do not earn.
 
 ```
 InferenceGate
-  ├─ background().await   → returns when no interactive call is in flight,
-  │                         AND cooldown has elapsed since the last call ended,
-  │                         AND the circuit breaker is closed
+  ├─ background().await   → a permit, returned when no interactive call is in
+  │                         flight, AND cooldown has elapsed since the last call
+  │                         ended, AND the circuit breaker is closed
   ├─ interactive()        → RAII lease, returns immediately, never waits
   └─ any call completing stamps `last_finished`
 ```
 
 `core.ask()` holds an `interactive()` lease for its whole duration, since it
-makes more than one call. The four inference-making handlers — window, title,
-embed batch, judge — await `background()` immediately before their call.
+makes more than one call. The five inference-making paths — window, title, embed
+batch, per-chunk embed, judge — await `background()` immediately before their
+call and report the outcome through the permit it returns.
+
+The permit is what makes the cooldown a property of the endpoint rather than of
+a worker. `server.workers` defaults to 2, and a gate that only *checks* lets
+both read the same unchanged `last_finished` — neither has finished — and put
+two generations on the one GPU. Only one background call runs at a time, and the
+next waiter measures its cooldown from when that call ended.
 
 `cooldown_secs` moves from `[infer.synthesize]` to a global setting: a minimum
 gap between any two background calls, whatever their role. The GPU does not care
-which role loaded it. `ask` ignores the gap entirely.
+which role loaded it. `ask` ignores the gap entirely. The old key is kept on
+`SynthesizeRole` purely so that startup can complain about it — unknown keys
+parse silently, and an operator's thermal pacing turning itself off across an
+upgrade is not something to find out about from a warm room.
 
 An `ask` arriving mid-window still waits out the in-flight call — up to ~73s,
 observed. Nothing cancels. What the gate buys is that the worker will not pile a

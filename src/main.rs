@@ -367,6 +367,7 @@ mod startup_tests {
                     reasoning_effort: None,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
+                    cooldown_secs: None,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),

@@ -206,11 +206,15 @@ sweep_hours = 6
 
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
-# one GPU, so a per-role cooldown could not bound total load.
+# one GPU, so a per-role cooldown could not bound total load. Upgrading: this
+# replaces `cooldown_secs` under `[infer.synthesize]`, which is now ignored —
+# engram says so at startup if it finds one.
 [pacing]
 # Minimum seconds between the end of one background call and the start of the
-# next. Zero disables pacing. A question asked through `ask` ignores it: someone
-# is waiting, and the pacer is there to protect the GPU from batch work.
+# next, and only one background call runs at a time however many workers are
+# configured, so this is the gap between calls rather than per worker. Zero
+# disables pacing. A question asked through `ask` ignores it: someone is
+# waiting, and the pacer is there to protect the GPU from batch work.
 cooldown_secs = 0
 # Consecutive transport failures before background calls are held back, and how
 # long to hold them for before letting one through to probe. Output the parser

@@ -490,6 +490,7 @@ mod tests {
             reasoning_effort: None,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
+            cooldown_secs: None,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {

@@ -64,9 +64,15 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
         return split_oversize(core, &chunk, limit, false).await;
     }
 
+    // Paced like every other inference call. `split_into_artifact_jobs` can
+    // leave hundreds of these behind for one document, and against a dead
+    // endpoint an ungated path spends a timeout apiece without any of those
+    // failures ever reaching the breaker.
+    let permit = core.gate.background().await;
     match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
-        Ok(()) => {}
+        Ok(()) => permit.succeeded(),
         Err(e) if input_too_large(&e) => {
+            permit.failed(&e);
             // The endpoint's real ceiling is lower than the configured one, so
             // halving the configured limit would change nothing. Halve what the
             // chunk actually measures instead: that shrinks on every refusal
@@ -84,7 +90,10 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
             // this split has to succeed whatever the text looks like.
             return split_oversize(core, &chunk, smaller, true).await;
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            permit.failed(&e);
+            return Err(e);
+        }
     }
     settle_corpus(core, &chunk.corpus_id).await
 }
@@ -124,18 +133,18 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
         return settle_corpus(core, corpus_id).await;
     }
 
-    core.gate.background().await;
+    let permit = core.gate.background().await;
     match embed_batch(core, &batch[..take], texts[..take].to_vec()).await {
-        Ok(()) => core.gate.call_succeeded(),
+        Ok(()) => permit.succeeded(),
         // One oversize chunk fails the whole batch, and the batch cannot say
         // which. Per-chunk jobs isolate it, and that path splits it.
         Err(e) if input_too_large(&e) => {
-            core.gate.call_failed(&e);
+            permit.failed(&e);
             tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
             return split_into_artifact_jobs(core, corpus_id).await;
         }
         Err(e) => {
-            core.gate.call_failed(&e);
+            permit.failed(&e);
             return Err(e);
         }
     }
@@ -167,6 +176,14 @@ pub async fn rearm_if_more(core: &Core, corpus_id: &str) -> Result<()> {
         .await?
         .is_empty()
     {
+        return Ok(());
+    }
+    // What is left may not be batch work any more. A batch that met a chunk the
+    // endpoint refuses gives way to one unit per chunk and returns `Ok`, so this
+    // runs straight afterwards and would put the same doomed batch back beside
+    // the units that replaced it — converging, since those carry `seq = 0` and
+    // win the ordering, but a wasted call and a reset attempt count per round.
+    if core.store.pending_artifacts_are_isolated(corpus_id).await? {
         return Ok(());
     }
     // `seq` climbs, so later batches of a long document sink below the first
@@ -300,14 +317,19 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         title_cost,
         "oversize chunk has nothing left to cut on; embedding as-is"
     );
+    let permit = core.gate.background().await;
     let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
-        Ok(v) => v,
+        Ok(v) => {
+            permit.succeeded();
+            v
+        }
         // Still nothing to cut with when the title alone fills the limit:
         // `split_by_lines` at a budget of zero puts every line in a part of its
         // own and then falls to the 64-character floor, which shreds the text
         // into fragments that are each still oversize once they inherit the
         // title. A refusal we cannot act on is reported as one.
         Err(e) if input_too_large(&e) && budget > 0 => {
+            permit.failed(&e);
             let parts = split_by_lines(&chunk.text, budget, &core.counter);
             if parts.len() > 1 {
                 tracing::warn!(artifact_id = %chunk.id, parts = parts.len(), "endpoint refused it whole; cutting on lines");
@@ -315,7 +337,10 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
             }
             return Err(e);
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            permit.failed(&e);
+            return Err(e);
+        }
     };
     core.vectors
         .upsert(vec![VectorPoint {
@@ -908,6 +933,68 @@ mod tests {
             .len();
 
         assert_eq!(before - after, BATCH, "a run embedded more than one batch");
+    }
+
+    #[tokio::test]
+    async fn the_per_chunk_path_is_paced_like_every_other_call() {
+        // `split_into_artifact_jobs` can leave hundreds of these behind for one
+        // document. Ungated they ran back to back at the endpoint, and against a
+        // dead one they each spent a timeout without a single failure ever
+        // reaching the breaker that exists to stop exactly that.
+        let core = test_core().await;
+        let (_src, ids) = seed(&core, &["one"]).await;
+
+        // Holding the turn is the question asked directly: a path that goes
+        // through the gate cannot start while another call has it.
+        let permit = core.gate.background().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), run(&core, &ids[0]))
+                .await
+                .is_err(),
+            "the per-chunk embed path went straight to the endpoint"
+        );
+
+        permit.succeeded();
+        run(&core, &ids[0]).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().embed_state,
+            EmbedState::Embedded
+        );
+    }
+
+    #[tokio::test]
+    async fn isolating_a_batch_does_not_put_the_batch_straight_back() {
+        // The batch meets a chunk the endpoint refuses, gives way to one unit
+        // per chunk, and returns `Ok` — so `run_one` completes it and re-arms
+        // it, beside the units that just replaced it. It converges, because
+        // those carry `seq = 0` and win the ordering, but every round costs
+        // another call that can only fail the same way.
+        let mut core = test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
+            crate::core::test_support::TEST_DIM,
+            20,
+        ));
+        let big = "alpha ".repeat(200);
+        let (src_id, _) = seed(&core, &["small", &big]).await;
+        core.store
+            .enqueue(Stage::Embed, "corpus", &src_id)
+            .await
+            .unwrap();
+
+        // One claim: the re-arm happens in `run_one` after the job is closed.
+        crate::jobs::run_one(&core).await.unwrap();
+
+        let batch_armed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs
+              WHERE stage = 'embed' AND target_kind = 'corpus' AND state = 'pending'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            batch_armed, 0,
+            "the batch was re-armed beside the per-chunk units that replaced it"
+        );
     }
 
     #[tokio::test]

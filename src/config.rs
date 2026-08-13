@@ -252,10 +252,19 @@ pub struct SynthesizeRole {
     /// is what truncates the answer.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
-    /// Seconds to idle between segmentation calls.
-    ///
+    /// Seconds to wait on one call before giving up on it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Moved to `[pacing]`, and kept here only to be complained about.
+    ///
+    /// Pacing is one queue in front of one endpoint now, so a cooldown per role
+    /// could never bound the total load — several roles each honouring their own
+    /// still interleave into unbroken work. Nothing reads this, and without the
+    /// field the operator's thermal pacing would parse cleanly and silently stop
+    /// happening: unknown keys are ignored, which is right for forward
+    /// compatibility and wrong for a setting someone chose on purpose.
+    #[serde(default)]
+    pub cooldown_secs: Option<u64>,
     /// Tokens of the document's verbatim opening prepended to every window, so
     /// an artifact from deep in a long document still knows what product and
     /// version it belongs to. Zero disables it.
@@ -395,6 +404,7 @@ impl Config {
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
+        cfg.warn_on_moved_keys();
         Ok(cfg)
     }
 
@@ -456,6 +466,20 @@ impl Config {
             )));
         }
         Ok(())
+    }
+
+    /// A setting that moved is a setting that stopped working, and an unknown
+    /// key parses without complaint. Say so once at startup rather than letting
+    /// an operator discover the pacing they configured has been off since the
+    /// upgrade.
+    fn warn_on_moved_keys(&self) {
+        if self.infer.synthesize.cooldown_secs.is_some() {
+            tracing::warn!(
+                "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \
+                 being ignored; pacing is one gap in front of one endpoint now, so it can no \
+                 longer be set per role"
+            );
+        }
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file

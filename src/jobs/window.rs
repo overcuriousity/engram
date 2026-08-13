@@ -56,7 +56,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // every window after it.
     let text = w.text.clone();
 
-    core.gate.background().await;
+    let permit = core.gate.background().await;
     let first = core
         .synthesizer
         .segment(crate::infer::SegmentInput {
@@ -65,8 +65,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         })
         .await;
     match &first {
-        Ok(_) => core.gate.call_succeeded(),
-        Err(e) => core.gate.call_failed(e),
+        Ok(_) => permit.succeeded(),
+        Err(e) => permit.failed(e),
     }
     let mut chunks = match first {
         Ok(c) => c,
@@ -97,7 +97,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             window = idx,
             "literals missing; re-segmenting once"
         );
-        core.gate.background().await;
+        let permit = core.gate.background().await;
         match core
             .synthesizer
             .segment(crate::infer::SegmentInput {
@@ -107,14 +107,14 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             .await
         {
             Ok(second) => {
-                core.gate.call_succeeded();
+                permit.succeeded();
                 chunks = second;
             }
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
             // window we can already read.
             Err(e) => {
-                core.gate.call_failed(&e);
+                permit.failed(&e);
                 tracing::warn!(
                     corpus_id,
                     window = idx,
@@ -176,7 +176,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
 /// If it later succeeds this runs again, which is why every step of `finish` is
 /// idempotent: ordinals are renumbered, coverage recomputed, the embed job
 /// re-armed for the artifacts that have appeared since.
-async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
+pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
     for w in core.store.segments_for_corpus(corpus_id).await? {
         let resolved = match w.state {
             SegmentState::Done => true,

@@ -1,10 +1,11 @@
 //! One pacer in front of every inference call.
 //!
-//! Three jobs that all answer the same question — may a background call start
-//! now? The cooldown protects a desktop GPU from unbroken load. The interactive
-//! lease keeps the worker from piling work onto the endpoint while a person is
-//! waiting on `ask`. The breaker stops thirty-four units from each spending a
-//! fifteen-minute timeout discovering the same dead endpoint.
+//! Four jobs that all answer the same question — may a background call start
+//! now? The cooldown protects a desktop GPU from unbroken load. The turn keeps
+//! that answer true for the whole system rather than per worker. The
+//! interactive lease keeps the worker from piling work onto the endpoint while
+//! a person is waiting on `ask`. The breaker stops thirty-four units from each
+//! spending a fifteen-minute timeout discovering the same dead endpoint.
 //!
 //! It sits around calls rather than around jobs, so the two stages that make no
 //! inference call — planning a corpus into windows, and the consolidation sweep
@@ -13,7 +14,7 @@
 use crate::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 #[derive(Default)]
@@ -30,6 +31,15 @@ struct GateState {
 pub struct InferenceGate {
     state: Mutex<GateState>,
     resumed: Notify,
+    /// One background call at a time, held for the duration of the call.
+    ///
+    /// The cooldown on its own paces each worker without bounding the whole:
+    /// `server.workers` defaults to 2, and two workers read the same unchanged
+    /// `last_finished` in the same instant — neither has finished — and put two
+    /// generations on the one GPU. That is the load the cooldown is configured
+    /// to prevent, so the gap has to be between calls rather than between one
+    /// worker's calls.
+    turn: Semaphore,
     cooldown: Duration,
     breaker_after: usize,
     probe_after: Duration,
@@ -40,6 +50,7 @@ impl InferenceGate {
         Self {
             state: Mutex::new(GateState::default()),
             resumed: Notify::new(),
+            turn: Semaphore::new(1),
             cooldown,
             // Off unless configured, so a test that did not ask for a breaker
             // cannot be surprised by one.
@@ -54,14 +65,35 @@ impl InferenceGate {
         self
     }
 
-    /// Returns when a background inference call may start.
-    pub async fn background(&self) {
+    /// Returns the right to make one background inference call, once one may
+    /// start. Hold the permit for the duration of the call.
+    pub async fn background(&self) -> BackgroundPermit<'_> {
+        // The turn is taken before the wait rather than after it, so whoever
+        // holds it re-reads the cooldown once the call ahead has finished.
+        // Checking first and taking the turn afterwards would let every waiter
+        // clear the same stale `last_finished` and then merely queue up.
+        let turn = self
+            .turn
+            .acquire()
+            .await
+            .expect("the gate's turn is never closed");
         loop {
+            // Built before the lock is taken and registered before it is
+            // dropped. `notify_waiters` wakes only waiters that are already
+            // registered and leaves no permit behind, so a lease ending in the
+            // gap between dropping the guard and first polling this would have
+            // woken nobody — and background work would have waited for the
+            // *next* question instead of for this one to end, which on a
+            // single-user base can be hours.
+            let resumed = self.resumed.notified();
+            tokio::pin!(resumed);
+
             // The lock is never held across an await: the wait is computed, the
             // guard dropped, and only then slept on.
             let wait = {
                 let st = self.state.lock().expect("gate state");
                 if st.interactive > 0 {
+                    resumed.as_mut().enable();
                     None
                 } else {
                     let now = Instant::now();
@@ -74,7 +106,7 @@ impl InferenceGate {
                     .max();
                     match ready_at {
                         Some(t) if t > now => Some(t - now),
-                        _ => return,
+                        _ => break,
                     }
                 }
             };
@@ -82,8 +114,12 @@ impl InferenceGate {
                 Some(d) => tokio::time::sleep(d).await,
                 // Held off by an interactive call, which has no deadline. The
                 // lease wakes us when it drops.
-                None => self.resumed.notified().await,
+                None => resumed.await,
             }
+        }
+        BackgroundPermit {
+            gate: self,
+            _turn: turn,
         }
     }
 
@@ -122,6 +158,27 @@ impl InferenceGate {
                 "inference endpoint failed repeatedly; holding background calls"
             );
         }
+    }
+}
+
+/// The right to make one background inference call, held for as long as the
+/// call runs.
+///
+/// Report the outcome through it — both methods consume the permit, so the
+/// cooldown starts and the turn passes on at the moment the call ended rather
+/// than whenever the caller got around to saying so.
+pub struct BackgroundPermit<'a> {
+    gate: &'a InferenceGate,
+    _turn: SemaphorePermit<'a>,
+}
+
+impl BackgroundPermit<'_> {
+    pub fn succeeded(self) {
+        self.gate.call_succeeded();
+    }
+
+    pub fn failed(self, e: &Error) {
+        self.gate.call_failed(e);
     }
 }
 
@@ -172,7 +229,9 @@ mod tests {
         let g = gate(0);
         let lease = g.interactive();
         let g2 = Arc::clone(&g);
-        let waiter = tokio::spawn(async move { g2.background().await });
+        let waiter = tokio::spawn(async move {
+            g2.background().await;
+        });
 
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(
@@ -193,6 +252,49 @@ mod tests {
         let started = tokio::time::Instant::now();
         let _lease = g.interactive();
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_workers_do_not_put_two_generations_on_the_gpu_at_once() {
+        // `server.workers` defaults to 2, and the cooldown alone is a check
+        // rather than a turn: both workers read the same unchanged
+        // `last_finished` — neither has finished — and both proceed. The gap the
+        // operator configured then bounds each worker rather than the endpoint.
+        let g = gate(5);
+        let first = g.background().await;
+
+        let g2 = Arc::clone(&g);
+        let second = tokio::spawn(async move {
+            g2.background().await;
+            tokio::time::Instant::now()
+        });
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(
+            !second.is_finished(),
+            "a second call started while the first was still running"
+        );
+
+        // And the waiter serves out the cooldown from when that call *ended*,
+        // rather than from a stamp it read before it started.
+        first.succeeded();
+        let released = tokio::time::Instant::now();
+        let acquired = second.await.unwrap();
+        assert_eq!(acquired - released, Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_call_hands_the_turn_on() {
+        // The turn is released by the permit, so a call that errored must not
+        // hold the endpoint shut behind it.
+        let g = gate(0);
+        let permit = g.background().await;
+        permit.failed(&Error::Inference {
+            role: "chunk",
+            detail: "502".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(1), g.background())
+            .await
+            .expect("the turn was never handed on");
     }
 
     #[tokio::test(start_paused = true)]
