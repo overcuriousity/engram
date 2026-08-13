@@ -139,6 +139,16 @@ impl Store {
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
+    ///
+    /// Least-tried first, then oldest. Ordering by id alone made the queue
+    /// strictly sequential in the one case where that hurts: `enqueue_after`
+    /// re-arms the existing row, so a job that cannot get through keeps its
+    /// original id and reclaims the front of the queue every time its backoff
+    /// expires, ahead of everything captured since. One document the model
+    /// would not parse therefore held up every document behind it. Sorting by
+    /// `attempts` puts work that has already had its turn behind work that has
+    /// not — a reordering rather than a demotion, since the sore thumb still
+    /// runs as soon as nothing fresher is ready.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE jobs
@@ -146,7 +156,7 @@ impl Store {
               WHERE id = (
                 SELECT id FROM jobs
                  WHERE state = 'pending' AND run_after <= ?
-                 ORDER BY id LIMIT 1
+                 ORDER BY attempts, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
         )
@@ -402,6 +412,73 @@ mod tests {
             "the work was abandoned; an endpoint that comes back would never be noticed"
         );
         assert!(s.failed_jobs(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn work_that_keeps_failing_stops_holding_the_head_of_the_queue() {
+        // `enqueue_after` re-arms the existing row, so a job that fails over and
+        // over keeps its original id. Ordering by id alone therefore handed the
+        // queue's front to the one target that could not make progress, every
+        // time its backoff expired, ahead of everything captured since.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "sore-thumb")
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let j = s.claim_job().await.unwrap().unwrap();
+            s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+            // Past the backoff it just set; the delay is not what this test is
+            // about.
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+        }
+
+        // Captured long after, and with a lower row id nowhere in sight.
+        s.enqueue(Stage::Synthesize, "corpus", "fresh")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            next.target_id, "fresh",
+            "the failing job kept the front of the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_that_yielded_is_not_starved_once_it_is_the_only_work_left() {
+        // Yielding must be a reordering, not a demotion: the sore thumb still
+        // runs when nothing fresher is ready.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "sore-thumb")
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let j = s.claim_job().await.unwrap().unwrap();
+            s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+            // Past the backoff it just set; the delay is not what this test is
+            // about.
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap();
+        assert_eq!(
+            next.expect("the failing job was abandoned").target_id,
+            "sore-thumb"
+        );
     }
 
     #[tokio::test]

@@ -7,6 +7,18 @@ use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
 
+/// Unreadable replies in a row before the pass stops working through the
+/// document.
+///
+/// One window the model will not produce readable JSON for says something about
+/// that window; the pass steps over it and keeps going, which is the whole point
+/// of stepping over it at all. Several in a row says something about the model
+/// or the endpoint, and every further window costs a full call — the slowest,
+/// most expensive thing engram does — to arrive back at the same answer. Three
+/// is far enough to clear a bad patch of a document and short enough that a
+/// broken model costs a handful of calls rather than one per window.
+const REFUSALS_BEFORE_GIVING_UP_ON_THE_PASS: usize = 3;
+
 /// Tokens consumed by the system prompt and scaffolding. Measured from the
 /// real prompt rather than guessed.
 fn prompt_overhead(core: &Core) -> usize {
@@ -55,9 +67,15 @@ fn resolve_span(
 /// LLM-assisted segmentation, one window at a time.
 ///
 /// The window rows are the job's memory. A window that succeeds is written and
-/// marked `done` before the next is attempted, so an error here costs the
-/// windows that had not started yet and nothing else — the job retries and
-/// resumes from the first pending window.
+/// marked `done` before the next is attempted, so the job retries and resumes
+/// from the first window that has not resolved.
+///
+/// What a failure costs depends on whose failure it is. A reply the parser
+/// cannot read is the window's own problem — the pass records it against that
+/// window and carries on through the document, and the job ends in an error so
+/// the queue brings it back for another try. An endpoint that will not answer
+/// at all is everyone's problem, and the pass stops on the spot rather than
+/// spending a timeout per remaining window to learn the same thing again.
 pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     core.store
@@ -95,6 +113,12 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     // produced, which is what makes a retry reproduce the same prompt.
     let all = core.store.segments_for_corpus(corpus_id).await?;
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
+
+    // The first unreadable reply of this pass, kept so the job still ends in an
+    // error and comes back for the windows it could not segment. The rest of
+    // the document is worked through first.
+    let mut refused: Option<crate::error::Error> = None;
+    let mut in_a_row = 0usize;
 
     for w in core.store.pending_segments(corpus_id).await? {
         core.store.bump_segment_attempts(corpus_id, w.idx).await?;
@@ -138,13 +162,60 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             core.synthesizer.budget().context,
             &core.counter,
         );
-        let mut chunks = core
+        let mut chunks = match core
             .synthesizer
             .segment(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
             })
-            .await?;
+            .await
+        {
+            Ok(chunks) => chunks,
+            // The model answered and we could not read the answer. That is a
+            // property of this window's text, not of the endpoint, so the
+            // windows after it are still worth calling for — and before this,
+            // they were not called at all until the bad one got through. One
+            // duplicate JSON key cost a real document thirty untried windows
+            // and twelve rounds of backoff, hours of waiting for work that was
+            // never going to be attempted in those passes anyway.
+            Err(e @ crate::error::Error::MalformedLlmOutput(_)) => {
+                let reason = e.to_string();
+                tracing::warn!(
+                    corpus_id,
+                    window = w.idx,
+                    lines = format!("{}-{}", w.start_line, w.end_line),
+                    reason,
+                    "window could not be segmented; moving on to the next one"
+                );
+                core.store
+                    .set_segment_state(corpus_id, w.idx, SegmentState::Failed, Some(&reason))
+                    .await?;
+                in_a_row += 1;
+                refused.get_or_insert(e);
+                // Carrying on past one bad window is what this arm is for.
+                // Carrying on past a run of them is just paying a full call to
+                // learn the same thing again: a model garbling this many in a
+                // row is garbling all of them, and the windows left untried
+                // stay pending for a pass that can actually use them.
+                if in_a_row >= REFUSALS_BEFORE_GIVING_UP_ON_THE_PASS {
+                    tracing::warn!(
+                        corpus_id,
+                        windows = in_a_row,
+                        "the model is refusing every window; stopping this pass"
+                    );
+                    break;
+                }
+                continue;
+            }
+            // Anything else — a timeout, a 502, a refused connection — says the
+            // endpoint is unwell. Putting thirty more windows to it costs one
+            // timeout each and learns nothing, so the pass still stops here.
+            Err(e) => return Err(e),
+        };
+        // A window the model read fine says the last refusal was about that
+        // window rather than about the model, so the run starts over.
+        in_a_row = 0;
+
         // The model was told to keep commands, paths and flags verbatim. If it
         // did not, one more attempt usually gets it right; a second failure is
         // stored with a flag rather than dropped, because a visible warning
@@ -155,13 +226,25 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
                 window = w.idx,
                 "literals missing; re-segmenting once"
             );
-            chunks = core
+            match core
                 .synthesizer
                 .segment(crate::infer::SegmentInput {
                     core: &text,
                     context: &ctx,
                 })
-                .await?;
+                .await
+            {
+                Ok(second) => chunks = second,
+                // The first reply parsed; it merely paraphrased. Keeping it and
+                // letting `flag_unverified` mark what went missing beats losing
+                // a window we can already read.
+                Err(e) => tracing::warn!(
+                    corpus_id,
+                    window = w.idx,
+                    error = %e,
+                    "the re-segmentation failed; keeping the first reply"
+                ),
+            }
         }
 
         if !ctx.is_empty() {
@@ -213,6 +296,13 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
             );
             tokio::time::sleep(cooldown).await;
         }
+    }
+
+    // Windows the model refused are still owed a call, so the job has to fail
+    // for the queue to bring it back. `finish` is left to the caller's
+    // exhausted path, which settles the source once the attempts run out.
+    if let Some(e) = refused {
+        return Err(e);
     }
 
     finish(core, corpus_id).await
@@ -1213,6 +1303,123 @@ Then run sync.";
             core.store.get_corpus(&out.id).await.unwrap().status,
             CorpusStatus::Partial,
             "a window with no chunks makes the source partial, not ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_the_parser_chokes_on_does_not_hold_up_the_rest_of_the_document() {
+        // The production failure this exists for: one window's reply carried a
+        // duplicate JSON key, and because the pass stopped at the first error,
+        // the thirty windows after it were not attempted for over an hour —
+        // they waited out the job's backoff twelve times over. A reply we
+        // cannot read says something about that window's text, not about the
+        // endpoint, so the rest of the document still deserves its calls.
+        let mut core = test_core().await;
+        let body = format!("STOPHERE marker paragraph\n\n{}", multi_segment_body());
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        assert!(segment_count(&core, &body) > 2);
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "STOPHERE",
+        ));
+
+        let err = run(&core, &out.id).await.unwrap_err();
+        assert!(err.retryable(), "the refused window is still owed a call");
+
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
+        let refused: Vec<_> = windows
+            .iter()
+            .filter(|w| w.state == SegmentState::Failed)
+            .collect();
+        assert_eq!(refused.len(), 1, "only the unreadable window may fail");
+        assert_eq!(refused[0].idx, 0);
+        assert!(
+            refused[0]
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("duplicate field")),
+            "the window must carry the parser's own complaint"
+        );
+
+        // The point of the change: every window after the bad one was tried in
+        // this same pass rather than waiting for the next.
+        assert!(
+            windows
+                .iter()
+                .skip(1)
+                .all(|w| w.state == SegmentState::Done),
+            "windows after the refused one were left unattempted: {:?}",
+            windows.iter().map(|w| (w.idx, w.state)).collect::<Vec<_>>()
+        );
+        assert!(
+            !core
+                .store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the readable windows must have produced chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_refusing_everything_costs_a_handful_of_calls_not_one_per_window() {
+        // Stepping over a bad window must not turn a broken model into a full
+        // document's worth of calls every pass. Inference is the scarcest thing
+        // here, and three refusals in a row already answer the question.
+        let mut core = test_core().await;
+        let body = multi_segment_body();
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        let windows = segment_count(&core, &body);
+        assert!(
+            windows > REFUSALS_BEFORE_GIVING_UP_ON_THE_PASS + 2,
+            "the fixture must have more windows than the pass will try"
+        );
+        // Unparsable for every window, since every window contains the marker.
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "paragraph",
+        ));
+
+        assert!(run(&core, &out.id).await.is_err());
+
+        let tried = core
+            .store
+            .segments_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|w| w.attempts > 0)
+            .count();
+        assert_eq!(
+            tried, REFUSALS_BEFORE_GIVING_UP_ON_THE_PASS,
+            "the pass kept calling a model that had already refused three times"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_window_is_retried_on_the_next_pass_and_can_still_succeed() {
+        // `pending_segments` covers failed windows too, so the next pass owes
+        // the refused one another call — and a window that fails only because
+        // the endpoint garbled one reply must be able to recover.
+        let mut core = test_core().await;
+        let body = format!("STOPHERE marker paragraph\n\n{}", multi_segment_body());
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "STOPHERE",
+        ));
+        assert!(run(&core, &out.id).await.is_err());
+
+        // The endpoint comes back to its senses.
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::default());
+        run(&core, &out.id).await.unwrap();
+
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(
+            windows.iter().all(|w| w.state == SegmentState::Done),
+            "the retried window never recovered"
+        );
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Embedding
         );
     }
 

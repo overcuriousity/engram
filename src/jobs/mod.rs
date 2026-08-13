@@ -5,8 +5,9 @@ pub mod synthesize;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+use crate::store::jobs::{Job, MAX_ATTEMPTS, Stage};
 use std::time::Duration;
+use tracing::Instrument;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A job still marked `running` after this long belonged to a process that died.
@@ -26,8 +27,14 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         target = %job.target_id,
         attempt = job.attempts
     );
-    let _guard = span.enter();
+    // `.instrument`, not `span.enter()`: a guard held across an `.await` does
+    // not travel with the future, so every line logged after the first
+    // suspension point lost its `job{...}` prefix — which in a journal full of
+    // interleaved windows is the only thing saying which job spoke.
+    run_claimed(core, job).instrument(span).await
+}
 
+async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     let result = match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,

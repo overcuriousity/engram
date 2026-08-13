@@ -123,7 +123,22 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at  INTEGER NOT NULL DEFAULT 0,
   UNIQUE(stage, target_id)
 );
-CREATE INDEX IF NOT EXISTS idx_jobs_ready   ON jobs(state, run_after);
+-- Ready work in the order `claim_job` takes it: least-tried first, then oldest.
+--
+-- The column order is the query's, not the filter's. `run_after` last looks
+-- wrong until you try it the other way round: an inequality ends an index's
+-- usable ordering, so `(state, run_after, attempts, id)` finds the ready rows
+-- and then sorts them in a temp B-tree on every poll. This walks `state`,
+-- `attempts`, `id` in claim order, tests `run_after` on each entry, and stops
+-- at the first row that is ready — covering, and no sort.
+--
+-- Dropped by its old name rather than widened in place. `migrate` applies this
+-- file to every database on every start, and `CREATE INDEX IF NOT EXISTS` on a
+-- name that already exists is a silent no-op, so a deployment carrying the old
+-- two-column `idx_jobs_ready` would have kept it. The drop is how an existing
+-- base actually picks this up.
+DROP INDEX IF EXISTS idx_jobs_ready;
+CREATE INDEX IF NOT EXISTS idx_jobs_claim   ON jobs(state, attempts, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 
 -- ── Consolidation ────────────────────────────────────────────────────────────
