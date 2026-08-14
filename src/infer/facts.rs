@@ -1,16 +1,17 @@
-//! Could these two artifacts actually disagree?
+//! Which values do these artifacts not state the same way?
 //!
-//! The similarity sweep says two artifacts cover the same ground. That is not
-//! the interesting question — the interesting one is whether they state some
-//! detail differently, because a wrong artifact ranks exactly as well as a
-//! right one and nothing else in the system notices. Answering it properly
-//! needs a model, and a model call is minutes on the hardware this is built
-//! for, so this narrows the candidate set first at the cost of a scan.
+//! A wrong artifact ranks exactly as well as a right one and nothing else in
+//! the system notices, so the values two artifacts give for the same thing are
+//! worth singling out. This finds them without a model.
 //!
-//! The rule is deliberately conservative in one direction only: it must never
-//! discard a pair that might disagree, and it is free to pass through pairs
-//! that turn out not to. A pair it passes costs one call; a pair it wrongly
-//! drops costs a stale artifact nobody ever finds.
+//! It used to answer a yes/no question — "could these two disagree?" — and gate
+//! the model on it. That gate was removed on 2026-08-14: it admitted a pair only
+//! when values *differed*, which is right for hunting contradictions and exactly
+//! backwards for deduplication, where two artifacts saying the same thing in
+//! different words are the cleanest thing there is to merge. What survives is
+//! the list, which decides nothing: it is a prior for the prompt, and the rule
+//! the merge verification enforces — whatever appears in it must survive into
+//! the merged text, or a value was dropped.
 
 use std::collections::BTreeSet;
 
@@ -80,31 +81,6 @@ pub fn fact_tokens(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Whether a pair is worth a model call.
-///
-/// Both artifacts must state some value, and their values must not be
-/// identical. That is all this can safely require. An earlier version also
-/// demanded a shared value, on the theory that it showed the two were talking
-/// about the same measurable thing — but that is exactly backwards for the case
-/// this exists to catch: one artifact says `1.21.4` and the other says
-/// `1.30.0`, and they share nothing at all.
-///
-/// So a pair stating unrelated values does get through and costs one call. That
-/// is the cheap direction of the error, and it is the one to be wrong in.
-///
-/// What this deliberately does *not* decide is whether the two are about the
-/// same subject. That used to be assumed settled by the similarity that put
-/// them in a pair, and it is not: in a reference document the entries for
-/// FAT12, FAT16 and FAT32 are near-identical in form and deliberately different
-/// in content, so they score 0.91 and every number in them differs. Similarity
-/// measures shape. The judge is the only thing here that can read a subject,
-/// which is why it is given both titles and told that different named things
-/// are not in conflict.
-pub fn may_disagree(a: &str, b: &str) -> bool {
-    let (fa, fb) = (fact_tokens(a), fact_tokens(b));
-    !fa.is_empty() && !fb.is_empty() && fa != fb
-}
-
 /// Values that not all of these texts state.
 ///
 /// This is what `may_disagree` became once deduplication replaced contradiction
@@ -151,58 +127,24 @@ mod tests {
     }
 
     #[test]
-    fn two_artifacts_giving_a_different_version_may_disagree() {
-        assert!(may_disagree(
-            "engram requires Rust 1.21.4 to build.",
-            "engram requires Rust 1.30.0 to build.",
-        ));
-    }
-
-    #[test]
-    fn the_same_fact_stated_twice_does_not_disagree() {
-        assert!(!may_disagree(
-            "engram requires Rust 1.21.4 to build.",
-            "To build engram you need Rust 1.21.4.",
-        ));
-    }
-
-    #[test]
-    fn a_pair_where_only_one_side_states_a_value_is_not_judged() {
-        // Nothing to compare, so nothing a model could rule on.
-        assert!(!may_disagree(
-            "The mount command attaches a filesystem.",
-            "Version 9.9.9 of the pastry compiler ships on 2030-01-01.",
-        ));
-    }
-
-    #[test]
-    fn unrelated_values_do_get_through_and_that_is_deliberate() {
-        // The filter is allowed to pass a pair that turns out to be fine — that
-        // costs one call. It is not allowed to drop one that disagrees, which
-        // would cost a stale artifact nobody ever finds.
-        assert!(may_disagree(
-            "The timeout is 30 seconds.",
-            "It listens on 8080."
-        ));
-    }
-
-    #[test]
-    fn one_artifact_with_no_facts_never_disagrees() {
-        assert!(!may_disagree("Prose only.", "Requires 1.2.3."));
-    }
-
-    #[test]
     fn versions_carrying_a_v_are_facts_and_equal_the_bare_form() {
         let f = fact_tokens("Needs v1.21.4 of the toolchain.");
         assert!(f.contains("1.21.4"), "{f:?}");
-        assert!(!may_disagree(
-            "Needs v1.21.4 of the toolchain.",
-            "Needs 1.21.4 of the toolchain.",
-        ));
-        assert!(may_disagree(
-            "Needs v1.21.4 of the toolchain.",
-            "Needs v1.30.0 of the toolchain.",
-        ));
+        assert!(
+            differing_values(&[
+                "Needs v1.21.4 of the toolchain.",
+                "Needs 1.21.4 of the toolchain.",
+            ])
+            .is_empty(),
+            "the v prefix made one value look like two"
+        );
+        assert_eq!(
+            differing_values(&[
+                "Needs v1.21.4 of the toolchain.",
+                "Needs v1.30.0 of the toolchain.",
+            ]),
+            vec!["1.21.4".to_string(), "1.30.0".to_string()]
+        );
     }
 
     #[test]
@@ -213,7 +155,10 @@ mod tests {
         let f = fact_tokens("The timeout is 30s and the batch is 512MB.");
         assert!(f.contains("30s"), "{f:?}");
         assert!(f.contains("512mb"), "{f:?}");
-        assert!(may_disagree("Wait 30s.", "Wait 90s."));
+        assert_eq!(
+            differing_values(&["Wait 30s.", "Wait 90s."]),
+            vec!["30s".to_string(), "90s".to_string()]
+        );
     }
 
     #[test]
