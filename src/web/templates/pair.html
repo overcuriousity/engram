@@ -1,0 +1,15 @@
+{% extends "layout.html" %}
+{% block title %}Pair the extension — engram{% endblock %}
+{% block content %}
+<h2>Pair the extension</h2>
+{# The origin is stated because it is the one thing the operator can check:
+   the extension will ask the browser for permission to reach exactly this
+   host, and nothing else. #}
+<p>This gives the browser extension a token for <strong>{{ origin }}</strong>.</p>
+<form method="post" action="/ui/pair">
+  <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+  <input type="hidden" name="state" value="{{ state }}">
+  <button class="btn btn-accent" type="submit">Pair</button>
+</form>
+<p class="muted">You can revoke it any time under Housekeeping → API tokens.</p>
+{% endblock %}

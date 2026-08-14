@@ -612,7 +612,7 @@ pub fn api_router() -> Router<AppState> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
