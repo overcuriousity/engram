@@ -292,8 +292,30 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .find(|m| m.id != obsolete)
                 .expect("run dismisses a component with fewer than two roots");
             for pr in &s.pairs {
+                if pr.a_id == obsolete || pr.b_id == obsolete {
+                    core.store
+                        .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
+                        .await?;
+                    continue;
+                }
+                // Both sides survived. Writing the direction here anyway named
+                // an artifact the pair does not contain, and Ops rendered an
+                // "apply supersede" button for it — a button that would hide a
+                // third artifact on the strength of a question about two others.
+                //
+                // Not left pending either. The roots this verdict was drawn from
+                // are unchanged by the supersede, so re-arming the pair would
+                // build the identical prompt and, against an endpoint that
+                // caches by prompt, receive the identical answer forever. An
+                // unanswered question goes where the others go: to a person.
                 core.store
-                    .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
+                    .set_pair_state(
+                        pr.id,
+                        PairState::Contradiction,
+                        Some(&format!(
+                            "{obsolete} was superseded; these two were not separated"
+                        )),
+                    )
                     .await?;
             }
             if core.consolidate.autonomous {
@@ -543,6 +565,47 @@ mod tests {
                 .superseded_by
                 .is_none(),
             "a proposal hid an artifact without being asked to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_of_two_survivors_is_not_closed_with_someone_elses_direction() {
+        // Three artifacts, two pairs, and one of the three named obsolete. The
+        // pair that holds it has a direction; the pair of the other two does
+        // not, and stamping the same `obsolete_id` on it put an artifact it does
+        // not contain behind an "apply supersede" button in Ops.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"the first is stale"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.93, 0.37]),
+                ("timeout is 90 seconds", [0.94, 0.34]),
+            ],
+        )
+        .await;
+        let first = queue_pair(&core, &ids[0], &ids[1]).await;
+        let second = queue_pair(&core, &ids[1], &ids[2]).await;
+
+        run(&core, &first.to_string()).await.unwrap();
+
+        let held = core.store.get_pair(first).await.unwrap();
+        assert_eq!(held.state, PairState::Superseded);
+        assert_eq!(held.obsolete_id.as_deref(), Some(ids[0].as_str()));
+
+        let survivors = core.store.get_pair(second).await.unwrap();
+        assert_eq!(
+            survivors.obsolete_id, None,
+            "a pair was closed naming an artifact it does not contain"
+        );
+        assert_eq!(
+            survivors.state,
+            PairState::Contradiction,
+            "two artifacts the verdict never separated were quietly settled"
         );
     }
 
