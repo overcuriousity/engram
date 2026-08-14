@@ -57,13 +57,24 @@ impl Store {
         Ok(out)
     }
 
-    /// Merged artifacts, newest first. What Ops lists.
+    /// Merged artifacts still standing, newest first. What Ops lists.
+    ///
+    /// Standing is the whole of the filter, and it is not cosmetic: every row
+    /// here is rendered with an "Undo merge" button, and undoing is defined as
+    /// restoring what the merge hid and then deprecating it. A merge that was
+    /// already undone is deprecated and hid nothing that is still hidden; one
+    /// subsumed by a later merge is superseded, and its sources belong to that
+    /// later merge now. Pressing undo on either finds nothing to restore and
+    /// deprecates an artifact that is already gone from results.
     pub async fn merged_artifacts(
         &self,
         limit: i64,
     ) -> Result<Vec<crate::store::artifacts::Chunk>> {
         let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE provenance = 'merged'
+            "SELECT * FROM artifacts
+              WHERE provenance = 'merged'
+                AND status = 'active'
+                AND superseded_by IS NULL
               ORDER BY created_at DESC, id LIMIT ?",
         )
         .bind(limit)
@@ -295,6 +306,48 @@ mod tests {
         // And the loss is visible rather than silent: the merge still claims
         // two sources while only one row survives.
         assert_eq!(s.merged_missing_a_source(10).await.unwrap(), vec![m.id]);
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_is_no_longer_standing_leaves_the_ops_list() {
+        // Every row Ops renders carries an "Undo merge" button, and undo means
+        // restore what this hid, then deprecate it. A merge already deprecated
+        // hid nothing that is still hidden, and one superseded by a later merge
+        // has handed its sources over — so the button would restore nothing and
+        // deprecate an artifact that is already gone from results.
+        let s = Store::memory().await.unwrap();
+        let (a, b, c) = three(&s).await;
+        let live = s
+            .insert_merged_artifact(&merged("a and b"), &[a.clone(), b])
+            .await
+            .unwrap();
+        let undone = s
+            .insert_merged_artifact(&merged("undone"), &[a.clone(), c.clone()])
+            .await
+            .unwrap();
+        let subsumed = s
+            .insert_merged_artifact(&merged("subsumed"), &[a, c])
+            .await
+            .unwrap();
+        s.set_artifact_status(
+            &undone.id,
+            crate::store::artifacts::ArtifactStatus::Deprecated,
+        )
+        .await
+        .unwrap();
+        s.set_superseded_by(&subsumed.id, Some(&live.id))
+            .await
+            .unwrap();
+
+        let listed: Vec<String> = s
+            .merged_artifacts(50)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        assert_eq!(listed, vec![live.id], "{listed:?}");
     }
 
     #[tokio::test]
