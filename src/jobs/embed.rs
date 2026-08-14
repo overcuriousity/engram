@@ -295,13 +295,33 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // to find. Armed rather than run inline — a Qdrant query that fails must not
     // fail the embed job, whose retry would pay for the embedding again.
     //
+    // Which is why neither of these propagates. Both are follow-up work over an
+    // artifact that is already indexed, and returning their errors from here
+    // would have failed the embed job for exactly the reason the arming exists
+    // to avoid — buying the same embedding twice to retry a step that costs
+    // nothing. Both have a backstop: the sweep re-finds an unarmed artifact's
+    // pairs through `near_pairs`, and an unfinished merge through
+    // `merged_with_active_roots`.
+    //
     // This is what makes duplicate detection complete rather than sampled; see
     // the module header of `jobs::relate`.
-    crate::jobs::relate::arm(core, &chunk.id, 0).await?;
+    if let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await {
+        tracing::warn!(
+            artifact_id = %chunk.id,
+            error = %e,
+            "could not arm the neighbour query; the sweep will find its pairs"
+        );
+    }
     // A merged artifact hides what it replaced only once it is itself in the
     // index, so the knowledge is never out of search on both sides at once.
-    if chunk.provenance == crate::store::artifacts::Provenance::Merged {
-        crate::jobs::merge::finish(core, &chunk.id).await?;
+    if chunk.provenance == crate::store::artifacts::Provenance::Merged
+        && let Err(e) = crate::jobs::merge::finish(core, &chunk.id).await
+    {
+        tracing::warn!(
+            merged = %chunk.id,
+            error = %e,
+            "could not finish the merge; the next sweep will"
+        );
     }
     Ok(())
 }
