@@ -280,38 +280,6 @@ impl Store {
         Ok(self.job_seq(stage, target_id).await?.is_some())
     }
 
-    /// Queue work that has already been tried, so the next attempt waits.
-    ///
-    /// `enqueue` resets `attempts` to zero, which is right for a reprocess a
-    /// person asked for and wrong for a stage re-arming itself: a synthesize
-    /// job that keeps failing would come straight back with a two-second
-    /// delay and hammer an endpoint that is down. This keeps the attempt count
-    /// climbing so the backoff means something.
-    pub async fn enqueue_after(
-        &self,
-        stage: Stage,
-        target_kind: &str,
-        target_id: &str,
-        attempts: i64,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?)
-             ON CONFLICT(stage, target_id) DO UPDATE SET
-               state = 'pending', attempts = excluded.attempts,
-               run_after = excluded.run_after, claimed_at = NULL",
-        )
-        .bind(stage.as_str())
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(attempts)
-        .bind(now() + backoff_secs(attempts))
-        .bind(now())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
@@ -319,7 +287,7 @@ impl Store {
     /// Least-tried first, then earliest position in its batch, then oldest.
     ///
     /// Ordering by id alone made the queue strictly sequential in the one case
-    /// where that hurts: `enqueue_after` re-arms the existing row, so a job that
+    /// where that hurts: `fail_job` re-arms the row in place, so a job that
     /// cannot get through keeps its original id and reclaims the front of the
     /// queue every time its backoff expires, ahead of everything captured since.
     /// One document the model would not parse therefore held up every document
@@ -597,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn work_that_keeps_failing_stops_holding_the_head_of_the_queue() {
-        // `enqueue_after` re-arms the existing row, so a job that fails over and
+        // `fail_job` re-arms the row in place, so a job that fails over and
         // over keeps its original id. Ordering by id alone therefore handed the
         // queue's front to the one target that could not make progress, every
         // time its backoff expired, ahead of everything captured since.
