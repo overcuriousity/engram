@@ -171,7 +171,8 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 /// permanently, so both capped scans were on course to be truncated forever:
 /// repairing a shifting window of an ever-growing set, and reporting success
 /// either way. `full_lifecycle_reconcile` keeps that scan for the drift that
-/// arises with no SQLite write behind it, but it no longer runs every sweep.
+/// arises with no SQLite write behind it; it still runs every sweep, after
+/// this pass.
 ///
 /// Returns how many artifacts it rewrote, which is a number worth asserting on:
 /// a repair that fires on a base in agreement is a bug that hides behind a
@@ -202,8 +203,8 @@ async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
 /// The full two-sided scan, for drift that arose with no SQLite write behind it
 /// — a payload edited out of band, or a base predating `lifecycle_dirty`.
 ///
-/// Still on the sweep, behind the marker, and the division of labour is the
-/// point. The marker is *complete* for everything this system does to itself:
+/// Still on every sweep, after the marker pass, and the division of labour is
+/// the point. The marker is *complete* for everything this system does to itself:
 /// every lifecycle transition marks before it writes and clears only once both
 /// stores agree, so no in-system write can drift unseen however large the base
 /// grows. This scan is *best-effort* for everything else, and past `DRIFT_SCAN`
