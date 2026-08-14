@@ -7,5 +7,28 @@ function say(message, isError) {
   el.classList.toggle('error', !!isError);
 }
 
-// Filled in by later tasks. Wired now so the shell is verifiably loaded.
-$('capture').addEventListener('click', () => say('not wired yet'));
+/// Trailing slashes would double up in every URL built from this.
+function cleanOrigin(raw) {
+  return raw.trim().replace(/\/+$/, '');
+}
+
+async function ensurePaired() {
+  if (await engramApi.config()) return true;
+
+  const typed = prompt('engram address (for example https://engram.example)');
+  if (!typed) return false;
+  try {
+    say('Pairing…');
+    const origin = await engramPair.pair(cleanOrigin(typed));
+    say('Paired with ' + origin + '.');
+    return true;
+  } catch (e) {
+    say(e.message, true);
+    return false;
+  }
+}
+
+$('capture').addEventListener('click', async () => {
+  if (!(await ensurePaired())) return;
+  say('not wired yet');
+});
