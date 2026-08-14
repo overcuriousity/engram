@@ -1,5 +1,6 @@
 pub mod ask;
 pub mod background;
+pub mod extract;
 pub mod ingest;
 pub mod search;
 

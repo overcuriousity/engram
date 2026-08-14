@@ -48,6 +48,14 @@ rust-embed = "8.12.0"
 mime_guess = "2"
 askama = "0.16.0"
 rmcp = { version = "3.1.2", features = ["server", "transport-streamable-http-server"] }
+# Readability: strips navigation, headers, footers and asides, leaving the
+# article. Hand-rolling these heuristics would be worse code than importing an
+# implementation of them.
+dom_smoothie = "0.18.0"
+# HTML → markdown. Pre-1.0, and the fallback if that becomes unacceptable is
+# plain-text extraction, which costs the splitter its heading boundaries.
+html2md = "0.2.15"
+url = "2"
 schemars = "1.2.2"
 
 [dev-dependencies]
