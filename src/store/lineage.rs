@@ -167,7 +167,6 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::store::Store;
     use crate::store::artifacts::{NewArtifact, NewMerged, Provenance};
 
@@ -341,7 +340,7 @@ mod tests {
         // hidden behind a merge it has nothing to do with.
         let s = Store::memory().await.unwrap();
         let (a, b, c) = three(&s).await;
-        let orphan = s
+        let _orphan = s
             .insert_merged_artifact(&merged("a and b"), &[a.clone(), b.clone()])
             .await
             .unwrap();

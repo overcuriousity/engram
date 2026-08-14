@@ -23,9 +23,6 @@ pub struct Outcome {
     pub examined: usize,
     pub superseded: usize,
     pub queued: usize,
-    /// Pairs settled without asking anyone, because the two artifacts state no
-    /// value differently and so have nothing to disagree about.
-    pub closed: usize,
     /// Pairs this sweep armed a judge unit for. The calls happen later, one
     /// unit at a time, so this counts what was asked for rather than answered.
     pub judged: usize,
@@ -69,16 +66,6 @@ impl Clusters {
 /// not depend on clock resolution. Newer is the right default because the thing
 /// most often re-captured is a document that has since been updated — and Ops
 /// has an undo for when it is not.
-/// Is the whole of one artifact inside the other, whitespace aside?
-///
-/// Not a similarity — containment. A score says two texts are alike; this says
-/// one of them adds nothing, which is the only ground on which the sweep hides
-/// something below `auto_supersede`.
-fn contains_normalized(long: &str, short: &str) -> bool {
-    let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    !short.trim().is_empty() && n(long).contains(&n(short))
-}
-
 fn keeper(members: &[Chunk]) -> &Chunk {
     members
         .iter()
@@ -314,6 +301,9 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // The review band. A pair whose members were just hidden has already been
     // answered, and queueing it would ask an operator to rule on an artifact
     // that is no longer in results.
+    //
+    // The rules themselves live in `classify_pair`, because the per-artifact
+    // relate unit applies the same ones and two copies would diverge silently.
     for p in pairs.iter().filter(|p| p.score < cfg.auto_supersede) {
         if hidden.contains(&p.a) || hidden.contains(&p.b) {
             continue;
@@ -324,96 +314,19 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         ) else {
             continue;
         };
-        // Same rule as the cluster pass: only two live artifacts have a
-        // question worth a queue slot, an inference call, or a containment
-        // supersede below.
-        if [&a, &b]
-            .iter()
-            .any(|c| c.status != ArtifactStatus::Active || c.superseded_by.is_some())
-        {
-            continue;
-        }
-
-        // One synthesis call emitting the same passage twice: the shorter text
-        // is wholly inside the longer, and both came out of the same document.
-        // That is a defect in one artifact rather than two sources saying
-        // different things, and nothing is lost by hiding it — the survivor
-        // says everything it said, Ops lists it, and one press undoes it.
-        //
-        // Same corpus is the whole of the condition. Two documents that share a
-        // sentence are two sources, and hiding one of those on a 0.9 similarity
-        // is what `auto_supersede` deliberately refuses to do.
-        if a.corpus_id == b.corpus_id {
-            let (long, short) = if a.text.len() >= b.text.len() {
-                (&a, &b)
-            } else {
-                (&b, &a)
-            };
-            if contains_normalized(&long.text, &short.text) {
-                // Same race, same treatment as the cluster pass above.
-                if let Err(e) = core.supersede(&short.id, &long.id).await {
-                    tracing::warn!(
-                        superseded = %short.id,
-                        by = %long.id,
-                        error = %e,
-                        "could not hide a duplicated passage; it stays active"
-                    );
-                    continue;
-                }
-                out.superseded += 1;
-                tracing::info!(
-                    superseded = %short.id,
-                    by = %long.id,
-                    "hid a passage one synthesis call emitted twice"
-                );
-                continue;
-            }
-        }
-
-        // Two artifacts that state no value differently have nothing for a
-        // person to rule on, and asking anyway is what turned this queue into a
-        // list of chores. The pair is filed as settled — the sweep re-finds it
-        // every run, so it has to be remembered — and both artifacts stay
-        // exactly where they are. Closing a question is not hiding an answer.
-        //
-        // The prefilter used to run only when the judge was enabled, which it
-        // is not by default, so the cheap answer was reached only by bases
-        // already paying for the expensive one.
-        // Both writes below warn and carry on, like the supersede calls above:
-        // a pair is one row about two artifacts, and a transient BUSY on it is
-        // no reason to abandon the rest of the band, the judge pass and the
-        // sweep's tally. The sweep re-finds the pair next run.
-        if !crate::infer::facts::may_disagree(&a.text, &b.text) {
-            match core
-                .store
-                .record_settled_pair(
-                    &p.a,
-                    &p.b,
-                    p.score,
-                    crate::store::pairs::PairState::NoConflict,
-                )
-                .await
-            {
-                Ok(true) => {
-                    out.closed += 1;
-                    tracing::debug!(a = %p.a, b = %p.b, score = p.score, "pair states nothing differently");
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not file a settled pair; it will be re-examined next sweep");
-                }
-            }
-            continue;
-        }
-
-        match core.store.record_pair(&p.a, &p.b, p.score).await {
-            Ok(true) => {
+        // Warn and carry on. A pair is one row about two artifacts, and a
+        // transient BUSY on it is no reason to abandon the rest of the band,
+        // the dedupe pass, and the sweep's tally — the sweep re-finds the pair
+        // next run either way.
+        match crate::jobs::classify::classify_pair(core, &a, &b, p.score).await {
+            Ok(crate::jobs::classify::Verdict::Queued) => {
                 out.queued += 1;
                 tracing::info!(a = %p.a, b = %p.b, score = p.score, "queued a pair for review");
             }
-            Ok(false) => {}
+            Ok(crate::jobs::classify::Verdict::Contained) => out.superseded += 1,
+            Ok(_) => {}
             Err(e) => {
-                tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not queue a pair for review; it will be re-examined next sweep");
+                tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not classify a pair; it will be re-examined next sweep");
             }
         }
     }
@@ -515,12 +428,17 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
             continue;
         }
 
-        if !crate::infer::facts::may_disagree(&a.text, &b.text) {
-            core.store
-                .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, None)
-                .await?;
-            continue;
-        }
+        // `may_disagree` used to close the pair here, and it was the second
+        // copy of the gate `classify_pair` just lost. Both were right for the
+        // old question — "do these two contradict each other?" — and both are
+        // backwards for deduplication, where a pair stating no differing value
+        // is the cleanest thing there is to merge. Keeping this one would have
+        // meant the queue filed such a pair and the arming step closed it
+        // again, which reads as the sweep disagreeing with itself.
+        //
+        // The tokeniser under it survives: `dedupe_prompt` is given the values
+        // that differ as a prior, and the merge verification refuses any merge
+        // that drops one.
 
         // A pair whose unit is still queued from an earlier sweep is already
         // going to be judged. `pairs_to_judge` orders by `judge_attempts`, and a
@@ -550,7 +468,7 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
@@ -578,7 +496,10 @@ mod tests {
 
     /// Seed artifacts with hand-placed vectors, so the test controls the exact
     /// similarity rather than depending on what the fake embedder produces.
-    async fn seed(core: &crate::core::Core, vectors: &[(&str, [f32; 2])]) -> Vec<String> {
+    pub(crate) async fn seed(
+        core: &crate::core::Core,
+        vectors: &[(&str, [f32; 2])],
+    ) -> Vec<String> {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = vectors
             .iter()
@@ -625,7 +546,7 @@ mod tests {
 
     /// One artifact under a corpus of its own, for the cases where "same
     /// document" is the thing under test.
-    async fn seed_into_new_corpus(
+    pub(crate) async fn seed_into_new_corpus(
         core: &crate::core::Core,
         text: &str,
         vector: [f32; 2],
@@ -1284,13 +1205,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_with_no_facts_to_disagree_about_never_reaches_the_model() {
-        // The prefilter is the whole economic argument for this feature: a
-        // model call is minutes, and most near pairs have nothing to judge.
+    async fn a_pair_with_no_differing_values_is_armed_for_the_model() {
+        // This asserted the opposite until 2026-08-14, and the reversal is the
+        // point of the change rather than a side effect of it.
+        //
+        // `may_disagree` admits a pair only when both sides state values and
+        // those values differ. That was right for the question it was written
+        // for — "do these two contradict each other?" — and is backwards for
+        // deduplication: two artifacts at 0.93 saying the same thing in
+        // different words have nothing to contradict and everything to merge.
+        // The old rule filed them as settled and left both in every result set,
+        // so the single best merge candidate was the one case the model was
+        // never shown.
         let mut core = test_core().await;
         core.consolidate.judge = true;
-        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
         seed(
             &core,
             &[
@@ -1301,20 +1229,15 @@ mod tests {
         .await;
 
         let out = run(&core).await.unwrap();
-        assert_eq!(
-            completer.calls(),
-            0,
-            "the prefilter let a factless pair through"
-        );
-        assert_eq!(out.judged, 0);
-        assert_eq!(
+        assert_eq!(out.queued, 1, "{out:?}");
+        assert_eq!(out.judged, 1, "the pair was never armed for a decision");
+        assert!(
             core.store
                 .pairs_by_state(PairState::NoConflict, 10)
                 .await
                 .unwrap()
-                .len(),
-            1,
-            "a cleared pair must leave the pending queue"
+                .is_empty(),
+            "the pair was closed by the old prefilter instead of being judged"
         );
     }
 
@@ -1431,11 +1354,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_with_nothing_to_disagree_about_never_reaches_the_queue() {
-        // The prefilter already knows these two state no differing value, but
-        // it only ran when the judge was enabled — and the judge is off by
-        // default. So every near pair became a question for a person, which is
-        // a question with no answer to give.
+    async fn a_pair_with_no_differing_values_reaches_the_queue() {
+        // The sibling of the rewrite above, from the sweep's side. It used to
+        // assert `queued == 0` and `closed == 1`: a pair stating no differing
+        // value was filed as settled and both artifacts stayed active.
+        //
+        // Under deduplication that is the wrong way round. Two artifacts saying
+        // the same thing in different words are what merging is for, and the
+        // sweep now queues them for a decision rather than closing the question
+        // nobody asked. Queued is not hidden: nothing about either artifact
+        // changes until a dedupe unit has ruled.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -1447,16 +1375,15 @@ mod tests {
         .await;
 
         let out = run(&core).await.unwrap();
-        assert_eq!(out.queued, 0, "{out:?}");
-        assert_eq!(out.closed, 1, "{out:?}");
-        assert!(
+        assert_eq!(out.queued, 1, "{out:?}");
+        assert_eq!(
             core.store
                 .pairs_by_state(PairState::Pending, 10)
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            1
         );
-        // Closing a question is not hiding an answer.
         for id in &ids {
             assert!(
                 core.store
@@ -1464,7 +1391,8 @@ mod tests {
                     .await
                     .unwrap()
                     .superseded_by
-                    .is_none()
+                    .is_none(),
+                "queueing a pair must not hide anything"
             );
         }
     }

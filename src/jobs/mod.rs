@@ -1,3 +1,4 @@
+pub mod classify;
 pub mod consolidate;
 pub mod embed;
 pub mod judge;
