@@ -563,6 +563,20 @@ impl Config {
             );
             self.feedback.candidates = ceiling;
         }
+        // Same argument as above: every judgeable component flattens to at
+        // least two roots, so a cap of zero or one settles all of them
+        // Oversized before any call — merging silently off from a number
+        // nobody types meaning that.
+        if self.consolidate.merge_max_roots < 2 {
+            let d = ConsolidateConfig::default().merge_max_roots;
+            tracing::warn!(
+                configured = self.consolidate.merge_max_roots,
+                using = d,
+                "consolidate.merge_max_roots below 2 would settle every component \
+                 as oversized; using the default"
+            );
+            self.consolidate.merge_max_roots = d;
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.
@@ -689,6 +703,23 @@ mod tests {
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
+    }
+
+    #[test]
+    fn a_merge_cap_below_two_goes_back_to_the_default() {
+        // The same put-back as feedback.candidates: every judgeable component
+        // flattens to at least two roots, so a cap of 0 or 1 settles all of
+        // them Oversized before any call — merging silently off.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nmerge_max_roots = 1\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.consolidate.merge_max_roots,
+            ConsolidateConfig::default().merge_max_roots
+        );
     }
 
     #[test]
