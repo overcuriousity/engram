@@ -610,6 +610,18 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
+    // Verdicts recorded while autonomy was off go back into the queue now
+    // that it is on. Idempotent and normally free: with autonomy on, no unit
+    // writes would_merge, so this touches rows exactly once per flip.
+    if core.consolidate.autonomous {
+        let reopened = core.store.reopen_would_merge_pairs().await?;
+        if reopened > 0 {
+            tracing::info!(
+                reopened,
+                "re-armed would-merge verdicts recorded before autonomy"
+            );
+        }
+    }
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
@@ -1465,6 +1477,43 @@ pub(crate) mod tests {
             first.stage,
             Stage::SegmentWindow,
             "a dedupe unit was claimed ahead of capture work"
+        );
+    }
+
+    #[tokio::test]
+    async fn would_merge_verdicts_are_re_armed_once_autonomy_is_on() {
+        // Recorded while autonomy was off, the verdict's whole point is to be
+        // acted on once the switch flips — the variant's own doc says so. The
+        // ticker's arming pass is where the flip becomes visible.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.consolidate.max_dedupe_per_tick = 5;
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        core.store
+            .set_pair_state(
+                pair,
+                crate::store::pairs::PairState::WouldMerge,
+                Some("same claim"),
+            )
+            .await
+            .unwrap();
+
+        arm_dedupe(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            crate::store::pairs::PairState::Pending,
+            "a would_merge verdict stayed stranded after autonomy came on"
         );
     }
 

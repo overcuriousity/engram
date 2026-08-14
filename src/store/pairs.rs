@@ -334,6 +334,20 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// Hand every recorded would-merge verdict back to the judge queue.
+    ///
+    /// `would_merge` exists only as a note taken while autonomy is off — the
+    /// draft was discarded, so there is nothing to apply directly; the unit
+    /// re-judges and merges at the queue's own pace. The detail is kept: it is
+    /// the model's recorded reasoning, and `pending` reads it never.
+    pub async fn reopen_would_merge_pairs(&self) -> Result<u64> {
+        let res =
+            sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
+                .execute(&self.pool)
+                .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Dismiss every pair a merge being undone had settled, by the lineage the
     /// settlement recorded. `pairs_among` covers only what the merge had
     /// already hidden — before the embed lands that is nothing, while the
