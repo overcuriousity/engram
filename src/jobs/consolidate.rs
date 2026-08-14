@@ -232,12 +232,32 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     };
 
     // Group everything near-identical first, and only then decide who wins.
+    //
+    // Two inputs, and the second is the one that matters now. `near_pairs` is
+    // one sampled round trip, which was all this had while the sweep was the
+    // only detector. The stored `NearIdentical` rows are what the per-artifact
+    // relate units have filed since — exact rather than sampled, and filed
+    // rather than acted on because resolving a pair where it is found leaves A
+    // pointing at a B that is itself hidden.
+    //
+    // Reading only the sample would leave every such pair unsettled forever:
+    // nothing else acts on that band, and the odds of the sample redrawing both
+    // members together are the (s/N)² the relate unit exists to escape.
+    let filed = core
+        .store
+        .pairs_by_state(crate::store::pairs::PairState::NearIdentical, 500)
+        .await?;
     let mut clusters = Clusters::default();
     let mut in_a_cluster: HashSet<String> = HashSet::new();
-    for p in pairs.iter().filter(|p| p.score >= cfg.auto_supersede) {
-        clusters.union(&p.a, &p.b);
-        in_a_cluster.insert(p.a.clone());
-        in_a_cluster.insert(p.b.clone());
+    let from_sweep = pairs
+        .iter()
+        .filter(|p| p.score >= cfg.auto_supersede)
+        .map(|p| (p.a.as_str(), p.b.as_str()));
+    let from_store = filed.iter().map(|p| (p.a_id.as_str(), p.b_id.as_str()));
+    for (a, b) in from_sweep.chain(from_store) {
+        clusters.union(a, b);
+        in_a_cluster.insert(a.to_string());
+        in_a_cluster.insert(b.to_string());
     }
 
     let mut members: HashMap<String, Vec<Chunk>> = HashMap::new();
@@ -1048,6 +1068,39 @@ pub(crate) mod tests {
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.superseded, out.queued), (0, 0), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn the_cluster_pass_settles_a_pair_the_relate_unit_filed() {
+        // The relate unit files a pair above `auto_supersede` rather than
+        // acting on it, because resolving where it is found leaves A pointing
+        // at a B that is itself hidden. Nothing would ever settle those rows if
+        // the cluster pass read only what one sampled round trip returned —
+        // and the whole reason the relate unit exists is that the sample is
+        // unlikely to redraw both members together.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        core.store
+            .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
+            .await
+            .unwrap();
+        // Empty the vector store's view, so `near_pairs` cannot supply the pair
+        // and only the stored row can.
+        core.vectors.delete_artifacts(&ids).await.unwrap();
+
+        let out = run(&core).await.unwrap();
+
+        assert_eq!(out.superseded, 1, "{out:?}");
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[1].as_str()),
+            "the newest member should have survived"
+        );
     }
 
     #[tokio::test]
