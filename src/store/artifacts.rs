@@ -143,6 +143,17 @@ pub struct Chunk {
     pub last_verified_at: Option<i64>,
 }
 
+impl Chunk {
+    /// Whether search may return this artifact: active and not hidden behind
+    /// a winner. This is the predicate every consolidation decision gates on —
+    /// what may win a cluster, be shown to the model, or be superseded — so it
+    /// has exactly one spelling. A third lifecycle state changes this method,
+    /// not a dozen call sites.
+    pub fn in_results(&self) -> bool {
+        self.status == ArtifactStatus::Active && self.superseded_by.is_none()
+    }
+}
+
 /// A merged artifact being created.
 ///
 /// Deliberately not `NewArtifact`. There is no corpus, no span, no segment and
@@ -1228,6 +1239,26 @@ mod tests {
                 .superseded_by
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn in_results_means_active_and_not_superseded() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+            .await
+            .unwrap();
+
+        assert!(s.get_artifact(&made[0].id).await.unwrap().in_results());
+        s.set_superseded_by(&made[0].id, Some(&made[1].id))
+            .await
+            .unwrap();
+        assert!(!s.get_artifact(&made[0].id).await.unwrap().in_results());
+        s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert!(!s.get_artifact(&made[1].id).await.unwrap().in_results());
     }
 
     #[tokio::test]

@@ -1,1541 +1,1093 @@
-# PR #14 Review Fixes Implementation Plan
+# PR 14 Review Fixes Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fix all 14 confirmed findings from the multi-agent review of PR #14 (`feat/autonomous-consolidation`), on that branch.
+**Goal:** Fix every confirmed finding from the multi-agent review of PR 14 (feat/autonomous-consolidation), including the minor reuse/efficiency ones.
 
-**Architecture:** The load-bearing principle across the dedupe fixes: a pair-state write may only become terminal *after* the fallible side effect it describes (supersede, merge-embed) is durable — or the settled state must be recoverable by a sweep repair. Three product decisions are already made by the user: (1) observation-mode merge verdicts get a new honest `WouldMerge` pair state, draft still discarded; (2) unsuperseding a merge source is honored as a partial restore via a `restored` marker on lineage rows; (3) merges whose embed permanently fails are auto-undone by the sweep, reopening their pairs for a person.
+**Architecture:** All fixes are local repairs to the consolidation subsystem introduced by this branch: the dedupe judge unit (`src/jobs/dedupe.rs`), merge lifecycle (`src/jobs/merge.rs`), the consolidation sweep (`src/jobs/consolidate.rs`), the pair and lineage stores, and the Ops UI. No schema changes; two new store methods.
 
-**Tech Stack:** Rust (tokio, sqlx/SQLite, axum, askama templates), Qdrant + in-memory vector store. Tests are `#[tokio::test]` colocated in each module.
+**Tech Stack:** Rust, sqlx/SQLite, tokio, axum. Tests are in-file `#[cfg(test)] mod tests` using `crate::core::test_support::test_core()`, `crate::infer::fake::ScriptedCompleter`, and `crate::jobs::consolidate::tests::{seed, seed_titled}`.
 
-**Spec:** The 14 findings, restated one line each in "Findings Index" below. Full failure scenarios are in the PR #14 review report (delivered in-session); each task's rationale section repeats what its finding claims.
+**Spec:** The findings come from the code review recorded in this plan's "Findings and decisions" section below (verifier transcripts under the session's task outputs). The branch's own design spec is `docs/superpowers/specs/2026-08-14-autonomous-consolidation-design.md`.
 
 ## Global Constraints
 
-- Work on branch `feat/autonomous-consolidation` (PR #14). Do not merge or rebase onto master.
-- Every task: `cargo test` must pass and `cargo fmt` must be clean before its commit.
-- Commit style (from repo history): `fix(scope): lowercase clause describing the behavior`, e.g. `fix(dedupe): a retired member dismisses only its own pairs`. End every commit message with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
-- Comment style: this codebase writes long "why" comments. When you change behavior a nearby comment describes, update the comment in the same edit — several findings are precisely stale comments.
-- Schema changes go in BOTH places: the fresh-DB schema (`src/store/schema.sql` — locate the `artifact_pairs` / `artifact_sources` CREATE TABLE there) AND the `ADDED_COLUMNS` list in `src/store/mod.rs` (append-only, with a default; never reorder).
-- SQLite `now()` helper and test idioms (`test_core()`, `seed`, `queue_pair`, `ScriptedCompleter`, direct `sqlx::query(...).execute(&core.store.pool)` for state surgery) already exist — use them, do not invent new harnesses.
+- Run `cargo test` after every implementation step; run `cargo fmt` before every commit.
+- Comment style: comments state constraints the code cannot show, in the codebase's essay style. Never "fixed per review".
+- Test names are full snake_case sentences (`a_retired_member_dismisses_only_its_own_pairs`), matching the existing suites.
+- Commit after each task with a conventional-commit message.
 
-## Findings Index
+## Findings and decisions
 
-| # | Where | One-line claim |
-|---|-------|----------------|
-| F1 | `src/jobs/dedupe.rs:294-327` | Replaced verdict settles pairs terminally before the fallible `core.supersede`; picks obsolete/winner from roots with no status check; failure is unretryable (run() skips non-Pending). |
-| F2 | `src/jobs/dedupe.rs:78-81` | One retired component member dismisses the entire component, killing sibling pairs between still-active duplicates forever. |
-| F3 | `src/jobs/consolidate.rs:307` | Sweep's unfinished-merge repair silently reverts an operator's unsupersede of a merge source, every sweep. |
-| F4 | `src/jobs/consolidate.rs:446-470` | Closing pass treats any `get_artifact` error (transient BUSY) as "artifact gone" and permanently closes a live pair as NoConflict. |
-| F5 | `src/jobs/dedupe.rs:357-365` | Duplicate verdict settles pairs as NoConflict before the merge is embedded; a permanently failing embed strands an invisible merge, duplicates unmergeable forever. |
-| F6 | `src/jobs/dedupe.rs:321` | Autonomous applied replacement leaves its pair in `Superseded` (= "awaiting confirmation"); its buttons then always return a validation error. |
-| F7 | `src/jobs/dedupe.rs:334-350` | Autonomy-off duplicate verdict filed as `Contradiction`; UI lies ("These two disagree"), offers only lossy keep-one buttons, draft discarded. |
-| F8 | `src/store/lineage.rs:43-55` | `roots_of` self-root fallback fires for an orphaned merge; its synthesized text is shown to the model as a captured original and can become a `root_id`. |
-| F9 | `src/store/artifacts.rs:407` | `restore_artifact` loses `source_count`/lineage, so a merge restored from its vector payload silently defeats the anti-drift invariant. |
-| F10 | `src/jobs/consolidate.rs:153-169` | `repair_lifecycle_drift` racing a payload-first reveal can re-hide the payload, then the reveal clears the marker: row Active, payload Superseded, no marker. |
-| F11 | `src/store/jobs.rs:330` | Legacy `'judge'` job rows parse as `None` → `unwrap_or(Stage::Synthesize)` misroute. |
-| F12 | `src/jobs/consolidate.rs:549-560` | `arm_dedupe` does a 200-row query + loop every tick even when `max_dedupe_per_tick == 0`. |
-| F13 | `src/store/pairs.rs:350-366` | `open_component` fixed-point loop rescans the whole window per growth pass — quadratic on the 5 000-row window. |
-| F14 | `src/jobs/consolidate.rs:148,175` | Comments claim `full_lifecycle_reconcile` "no longer runs every sweep" / is "behind the marker" while `run()` calls it unconditionally at line 298. |
+Confirmed findings fixed by this plan (task number in parentheses):
+
+1. Stale `member_ids` in the dedupe unit leaks retired members' roots into the prompt, the fan-in cap, `losses()`, and the Replaced-verdict resolution (Task 2).
+2. `merge::undo` pressed before the embed lands dismisses nothing and strands the merge's pairs settled forever — silent permanent duplication (Task 4).
+3. Proposal-mode sibling pairs record "`X` was superseded" when the supersede was only proposed and may be rejected (Task 3).
+4. `WouldMerge` doc promises re-judging on autonomy flip; no code path provides it (Task 5).
+5. `flag_orphans` starves: no flag filter / ORDER BY in `merged_missing_a_source`, so 500 permanently-orphaned old merges block new ones forever, and "mark reviewed" is undone next sweep (Task 6).
+6. `merge_max_roots = 0` or `1` silently settles every component `Oversized`; `normalize()` doesn't touch it (Task 7).
+7. `full_lifecycle_reconcile_scanning` runs outside `lifecycle_lock`, races a concurrent reveal, and writes the corrupted state with no marker left to find it by (Task 8).
+8. `heal_dangling_supersessions` takes no lock and never marks dirty; interleaved with `repair_lifecycle_drift` it produces row-Active/payload-Superseded/marker-clear (Task 9).
+9. The liveness predicate `status == Active && superseded_by.is_none()` is hand-spelled at 12 production sites (Task 1).
+10. `ops()` and `build_artifact_detail()` duplicate the source-rows loop verbatim, and `ops()` is an N+1 over a batch API (Task 10).
+11. `open_component`'s `let Some(seed) ... else` arm is unreachable (Task 11).
+12. `arm_dedupe` pays two full-row `get_artifact` fetches per pair before the cheap already-queued skip, re-checking the same in-flight pairs every tick (Task 12).
+
+Declined by the user (2026-08-14, "prototype, only used by me — legacy doesn't exist"):
+
+- **Legacy-DB startup refusal stays.** `migrate()`'s hard error on a pre-PR `corpus_id NOT NULL` schema is deliberate and keeps its test. No automated rebuild.
+- **The autonomy default flip on upgrade stays.** No carry for configs that never wrote `judge`; fresh-install `autonomous: true` is the spec's choice.
+- **Legacy `no_conflict` prefilter pairs stay settled.** No migration reopens them.
+
+Deferred (not in this plan): the altitude finding proposing a single `Core::lifecycle_write` helper owning the lock/marker/ordering protocol. Tasks 8 and 9 fix the two concrete protocol violations; the full refactor of five working mutators is follow-up work, not a review fix.
 
 ---
 
-### Task 1: Pair-state groundwork — `WouldMerge` state and `merged_into` column
+### Task 1: `Chunk::in_results()` — one owner for the liveness predicate
 
 **Files:**
-- Modify: `src/store/pairs.rs` (PairState enum, `ArtifactPair`, `row_to_pair`, `set_pair_state`, `set_pair_superseded`; new fns `set_pair_merged`, `reopen_pairs_merged_into`)
-- Modify: `src/store/mod.rs` (`ADDED_COLUMNS`)
-- Modify: `src/store/schema.sql` (or wherever `CREATE TABLE artifact_pairs` lives — find with `grep -rn "CREATE TABLE artifact_pairs" src/`)
-- Test: `src/store/pairs.rs` tests module
+- Modify: `src/store/artifacts.rs` (impl block for `Chunk`, after the struct around line 99)
+- Modify: `src/jobs/dedupe.rs:79`, `src/jobs/dedupe.rs:345`
+- Modify: `src/jobs/classify.rs:54`
+- Modify: `src/jobs/relate.rs:50`
+- Modify: `src/jobs/consolidate.rs:440`, `src/jobs/consolidate.rs:657-661`
+- Modify: `src/jobs/merge.rs:61-64`, `src/jobs/merge.rs:76`, `src/jobs/merge.rs:184-187`
+- Modify: `src/core/ingest.rs:314`
+- Modify: `src/web/judge.rs:174`, `src/web/judge.rs:363`
+- Test: `src/store/artifacts.rs` tests module
 
 **Interfaces:**
-- Consumes: existing `Store` pair API.
-- Produces (later tasks rely on these exact names):
-  - `PairState::WouldMerge` with `as_str() == "would_merge"`, `parse("would_merge")`.
-  - `ArtifactPair.merged_into: Option<String>`.
-  - `Store::set_pair_merged(&self, id: i64, merged_into: &str, detail: Option<&str>) -> Result<()>` — writes `state = 'no_conflict'`, `detail`, `merged_into`, `obsolete_id = NULL`; `Err(NotFound)` when 0 rows affected.
-  - `Store::reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64>` — `state = 'contradiction'`, given detail, `merged_into = NULL` for all rows whose `merged_into = merged_id`; returns rows affected.
-  - `set_pair_state` and `set_pair_superseded` both additionally set `merged_into = NULL` (same rule as `obsolete_id`: the column belongs to the merged-settlement and to nothing else).
+- Produces: `impl Chunk { pub fn in_results(&self) -> bool }` — later tasks (2, 12) call it.
 
-- [ ] **Step 1: Write the failing tests** (append to `src/store/pairs.rs` tests)
+- [ ] **Step 1: Write the failing test** (in `src/store/artifacts.rs` tests)
 
 ```rust
 #[tokio::test]
-async fn a_merged_settlement_records_which_merge_answered_it() {
+async fn in_results_means_active_and_not_superseded() {
     let s = Store::memory().await.unwrap();
-    let (a, b) = two_artifacts(&s).await;
-    s.record_pair(&a, &b, 0.91).await.unwrap();
-    let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+    let src = s.insert_corpus("raw", "web", None).await.unwrap();
+    let made = s
+        .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+        .await
+        .unwrap();
 
-    s.set_pair_merged(id, "merge-1", Some("same claim")).await.unwrap();
-
-    let p = s.get_pair(id).await.unwrap();
-    assert_eq!(p.state, PairState::NoConflict);
-    assert_eq!(p.merged_into.as_deref(), Some("merge-1"));
-
-    // Leaving the settlement drops the record, exactly as obsolete_id does.
-    s.set_pair_state(id, PairState::Dismissed, None).await.unwrap();
-    assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
-}
-
-#[tokio::test]
-async fn reopening_a_stranded_merge_s_pairs_touches_only_its_own() {
-    let s = Store::memory().await.unwrap();
-    let (a, b) = two_artifacts(&s).await;
-    s.record_pair(&a, &b, 0.91).await.unwrap();
-    let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-    s.set_pair_merged(id, "merge-1", None).await.unwrap();
-
-    assert_eq!(
-        s.reopen_pairs_merged_into("merge-other", "unrelated").await.unwrap(),
-        0,
-        "another merge's undo reopened this pair"
-    );
-    assert_eq!(s.reopen_pairs_merged_into("merge-1", "the merged text could not be indexed").await.unwrap(), 1);
-    let p = s.get_pair(id).await.unwrap();
-    assert_eq!(p.state, PairState::Contradiction);
-    assert_eq!(p.merged_into, None);
-}
-
-#[tokio::test]
-async fn would_merge_is_a_state_of_its_own() {
-    let s = Store::memory().await.unwrap();
-    let (a, b) = two_artifacts(&s).await;
-    s.record_pair(&a, &b, 0.91).await.unwrap();
-    let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-    s.set_pair_state(id, PairState::WouldMerge, Some("same claim")).await.unwrap();
-    assert_eq!(s.pairs_by_state(PairState::WouldMerge, 10).await.unwrap().len(), 1);
-    assert_eq!(PairState::parse("would_merge"), PairState::WouldMerge);
+    assert!(s.get_artifact(&made[0].id).await.unwrap().in_results());
+    s.set_superseded_by(&made[0].id, Some(&made[1].id)).await.unwrap();
+    assert!(!s.get_artifact(&made[0].id).await.unwrap().in_results());
+    s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+        .await
+        .unwrap();
+    assert!(!s.get_artifact(&made[1].id).await.unwrap().in_results());
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+(`Store::memory()` and the `nc` helper are the module's existing test fixtures.)
 
-Run: `cargo test -p engram a_merged_settlement_records reopening_a_stranded would_merge_is_a_state 2>&1 | tail -20`
-Expected: compile errors — `WouldMerge`, `merged_into`, `set_pair_merged` do not exist.
+- [ ] **Step 2: Run it — expect FAIL** with "no method named `in_results`": `cargo test in_results_means`
 
-- [ ] **Step 3: Implement**
-
-In `src/store/pairs.rs`:
-- Add `WouldMerge` variant with doc comment: the model answered "duplicate" while autonomy is off — recorded so an operator can read the verdicts before letting the system act on them; the draft is not kept, and flipping autonomy on lets a later unit re-judge and merge.
-- Extend `as_str`/`parse` with `"would_merge"`.
-- Add `pub merged_into: Option<String>` to `ArtifactPair` (doc: which merged artifact answered this pair, when the settlement was an applied merge; what the stranded-merge reap uses to reopen exactly the pairs a failed merge closed). Read it in `row_to_pair`.
-- In `set_pair_state` and `set_pair_superseded` SQL, add `, merged_into = NULL` next to the existing `obsolete_id` handling (extend `set_pair_state`'s doc comment to name both columns).
-- New functions:
+- [ ] **Step 3: Implement** in `src/store/artifacts.rs`, next to the `Chunk` struct:
 
 ```rust
-/// Settle a pair as answered by an applied merge. `merged_into` names the
-/// merged artifact, which is what lets the stranded-merge reap reopen exactly
-/// the pairs a merge that never embedded had closed.
-pub async fn set_pair_merged(&self, id: i64, merged_into: &str, detail: Option<&str>) -> Result<()> {
-    let res = sqlx::query(
-        "UPDATE artifact_pairs
-            SET state = 'no_conflict', detail = ?, merged_into = ?, obsolete_id = NULL
-          WHERE id = ?",
-    )
-    .bind(detail)
-    .bind(merged_into)
-    .bind(id)
-    .execute(&self.pool)
-    .await?;
-    if res.rows_affected() == 0 {
-        return Err(crate::error::Error::NotFound);
+impl Chunk {
+    /// Whether search may return this artifact: active and not hidden behind
+    /// a winner. This is the predicate every consolidation decision gates on —
+    /// what may win a cluster, be shown to the model, or be superseded — so it
+    /// has exactly one spelling. A third lifecycle state changes this method,
+    /// not twelve call sites.
+    pub fn in_results(&self) -> bool {
+        self.status == ArtifactStatus::Active && self.superseded_by.is_none()
     }
-    Ok(())
-}
-
-/// Reopen every pair a now-dead merge had settled, handing them to a person.
-/// Contradiction rather than Pending on purpose: re-arming the model would
-/// regenerate the same unembeddable draft and loop forever.
-pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
-    let res = sqlx::query(
-        "UPDATE artifact_pairs
-            SET state = 'contradiction', detail = ?, merged_into = NULL
-          WHERE merged_into = ?",
-    )
-    .bind(detail)
-    .bind(merged_id)
-    .execute(&self.pool)
-    .await?;
-    Ok(res.rows_affected())
 }
 ```
 
-In `src/store/mod.rs` `ADDED_COLUMNS`, append (comment: arrived with the stranded-merge reap; NULL on every pair predating it, which is correct — those settlements predate the column and are not reopenable by merge id):
+- [ ] **Step 4: Replace every inline spelling.** Positive form `c.status == ArtifactStatus::Active && c.superseded_by.is_none()` becomes `c.in_results()`; negated form becomes `!c.in_results()`. Exact sites:
+  - `src/jobs/dedupe.rs:79` → `if !c.in_results() {`
+  - `src/jobs/dedupe.rs:345` → delete the `live` closure; use `c.in_results()` at its two call sites (lines 346, 352)
+  - `src/jobs/classify.rs:54` → `.any(|c| !c.in_results())`
+  - `src/jobs/relate.rs:50` → `if !me.in_results() {`
+  - `src/jobs/consolidate.rs:440` → negated call
+  - `src/jobs/consolidate.rs:657-661` → `if !a.in_results() || !b.in_results() {`
+  - `src/jobs/merge.rs:61-64` (`finish`) → `if m.provenance != Provenance::Merged || !m.in_results() { return Ok(()); }`
+  - `src/jobs/merge.rs:76` → `if !r.in_results() { continue; }`
+  - `src/jobs/merge.rs:184-187` (`reap_stranded`) → `if m.provenance != Provenance::Merged || !m.in_results() || m.embed_state == EmbedState::Embedded {`
+  - `src/core/ingest.rs:314` (`repoint_supersession`) → `if !winner.in_results() {`
+  - `src/web/judge.rs:174` → `usable: a.in_results(),`
+  - `src/web/judge.rs:363` → negated call
 
-```rust
-("artifact_pairs", "merged_into", "TEXT"),
-```
+  Leave the single-condition `superseded_by.is_none()` payload checks (vector/memory.rs, qdrant.rs, embed.rs, ingest.rs:389/427) alone — they ask a different question.
 
-In the schema file, add `merged_into TEXT` to the `artifact_pairs` CREATE TABLE.
+- [ ] **Step 5: Run the full suite** — `cargo test`. Expected: PASS (pure extraction, zero behavior change).
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cargo test -p engram a_merged_settlement_records reopening_a_stranded would_merge_is_a_state` — Expected: PASS. Then full `cargo test` (the `PairState` match in `as_str` is exhaustive; the compiler will point at any consumer that needs the new arm — fix those `match`es by adding the arm, nothing else).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A && git commit -m "feat(pairs): a would_merge state and a merged_into column for settlements"
+git add -A && git commit -m "refactor(core): the liveness predicate has one owner, Chunk::in_results"
 ```
 
 ---
 
-### Task 2: F7 — observation-mode merge verdicts land as `WouldMerge`, rendered honestly
+### Task 2: Recompute `member_ids` after retired members are dropped
 
 **Files:**
-- Modify: `src/jobs/dedupe.rs` (Duplicate arm, non-autonomous branch, ~line 334)
-- Modify: `src/web/ui.rs` (`PAIR_STATES`, `PairRow`, `pair_rows`)
-- Modify: `templates/_decide.html`
-- Modify: `src/web/api.rs` (`consolidation` handler)
-- Test: `src/jobs/dedupe.rs` tests
+- Modify: `src/jobs/dedupe.rs:120-122`
+- Test: `src/jobs/dedupe.rs` tests module
 
 **Interfaces:**
-- Consumes: `PairState::WouldMerge` (Task 1).
-- Produces: `PairRow.would_merge: bool`; API key `"merge_proposals"`.
+- Consumes: `Chunk::in_results()` from Task 1 (only incidentally; the fix itself is one line).
 
-- [ ] **Step 1: Write the failing test** (in `src/jobs/dedupe.rs` tests; copy the seeding idiom from the existing duplicate-verdict test around line 720)
+The bug: `member_ids` is built at line 60 from the pre-partition pairs and never rebuilt after lines 85–113 drop retired members, so `roots_of(&member_ids)` at line 122 resolves roots of artifacts no longer in the question — they reach the prompt, the `merge_max_roots` cap, `losses()`, and the Replaced-verdict resolution.
 
-```rust
-#[tokio::test]
-async fn with_autonomy_off_a_duplicate_verdict_is_filed_as_would_merge() {
-    // It used to be filed as Contradiction, so the UI said "These two
-    // disagree" about a pair the model judged complementary, and offered only
-    // the lossy keep-one buttons for it.
-    let mut core = test_core().await;
-    core.consolidate.autonomous = false;
-    core.completer = Arc::new(ScriptedCompleter::new(vec![
-        r#"{"relation":"duplicate","detail":"same claim",
-            "merged":{"text":"engram needs Rust 1.21.4 and 1.30.0 to build.","tags":[],"caveats":[]}}"#
-            .into(),
-    ]));
-    let ids = disagreeing(&core).await;
-    let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-    run(&core, &pair.to_string()).await.unwrap();
-
-    let found = core.store.pairs_by_state(PairState::WouldMerge, 10).await.unwrap();
-    assert_eq!(found.len(), 1, "the verdict must land as its own state");
-    assert_eq!(found[0].detail.as_deref(), Some("same claim"));
-    assert!(
-        core.store.pairs_by_state(PairState::Contradiction, 10).await.unwrap().is_empty(),
-        "a mergeable pair was filed among genuine conflicts"
-    );
-    // Recorded, not applied: no merge written, nothing hidden.
-    for id in &ids {
-        let c = core.store.get_artifact(id).await.unwrap();
-        assert!(c.superseded_by.is_none());
-    }
-    assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p engram with_autonomy_off_a_duplicate_verdict` — Expected: FAIL (pair lands in Contradiction).
-
-- [ ] **Step 3: Implement**
-
-`src/jobs/dedupe.rs`, Duplicate arm, non-autonomous branch: replace the `Contradiction` settle (and its `"would merge: {detail}"` prefix hack) with:
-
-```rust
-if !core.consolidate.autonomous {
-    // Recorded, not applied. Reading the verdicts before letting the
-    // system act on them is the cheapest evidence available about
-    // whether the contract holds on real data. Its own state rather
-    // than Contradiction: filing a mergeable pair among genuine
-    // conflicts made the UI claim the two disagree, and steered the
-    // operator toward hiding a side the model judged complementary.
-    // The draft is discarded — once autonomy is on, the unit re-judges
-    // and merges then.
-    return settle_all(core, &s.pairs, PairState::WouldMerge, s.detail.as_deref()).await;
-}
-```
-
-`src/web/ui.rs`:
-- `PAIR_STATES` becomes 5 entries; insert `WouldMerge` after `Oversized` with a comment (a verdict recorded in observation mode: worth a person's read, less urgent than a contradiction):
-
-```rust
-const PAIR_STATES: [crate::store::pairs::PairState; 5] = [
-    crate::store::pairs::PairState::Contradiction,
-    crate::store::pairs::PairState::Superseded,
-    crate::store::pairs::PairState::Oversized,
-    crate::store::pairs::PairState::WouldMerge,
-    crate::store::pairs::PairState::Pending,
-];
-```
-
-- Add `pub would_merge: bool` to `PairRow` (doc: the model would merge these; rendered with its own header so the page never claims a disagreement it did not find). In `pair_rows`, next to the existing `contradiction:` field init, add `would_merge: state == crate::store::pairs::PairState::WouldMerge,`.
-
-`templates/_decide.html` head line — three-way branch:
-
-```html
-{% if p.contradiction %}<b>These two disagree</b>{% else %}{% if p.would_merge %}<b>The model would merge these</b>{% else %}<b>These two cover the same ground</b>{% endif %}{% endif %}
-```
-
-(Keep the existing keep-one and Dismiss forms for all states — that is the chosen scope: honest header, existing actions.)
-
-`src/web/api.rs` `consolidation` handler: after `"supersede_proposals"`, add:
-
-```rust
-// Merge verdicts recorded while autonomy is off. Their own key for the
-// same reason they are their own state: an API consumer counting
-// `contradictions` must not see pairs the model judged complementary.
-"merge_proposals": st
-    .core
-    .store
-    .pairs_by_state(PairState::WouldMerge, 100)
-    .await?,
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test -p engram` — Expected: PASS, including the existing autonomy-off dedupe tests (any asserting Contradiction + `"would merge:"` prefix must be updated to assert `WouldMerge` — that assertion was pinning the bug).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(dedupe): an observation-mode merge verdict is not a contradiction"
-```
-
----
-
-### Task 3: F1 + F6 — Replaced verdict: validate, apply, then settle
-
-**Files:**
-- Modify: `src/jobs/dedupe.rs` (`apply`, `Relation::Replaced` arm, ~lines 281-328)
-- Test: `src/jobs/dedupe.rs` tests
-
-**Interfaces:**
-- Consumes: `Core::supersede`, `ArtifactStatus`, `settle_all`.
-- Produces: new arm behavior — later tasks do not depend on its internals.
-
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test** (in `src/jobs/dedupe.rs` tests):
 
 ```rust
 #[tokio::test]
-async fn an_applied_replacement_does_not_wait_for_an_operator() {
-    // F6: the pair used to stay in Superseded — the state every consumer
-    // reads as "awaiting confirmation" — with buttons that could only
-    // return a validation error.
+async fn a_retired_members_roots_do_not_count_against_the_cap() {
+    // C is deprecated while the unit waits. Its pair is dismissed and it is
+    // dropped from the component — but its root must also leave the question,
+    // or a two-root component at the cap is settled Oversized for fan-in it
+    // does not have, and C's text is shown to the model as an original.
     let mut core = test_core().await;
     core.consolidate.autonomous = true;
-    core.completer = Arc::new(ScriptedCompleter::new(vec![
-        r#"{"relation":"replaced","detail":"old flag vs new flag","supersedes":"a"}"#.into(),
-    ]));
-    let ids = disagreeing(&core).await;
-    // Make ids[0] strictly older so the newest-wins guard accepts "a".
-    sqlx::query("UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?")
-        .bind(&ids[0]).execute(&core.store.pool).await.unwrap();
-    let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-    run(&core, &pair.to_string()).await.unwrap();
-
-    assert!(
-        core.store.get_artifact(&ids[0]).await.unwrap().superseded_by.is_some(),
-        "the replacement was not applied"
-    );
-    assert!(
-        core.store.pairs_by_state(PairState::Superseded, 10).await.unwrap().is_empty(),
-        "an applied replacement is still listed as awaiting confirmation"
-    );
-    assert_eq!(
-        core.store.pairs_by_state(PairState::Dismissed, 10).await.unwrap().len(),
-        1,
-        "the applied pair should be settled the way the manual apply settles it"
-    );
-}
-
-#[tokio::test]
-async fn a_replacement_naming_a_root_already_out_of_results_settles_cleanly() {
-    // F1: a component holding a finished merge flattens to roots that are
-    // already superseded. Applying blindly errored *after* the pairs were
-    // settled, and run()'s Pending guard made the error unretryable.
-    let mut core = test_core().await;
-    core.consolidate.autonomous = true;
-    // First call merges a+b; second call answers the (merge, c) pair.
-    core.completer = Arc::new(ScriptedCompleter::new(vec![
-        r#"{"relation":"duplicate","detail":"same claim",
-            "merged":{"text":"engram needs Rust 1.21.4 to build.","tags":[],"caveats":[]}}"#.into(),
-        r#"{"relation":"replaced","detail":"superseded by the merge","supersedes":"c"}"#.into(),
-    ]));
-    let ids = seed(
-        &core,
-        &[
-            ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
-            ("engram needs Rust 1.21.4 to compile.", [0.999, 0.02]),
-            ("engram wants Rust 1.20 or so to build.", [0.97, 0.2]),
-        ],
-    )
-    .await;
-    // Oldest so the newest-wins guard accepts it as obsolete. Its letter
-    // among the sorted roots must be computed, not assumed — see step 3
-    // note; if the sorted position of ids[2] is not 'c', adjust the
-    // scripted letter accordingly by sorting [&ids[0], &ids[1], &ids[2]].
-    sqlx::query("UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?")
-        .bind(&ids[2]).execute(&core.store.pool).await.unwrap();
-
-    // Merge a and b, then drive the queue so finish() supersedes the roots.
-    let p1 = queue_pair(&core, &ids[0], &ids[1]).await;
-    run(&core, &p1.to_string()).await.unwrap();
-    drive_queue(&core).await; // embed lands, merge::finish hides ids[0], ids[1]
-    let m = &core.store.merged_artifacts(10).await.unwrap()[0].id;
-
-    let p2 = queue_pair(&core, m, &ids[2]).await;
-    run(&core, &p2.to_string()).await.unwrap();
-
-    // The winner among the roots is superseded, so the live carrier (the
-    // merge, a member) wins instead — and the settle happens after.
-    assert_eq!(
-        core.store.get_artifact(&ids[2]).await.unwrap().superseded_by.as_deref(),
-        Some(m.as_str()),
-        "the replacement was not applied against the live carrier"
-    );
-    assert!(core.store.pairs_by_state(PairState::Pending, 10).await.unwrap().is_empty());
-}
-```
-
-Add the small queue driver next to the tests if none exists in this module (the consolidate tests have `sweep_and_judge`/`sweep_and_dedupe` — reuse the same body):
-
-```rust
-async fn drive_queue(core: &Core) {
-    for _ in 0..100 {
-        sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&core.store.pool).await.unwrap();
-        if !crate::jobs::run_one(core).await.unwrap_or(false) { break; }
-    }
-}
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cargo test -p engram an_applied_replacement_does_not_wait a_replacement_naming_a_root_already` — Expected: first FAILS on the `Superseded`-empty assertion; second FAILS (error propagates or pair left half-settled). If the second fails only because the letter `"c"` maps to a different sorted root, fix the test's scripted letter first (sort the three ids; the letter is the index of `ids[2]` in that order) — then confirm it fails for the real reason.
-
-- [ ] **Step 3: Implement** — replace the whole `Relation::Replaced` arm of `apply`:
-
-```rust
-Relation::Replaced => {
-    let obsolete = s
-        .obsolete
-        .clone()
-        .expect("interpret sets this or downgrades to Conflict");
-    // Fresh statuses, not the snapshot `interpret` saw. The roots of a
-    // member that is itself a finished merge are already superseded, and
-    // a component can change while the unit waits out a backoff.
-    let mut fresh = Vec::new();
-    for r in &s.roots {
-        match core.store.get_artifact(&r.id).await {
-            Ok(c) => fresh.push(c),
-            Err(Error::NotFound) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    let live = |c: &Chunk| c.status == ArtifactStatus::Active && c.superseded_by.is_none();
-    let obsolete_live = fresh.iter().any(|c| c.id == obsolete && live(c));
-    // A live root wins if one exists; otherwise the live member that
-    // carries the surviving roots — a finished merge's own sources are
-    // superseded, and the merge is the one thing still in results.
-    let winner = fresh
-        .iter()
-        .find(|c| c.id != obsolete && live(c))
-        .map(|c| c.id.clone())
-        .or_else(|| s.members.iter().find(|m| m.id != obsolete).map(|m| m.id.clone()));
-    let (Some(winner), true) = (winner, obsolete_live) else {
-        // Nothing to apply: the named side is already out of results, so
-        // the replacement has in effect already happened.
-        return settle_all(
-            core,
-            &s.pairs,
-            PairState::NoConflict,
-            Some("the named replacement is already out of results"),
-        )
-        .await;
-    };
-
-    if core.consolidate.autonomous {
-        // The side effect FIRST. A failure here leaves every pair
-        // pending, so the unit retries under the queue's backoff — the
-        // reverse order left the verdict recorded but never applied,
-        // permanently, because run() skips non-Pending pairs.
-        core.supersede(&obsolete, &winner).await?;
-        tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
-        for pr in &s.pairs {
-            if pr.a_id == obsolete || pr.b_id == obsolete {
-                // As the manual apply settles it (`apply_pair_supersede_ui`):
-                // done, with the model's reasoning kept as the record of why.
-                core.store
-                    .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
-                    .await?;
-            } else {
-                // Both sides of this pair survived; see the comment below.
-                core.store
-                    .set_pair_state(
-                        pr.id,
-                        PairState::Contradiction,
-                        Some(&format!("{obsolete} was superseded; these two were not separated")),
-                    )
-                    .await?;
-            }
-        }
-        return Ok(());
-    }
-
-    // Proposal mode: nothing is hidden, the pair carries the direction
-    // and an operator confirms via "apply supersede".
-    for pr in &s.pairs {
-        if pr.a_id == obsolete || pr.b_id == obsolete {
-            core.store
-                .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
-                .await?;
-        } else {
-            core.store
-                .set_pair_state(
-                    pr.id,
-                    PairState::Contradiction,
-                    Some(&format!("{obsolete} was superseded; these two were not separated")),
-                )
-                .await?;
-        }
-    }
-    Ok(())
-}
-```
-
-Carry over (do not lose) the two existing long comments in that arm — the "letter indexes `roots`" comment stays on `interpret`, and the "Both sides survived…" comment moves onto the Contradiction branch. The `winner`-from-roots comment is superseded by the new "live root wins…" comment.
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test -p engram` — Expected: PASS. The existing test `a_confident_direction_proposes_a_supersede_but_does_not_apply_it` must still pass unchanged (proposal path preserved).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(dedupe): a replacement is applied before its pairs are settled"
-```
-
----
-
-### Task 4: F2 — a retired member dismisses only the pairs that name it
-
-**Files:**
-- Modify: `src/jobs/dedupe.rs` (`run`, member-gathering loop, ~lines 67-87)
-- Test: `src/jobs/dedupe.rs` tests
-
-**Interfaces:** none new.
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[tokio::test]
-async fn a_retired_member_dismisses_only_its_own_pairs() {
-    // Dismissing the whole component killed sibling pairs between
-    // still-active duplicates permanently: record_pair is INSERT OR
-    // IGNORE and Dismissed appears on no list, so the A/B duplication
-    // became invisible forever.
-    let mut core = test_core().await;
-    core.consolidate.autonomous = true;
+    core.consolidate.merge_max_roots = 2;
     core.completer = Arc::new(ScriptedCompleter::new(vec![
         r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
     ]));
     let ids = seed(
         &core,
         &[
-            ("the timeout is 30 seconds", [1.0, 0.0]),
-            ("the timeout is 90 seconds", [0.93, 0.37]),
-            ("the timeout is 120 seconds", [0.94, 0.34]),
+            ("a text", [1.0, 0.0]),
+            ("b text", [0.93, 0.37]),
+            ("c text", [0.90, 0.44]),
         ],
     )
     .await;
-    let p_ab = queue_pair(&core, &ids[0], &ids[1]).await;
-    let p_bc = queue_pair(&core, &ids[1], &ids[2]).await;
+    let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+    queue_pair(&core, &ids[1], &ids[2]).await;
     core.deprecate(&ids[2]).await.unwrap();
 
-    run(&core, &p_ab.to_string()).await.unwrap();
+    run(&core, &seed_pair.to_string()).await.unwrap();
 
-    assert_eq!(
-        core.store.get_pair(p_bc).await.unwrap().state,
-        PairState::Dismissed,
-        "the pair naming the retired artifact should be dismissed"
+    assert!(
+        core.store
+            .pairs_by_state(PairState::Oversized, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a retired member's root was counted against merge_max_roots"
     );
+    // The live pair reached the model and took its verdict.
     assert_eq!(
-        core.store.get_pair(p_ab).await.unwrap().state,
-        PairState::NoConflict,
-        "the pair between two live artifacts must still be judged, not dismissed"
+        core.store
+            .pairs_by_state(PairState::NoConflict, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run it — expect FAIL**: the pair settles `Oversized` (3 roots > cap 2). `cargo test a_retired_members_roots`
 
-Run: `cargo test -p engram a_retired_member_dismisses_only_its_own_pairs` — Expected: FAIL — `p_ab` is Dismissed.
-
-- [ ] **Step 3: Implement** — in `run`, replace the retired-member early-out. `pairs` must become `let mut pairs = …`:
+- [ ] **Step 3: Implement.** In `src/jobs/dedupe.rs`, immediately before line 122 (`let root_map = ...`), rebind `member_ids` from the surviving members so the two can never disagree:
 
 ```rust
-let mut members = Vec::new();
-let mut retired: std::collections::HashSet<String> = Default::default();
-for mid in &member_ids {
-    // (keep the existing "Reported, not swallowed" comment here)
-    let c = core.store.get_artifact(mid).await?;
-    if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
-        // Only the pairs naming this member are answered by its
-        // retirement. Dismissing the whole component killed sibling
-        // pairs between still-active duplicates — record_pair is
-        // INSERT OR IGNORE, so nothing could ever re-file them.
-        retired.insert(c.id);
-        continue;
-    }
-    members.push(c);
-}
-if !retired.is_empty() {
-    let (dead, live): (Vec<_>, Vec<_>) = pairs
-        .into_iter()
-        .partition(|pr| retired.contains(&pr.a_id) || retired.contains(&pr.b_id));
-    settle_all(core, &dead, PairState::Dismissed, Some("a member is no longer in results")).await?;
-    pairs = live;
-    // Dropping a member can strand others with no surviving pair; they
-    // are simply not part of this unit's question any more.
-    let named: std::collections::HashSet<&str> = pairs
-        .iter()
-        .flat_map(|pr| [pr.a_id.as_str(), pr.b_id.as_str()])
-        .collect();
-    members.retain(|c| named.contains(c.id.as_str()));
-    // The seed pair itself may be among the dead; the survivors keep
-    // their own units and nothing further is owed here.
-    if !pairs.iter().any(|pr| pr.id == id) {
-        return Ok(());
-    }
-}
-if members.len() < 2 {
-    settle_all(core, &pairs, PairState::Dismissed, None).await?;
-    return Ok(());
-}
+    // Flatten before anything else, and never show the model a merged member's
+    // own text.
+    //
+    // From `members`, not the list the component arrived with: the partition
+    // above drops retired members and their pairs, and roots resolved from the
+    // stale list would put a retired artifact back into the prompt, the fan-in
+    // cap, and the loss check — the question this unit is no longer asking.
+    let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
+    let root_map = core.store.roots_of(&member_ids).await?;
 ```
 
-Also move the existing re-check comment ("Re-checked here and not only when the unit was armed…") onto the retired-branch.
+Also change line 60's binding from `let mut member_ids` to `let member_ids` if the shadowing makes the `mut` unused (the compiler will say).
 
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS (the existing dismissal tests for fully-retired components still pass: with every pair dead, the seed pair is dismissed and the unit returns).
+- [ ] **Step 4: Run** `cargo test` (whole dedupe suite — `a_retired_member_dismisses_only_its_own_pairs` must still pass). Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A && git commit -m "fix(dedupe): a retired member dismisses only the pairs that name it"
+git add -A && git commit -m "fix(dedupe): roots are resolved from the surviving members, not the stale list"
 ```
 
 ---
 
-### Task 5: F5 — stranded merges are reaped by the sweep
+### Task 3: Truthful survivor-pair detail, written once
 
 **Files:**
-- Modify: `src/jobs/dedupe.rs` (Duplicate arm, autonomous settle, ~line 357)
-- Modify: `src/store/lineage.rs` (new query `stranded_merges`)
-- Modify: `src/jobs/merge.rs` (new fn `reap_stranded`)
-- Modify: `src/jobs/consolidate.rs` (`run`, after the `merged_with_active_roots` block, ~line 316)
-- Test: `src/jobs/consolidate.rs` tests
+- Modify: `src/jobs/dedupe.rs:372-438` (the `Relation::Replaced` arm of `apply`)
+- Test: `src/jobs/dedupe.rs` tests module
 
-**Interfaces:**
-- Consumes: `set_pair_merged`, `reopen_pairs_merged_into` (Task 1), `MAX_ATTEMPTS` (`crate::store::jobs`), `delete_job`.
-- Produces:
-  - `Store::stranded_merges(&self, limit: i64) -> Result<Vec<String>>`
-  - `merge::reap_stranded(core: &Core, merged_id: &str) -> Result<()>`
+Two findings, one edit: (a) in proposal mode the sibling pair's detail claims "`X` was superseded" before any supersede happened; (b) the survivor-Contradiction block is byte-identical in both branches, so a future edit lands in one copy. Partition the pairs once; branch on `autonomous` only where the modes actually differ.
 
-- [ ] **Step 1: Write the failing test** (in `src/jobs/consolidate.rs` tests)
+- [ ] **Step 1: Write the failing test:**
 
 ```rust
 #[tokio::test]
-async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
-    // The pairs were settled "merged into m" the moment the merge was
-    // written. If the embed then fails permanently the merge is stranded
-    // active-but-unindexed, the roots are never superseded, and the
-    // NoConflict pairs mean the duplicates can never be merged again.
-    use crate::store::artifacts::NewMerged;
-    let core = test_core().await;
-    let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
-    let m = core
-        .store
-        .insert_merged_artifact(
-            &NewMerged {
-                text: "both".into(), title: None, category: None,
-                tags: vec![], caveats: vec![],
-            },
-            &[ids[0].clone(), ids[1].clone()],
-        )
-        .await
-        .unwrap();
-    core.store.enqueue(crate::store::jobs::Stage::Embed, "artifact", &m.id).await.unwrap();
-    core.store.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
-    let pid = core.store.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-    core.store.set_pair_merged(pid, &m.id, Some("same claim")).await.unwrap();
-    // The embed job has exhausted its retries and cannot succeed.
-    sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
-        .bind(crate::store::jobs::MAX_ATTEMPTS)
-        .bind(&m.id)
-        .execute(&core.store.pool)
-        .await
-        .unwrap();
-
-    run(&core).await.unwrap();
-
-    assert_eq!(
-        core.store.get_artifact(&m.id).await.unwrap().status,
-        ArtifactStatus::Deprecated,
-        "the stranded merge should be retired"
-    );
-    let p = core.store.get_pair(pid).await.unwrap();
-    assert_eq!(p.state, crate::store::pairs::PairState::Contradiction, "the pair goes back to a person");
-    for id in &ids {
-        assert_eq!(core.store.get_artifact(id).await.unwrap().status, ArtifactStatus::Active);
-    }
-    // And a healthy in-flight merge is left alone.
-    let m2 = core.store.insert_merged_artifact(
-        &NewMerged { text: "x".into(), title: None, category: None, tags: vec![], caveats: vec![] },
-        &[ids[0].clone(), ids[1].clone()],
-    ).await.unwrap();
-    core.store.enqueue(crate::store::jobs::Stage::Embed, "artifact", &m2.id).await.unwrap();
-    run(&core).await.unwrap();
-    assert_eq!(core.store.get_artifact(&m2.id).await.unwrap().status, ArtifactStatus::Active);
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p engram a_merge_that_can_never_embed` — Expected: compile FAIL (`stranded_merges` missing) or assertion FAIL (merge still active).
-
-- [ ] **Step 3: Implement**
-
-`src/store/lineage.rs`:
-
-```rust
-/// Active merged artifacts whose embedding can no longer arrive: no live
-/// embed job below the retry ceiling. The write path settles the pairs the
-/// moment the merge is written, so a merge stuck here is invisible to
-/// search, its roots were never superseded, and nothing else would notice.
-pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
-    let rows = sqlx::query(
-        "SELECT a.id FROM artifacts a
-          WHERE a.provenance = 'merged'
-            AND a.status = 'active'
-            AND a.superseded_by IS NULL
-            AND a.embed_state != 'embedded'
-            AND NOT EXISTS (
-                  SELECT 1 FROM jobs j
-                   WHERE j.stage = 'embed'
-                     AND j.target_id = a.id
-                     AND j.state IN ('pending', 'running')
-                     AND j.attempts < ?)
-          LIMIT ?",
+async fn a_proposed_supersede_is_not_recorded_as_a_done_one() {
+    // Proposal mode: the supersede is a proposal an operator may reject. The
+    // sibling pair's record must not assert an event that has not happened.
+    let mut core = test_core().await;
+    core.consolidate.autonomous = false;
+    core.completer = Arc::new(ScriptedCompleter::new(vec![
+        r#"{"relation":"replaced","supersedes":"a","detail":"a is stale"}"#.into(),
+    ]));
+    let ids = seed(
+        &core,
+        &[
+            ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
+            ("engram needs Rust 1.30.0 to build.", [0.93, 0.37]),
+            ("engram builds with stable Rust.", [0.90, 0.44]),
+        ],
     )
-    .bind(crate::store::jobs::MAX_ATTEMPTS)
-    .bind(limit)
-    .fetch_all(&self.pool)
-    .await?;
-    Ok(rows.iter().map(|r| r.get("id")).collect())
-}
-```
+    .await;
+    let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+    queue_pair(&core, &ids[1], &ids[2]).await;
 
-`src/jobs/merge.rs`:
+    run(&core, &seed_pair.to_string()).await.unwrap();
 
-```rust
-/// Retire a merge whose embedding can never arrive, and hand its pairs back
-/// to a person.
-///
-/// Safe by the write path's own ordering: the roots are superseded only
-/// after the embed lands, so a stranded merge has hidden nothing — the base
-/// is exactly what it was before the verdict, plus one unindexed artifact.
-/// Deprecated rather than deleted for the same reason `undo` deprecates:
-/// the lineage is the record of what was attempted.
-///
-/// Contradiction rather than Pending for the reopened pairs: re-arming the
-/// model would regenerate the same unembeddable draft, at full price,
-/// forever.
-pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
-    let m = core.store.get_artifact(merged_id).await?;
-    if m.provenance != Provenance::Merged
-        || m.status != ArtifactStatus::Active
-        || m.superseded_by.is_some()
-        || m.embed_state == crate::store::artifacts::EmbedState::Embedded
-    {
-        // The embed landed (or someone else acted) between the scan and
-        // here. Nothing is stranded any more.
-        return Ok(());
-    }
-    core.deprecate(&m.id).await?;
-    let reopened = core
+    let contradictions = core
         .store
-        .reopen_pairs_merged_into(&m.id, "the merged text could not be indexed; resolve by hand")
-        .await?;
-    // The forever-retrying job is the only signal this state used to have;
-    // with the merge retired it is pure noise.
-    core.store.delete_job(Stage::Embed, &m.id).await?;
-    tracing::warn!(merged = %m.id, reopened, "reaped a merge that could not be embedded");
-    Ok(())
-}
-```
-
-`src/jobs/dedupe.rs` Duplicate arm, autonomous branch — replace the `settle_all(NoConflict, "merged into …")` with per-pair stamping so the reap can find them:
-
-```rust
-let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
-let m = crate::jobs::merge::write(core, draft, &sources).await?;
-// `merged_into` rather than a detail string: if the embed never lands,
-// the sweep's reap has to find exactly these pairs and reopen them.
-for pr in &s.pairs {
-    core.store
-        .set_pair_merged(pr.id, &m.id, s.detail.as_deref())
-        .await?;
-}
-Ok(())
-```
-
-`src/jobs/consolidate.rs` `run`, directly after the `merged_with_active_roots` repair block:
-
-```rust
-// The opposite failure: a merge that will never be embedded. Its pairs
-// are already settled, its roots were never superseded, and its only
-// signal was a forever-retrying embed job.
-match core.store.stranded_merges(50).await {
-    Ok(stranded) => {
-        for id in stranded {
-            if let Err(e) = crate::jobs::merge::reap_stranded(core, &id).await {
-                tracing::warn!(merged = %id, error = %e, "could not reap a stranded merge");
-            }
-        }
+        .pairs_by_state(PairState::Contradiction, 10)
+        .await
+        .unwrap();
+    assert_eq!(contradictions.len(), 1, "the survivor pair escalates");
+    let detail = contradictions[0].detail.clone().unwrap_or_default();
+    assert!(
+        !detail.contains("was superseded"),
+        "the record asserts a supersession that is only proposed: {detail}"
+    );
+    // Nothing was hidden in proposal mode.
+    for id in &ids {
+        assert!(core.store.get_artifact(id).await.unwrap().in_results());
     }
-    Err(e) => tracing::warn!(error = %e, "could not look for stranded merges"),
 }
 ```
 
-- [ ] **Step 4: Run tests**
+Note: `supersedes` letters index the *roots* list, ordered by sorted root id; if the scripted letter doesn't resolve to the oldest artifact the guard downgrades to Conflict and the test still sees a Contradiction — but then the pair naming the obsolete isn't `Superseded`. If the assertion setup proves fragile, pin creation order by seeding the "stale" artifact first (seed inserts in order, `created_at` ascending) and letter `"a"` = lexicographically first root id; adjust the letter after printing `roots` once in a debug run. The behavioral assertions above (no "was superseded" text; nothing hidden) are the contract.
 
-Run: `cargo test -p engram` — Expected: PASS. Any existing test asserting the `"merged into {id}"` detail on settled pairs should be updated to assert `merged_into == Some(m.id)` instead.
+- [ ] **Step 2: Run it — expect FAIL** on the detail assertion. `cargo test a_proposed_supersede_is_not_recorded`
+
+- [ ] **Step 3: Implement.** In `apply`'s `Relation::Replaced` arm, after the `(Some(winner), true)` destructure, replace both per-mode loops with one partition:
+
+```rust
+            let (touching, survivors): (Vec<&ArtifactPair>, Vec<&ArtifactPair>) = s
+                .pairs
+                .iter()
+                .partition(|pr| pr.a_id == obsolete || pr.b_id == obsolete);
+
+            if core.consolidate.autonomous {
+                // The side effect FIRST. A failure here leaves every pair
+                // pending, so the unit retries under the queue's backoff — the
+                // reverse order left the verdict recorded on the pairs but
+                // never applied, permanently, because run() skips a component
+                // whose seed is no longer Pending.
+                core.supersede(&obsolete, &winner).await?;
+                tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
+                for pr in &touching {
+                    // As the manual apply settles it (`apply_pair_supersede_ui`):
+                    // done, with the model's reasoning kept as the record of why.
+                    core.store
+                        .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
+                        .await?;
+                }
+            } else {
+                // Proposal mode: nothing is hidden, the pair carries the
+                // direction and an operator confirms via "apply supersede".
+                for pr in &touching {
+                    core.store
+                        .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
+                        .await?;
+                }
+                tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
+            }
+
+            // Both sides survived these pairs. Writing the direction on them
+            // named an artifact the pair does not contain. Not left pending
+            // either: the roots this verdict was drawn from are unchanged, so
+            // re-arming would build the identical prompt and receive the
+            // identical answer forever. An unanswered question goes where the
+            // others go: to a person.
+            //
+            // Past tense only where the supersede actually ran. In proposal
+            // mode it may yet be rejected, and a record asserting it happened
+            // would outlive the rejection.
+            let survivor_detail = if core.consolidate.autonomous {
+                format!("{obsolete} was superseded; these two were not separated")
+            } else {
+                format!("superseding {obsolete} was proposed; these two were not separated")
+            };
+            for pr in &survivors {
+                core.store
+                    .set_pair_state(pr.id, PairState::Contradiction, Some(&survivor_detail))
+                    .await?;
+            }
+            Ok(())
+```
+
+Keep the surrounding rationale comments that still apply; the two deleted copies' comments are consolidated above.
+
+- [ ] **Step 4: Run** `cargo test` (the whole dedupe suite — the autonomous Replaced tests must still pass). Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A && git commit -m "fix(consolidate): a merge that can never embed is reaped, not stranded"
+git add -A && git commit -m "fix(dedupe): a proposal-mode survivor pair records a proposal, not a fait accompli"
 ```
 
 ---
 
-### Task 6: F4 — a transient read error must not close a filed pair
+### Task 4: `merge::undo` before the embed lands reopens the pairs it settled
 
 **Files:**
-- Modify: `src/jobs/consolidate.rs` (member-read loop ~line 376, closing pass ~line 446; extract pure helper)
-- Test: `src/jobs/consolidate.rs` tests
+- Modify: `src/store/pairs.rs` (new method, next to `reopen_pairs_merged_into` at line 324)
+- Modify: `src/jobs/merge.rs:156-165` (`undo`)
+- Test: `src/jobs/merge.rs` tests module
+
+The bug: pairs are settled `no_conflict, merged_into = M` at write time, but roots are superseded only at embed time. `undo` pressed in between finds `artifacts_superseded_by(M)` empty, dismisses nothing, deprecates M — and the pairs stay settled forever pointing at a deprecated merge, with both duplicates active side by side.
 
 **Interfaces:**
-- Produces: `fn close_filed_pair(a_known: bool, b_known: bool, a_live: bool, b_live: bool, a_id: &str, b_id: &str) -> Option<String>` — `None` = leave the pair filed; `Some(detail)` = close as NoConflict with that detail.
+- Produces: `Store::dismiss_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64>`
 
-- [ ] **Step 1: Write the failing test** (pure-function test; store-level fault injection isn't feasible with SQLite here, so the decision is extracted and tested directly)
+- [ ] **Step 1: Write the failing test** (in `src/jobs/merge.rs` tests; `write` + `draft` helpers already exist there):
+
+```rust
+#[tokio::test]
+async fn undoing_a_merge_before_its_embed_lands_still_releases_its_pairs() {
+    // Pairs are settled at write time; roots are superseded at embed time.
+    // An undo in between used to find nothing superseded, dismiss nothing,
+    // and leave the pairs no_conflict behind a deprecated merge — both
+    // duplicates active, and record_pair unable to ever re-file them.
+    let core = crate::core::test_support::test_core().await;
+    let ids = crate::jobs::consolidate::tests::seed(
+        &core,
+        &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+    )
+    .await;
+    core.store.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+    let pair = core
+        .store
+        .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+        .await
+        .unwrap()[0]
+        .id;
+
+    let m = write(&core, &draft("a text and b text"), &ids).await.unwrap();
+    core.store
+        .set_pair_merged(pair, &m.id, Some("duplicate"))
+        .await
+        .unwrap();
+    // No embed ran: nothing is superseded by m yet.
+
+    undo(&core, &m.id).await.unwrap();
+
+    let p = core.store.get_pair(pair).await.unwrap();
+    assert_eq!(
+        p.state,
+        crate::store::pairs::PairState::Dismissed,
+        "the pair stayed settled behind a deprecated merge: {p:?}"
+    );
+    assert_eq!(p.merged_into, None);
+}
+```
+
+- [ ] **Step 2: Run it — expect FAIL** (state stays `NoConflict`). `cargo test undoing_a_merge_before_its_embed`
+
+- [ ] **Step 3: Implement the store method** in `src/store/pairs.rs`, after `reopen_pairs_merged_into`:
+
+```rust
+    /// Dismiss every pair a merge being undone had settled, by the lineage the
+    /// settlement recorded. `pairs_among` covers only what the merge had
+    /// already hidden — before the embed lands that is nothing, while the
+    /// pairs were settled the moment the merge was written. Dismissed, not
+    /// Contradiction: an undo is an operator overruling the verdict, and
+    /// `record_pair` respecting dismissed rows is what makes that last.
+    pub async fn dismiss_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs
+                SET state = 'dismissed', detail = ?, merged_into = NULL
+              WHERE merged_into = ?",
+        )
+        .bind(detail)
+        .bind(merged_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+```
+
+- [ ] **Step 4: Call it from `undo`** in `src/jobs/merge.rs`, after the existing `pairs_among` loop (keep that loop — it also catches pairs between restored artifacts that never carried `merged_into`):
+
+```rust
+    // And by lineage, for an undo that outran the embed: before `finish` runs,
+    // nothing is superseded by this merge, so `restored` above is empty — but
+    // the pairs were settled the moment the merge was written, and leaving
+    // them would keep the duplicates invisible to every later sweep.
+    core.store
+        .dismiss_pairs_merged_into(&m.id, "merge undone")
+        .await?;
+```
+
+- [ ] **Step 5: Run** `cargo test` (the post-embed undo test in merge.rs must still pass). Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit -m "fix(merge): undo before the embed lands releases the pairs the write settled"
+```
+
+---
+
+### Task 5: Flipping autonomy on re-arms `WouldMerge` verdicts
+
+**Files:**
+- Modify: `src/store/pairs.rs` (new method)
+- Modify: `src/jobs/consolidate.rs:606-613` (`arm_dedupe`)
+- Test: `src/jobs/consolidate.rs` tests module (or pairs.rs for the store half)
+
+The `WouldMerge` doc (pairs.rs:68-74) promises "flipping autonomy on lets a later unit re-judge and merge"; nothing implements it. User chose: implement the re-arm.
+
+**Interfaces:**
+- Produces: `Store::reopen_would_merge_pairs(&self) -> Result<u64>`
+
+- [ ] **Step 1: Write the failing test** (in `src/jobs/consolidate.rs` tests):
+
+```rust
+#[tokio::test]
+async fn would_merge_verdicts_are_re_armed_once_autonomy_is_on() {
+    // Recorded while autonomy was off, the verdict's whole point is to be
+    // acted on once the switch flips — the variant's own doc says so. The
+    // ticker's arming pass is where the flip becomes visible.
+    let mut core = test_core().await;
+    core.consolidate.autonomous = true;
+    core.consolidate.max_dedupe_per_tick = 5;
+    let ids = seed(
+        &core,
+        &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+    )
+    .await;
+    core.store.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+    let pair = core
+        .store
+        .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+        .await
+        .unwrap()[0]
+        .id;
+    core.store
+        .set_pair_state(pair, crate::store::pairs::PairState::WouldMerge, Some("same claim"))
+        .await
+        .unwrap();
+
+    arm_dedupe(&core).await.unwrap();
+
+    assert_eq!(
+        core.store.get_pair(pair).await.unwrap().state,
+        crate::store::pairs::PairState::Pending,
+        "a would_merge verdict stayed stranded after autonomy came on"
+    );
+}
+```
+
+(If `arm_dedupe` and `seed` aren't importable in that tests module, follow how neighbouring `arm_dedupe` tests there reference them.)
+
+- [ ] **Step 2: Run it — expect FAIL** (state stays `WouldMerge`). `cargo test would_merge_verdicts_are_re_armed`
+
+- [ ] **Step 3: Implement the store method** in `src/store/pairs.rs`:
+
+```rust
+    /// Hand every recorded would-merge verdict back to the judge queue.
+    ///
+    /// `would_merge` exists only as a note taken while autonomy is off — the
+    /// draft was discarded, so there is nothing to apply directly; the unit
+    /// re-judges and merges at the queue's own pace. The detail is kept: it is
+    /// the model's recorded reasoning, and `pending` reads it never.
+    pub async fn reopen_would_merge_pairs(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+```
+
+- [ ] **Step 4: Call it from `arm_dedupe`** in `src/jobs/consolidate.rs`, after the `max_dedupe_per_tick == 0` early return and before `pairs_to_judge`:
+
+```rust
+    // Verdicts recorded while autonomy was off go back into the queue now
+    // that it is on. Idempotent and normally free: with autonomy on, no unit
+    // writes would_merge, so this touches rows exactly once per flip.
+    if core.consolidate.autonomous {
+        let reopened = core.store.reopen_would_merge_pairs().await?;
+        if reopened > 0 {
+            tracing::info!(reopened, "re-armed would-merge verdicts recorded before autonomy");
+        }
+    }
+```
+
+- [ ] **Step 5: Run** `cargo test`. Expected: PASS (including `would_merge_is_a_state_of_its_own` in pairs.rs).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit -m "feat(consolidate): flipping autonomy on re-arms recorded would-merge verdicts"
+```
+
+---
+
+### Task 6: `flag_orphans` stops starving, and "reviewed" sticks
+
+**Files:**
+- Modify: `src/store/lineage.rs:223-235` (`merged_missing_a_source`)
+- Modify: `src/jobs/merge.rs:218-238` (`flag_orphans`)
+- Modify: `src/store/artifacts.rs` (new method near `clear_artifact_flags`, line 935)
+- Modify: `src/web/ui.rs:1529-1536` (`mark_artifact_reviewed`)
+- Test: `src/jobs/merge.rs` tests module
+
+Two halves. (a) Starvation: the SQL has no flag filter and no ORDER BY, so once 500 old merges are permanently orphaned the same rows fill the LIMIT every sweep and new orphans are never flagged; each sweep also burns one `get_artifact` per already-flagged row. (b) The operator's "reviewed" clears the flag, but the row still matches the query, so the next sweep re-flags it — the dismissal doesn't stick.
+
+For (b): reviewing an orphaned merge means the operator accepts it as a merge of what remains, so the review also syncs `source_count` down to the surviving lineage count. The row then leaves the query's result set permanently.
+
+**Interfaces:**
+- Produces: `Store::accept_source_loss(&self, id: &str) -> Result<()>`
+
+- [ ] **Step 1: Write the failing tests** (in `src/jobs/merge.rs` tests):
+
+```rust
+#[tokio::test]
+async fn an_already_flagged_merge_does_not_occupy_the_orphan_scan() {
+    let core = crate::core::test_support::test_core().await;
+    let ids = crate::jobs::consolidate::tests::seed(
+        &core,
+        &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+    )
+    .await;
+    write(&core, &draft("a text and b text"), &ids).await.unwrap();
+    core.store.delete_artifact(&ids[0]).await.unwrap();
+    assert_eq!(flag_orphans(&core).await.unwrap(), 1);
+    // Flagged rows leave the scan entirely — not fetched and skipped in Rust,
+    // which is what let 500 of them starve every newer orphan out of the LIMIT.
+    assert!(
+        core.store.merged_missing_a_source(500).await.unwrap().is_empty(),
+        "a flagged merge still occupies a scan slot"
+    );
+}
+
+#[tokio::test]
+async fn reviewing_an_orphaned_merge_is_not_undone_by_the_next_sweep() {
+    let core = crate::core::test_support::test_core().await;
+    let ids = crate::jobs::consolidate::tests::seed(
+        &core,
+        &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+    )
+    .await;
+    let m = write(&core, &draft("a text and b text"), &ids).await.unwrap();
+    core.store.delete_artifact(&ids[0]).await.unwrap();
+    assert_eq!(flag_orphans(&core).await.unwrap(), 1);
+
+    // What mark_artifact_reviewed does for an orphaned merge.
+    core.store.accept_source_loss(&m.id).await.unwrap();
+    core.store.clear_artifact_flags(&m.id).await.unwrap();
+
+    assert_eq!(
+        flag_orphans(&core).await.unwrap(),
+        0,
+        "the sweep re-flagged a merge the operator had reviewed"
+    );
+    assert!(core.store.get_artifact(&m.id).await.unwrap().flags.is_empty());
+}
+```
+
+- [ ] **Step 2: Run — expect FAIL** (first test: `merged_missing_a_source` still returns the flagged row; second: `flag_orphans` returns 1 again). `cargo test orphan`
+
+- [ ] **Step 3: Fix the SQL** in `src/store/lineage.rs` (`merged_missing_a_source`). Flags are stored as a JSON array in the `flags` TEXT column, so a LIKE exclusion is exact enough (no other flag contains the substring):
+
+```rust
+    /// Merged artifacts holding fewer lineage rows than the number of sources
+    /// they were written from — and not yet flagged for it. The exclusion is
+    /// in the SQL, not the caller: membership in this set is permanent
+    /// (deletes are hard), so without it the oldest flagged rows fill the
+    /// LIMIT forever and a newly orphaned merge past the five-hundredth is
+    /// never seen. Newest first for the same reason.
+    ///
+    /// A comparison rather than a guess, which is what `source_count` is for:
+    /// without it, "lost a source" cannot be told from "only ever had two".
+    pub async fn merged_missing_a_source(&self, limit: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT a.id FROM artifacts a
+              WHERE a.provenance = 'merged'
+                AND a.source_count >
+                    (SELECT COUNT(*) FROM artifact_sources WHERE child_id = a.id)
+                AND (a.flags IS NULL OR a.flags NOT LIKE '%orphaned_source%')
+              ORDER BY a.created_at DESC, a.id
+              LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+```
+
+- [ ] **Step 4: Slim `flag_orphans`** in `src/jobs/merge.rs` — the per-row fetch-and-skip is now dead weight:
+
+```rust
+pub async fn flag_orphans(core: &Core) -> Result<usize> {
+    let mut n = 0;
+    // The scan already excludes flagged rows, so every id here is new work.
+    for id in core.store.merged_missing_a_source(500).await? {
+        core.store
+            .set_artifact_flags(
+                &id,
+                &["orphaned_source".to_string()],
+                Some("one of the artifacts this was written from has been deleted"),
+            )
+            .await?;
+        n += 1;
+    }
+    if n > 0 {
+        tracing::info!(flagged = n, "merged artifacts have lost a source");
+    }
+    Ok(n)
+}
+```
+
+- [ ] **Step 5: Add `accept_source_loss`** in `src/store/artifacts.rs`, next to `clear_artifact_flags`:
+
+```rust
+    /// Record that an operator reviewed a merge's lost sources and accepted it
+    /// as a merge of what remains. `source_count` comes down to the surviving
+    /// lineage count, so the orphan scan's comparison goes quiet — without
+    /// this, clearing the flag lasts exactly one sweep, because the row still
+    /// answers "lost a source" and is flagged all over again.
+    pub async fn accept_source_loss(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE artifacts
+                SET source_count = (SELECT COUNT(*) FROM artifact_sources WHERE child_id = ?)
+              WHERE id = ? AND provenance = 'merged'",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+```
+
+- [ ] **Step 6: Wire the handler** in `src/web/ui.rs` (`mark_artifact_reviewed`):
+
+```rust
+async fn mark_artifact_reviewed(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+) -> Result<Response> {
+    // For an orphaned merge, "reviewed" means accepted as a merge of what
+    // remains — recorded on source_count, or the next sweep re-flags it and
+    // the operator's judgement lasts one tick.
+    let c = st.core.store.get_artifact(&cid).await?;
+    if c.flags.iter().any(|f| f == "orphaned_source") {
+        st.core.store.accept_source_loss(&cid).await?;
+    }
+    st.core.store.clear_artifact_flags(&cid).await?;
+    Ok(axum::response::Html(String::new()).into_response())
+}
+```
+
+- [ ] **Step 7: Run** `cargo test` — including `deleting_a_source_flags_the_merge_rather_than_hiding_the_loss`, whose "does not re-flag" assertion now holds via the SQL exclusion. Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add -A && git commit -m "fix(merge): the orphan scan skips flagged rows in SQL, and a review sticks"
+```
+
+---
+
+### Task 7: `merge_max_roots` below 2 goes back to the default
+
+**Files:**
+- Modify: `src/config.rs:546-566` (`normalize`)
+- Test: `src/config.rs` tests module
+
+A cap of 0 or 1 settles every judgeable component `Oversized` before any model call — merging silently off from a number nobody types meaning that. The codebase's own pattern for this is `normalize()`'s put-back (see `feedback.candidates`).
+
+- [ ] **Step 1: Write the failing test** (in `src/config.rs` tests, following how the existing `feedback.candidates` normalize tests build a `Config`):
 
 ```rust
 #[test]
-fn an_unreadable_member_leaves_the_filed_pair_alone() {
-    // A transient BUSY on one member used to read as "gone", closing the
-    // pair as NoConflict while both artifacts were live — permanently,
-    // because record_settled_pair only updates pending rows.
-    assert_eq!(close_filed_pair(false, true, false, true, "a", "b"), None);
-    assert_eq!(close_filed_pair(true, false, true, false, "a", "b"), None);
-    // Both readable and live: genuinely unanswered, stays filed.
-    assert_eq!(close_filed_pair(true, true, true, true, "a", "b"), None);
-    // Known-gone or known-hidden sides do close.
-    assert_eq!(
-        close_filed_pair(true, true, true, false, "a", "b").as_deref(),
-        Some("near-identical; a kept")
+fn a_merge_cap_below_two_goes_back_to_the_default() {
+    // The same put-back as feedback.candidates: every judgeable component
+    // flattens to at least two roots, so a cap of 0 or 1 settles all of them
+    // Oversized before any call — merging silently off.
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        &dir,
+        &format!("{MINIMAL}\n[consolidate]\nmerge_max_roots = 1\n"),
     );
+    let cfg = Config::load(Some(&p)).unwrap();
     assert_eq!(
-        close_filed_pair(true, true, false, false, "a", "b").as_deref(),
-        Some("near-identical; neither side is in results any more")
+        cfg.consolidate.merge_max_roots,
+        ConsolidateConfig::default().merge_max_roots
     );
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+(`write` and `MINIMAL` are the config test module's existing fixtures; check whether `MINIMAL` already contains a `[consolidate]` section — if it does, append the key inside that section instead of opening a second one, since TOML rejects duplicate tables.)
 
-Run: `cargo test -p engram an_unreadable_member_leaves` — Expected: compile FAIL — `close_filed_pair` does not exist.
+- [ ] **Step 2: Run — expect FAIL.** `cargo test a_merge_cap_below_two`
 
-- [ ] **Step 3: Implement**
-
-Pure helper in `src/jobs/consolidate.rs`:
+- [ ] **Step 3: Implement** in `normalize()`, after the `feedback.candidates` blocks:
 
 ```rust
-/// Whether the clustering pass answered a filed near-identical pair, and
-/// with what record. `known` is false when the member's row could not be
-/// read this sweep — an unreadable member is not a gone member, and closing
-/// on a transient store error would settle a live pair permanently
-/// (`record_settled_pair` only updates pending rows).
-fn close_filed_pair(
-    a_known: bool,
-    b_known: bool,
-    a_live: bool,
-    b_live: bool,
-    a_id: &str,
-    b_id: &str,
-) -> Option<String> {
-    if !a_known || !b_known {
-        return None;
-    }
-    match (a_live, b_live) {
-        (true, true) => None,
-        (true, false) => Some(format!("near-identical; {a_id} kept")),
-        (false, true) => Some(format!("near-identical; {b_id} kept")),
-        (false, false) => Some("near-identical; neither side is in results any more".to_string()),
-    }
-}
+        // Same argument as above: every judgeable component flattens to at
+        // least two roots, so a cap of zero or one settles all of them
+        // Oversized before any call — merging silently off from a number
+        // nobody types meaning that.
+        if self.consolidate.merge_max_roots < 2 {
+            let d = ConsolidateConfig::default().merge_max_roots;
+            tracing::warn!(
+                configured = self.consolidate.merge_max_roots,
+                using = d,
+                "consolidate.merge_max_roots below 2 would settle every component \
+                 as oversized; using the default"
+            );
+            self.consolidate.merge_max_roots = d;
+        }
 ```
 
-Member-read loop: add `let mut unknown: HashSet<String> = HashSet::new();` beside `live`, and split the error cases:
-
-```rust
-let c = match core.store.get_artifact(id).await {
-    Ok(c) => c,
-    Err(Error::NotFound) => {
-        tracing::debug!(artifact_id = %id, "pair names an artifact that is gone");
-        continue;
-    }
-    Err(e) => {
-        // Unreadable is not gone. The closing pass must not settle a
-        // pair on the strength of a store that was briefly unwell.
-        tracing::warn!(artifact_id = %id, error = %e, "could not read a clustered artifact this sweep");
-        unknown.insert(id.clone());
-        continue;
-    }
-};
-```
-
-Closing pass body becomes:
-
-```rust
-for p in &filed {
-    let alive = |id: &String| live.contains(id) && !hidden.contains(id);
-    let Some(detail) = close_filed_pair(
-        !unknown.contains(&p.a_id),
-        !unknown.contains(&p.b_id),
-        alive(&p.a_id),
-        alive(&p.b_id),
-        &p.a_id,
-        &p.b_id,
-    ) else {
-        continue;
-    };
-    if let Err(e) = core
-        .store
-        .set_pair_state(p.id, crate::store::pairs::PairState::NoConflict, Some(&detail))
-        .await
-    {
-        tracing::warn!(pair = p.id, error = %e, "could not close a settled near-identical pair");
-    }
-}
-```
-
-Keep the existing block comment above the pass; extend it with one line: an unreadable member leaves the pair filed for the next sweep.
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS.
-
+- [ ] **Step 4: Run** `cargo test`. Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A && git commit -m "fix(consolidate): an unreadable member does not close a filed pair"
+git add -A && git commit -m "fix(config): a merge cap below two goes back to the default instead of disabling merges"
 ```
 
 ---
 
-### Task 7: F3 — an operator's partial restore survives the sweep
+### Task 8: The full lifecycle reconcile scan runs under `lifecycle_lock` and marks what it repairs
 
 **Files:**
-- Modify: `src/store/mod.rs` (`ADDED_COLUMNS`) + schema file (`artifact_sources` CREATE TABLE)
-- Modify: `src/store/lineage.rs` (`merged_with_active_roots`; new fns `mark_source_restored`, `roots_to_hide`)
-- Modify: `src/jobs/merge.rs` (`finish` uses `roots_to_hide`)
-- Modify: `src/core/ingest.rs` (`unsupersede`)
-- Test: `src/jobs/merge.rs` tests
+- Modify: `src/jobs/consolidate.rs:223-286` (`full_lifecycle_reconcile_scanning`)
+- Test: `src/jobs/consolidate.rs` tests module
 
-**Interfaces:**
-- Produces:
-  - `artifact_sources.restored INTEGER NOT NULL DEFAULT 0` (schema + `ADDED_COLUMNS`).
-  - `Store::mark_source_restored(&self, root_id: &str) -> Result<()>` — sets `restored = 1` on every lineage row naming that root.
-  - `Store::roots_to_hide(&self, child_id: &str) -> Result<Vec<String>>` — `SELECT root_id FROM artifact_sources WHERE child_id = ? AND restored = 0 ORDER BY root_id`.
-- `roots_of` is deliberately unchanged: flattening for the model must still see the true captured roots.
+The race: the scan reads the SQLite row snapshot and the payload at different times with no lock; a concurrent `unsupersede` completing in between makes the scan write the *stale hidden state* back over the fresh payload, and because the scan's write marks nothing dirty, the corrupted state (row Active, payload Superseded, marker clear) is invisible to the complete marker pass.
 
-- [ ] **Step 1: Write the failing test** (in `src/jobs/merge.rs` tests; mirror the setup of the existing `undoing_a_merge_survives_the_next_sweep` test at ~line 596, which already builds a finished merge — reuse its seeding verbatim up to the point where the merge's roots are superseded)
+- [ ] **Step 1: Write the test** (deterministic protocol test — the race itself needs a scheduler; assert the protocol instead):
 
 ```rust
 #[tokio::test]
-async fn restoring_one_merge_source_survives_the_next_sweep() {
-    // "Put it back" on a merge-hidden artifact used to last exactly one
-    // sweep: merged_with_active_roots cannot tell a crash-interrupted
-    // merge from an operator's explicit restore, and finish re-hid it.
-    // <seeding: as in undoing_a_merge_survives_the_next_sweep — build a
-    //  finished merge m over roots [a, b], both superseded by m>
-    core.unsupersede(&a).await.unwrap();
-
-    crate::jobs::consolidate::run(&core).await.unwrap();
-
-    let back = core.store.get_artifact(&a).await.unwrap();
-    assert!(
-        back.superseded_by.is_none(),
-        "the sweep re-hid an artifact an operator had explicitly restored"
-    );
-    // The rest of the merge is untouched: b stays hidden, m stays active.
-    assert!(core.store.get_artifact(&b).await.unwrap().superseded_by.is_some());
-    assert_eq!(core.store.get_artifact(&m).await.unwrap().status, ArtifactStatus::Active);
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p engram restoring_one_merge_source_survives` — Expected: FAIL — `a.superseded_by` is `Some(m)` again after the sweep.
-
-- [ ] **Step 3: Implement**
-
-Schema: `ADDED_COLUMNS` append (comment: the operator's partial restore; `0` on every existing row, which is correct — nothing predating the column was explicitly restored):
-
-```rust
-("artifact_sources", "restored", "INTEGER NOT NULL DEFAULT 0"),
-```
-
-plus `restored INTEGER NOT NULL DEFAULT 0` in the `artifact_sources` CREATE TABLE.
-
-`src/store/lineage.rs`:
-
-```rust
-/// Record that an operator explicitly restored this captured root: no
-/// repair may hide it behind a merge again. Every merge naming it, not one
-/// — the operator's decision is about the root, not about a lineage edge.
-/// A *new* merge decision may still hide it: `insert_merged_artifact`
-/// writes fresh rows with `restored = 0`, and that is new evidence rather
-/// than a repair of old state.
-pub async fn mark_source_restored(&self, root_id: &str) -> Result<()> {
-    sqlx::query("UPDATE artifact_sources SET restored = 1 WHERE root_id = ?")
-        .bind(root_id)
-        .execute(&self.pool)
-        .await?;
-    Ok(())
-}
-
-/// The roots `finish` is allowed to hide: the lineage minus every root an
-/// operator explicitly restored. Distinct from `roots_of`, which answers
-/// "what was this written from" and must keep seeing the true closure.
-pub async fn roots_to_hide(&self, child_id: &str) -> Result<Vec<String>> {
-    let rows = sqlx::query(
-        "SELECT root_id FROM artifact_sources
-          WHERE child_id = ? AND restored = 0 ORDER BY root_id",
-    )
-    .bind(child_id)
-    .fetch_all(&self.pool)
-    .await?;
-    Ok(rows.iter().map(|r| r.get("root_id")).collect())
-}
-```
-
-`merged_with_active_roots`: add `AND s.restored = 0` to the WHERE clause, and extend its doc comment: a root an operator explicitly restored is not an unfinished merge, and the repair must not see it.
-
-`src/jobs/merge.rs` `finish`: replace the `roots_of` read with:
-
-```rust
-for root in core.store.roots_to_hide(&m.id).await? {
-    let Ok(r) = core.store.get_artifact(&root).await else {
-        continue;
-    };
-    ...
-    if let Err(e) = core.supersede(&root, &m.id).await {
-```
-
-(loop body otherwise unchanged; adjust for `root: String` instead of `&String`).
-
-`src/core/ingest.rs` `unsupersede` — read the winner before clearing, mark after both stores agree:
-
-```rust
-pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
-    let winner = self.store.get_artifact(artifact_id).await?.superseded_by;
-    // (existing body: mark dirty, payload, row, clear marker)
-    ...
-    // A restore out of a merge is an operator overruling the merge for
-    // this one source. Recorded on the lineage, or the sweep's
-    // unfinished-merge repair re-hides it on the next tick, every tick.
-    if let Some(w) = winner
-        && let Ok(wc) = self.store.get_artifact(&w).await
-        && wc.provenance == crate::store::artifacts::Provenance::Merged
-    {
-        self.store.mark_source_restored(artifact_id).await?;
-    }
-    tracing::info!(artifact_id, "restored a superseded artifact to search");
-    Ok(())
-}
-```
-
-(`reactivate` routes merge-hidden artifacts through `unsupersede`, so both buttons are covered. `merge::undo` deprecates the merge itself, so stray `restored = 1` rows under a deprecated merge are inert.)
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS, including `a_merge_whose_roots_were_never_superseded_is_finished_by_the_next_sweep` (fresh lineage rows have `restored = 0`, so `finish` still hides them).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(merge): an operator's restore of a merge source survives the sweep"
-```
-
----
-
-### Task 8: F8 — an orphaned merge is never its own root
-
-**Files:**
-- Modify: `src/store/lineage.rs` (`roots_of`)
-- Modify: `src/jobs/dedupe.rs` (`run`, after `roots_of`, ~line 91)
-- Test: `src/jobs/dedupe.rs` tests
-
-**Interfaces:**
-- Changed contract: `roots_of` returns an **empty** `Vec` for a merged artifact with no lineage rows (previously: the artifact itself). Captured artifacts keep the self-root fallback. Before relying on this, `grep -rn "roots_of" src/` and check every caller tolerates an empty entry (`merge::finish` no longer calls it after Task 7; `insert_merged_artifact`'s flattening treats "no rows" per its own logic — verify it maps a rootless merged member to nothing rather than to itself; if it self-roots there too, apply the same provenance check in that flattening).
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[tokio::test]
-async fn a_merge_that_lost_its_sources_is_never_shown_as_an_original() {
-    // The self-root fallback put a model-synthesized paraphrase in the
-    // prompt as a captured original, and a Duplicate verdict would then
-    // record a merged artifact as root_id — paraphrase drift, one
-    // generation per merge, which the lineage design exists to prevent.
-    let mut core = test_core().await;
-    core.consolidate.autonomous = true;
-    let completer = Arc::new(ScriptedCompleter::new(vec![]));
-    core.completer = completer.clone();
-    let ids = disagreeing(&core).await;
-    let m = core
-        .store
-        .insert_merged_artifact(
-            &crate::store::artifacts::NewMerged {
-                text: "a paraphrase".into(), title: None, category: None,
-                tags: vec![], caveats: vec![],
-            },
-            &[ids[0].clone()],
-        )
+async fn the_scan_repair_leaves_no_repaired_id_unmarked_midway() {
+    // The scan writes payloads from row state. An interrupted write must be
+    // findable by the complete marker pass, so the ids are marked dirty
+    // before the payload write and cleared only after it returns — the same
+    // contract every lifecycle mutator honours.
+    let core = test_core().await;
+    let ids = seed(&core, &[("a text", [1.0, 0.0])]).await;
+    // Drift no SQLite write produced: the payload hides what the row shows.
+    core.vectors
+        .set_lifecycle(&ids[0], crate::store::artifacts::ArtifactStatus::Deprecated, None)
         .await
         .unwrap();
-    // Its every source cascades away, as a corpus deletion does.
-    sqlx::query("DELETE FROM artifact_sources WHERE child_id = ?")
-        .bind(&m.id).execute(&core.store.pool).await.unwrap();
 
-    let pair = queue_pair(&core, &m.id, &ids[1]).await;
-    run(&core, &pair.to_string()).await.unwrap();
+    let repaired = full_lifecycle_reconcile(&core).await.unwrap();
 
-    assert_eq!(completer.calls(), 0, "a rootless merge reached the model as an original");
-    assert_eq!(
-        core.store.get_pair(pair).await.unwrap().state,
-        PairState::Contradiction,
-        "the component goes to a person rather than being judged on a paraphrase"
-    );
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p engram a_merge_that_lost_its_sources` — Expected: FAIL — the completer is called (empty script panics or call count is 1).
-
-- [ ] **Step 3: Implement**
-
-`roots_of` fallback branch:
-
-```rust
-let entry = if roots.is_empty() {
-    // No lineage rows means a captured artifact — or a merged one every
-    // root of which has since been deleted. A captured artifact is its
-    // own root; a merged one is nobody's: its text is a synthesis, and
-    // handing it back as a root is how a paraphrase of a paraphrase
-    // ends up in a prompt as an original. The empty answer makes that
-    // state visible to the caller instead.
-    let provenance: String =
-        sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .unwrap_or_else(|| "captured".to_string());
-    if provenance == "merged" { vec![] } else { vec![id.clone()] }
-} else {
-    roots
-};
-out.insert(id.clone(), entry);
-```
-
-`src/jobs/dedupe.rs` `run`, right after `let root_map = …`:
-
-```rust
-// A member with no roots at all is a merge whose sources were deleted
-// out from under it. Its text is a paraphrase with nothing behind it —
-// not something to show the model as an original, and not something a
-// rule can settle. A person decides.
-if member_ids.iter().any(|mid| root_map.get(mid).is_none_or(|r| r.is_empty())) {
-    settle_all(
-        core,
-        &pairs,
-        PairState::Contradiction,
-        Some("a merged member has lost its sources; resolve by hand"),
-    )
-    .await?;
-    return Ok(());
-}
-```
-
-Update the `roots_of` doc comment (its current text explains the old fallback) and the module-header sentence in `lineage.rs` that describes it.
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(lineage): a merge that lost every source is nobody's root"
-```
-
----
-
-### Task 9: F9 — a merge restored from the index is flagged as having lost its lineage
-
-**Files:**
-- Modify: `src/core/ingest.rs` (`heal_store_drift` restore loop, ~line 647)
-- Test: `src/core/ingest.rs` tests (or wherever `heal_store_drift` tests live — `grep -rn "heal_store_drift" src/ --include=*.rs -l`)
-
-**Interfaces:**
-- Consumes: `set_artifact_flags` (exists), `Provenance::Merged`, flag string `"orphaned_source"` (the one `flag_orphans` and the UI already read).
-
-- [ ] **Step 1: Write the failing test** (place beside the existing `heal_store_drift` tests, reusing their vector-point seeding idiom — the test around `ingest.rs:1580` restores an artifact from a surviving payload; copy its setup with `provenance: Some("merged".into())` in the payload)
-
-```rust
-#[tokio::test]
-async fn a_merge_restored_from_the_index_is_flagged_as_orphaned() {
-    // restore_artifact cannot recreate lineage rows and leaves
-    // source_count at 0, so 0 > COUNT(*) never fires and nothing ever
-    // flagged the restored merge — it became its own root silently.
-    // <setup: as in the existing restore test, but the payload's
-    //  provenance is "merged" and corpus_id handling follows the
-    //  Provenance::Merged branch>
-    core.heal_store_drift().await.unwrap();
-
-    let c = core.store.get_artifact(&artifact_id).await.unwrap();
+    assert_eq!(repaired, 1);
+    // Repair complete: payload agrees with the row again and no marker is left.
     assert!(
-        c.flags.iter().any(|f| f == "orphaned_source"),
-        "a restored merge must say it cannot support its provenance claim"
+        core.store.dirty_lifecycle_artifacts(10).await.unwrap().is_empty(),
+        "the scan left markers standing on a base in agreement"
     );
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+(Adapt the drift seeding and assertions to the existing reconcile tests in that module — several already seed payload-side drift; follow their pattern. If `dirty_lifecycle_artifacts` has a different name/signature, use whatever `repair_lifecycle_drift` reads.)
 
-Run: `cargo test -p engram a_merge_restored_from_the_index` — Expected: FAIL — no flag set.
+- [ ] **Step 2: Run** — this passes or fails depending on current marker behavior; its job is to pin the contract. Note the result.
 
-- [ ] **Step 3: Implement** — in the restore loop, after `if self.store.restore_artifact(&restored).await? {`:
-
-```rust
-if self.store.restore_artifact(&restored).await? {
-    out.rows_restored += 1;
-    // A payload records neither source_count nor lineage rows, so a
-    // restored merge definitionally cannot support its provenance
-    // claim — and `merged_missing_a_source` (0 > 0) will never say
-    // so. Said here instead, with the flag that pass would have set.
-    if provenance == crate::store::artifacts::Provenance::Merged {
-        self.store
-            .set_artifact_flags(
-                &p.artifact_id,
-                &["orphaned_source".to_string()],
-                Some("restored from the index; the record of its sources was lost"),
-            )
-            .await?;
-    }
-    self.store
-        .enqueue(Stage::Embed, "artifact", &p.artifact_id)
-        .await?;
-}
-```
-
-(With Task 8 in place, such a merge also never self-roots — the flag is the operator-visible half, `roots_of` is the invariant half.)
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(ingest): a merge restored from the index is flagged as orphaned"
-```
-
----
-
-### Task 10: F10 — lifecycle writes are serialized against the marker repair
-
-**Files:**
-- Modify: `src/core/mod.rs` (`Core` struct + its constructor(s))
-- Modify: `src/core/ingest.rs` (`supersede`, `unsupersede`, `deprecate`, `reactivate`, `repoint_supersession`)
-- Modify: `src/jobs/consolidate.rs` (`repair_lifecycle_drift`)
-
-**Interfaces:**
-- Produces: `Core.lifecycle_lock: Arc<tokio::sync::Mutex<()>>` (constructed as `Arc::new(tokio::sync::Mutex::new(()))` wherever `Core` is built — `grep -rn "Core {" src/` for every literal, including `test_support`).
-
-No new deterministic test: the race needs two tasks interleaved between specific awaits, which nothing in this test harness can schedule reliably. The fix is structural (mutual exclusion); the existing lifecycle test suite guards against regressions in each path's behavior. State this in the commit message body.
-
-- [ ] **Step 1: Implement**
-
-`Core`:
+- [ ] **Step 3: Implement.** At the top of `full_lifecycle_reconcile_scanning`, before `list_non_active_artifacts`:
 
 ```rust
-/// Serializes every lifecycle transition against the sweep's marker
-/// repair. Each transition is two writes to two stores plus a dirty
-/// marker, none of it atomic; without mutual exclusion the repair can
-/// read a stale row mid-reveal, write the old state back over the new
-/// payload, and the reveal then clears the marker — row active, payload
-/// hidden, and nothing left that would ever notice. Shared by every
-/// clone, like the background queue.
-pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
-```
-
-In `ingest.rs`, split `unsupersede` into a public locking wrapper and a private body so `reactivate` never locks twice:
-
-```rust
-pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
-    let _guard = self.lifecycle_lock.lock().await;
-    self.unsupersede_locked(artifact_id).await
-}
-
-async fn unsupersede_locked(&self, artifact_id: &str) -> Result<()> {
-    // (entire current body, including Task 7's restored-marking)
-}
-```
-
-`reactivate`:
-
-```rust
-pub async fn reactivate(&self, id: &str) -> Result<()> {
-    let _guard = self.lifecycle_lock.lock().await;
-    if self.store.get_artifact(id).await?.superseded_by.is_some() {
-        return self.unsupersede_locked(id).await;
-    }
-    // (rest of current body)
-}
-```
-
-`supersede`, `deprecate`, `repoint_supersession`: `let _guard = self.lifecycle_lock.lock().await;` as the first line (none of them calls another locked fn — verify by reading each body before adding the guard; `merge::finish` and the sweep call them from *outside*, which is fine, the guard is per-call).
-
-`repair_lifecycle_drift` in `consolidate.rs`:
-
-```rust
-async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
-    // Under the same lock as every lifecycle transition: the repair
-    // reads rows, writes payloads and clears markers, and interleaving
-    // that with a payload-first reveal is exactly the sequence that
-    // hides an artifact with no marker left to find it by.
+    // Under the same lock as every lifecycle transition. The scan reads the
+    // row side and the payload side at different moments and then writes
+    // payloads from the row snapshot; interleaved with a payload-first reveal
+    // it would write the stale hidden state back over the fresh payload —
+    // and, writing with no marker, leave nothing behind for the complete
+    // marker pass to find it by. The scan is capped at `DRIFT_SCAN`, so the
+    // hold is bounded.
     let _guard = core.lifecycle_lock.lock().await;
-    let dirty = core.store.dirty_lifecycle_artifacts(DRIFT_SCAN).await?;
-    // (rest unchanged)
 ```
 
-- [ ] **Step 2: Run tests** — `cargo test -p engram` — Expected: PASS (behavior unchanged single-threaded; watch for a deadlock-shaped test hang, which would mean a locked fn calls another locked fn — re-check call graphs).
+And wrap the write at the bottom in the marker protocol:
 
-- [ ] **Step 3: Commit**
+```rust
+    if !rows.is_empty() {
+        tracing::info!(
+            repaired = rows.len(),
+            "lifecycle state disagreed between sqlite and the vector store"
+        );
+        // Marked before the payload write, cleared only after it returns: an
+        // interrupted repair is then ordinary marked drift the next marker
+        // pass finishes, instead of a best-effort scan's private problem.
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        for id in &ids {
+            core.store.mark_lifecycle_dirty(id).await?;
+        }
+        core.vectors.apply_lifecycle(&rows).await?;
+        core.store.clear_lifecycle_dirty(&ids).await?;
+    }
+    Ok(rows.len())
+```
+
+(Check the actual field name for the id on `LifecycleRow` — `lifecycle_row_of` builds it; adjust `r.id` accordingly. If `mark_lifecycle_dirty` only takes `&str` one at a time, the loop above is the call shape.)
+
+- [ ] **Step 4: Verify no caller holds the lock** (tokio Mutex deadlocks silently):
+
+Run: `grep -n "full_lifecycle_reconcile\|lifecycle_lock" src/jobs/consolidate.rs src/core/*.rs`
+Expected: `run()` calls `repair_lifecycle_drift` (locks and releases) and then `full_lifecycle_reconcile` as a *separate* call; no call path enters the scan with the lock held. If any does, restructure as `_locked` variants the way `unsupersede`/`unsupersede_locked` do.
+
+- [ ] **Step 5: Run** `cargo test` (the reconcile suite has several scan tests — all must pass). Expected: PASS.
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A && git commit -m "fix(core): lifecycle transitions and the marker repair exclude each other"
+git add -A && git commit -m "fix(consolidate): the reconcile scan takes the lifecycle lock and marks its writes"
 ```
-
-Body: note that the interleaving (repair reads stale row → reveal writes payload → repair writes stale payload → reveal clears marker) is unreproducible deterministically in tests, so the fix is mutual exclusion with no new test; existing lifecycle tests cover each path.
 
 ---
 
-### Task 11: F11 — legacy `'judge'` job rows
+### Task 9: `heal_dangling_supersessions` honours the lifecycle lock and marker
 
 **Files:**
-- Modify: `src/store/mod.rs` (migration section — near the existing one-off `ALTER TABLE`/cleanup statements, `grep -n "DROP COLUMN" src/store/mod.rs` for the spot)
-- Test: `src/store/jobs.rs` tests
+- Modify: `src/core/ingest.rs:756-793`
+- Test: `src/core/ingest.rs` tests module (or wherever the heal's existing tests live — find with `grep -rn "heal_dangling" src --include=*.rs`)
 
-**Interfaces:** none new.
+Same failure class as Task 8: heal writes payload → row → clear-marker with no lock and no pre-mark; interleaved with `repair_lifecycle_drift` it produces row Active / payload Superseded / marker clear.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the test** (protocol pin, same shape as Task 8's):
 
 ```rust
 #[tokio::test]
-async fn a_legacy_judge_row_is_not_claimed_as_something_else() {
-    // Stage::parse has no 'judge' arm and claim_job falls back to
-    // Synthesize, so a leftover row from the branch this replaced was
-    // claimed as a synthesize job aimed at a pair id.
-    let s = Store::memory().await.unwrap();
-    sqlx::query(
-        "INSERT INTO jobs (stage, target_kind, target_id, state, run_after, attempts, seq)
-         VALUES ('judge', 'pair', '17', 'pending', 0, 0, 0)",
-    )
-    .execute(&s.pool)
-    .await
-    .unwrap();
+async fn the_heal_reveals_under_the_lifecycle_lock_with_the_marker_raised_first() {
+    // Payload-first direction, so the contract is unsupersede's: mark before
+    // the payload write, clear only once both stores agree. Without the mark,
+    // a crash between the two writes is drift no marker ever announced; and
+    // without the lock, the sweep's repair can interleave and write the stale
+    // hidden state back with nothing left to notice.
+    let core = test_core().await;
+    let ids = seed(&core, &[("a", [1.0, 0.0]), ("b", [0.93, 0.37])]).await;
+    core.supersede(&ids[0], &ids[1]).await.unwrap();
+    core.delete_artifact(&ids[1]).await.unwrap(); // runs the heal
 
-    s.migrate().await.unwrap();
-
+    let a = core.store.get_artifact(&ids[0]).await.unwrap();
+    assert!(a.in_results(), "the heal did not restore the dangling loser");
     assert!(
-        s.claim_job().await.unwrap().is_none(),
-        "a legacy judge row survived migration and was claimed"
+        core.store.dirty_lifecycle_artifacts(10).await.unwrap().is_empty(),
+        "the heal left a marker on a base in agreement"
     );
 }
 ```
 
-(If the migration entry point is not named `migrate`, find the fn that runs `ADDED_COLUMNS` — the test calls that. If it is private, make the test a sibling in `store/mod.rs` tests instead.)
+(This may already pass end-state-wise; it pins the marker end state while Step 3 fixes the ordering and locking. Keep it regardless.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run it**, note the result.
 
-Run: `cargo test -p engram a_legacy_judge_row` — Expected: FAIL — the row is claimed (as Synthesize).
-
-- [ ] **Step 3: Implement** — in the migration path, after the `ADDED_COLUMNS` loop:
+- [ ] **Step 3: Implement.** In `heal_dangling_supersessions`:
 
 ```rust
-// The judge became the dedupe unit on this branch and its stage name
-// went with it. A leftover row would otherwise be claimed under
-// `Stage::parse`'s Synthesize fallback and aimed at a pair id. Deleted
-// rather than renamed: the pair is still pending, so the next sweep
-// re-arms it under its real stage, and a rename could collide with a
-// dedupe row the sweep has already written for the same pair.
-sqlx::query("DELETE FROM jobs WHERE stage = 'judge'")
-    .execute(&self.pool)
-    .await?;
-```
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(store): a legacy judge job row is deleted, not misrouted"
-```
-
----
-
-### Task 12: F12 — `arm_dedupe` does nothing when its budget is zero
-
-**Files:**
-- Modify: `src/jobs/consolidate.rs` (`arm_dedupe`, ~line 549)
-- Test: `src/jobs/consolidate.rs` tests
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-#[tokio::test]
-async fn a_zero_dedupe_budget_arms_nothing_and_reads_nothing() {
-    // With the budget at zero every tick still ran the 200-row query and
-    // logged "budget spent" — dead work on the sweep's hot path, and a
-    // misleading log line. The observable half: nothing is armed and no
-    // pair is touched.
-    let mut core = test_core().await;
-    core.consolidate.max_dedupe_per_tick = 0;
-    disagreeing(&core).await;
-    let out = run(&core).await.unwrap();
-    assert_eq!(out.judged, 0);
-    assert_eq!(
-        core.store.pairs_by_state(PairState::Pending, 10).await.unwrap().len(),
-        1,
-        "the pending pair must be left exactly as it was"
-    );
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails or passes vacuously**
-
-Run: `cargo test -p engram a_zero_dedupe_budget` — This may already PASS behaviorally (the waste is the query, not the outcome). Either way it pins the contract; proceed.
-
-- [ ] **Step 3: Implement** — first lines of `arm_dedupe`:
-
-```rust
-// `max_dedupe_per_tick = 0` is the off switch for the model (see run's
-// comment on the `autonomous` flag). Off means off: no 200-row read per
-// tick, and no "budget spent" log line implying a budget was spent.
-if core.consolidate.max_dedupe_per_tick == 0 {
-    return Ok(0);
-}
-```
-
-- [ ] **Step 4: Run tests** — `cargo test -p engram` — Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "fix(consolidate): a zero dedupe budget arms nothing and reads nothing"
-```
-
----
-
-### Task 13: F13 — `open_component` grows by worklist, not by rescan
-
-**Files:**
-- Modify: `src/store/pairs.rs` (`open_component` fixed-point loop, ~lines 342-366)
-
-Behavior is unchanged (same members, same picked set), so the existing `open_component` tests are the spec — no new test.
-
-- [ ] **Step 1: Implement** — replace the loop with an adjacency-indexed worklist:
-
-```rust
-// Adjacency once, then a worklist. The fixed point rescanned the whole
-// window per growth pass — quadratic at the 5 000-row window for a
-// long chain — for an answer a plain flood fill gives in one pass over
-// the edges.
-let mut by_artifact: std::collections::HashMap<&str, Vec<usize>> = Default::default();
-for (i, p) in open.iter().enumerate() {
-    by_artifact.entry(p.a_id.as_str()).or_default().push(i);
-    by_artifact.entry(p.b_id.as_str()).or_default().push(i);
-}
-let mut picked: std::collections::HashSet<i64> = [seed.id].into_iter().collect();
-let mut queue: Vec<&str> = vec![seed.a_id.as_str(), seed.b_id.as_str()];
-let mut seen: std::collections::HashSet<&str> = queue.iter().copied().collect();
-while let Some(id) = queue.pop() {
-    for &i in by_artifact.get(id).into_iter().flatten() {
-        let p = &open[i];
-        picked.insert(p.id);
-        for other in [p.a_id.as_str(), p.b_id.as_str()] {
-            if seen.insert(other) {
-                queue.push(other);
+    pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
+        // Under the lifecycle lock like every other transition: this path
+        // reveals payload-first, and interleaving with the sweep's repair —
+        // which reads rows and writes payloads — is exactly the sequence that
+        // hides an artifact with no marker left to find it by.
+        let _guard = self.lifecycle_lock.lock().await;
+        let mut first_err = None;
+        for id in self.store.dangling_superseded().await? {
+            // Marked before the payload write, as `unsupersede` does and for
+            // the same reason: this direction writes the payload first, so
+            // without it a crash between the two stores would leave drift no
+            // row write ever announced.
+            self.store.mark_lifecycle_dirty(&id).await?;
+            if let Err(e) = self
+                .vectors
+                .set_lifecycle(&id, ArtifactStatus::Active, None)
+                .await
+            {
+                tracing::warn!(
+                    artifact_id = %id,
+                    error = %e,
+                    "could not clear the hidden flag; the artifact stays listed on Ops"
+                );
+                first_err.get_or_insert(e);
+                continue;
             }
+            self.store.set_superseded_by(&id, None).await?;
+            // ... keep the existing clear_lifecycle_dirty call and its comment ...
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
-}
-Ok(open.into_iter().filter(|p| picked.contains(&p.id)).collect())
 ```
 
-(Delete the now-dead `members` set and the old loop; keep the surrounding comments about the seed always being in the component.)
+One subtlety the implementer must preserve: on the `continue` (payload write failed), the marker now stays raised — that is correct and is the point: the failed reveal is findable drift. But `repair_lifecycle_drift` repairs *row → payload*, and here the row still says superseded, so the marker pass would just rewrite "superseded" into the payload — harmless (that is the current true state) and the heal retries next sweep anyway.
 
-- [ ] **Step 2: Run tests** — `cargo test -p engram open_component` then full `cargo test -p engram` — Expected: PASS.
+- [ ] **Step 4: Verify no caller holds the lock:**
 
+Run: `grep -rn "heal_dangling_supersessions" src --include=*.rs`
+Expected callers: `delete_artifact`, `delete_corpus`, `reprocess` (ingest.rs), `embed.rs`, `consolidate::run` — read each call site and confirm none holds `lifecycle_lock` at the call. `delete_artifact`/`delete_corpus`/`reprocess` do not lock; check `embed.rs:582`'s enclosing function. If any holds it, add a `_locked` variant per the `unsupersede_locked` pattern.
+
+- [ ] **Step 5: Run** `cargo test`. Expected: PASS.
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit -m "fix(core): the dangling-supersession heal takes the lifecycle lock and marks first"
+```
+
+---
+
+### Task 10: One `source_rows` helper; Ops batches `roots_of`
+
+**Files:**
+- Modify: `src/web/ui.rs:1043-1075` (`ops()`), `src/web/ui.rs:1412-1435` (`build_artifact_detail`)
+- Test: existing UI/store tests only (this is an extraction; `cargo test` guards it)
+
+The loop `roots_of(one id)` → skip self → `get_artifact(rid)` → push `SourceRow` is copy-pasted verbatim in both functions, and `ops()` runs it once per merged artifact — an N+1 over an API whose signature `&[String]` exists for batching.
+
+- [ ] **Step 1: Extract the helper** in `src/web/ui.rs`, near `SourceRow`:
+
+```rust
+/// The source list a merge renders: its lineage roots, fetched and titled.
+/// One shape for Ops and the detail pane — the two must stay behaviorally
+/// identical (same self-guard, same tolerance for deleted sources, same
+/// corpus fallback), and a copy in each is how they come to disagree about
+/// what a merge was made of.
+async fn source_rows(store: &crate::store::Store, merged_id: &str, roots: &[String]) -> Vec<SourceRow> {
+    let mut sources = Vec::new();
+    for rid in roots {
+        // `roots_of` answers an empty list for a merge that lost every source;
+        // the self guard stays as defense against a base written before that
+        // change.
+        if rid == merged_id {
+            continue;
+        }
+        if let Ok(r) = store.get_artifact(rid).await {
+            sources.push(SourceRow {
+                corpus_id: r.corpus_id.clone().unwrap_or_default(),
+                title: title_of(&r),
+                id: r.id,
+            });
+        }
+    }
+    sources
+}
+```
+
+- [ ] **Step 2: Rewrite `ops()`'s merged loop** — one batched `roots_of` for all listed merges:
+
+```rust
+    let mut merged = Vec::new();
+    let merged_chunks = st.core.store.merged_artifacts(50).await?;
+    // One lineage query per page, not one per row: `roots_of` takes the batch.
+    let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
+    let roots = st.core.store.roots_of(&merged_ids).await.unwrap_or_default();
+    for c in merged_chunks {
+        let sources = source_rows(
+            &st.core.store,
+            &c.id,
+            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
+        merged.push(MergedRow {
+            orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
+            title: title_of(&c),
+            id: c.id,
+            sources,
+        });
+    }
+```
+
+(If `st.core.store` is not a plain `crate::store::Store`, match the helper's parameter type to whatever both call sites can hand over — the detail pane has `core.store`, ops has `st.core.store`.)
+
+- [ ] **Step 3: Rewrite `build_artifact_detail`'s block** to use the same helper:
+
+```rust
+    let mut sources = Vec::new();
+    if c.provenance == crate::store::artifacts::Provenance::Merged {
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&c.id))
+            .await
+            .unwrap_or_default();
+        sources = source_rows(
+            &core.store,
+            &c.id,
+            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
+    }
+```
+
+- [ ] **Step 4: Run** `cargo test`. Expected: PASS.
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "refactor(ui): one source_rows helper, one batched roots_of per Ops page"
+```
+
+---
+
+### Task 11: Remove `open_component`'s unreachable empty-component arm
+
+**Files:**
+- Modify: `src/store/pairs.rs:399-401`
+
+The block above guarantees the seed is in `open` (pushed if Pending, early-returned if settled), so the `else` arm can never run — yet it returns the same empty vec that has a *documented meaning* ("settled while the unit waited"), forcing readers to reason about a phantom third case.
+
+- [ ] **Step 1: Replace the let-else** at pairs.rs:399:
+
+```rust
+        let seed = open
+            .iter()
+            .find(|p| p.id == pair_id)
+            .expect("the block above put the seed in the window or returned");
+```
+
+- [ ] **Step 2: Run** `cargo test` (pairs suite). Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "perf(pairs): open_component flood-fills instead of rescanning the window"
+git add -A && git commit -m "refactor(pairs): open_component has two empty-component cases, not a phantom third"
 ```
 
 ---
 
-### Task 14: F14 — comments stop claiming the full reconcile is gated
+### Task 12: `arm_dedupe` skips in-flight pairs before fetching their artifacts
 
 **Files:**
-- Modify: `src/jobs/consolidate.rs` (doc comment of `repair_lifecycle_drift` ~line 143-148, doc comment of `full_lifecycle_reconcile` ~line 173-179)
+- Modify: `src/jobs/consolidate.rs:636-688` (inside `arm_dedupe`'s loop)
 
-The code is right (the reconcile's own rationale at lines 180-184 argues for keeping it); the comments are wrong.
+Each tick reads up to 200 pending pairs and pays two full-row `get_artifact` fetches per pair *before* the cheap `live_job` skip — and in-flight pairs sort first (`judge_attempts = 0`), so the same rows are re-fetched every 15 minutes for nothing.
 
-- [ ] **Step 1: Implement** — two wording fixes:
+- [ ] **Step 1: Reorder.** Move the `live_job` check (the block at lines 680-688 beginning `// A pair whose unit is still queued from an earlier sweep...` through `if core.store.live_job(Stage::Dedupe, &target).await? { continue; }`) to directly *above* the `let (a, b) = match (...)` artifact fetch at line 636. Keep both comment blocks with their code. The retired-member dismissal stays where it is — it needs the artifacts.
 
-In `repair_lifecycle_drift`'s doc, replace "`full_lifecycle_reconcile` keeps that scan for the drift that arises with no SQLite write behind it, but it no longer runs every sweep." with:
+- [ ] **Step 2: Check nothing between the two blocks depended on order.** The moved check reads only `p.id`; the fetch reads only `p.a_id`/`p.b_id`. Nothing in between mutates state. Confirm by reading the final loop top-to-bottom: budget check → live_job skip → artifact fetch → retired dismissal → re-arm.
 
-```
-/// `full_lifecycle_reconcile` keeps that scan for the drift that arises with
-/// no SQLite write behind it; it still runs every sweep, after this pass.
-```
-
-In `full_lifecycle_reconcile`'s doc, replace "Still on the sweep, behind the marker, and the division of labour is the point." with:
-
-```
-/// Still on every sweep, after the marker pass, and the division of labour
-/// is the point.
-```
-
-- [ ] **Step 2: Verify and commit**
-
-Run: `cargo build 2>&1 | tail -3` (comments only; build proves nothing broke) and `cargo fmt`.
+- [ ] **Step 3: Run** `cargo test` (the arm_dedupe tests). Expected: PASS.
+- [ ] **Step 4: Commit**
 
 ```bash
-git add -A && git commit -m "docs(consolidate): the full reconcile runs every sweep, and says so"
+git add -A && git commit -m "perf(consolidate): arm_dedupe skips queued pairs before fetching their artifacts"
 ```
 
 ---
 
-## Final verification (after Task 14)
+## Final verification
 
 - [ ] `cargo test` — full suite green.
-- [ ] `cargo fmt --check` and (if the repo uses it — check CI config) `cargo clippy` — clean.
-- [ ] Re-read the Findings Index: each of F1-F14 maps to a merged commit. F1→T3, F2→T4, F3→T7, F4→T6, F5→T1+T5, F6→T3, F7→T1+T2, F8→T8, F9→T9, F10→T10, F11→T11, F12→T12, F13→T13, F14→T14.
-- [ ] `git push` to `feat/autonomous-consolidation` only when the user asks.
+- [ ] `cargo fmt --check` and `cargo clippy` (fix anything the tasks introduced).
+- [ ] Re-read the Findings list at the top: every numbered finding maps to a landed commit; the three declined ones and the deferred refactor are recorded there.

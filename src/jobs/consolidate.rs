@@ -36,7 +36,7 @@
 
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::artifacts::{ArtifactStatus, Chunk};
+use crate::store::artifacts::Chunk;
 use crate::store::jobs::Stage;
 use std::collections::{HashMap, HashSet};
 
@@ -437,7 +437,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 continue;
             }
         };
-        if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
+        if !c.in_results() {
             // The row says hidden but the vector store still offered this point
             // as a pair candidate, so its payload never caught up — the write
             // was interrupted, and `repair_lifecycle_drift` at the top of this
@@ -654,11 +654,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // returns a validation error and the pair stays pending forever. The
         // same guard runs in `run`'s cluster pass and review band, and again in
         // the unit itself, because a pair can be retired while it waits.
-        if a.status != ArtifactStatus::Active
-            || b.status != ArtifactStatus::Active
-            || a.superseded_by.is_some()
-            || b.superseded_by.is_some()
-        {
+        if !a.in_results() || !b.in_results() {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
                 .await?;
@@ -713,6 +709,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
 pub(crate) mod tests {
     use super::*;
     use crate::core::test_support::test_core;
+    use crate::store::artifacts::ArtifactStatus;
     use crate::store::artifacts::NewArtifact;
     use crate::store::pairs::PairState;
     use crate::vector::{VectorPayload, VectorPoint};

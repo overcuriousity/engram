@@ -13,7 +13,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::store::artifacts::{ArtifactStatus, Chunk};
+use crate::store::artifacts::Chunk;
 use crate::store::pairs::PairState;
 
 /// What was decided about a pair, for the caller's tally.
@@ -49,10 +49,7 @@ pub async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Res
     // Only two live artifacts have a question worth a queue slot, a model call,
     // or a supersede. A retired artifact must not win against a live one, and a
     // pair that is already resolved has nothing left to decide.
-    if [a, b]
-        .iter()
-        .any(|c| c.status != ArtifactStatus::Active || c.superseded_by.is_some())
-    {
+    if [a, b].iter().any(|c| !c.in_results()) {
         return Ok(Verdict::Skipped);
     }
 

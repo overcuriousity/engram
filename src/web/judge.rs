@@ -11,7 +11,6 @@
 
 use crate::auth::Identity;
 use crate::error::Result;
-use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::{PendingEvent, Stats, Verdict};
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -171,7 +170,7 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
                 // `hit` refuses these anyway — `eval::export` would drop the
                 // pair — so showing them unchoosable says the same thing on the
                 // card, before the keystroke, instead of after it.
-                usable: a.status == ArtifactStatus::Active && a.superseded_by.is_none(),
+                usable: a.in_results(),
                 artifact_id: a.id,
                 title: a.title.unwrap_or_else(|| "Untitled".into()),
                 snippet: snippet_of(&a.text),
@@ -360,7 +359,7 @@ async fn hit(
     // asked to trust, disagreeing about the same judgement. Refused rather than
     // recorded: the card comes back so the answer can be given again against
     // something the benchmark will still be able to hold.
-    if artifact.status != ArtifactStatus::Active || artifact.superseded_by.is_some() {
+    if !artifact.in_results() {
         return card_again(
             &st,
             &event_id,

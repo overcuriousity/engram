@@ -14,7 +14,7 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::infer::prompt::MergedDraft;
-use crate::store::artifacts::{ArtifactStatus, Chunk, NewMerged, Provenance};
+use crate::store::artifacts::{Chunk, NewMerged, Provenance};
 use crate::store::jobs::Stage;
 
 /// Create a merged artifact and queue its embedding. Its roots are **not**
@@ -58,10 +58,7 @@ pub async fn write(core: &Core, draft: &MergedDraft, roots: &[String]) -> Result
 /// join across the lineage would ever notice it.
 pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
     let m = core.store.get_artifact(merged_id).await?;
-    if m.provenance != Provenance::Merged
-        || m.status != ArtifactStatus::Active
-        || m.superseded_by.is_some()
-    {
+    if m.provenance != Provenance::Merged || !m.in_results() {
         return Ok(());
     }
 
@@ -73,7 +70,7 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         let Ok(r) = core.store.get_artifact(&root).await else {
             continue;
         };
-        if r.status != ArtifactStatus::Active || r.superseded_by.is_some() {
+        if !r.in_results() {
             continue;
         }
         // Warn and carry on. `supersede` refuses a side that is no longer
@@ -182,8 +179,7 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
 pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged
-        || m.status != ArtifactStatus::Active
-        || m.superseded_by.is_some()
+        || !m.in_results()
         || m.embed_state == crate::store::artifacts::EmbedState::Embedded
     {
         // The embed landed (or someone else acted) between the scan and

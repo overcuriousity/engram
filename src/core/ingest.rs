@@ -311,7 +311,7 @@ impl Core {
     pub async fn repoint_supersession(&self, artifact_id: &str, winner_id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let winner = self.store.get_artifact(winner_id).await?;
-        if winner.status != ArtifactStatus::Active || winner.superseded_by.is_some() {
+        if !winner.in_results() {
             return Err(Error::Validation(format!(
                 "cannot re-point {artifact_id}: {winner_id} is not active"
             )));

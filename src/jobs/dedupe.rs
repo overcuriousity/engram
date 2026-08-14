@@ -27,7 +27,7 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, Relation};
-use crate::store::artifacts::{ArtifactStatus, Chunk};
+use crate::store::artifacts::Chunk;
 use crate::store::pairs::{ArtifactPair, PairState};
 
 /// What the model decided, with everything the write path needs already read.
@@ -76,7 +76,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         // superseded by a later sweep or deprecated by an operator while this
         // waits out a backoff, and spending the scarcest thing in the system to
         // rule on an artifact no longer in results buys nothing.
-        if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
+        if !c.in_results() {
             retired.insert(c.id);
             continue;
         }
@@ -342,14 +342,13 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                     Err(e) => return Err(e),
                 }
             }
-            let live = |c: &Chunk| c.status == ArtifactStatus::Active && c.superseded_by.is_none();
-            let obsolete_live = fresh.iter().any(|c| c.id == obsolete && live(c));
+            let obsolete_live = fresh.iter().any(|c| c.id == obsolete && c.in_results());
             // A live root wins if one exists; otherwise the live member that
             // carries the surviving roots — a finished merge's own sources are
             // superseded, and the merge is the one thing still in results.
             let winner = fresh
                 .iter()
-                .find(|c| c.id != obsolete && live(c))
+                .find(|c| c.id != obsolete && c.in_results())
                 .map(|c| c.id.clone())
                 .or_else(|| {
                     s.members
@@ -497,6 +496,7 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::infer::fake::ScriptedCompleter;
     use crate::jobs::consolidate::tests::{seed, seed_titled};
+    use crate::store::artifacts::ArtifactStatus;
     use std::sync::Arc;
 
     /// Record a pair for two artifacts and hand back its row id.

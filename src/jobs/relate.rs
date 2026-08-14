@@ -28,7 +28,6 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::store::artifacts::ArtifactStatus;
 use crate::store::jobs::Stage;
 
 /// Queue a neighbour query for this artifact.
@@ -47,7 +46,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     // A retired artifact has no duplicates worth recording. Every pair naming
     // it would be skipped by `classify_pair` anyway, so this saves the query
     // rather than changing the outcome.
-    if me.status != ArtifactStatus::Active || me.superseded_by.is_some() {
+    if !me.in_results() {
         tracing::debug!(
             artifact_id,
             status = me.status.as_str(),
