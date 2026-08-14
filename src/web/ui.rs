@@ -352,6 +352,10 @@ struct CorpusTemplate {
     /// the same "Raw corpus" heading as a real capture, and offers to
     /// re-segment them.
     restored: bool,
+    /// The page this was captured from, for the doors that know one. The last
+    /// hop back to where the text came from, which is otherwise unrecoverable
+    /// once the tab is closed.
+    source_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -731,6 +735,7 @@ async fn corpus_detail(
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
         restored: s.restored_at.is_some(),
+        source_url: s.source_url.clone(),
         artifacts,
     })
     .into_response())

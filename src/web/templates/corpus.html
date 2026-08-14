@@ -17,6 +17,12 @@
   </form>
 </div>
 
+{% if let Some(u) = source_url %}
+{# The one hop back to where this was read. A link, not text: a URL you
+   cannot click is a URL you retype. #}
+<p class="muted">From <a href="{{ u }}" rel="noreferrer noopener">{{ u }}</a></p>
+{% endif %}
+
 {% if restored %}
 <div class="flag" role="status">
   <div aria-hidden="true">⚠</div>
