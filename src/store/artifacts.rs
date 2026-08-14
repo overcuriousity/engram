@@ -196,7 +196,7 @@ pub struct RestoredArtifact {
     pub superseded_by: Option<String>,
 }
 
-fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
+pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     let tags_json: String = r.get("tags");
     let span_json: Option<String> = r.get("corpus_span");
     let flags_json: Option<String> = r.get("flags");

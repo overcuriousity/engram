@@ -57,6 +57,24 @@ impl Store {
         Ok(out)
     }
 
+    /// Merged artifacts, newest first. What Ops lists.
+    pub async fn merged_artifacts(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::store::artifacts::Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE provenance = 'merged'
+              ORDER BY created_at DESC, id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(crate::store::artifacts::row_to_artifact)
+            .collect())
+    }
+
     /// Merged artifacts at least one of whose roots is still active.
     ///
     /// The write path indexes a merged artifact before superseding its roots,

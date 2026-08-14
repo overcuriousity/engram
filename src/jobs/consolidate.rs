@@ -281,6 +281,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
         Err(e) => tracing::warn!(error = %e, "could not look for unfinished merges"),
     }
+    // A merged artifact whose source was deleted still carries what that source
+    // said, so this is not data loss — it is a claim of provenance the artifact
+    // can no longer support, and saying so beats quietly showing one fewer.
+    if let Err(e) = crate::jobs::merge::flag_orphans(core).await {
+        tracing::warn!(error = %e, "could not flag merged artifacts that lost a source");
+    }
     // Startup heals too, but a process that stays up for weeks is exactly the
     // one whose stores drift: every interrupted write between the two happens
     // while it is running, not while it is starting.

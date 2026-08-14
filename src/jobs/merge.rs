@@ -109,6 +109,93 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Take a merge back: what it replaced returns, the merge is retired, and the
+/// pairs that produced it are dismissed.
+///
+/// The third of those is easy to leave out and useless to leave out. Restoring
+/// the sources alone accomplishes nothing: the sweep re-finds them, the model
+/// reaches the same verdict, and the operator's decision is silently undone on
+/// the next tick. `record_pair` is `INSERT OR IGNORE`, so a dismissed row is
+/// respected forever — the mechanism exists and only needs to be used. This is
+/// the same bug `reactivating_a_superseded_artifact_survives_the_next_sweep`
+/// pins for the sweep's own supersessions.
+///
+/// The merge is deprecated rather than deleted, because `artifact_sources`
+/// cascades away with a delete and takes the record of what was attempted.
+///
+/// For an *explicit* undo only. A merged artifact that is simply deleted is
+/// handled by `heal_dangling_supersessions`, which restores what it hid — and a
+/// fresh merge is then correct, because the duplication is genuinely back. A
+/// decision may overrule the sweep; a deletion may not.
+pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
+    let m = core.store.get_artifact(merged_id).await?;
+    if m.provenance != Provenance::Merged {
+        return Err(crate::error::Error::Validation(format!(
+            "{merged_id} is not a merged artifact"
+        )));
+    }
+
+    // Everything it hid, not just its roots: an earlier merge it subsumed was
+    // superseded onto it too, and leaving that hidden behind a deprecated
+    // artifact is the dead end `repoint_supersession` exists to avoid.
+    let restored = core.store.artifacts_superseded_by(&m.id).await?;
+    for id in &restored {
+        if let Err(e) = core.reactivate(id).await {
+            tracing::warn!(artifact = %id, error = %e, "could not restore a merged artifact's source");
+        }
+    }
+
+    // Only after they are back. The other order leaves a moment with nothing in
+    // search at all, which is the window the whole write path is ordered to
+    // avoid.
+    core.deprecate(&m.id).await?;
+
+    // Without this the undo lasts exactly one sweep.
+    for pair in core.store.pairs_among(&restored).await? {
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Dismissed,
+                Some("merge undone"),
+            )
+            .await?;
+    }
+    tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
+    Ok(())
+}
+
+/// Flag merged artifacts that have lost a source to a delete.
+///
+/// The text still carries what the deleted source said, so this is not data
+/// loss — it is a claim of provenance the artifact can no longer support. The
+/// detail pane says so rather than quietly showing one fewer source, which
+/// would make a merge of three look like a merge of two.
+///
+/// Returns how many it flagged, which is worth asserting on for the same reason
+/// the repairs are: a pass that fires on a base with nothing wrong is a bug
+/// hiding behind a correct end state.
+pub async fn flag_orphans(core: &Core) -> Result<usize> {
+    let mut n = 0;
+    for id in core.store.merged_missing_a_source(500).await? {
+        let c = core.store.get_artifact(&id).await?;
+        if c.flags.iter().any(|f| f == "orphaned_source") {
+            continue;
+        }
+        core.store
+            .set_artifact_flags(
+                &id,
+                &["orphaned_source".to_string()],
+                Some("one of the artifacts this was written from has been deleted"),
+            )
+            .await?;
+        n += 1;
+    }
+    if n > 0 {
+        tracing::info!(flagged = n, "merged artifacts have lost a source");
+    }
+    Ok(n)
+}
+
 /// Every value and literal in `roots` that `draft` does not carry.
 ///
 /// Empty means the merge may be written. Anything else is a merge that would
@@ -503,6 +590,124 @@ mod tests {
                 "{id} points at a winner that is itself superseded"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn undoing_a_merge_survives_the_next_sweep() {
+        // Restoring the sources alone accomplishes nothing: the sweep re-finds
+        // them, the model reaches the same verdict, and the operator's decision
+        // is silently undone on the next tick. Dismissing the pairs is what
+        // makes it stick, and it is the half that is easy to leave out --
+        // literally the same bug as
+        // reactivating_a_superseded_artifact_survives_the_next_sweep.
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"same claim",
+                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
+                          "tags":[],"caveats":[]}}"#
+                .into(),
+        ]));
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        crate::jobs::dedupe::run(&core, &pair.to_string())
+            .await
+            .unwrap();
+        let merged_id = core
+            .store
+            .merged_artifacts(10)
+            .await
+            .unwrap()
+            .first()
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| panic!("no merge was written"));
+        crate::jobs::embed::run(&core, &merged_id).await.unwrap();
+
+        undo(&core, &merged_id).await.unwrap();
+
+        for id in &ids {
+            let c = core.store.get_artifact(id).await.unwrap();
+            assert_eq!(c.status, ArtifactStatus::Active);
+            assert!(c.superseded_by.is_none());
+        }
+        assert_eq!(
+            core.store.get_artifact(&merged_id).await.unwrap().status,
+            ArtifactStatus::Deprecated,
+            "the merge was deleted, taking its lineage with it"
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Dismissed, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the pair was left answerable, so the sweep will merge it again"
+        );
+
+        // The point of the whole test: it survives.
+        crate::jobs::consolidate::run(&core).await.unwrap();
+        for id in &ids {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "the sweep merged the pair again after an explicit undo"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_source_flags_the_merge_rather_than_hiding_the_loss() {
+        // The cascade removes the lineage row while the merged text still
+        // carries that source's content, so the artifact claims less provenance
+        // than it has. Not data loss, but a silent untruth: a merge of three
+        // would quietly render as a merge of two.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            flag_orphans(&core).await.unwrap(),
+            0,
+            "the flag fired on a merge with all its sources"
+        );
+
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        assert_eq!(flag_orphans(&core).await.unwrap(), 1);
+
+        let flagged = core.store.get_artifact(&m.id).await.unwrap();
+        assert!(
+            flagged.flags.iter().any(|f| f == "orphaned_source"),
+            "{flagged:?}"
+        );
+        // And it does not keep re-flagging the same artifact every sweep.
+        assert_eq!(flag_orphans(&core).await.unwrap(), 0);
     }
 
     #[test]
