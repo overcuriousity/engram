@@ -855,6 +855,20 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
+    /// Artifacts hidden in favour of this one.
+    ///
+    /// What a supersession chain is made of. When the winner is itself
+    /// superseded, everything pointing at it has to be re-pointed or the reader
+    /// who opens one of these is sent to an artifact that is not in results
+    /// either — a dead end no page can follow.
+    pub async fn artifacts_superseded_by(&self, winner_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT id FROM artifacts WHERE superseded_by = ?")
+            .bind(winner_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
     /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(

@@ -11,8 +11,103 @@
 //! unattended is not that it rarely goes wrong; it is that when it does, a rule
 //! that costs nothing catches it before anything is written.
 
+use crate::core::Core;
+use crate::error::Result;
 use crate::infer::prompt::MergedDraft;
-use crate::store::artifacts::Chunk;
+use crate::store::artifacts::{ArtifactStatus, Chunk, NewMerged, Provenance};
+use crate::store::jobs::Stage;
+
+/// Create a merged artifact and queue its embedding. Its roots are **not**
+/// superseded here.
+///
+/// The order is the whole design of this function. Superseding before the merge
+/// is indexed opens a window in which the roots are out of search and the merge
+/// is not yet in it — the knowledge temporarily unreachable, which is the
+/// failure class `heal_dangling_supersessions` and
+/// `deleting_the_survivor_puts_the_artifact_it_hid_back` exist to prevent, and
+/// the window is as long as the embed queue is deep.
+///
+/// In this order the worst a crash can leave is the merge and its roots all in
+/// search at once. That is redundancy, which is the state the system was already
+/// in before the merge — strictly better than a gap. `finish` closes it once the
+/// embedding lands, and the sweep finishes any that were interrupted.
+pub async fn write(core: &Core, draft: &MergedDraft, roots: &[String]) -> Result<Chunk> {
+    let m = core
+        .store
+        .insert_merged_artifact(
+            &NewMerged {
+                text: draft.text.clone(),
+                title: draft.title.clone(),
+                category: draft.category.clone(),
+                tags: draft.tags.clone(),
+                caveats: draft.caveats.clone(),
+            },
+            roots,
+        )
+        .await?;
+    core.store.enqueue(Stage::Embed, "artifact", &m.id).await?;
+    tracing::info!(merged = %m.id, sources = roots.len(), "wrote a merged artifact");
+    Ok(m)
+}
+
+/// Hide what an already-indexed merged artifact replaced.
+///
+/// Called from `mark_indexed` when a merged artifact finishes embedding, and
+/// again from the sweep for merges whose process died in between — a state that
+/// is complete from the artifact side and absent from the pair side, so only a
+/// join across the lineage would ever notice it.
+pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
+    let m = core.store.get_artifact(merged_id).await?;
+    if m.provenance != Provenance::Merged
+        || m.status != ArtifactStatus::Active
+        || m.superseded_by.is_some()
+    {
+        return Ok(());
+    }
+
+    let roots = core.store.roots_of(std::slice::from_ref(&m.id)).await?;
+    for root in roots.get(&m.id).into_iter().flatten() {
+        let Ok(r) = core.store.get_artifact(root).await else {
+            continue;
+        };
+        if r.status != ArtifactStatus::Active || r.superseded_by.is_some() {
+            continue;
+        }
+        // Warn and carry on. `supersede` refuses a side that is no longer
+        // active, and an operator deprecating a root between the read and here
+        // is an ordinary race rather than a reason to abandon the other roots —
+        // the sweep's repair reaches whatever is left.
+        if let Err(e) = core.supersede(root, &m.id).await {
+            tracing::warn!(root = %root, merged = %m.id, error = %e,
+                "could not hide a merged artifact's root; it stays active");
+        }
+    }
+
+    // And any earlier merge this one subsumes. Superseding only the roots would
+    // leave that merge active and near-identical to this one, so the relate unit
+    // would file the pair again on the next sweep and the two would churn
+    // against each other for as long as they both existed.
+    for older in core.store.subsumed_merges(&m.id).await? {
+        // Everything the older merge was hiding has to be re-pointed first.
+        // Those roots are already superseded — by `older` — so `finish`'s loop
+        // above skipped them, and hiding `older` behind this merge without
+        // moving them would leave `root -> older -> m`: a chain whose middle is
+        // itself out of results. That is the exact failure `Clusters` exists to
+        // prevent on the sweep's side, and the reader who opens a root would be
+        // sent to a dead end.
+        for hidden in core.store.artifacts_superseded_by(&older).await? {
+            if let Err(e) = core.repoint_supersession(&hidden, &m.id).await {
+                tracing::warn!(artifact = %hidden, to = %m.id, error = %e,
+                    "could not re-point a supersession; it still names a hidden winner");
+            }
+        }
+        if let Err(e) = core.supersede(&older, &m.id).await {
+            tracing::warn!(subsumed = %older, by = %m.id, error = %e,
+                "could not hide a merge this one subsumes; it stays active");
+        }
+    }
+    Ok(())
+}
 
 /// Every value and literal in `roots` that `draft` does not carry.
 ///
@@ -187,6 +282,227 @@ mod tests {
             lost.iter().any(|l| l.contains("systemctl stop app")),
             "a caveat's command was dropped without complaint: {lost:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn knowledge_is_never_unreachable_during_a_merge() {
+        // The write path is several steps over two stores that cannot be
+        // written atomically. Indexing before superseding means the worst a
+        // crash can leave is the merge and its roots all in search at once --
+        // redundancy, which is the state the system was already in. The other
+        // order leaves a window in which none of them is findable, and that
+        // window is as long as the embed queue is deep.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let d = draft("Mount the filesystem, or attach the volume, before writing.");
+
+        // Step one: the merge exists and nothing is hidden.
+        let m = write(&core, &d, &ids).await.unwrap();
+        for id in &ids {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "a root left search before the merge was indexed"
+            );
+        }
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "the roots are gone and the merge is not indexed yet"
+        );
+
+        // Step two: indexing the merge, which is what triggers the supersede.
+        crate::jobs::embed::run(&core, &m.id).await.unwrap();
+
+        for id in &ids {
+            assert_eq!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .as_deref(),
+                Some(m.id.as_str()),
+                "the roots were never superseded"
+            );
+        }
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == m.id),
+            "the merge never reached search"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_roots_were_never_superseded_is_finished_by_the_next_sweep() {
+        // A crash between indexing the merge and hiding its roots. The merge
+        // looks complete from the artifact side and absent from the pair side,
+        // so only a join across the lineage would ever notice.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let d = draft("Mount the filesystem, or attach the volume, before writing.");
+        let m = write(&core, &d, &ids).await.unwrap();
+        // Marked indexed without the arming hook, as an interrupted run leaves it.
+        core.store
+            .mark_embedded(&m.id, "fake-embed", 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.merged_with_active_roots(10).await.unwrap(),
+            vec![m.id.clone()]
+        );
+
+        crate::jobs::consolidate::run(&core).await.unwrap();
+
+        for id in &ids {
+            assert_eq!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .as_deref(),
+                Some(m.id.as_str())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merge_of_a_merge_is_written_from_the_captured_roots() {
+        // The anti-drift rule end to end. M1(a,b) merged with c is written from
+        // a, b and c -- never from M1's text, which is itself a rewrite.
+        // Otherwise each generation paraphrases a paraphrase and the originals
+        // drift further away with every pass.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m1 = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m1.id).await.unwrap();
+
+        let c =
+            crate::jobs::consolidate::tests::seed_into_new_corpus(&core, "c text", [0.94, 0.34])
+                .await;
+        let m2 = write(
+            &core,
+            &draft("a text and b text and c text"),
+            &[m1.id.clone(), c.clone()],
+        )
+        .await
+        .unwrap();
+        crate::jobs::embed::run(&core, &m2.id).await.unwrap();
+
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&m2.id))
+            .await
+            .unwrap();
+        let mut got = roots[&m2.id].clone();
+        got.sort();
+        let mut want = vec![ids[0].clone(), ids[1].clone(), c];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "the second merge did not flatten to captured roots"
+        );
+        assert!(
+            !got.contains(&m1.id),
+            "a merged artifact was recorded as a root of another merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_subsumes_an_earlier_one_hides_it() {
+        // Superseding only the roots leaves the earlier merge active and
+        // near-identical to the new one, so the relate unit re-pairs them on
+        // every sweep and the two churn against each other forever. This is the
+        // gap the design did not cover; `subsumed_merges` closes it.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m1 = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m1.id).await.unwrap();
+
+        let c =
+            crate::jobs::consolidate::tests::seed_into_new_corpus(&core, "c text", [0.94, 0.34])
+                .await;
+        let m2 = write(
+            &core,
+            &draft("a text and b text and c text"),
+            &[m1.id.clone(), c.clone()],
+        )
+        .await
+        .unwrap();
+        crate::jobs::embed::run(&core, &m2.id).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_artifact(&m1.id)
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(m2.id.as_str()),
+            "the subsumed merge is still active and will be re-paired forever"
+        );
+        // And no chain: every hidden artifact points at something that is
+        // itself in results. `root -> m1 -> m2` would leave the reader who
+        // opens a root at an artifact that is not in results either, and
+        // nothing in the UI can follow the second hop.
+        for id in ids.iter().chain(std::iter::once(&c)) {
+            let winner = core
+                .store
+                .get_artifact(id)
+                .await
+                .unwrap()
+                .superseded_by
+                .expect("every member should be hidden by now");
+            assert_eq!(winner, m2.id, "{id} was left pointing at the older merge");
+            assert!(
+                core.store
+                    .get_artifact(&winner)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "{id} points at a winner that is itself superseded"
+            );
+        }
     }
 
     #[test]

@@ -275,6 +275,41 @@ impl Core {
         Ok(())
     }
 
+    /// Move an already-hidden artifact from one winner to another.
+    ///
+    /// Not `supersede`, which refuses a side that is not active — and both sides
+    /// here are exactly that: the artifact is already superseded, and it is
+    /// being re-pointed precisely because its current winner is about to be
+    /// hidden too.
+    ///
+    /// A supersession chain is what this exists to prevent. `A -> B -> C` leaves
+    /// the reader who opens A at an artifact that is not in results either, and
+    /// nothing in the UI can follow the second hop. The sweep avoids chains by
+    /// grouping with union-find before it decides anything; the merge path
+    /// cannot, because the group it is collapsing was already partly collapsed
+    /// by an earlier merge.
+    ///
+    /// Row before payload, like `supersede`.
+    pub async fn repoint_supersession(&self, artifact_id: &str, winner_id: &str) -> Result<()> {
+        let winner = self.store.get_artifact(winner_id).await?;
+        if winner.status != ArtifactStatus::Active || winner.superseded_by.is_some() {
+            return Err(Error::Validation(format!(
+                "cannot re-point {artifact_id}: {winner_id} is not active"
+            )));
+        }
+        self.store
+            .set_superseded_by(artifact_id, Some(winner_id))
+            .await?;
+        self.vectors
+            .set_lifecycle(artifact_id, ArtifactStatus::Superseded, Some(winner_id))
+            .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
+            .await?;
+        tracing::info!(artifact_id, winner_id, "re-pointed a supersession");
+        Ok(())
+    }
+
     /// Hide `loser_id` in favour of `winner_id`. Row before payload, matching
     /// the sweep's existing auto-supersede order (`jobs::consolidate`): the
     /// intermediate state after a partial failure is one an operator can act

@@ -268,6 +268,19 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             "could not reconcile lifecycle state with the vector store; retrying on the next sweep"
         );
     }
+    // A merge whose process died between indexing and hiding what it replaced.
+    // Invisible to everything else: complete from the artifact side, absent
+    // from the pair side, and only a join across the lineage says otherwise.
+    match core.store.merged_with_active_roots(200).await {
+        Ok(unfinished) => {
+            for id in unfinished {
+                if let Err(e) = crate::jobs::merge::finish(core, &id).await {
+                    tracing::warn!(merged = %id, error = %e, "could not finish a merge");
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not look for unfinished merges"),
+    }
     // Startup heals too, but a process that stays up for weeks is exactly the
     // one whose stores drift: every interrupted write between the two happens
     // while it is running, not while it is starting.

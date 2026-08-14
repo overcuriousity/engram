@@ -287,19 +287,41 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             }
             Ok(())
         }
-        // The write path lands in the next commit. Recorded rather than applied
-        // until then — which is also what `autonomous = false` keeps doing
-        // afterwards, so the verdicts can be read before the system acts on them.
         Relation::Duplicate => {
-            let detail = s
-                .detail
-                .clone()
-                .unwrap_or_else(|| "would merge".to_string());
+            let draft = s
+                .merged
+                .as_ref()
+                .expect("interpret keeps this or downgrades to Conflict");
+            if !core.consolidate.autonomous {
+                // Recorded, not applied. Reading the verdicts before letting the
+                // system act on them is the cheapest evidence available about
+                // whether the contract holds on real data, and it is the only
+                // reason the switch is a switch rather than a leap.
+                let detail = s
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "would merge".to_string());
+                return settle_all(
+                    core,
+                    &s.pairs,
+                    PairState::Contradiction,
+                    Some(&format!("would merge: {detail}")),
+                )
+                .await;
+            }
+
+            // Every member, not just the roots. A merged member is not its own
+            // root, and `finish` hides what the lineage names — so passing only
+            // the roots would leave that earlier merge active and near-identical
+            // to the new one. `insert_merged_artifact` flattens all of them to
+            // captured roots, and `subsumed_merges` catches the merged members.
+            let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
+            let m = crate::jobs::merge::write(core, draft, &sources).await?;
             settle_all(
                 core,
                 &s.pairs,
-                PairState::Contradiction,
-                Some(&format!("would merge: {detail}")),
+                PairState::NoConflict,
+                Some(&format!("merged into {}", m.id)),
             )
             .await
         }

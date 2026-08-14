@@ -298,6 +298,11 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // This is what makes duplicate detection complete rather than sampled; see
     // the module header of `jobs::relate`.
     crate::jobs::relate::arm(core, &chunk.id, 0).await?;
+    // A merged artifact hides what it replaced only once it is itself in the
+    // index, so the knowledge is never out of search on both sides at once.
+    if chunk.provenance == crate::store::artifacts::Provenance::Merged {
+        crate::jobs::merge::finish(core, &chunk.id).await?;
+    }
     Ok(())
 }
 
