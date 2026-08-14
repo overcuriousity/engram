@@ -85,6 +85,9 @@ impl Store {
                 "judge_unreadable",
                 "INTEGER NOT NULL DEFAULT 0",
             ),
+            // Nullable, and rightly so: a corpus captured before the extension
+            // and link doors existed was read from nowhere this can name.
+            ("corpora", "source_url", "TEXT"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -230,7 +233,42 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_deployed_base_gains_source_url_without_being_recreated() {
+        // The capture-surfaces column. A knowledge base is expensive to
+        // rebuild — every artifact in it was paid for in GPU time — so a
+        // nullable column with no default must never be the reason an operator
+        // is asked to recreate one.
+        let store = Store::memory().await.unwrap();
+        sqlx::query("ALTER TABLE corpora DROP COLUMN source_url")
+            .execute(&store.pool)
+            .await
+            .expect("the fixture needs a corpora table without source_url");
+
+        store
+            .migrate()
+            .await
+            .expect("migrate refused a base captured before source_url existed");
+
+        let has: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('corpora') WHERE name = 'source_url'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(has, 1, "source_url was never added to the existing table");
+
+        // And a capture still works against the upgraded base.
+        let c = store
+            .insert_corpus_with_signature("alpha\n\nbeta", "web", None, vec![], None)
+            .await
+            .unwrap()
+            .into_corpus();
+        assert_eq!(store.get_corpus(&c.id).await.unwrap().source_url, None);
+    }
+
+    #[tokio::test]
     async fn a_column_added_after_deployment_reaches_a_database_that_predates_it() {
+        // The upgrade path, and the trap in it. `CREATE TABLE IF NOT EXISTS` is
         // The upgrade path, and the trap in it. `CREATE TABLE IF NOT EXISTS` is
         // a no-op against a table that already exists, so a column added to
         // schema.sql never reaches a running base — and the check at the end of

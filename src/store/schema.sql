@@ -38,11 +38,11 @@ CREATE TABLE IF NOT EXISTS corpora (
   shingles        TEXT,
   near_dupe_of    TEXT,
   near_dupe_score REAL,
-  restored_at     INTEGER,
   -- Where this text was read, when it was read somewhere. `origin` is the
   -- channel it arrived through and this is the location it came from; one
   -- column cannot be both without losing the channel.
-  source_url      TEXT
+  source_url      TEXT,
+  restored_at     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_corpora_status  ON corpora(status);
 CREATE INDEX IF NOT EXISTS idx_corpora_created ON corpora(created_at DESC);
