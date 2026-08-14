@@ -1718,13 +1718,23 @@ pub(crate) mod tests {
 
         let out = sweep_and_dedupe(&core).await;
         assert_eq!(out.judged, 1, "one pair should have been armed: {out:?}");
+        // Settled as the manual apply settles it: Dismissed, not left in
+        // Superseded — that state means "awaiting an operator", and an applied
+        // replacement has nothing left to confirm.
         let found = core
             .store
-            .pairs_by_state(PairState::Superseded, 10)
+            .pairs_by_state(PairState::Dismissed, 10)
             .await
             .unwrap();
         assert_eq!(found.len(), 1, "the pair did not land as decided");
-        assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Superseded, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an applied replacement is still listed as a proposal"
+        );
 
         // Applied, and the survivor is a stored original rather than a rewrite.
         assert_eq!(

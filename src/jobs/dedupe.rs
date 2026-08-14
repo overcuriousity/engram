@@ -283,47 +283,110 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .obsolete
                 .clone()
                 .expect("interpret sets this or downgrades to Conflict");
-            // Among the roots, for the same reason the letter was: the obsolete
-            // side is a root, and a winner drawn from `members` could be a
-            // merged artifact whose own sources include the one being hidden.
-            let winner = s
-                .roots
+            // Fresh statuses, not the snapshot `interpret` saw. The roots of a
+            // member that is itself a finished merge are already superseded,
+            // and a component can change while the unit waits out a backoff.
+            let mut fresh = Vec::new();
+            for r in &s.roots {
+                match core.store.get_artifact(&r.id).await {
+                    Ok(c) => fresh.push(c),
+                    Err(Error::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            let live = |c: &Chunk| c.status == ArtifactStatus::Active && c.superseded_by.is_none();
+            let obsolete_live = fresh.iter().any(|c| c.id == obsolete && live(c));
+            // A live root wins if one exists; otherwise the live member that
+            // carries the surviving roots — a finished merge's own sources are
+            // superseded, and the merge is the one thing still in results.
+            let winner = fresh
                 .iter()
-                .find(|m| m.id != obsolete)
-                .expect("run dismisses a component with fewer than two roots");
+                .find(|c| c.id != obsolete && live(c))
+                .map(|c| c.id.clone())
+                .or_else(|| {
+                    s.members
+                        .iter()
+                        .find(|m| m.id != obsolete)
+                        .map(|m| m.id.clone())
+                });
+            let (Some(winner), true) = (winner, obsolete_live) else {
+                // Nothing to apply: the named side is already out of results,
+                // so the replacement has in effect already happened.
+                return settle_all(
+                    core,
+                    &s.pairs,
+                    PairState::NoConflict,
+                    Some("the named replacement is already out of results"),
+                )
+                .await;
+            };
+
+            if core.consolidate.autonomous {
+                // The side effect FIRST. A failure here leaves every pair
+                // pending, so the unit retries under the queue's backoff — the
+                // reverse order left the verdict recorded on the pairs but
+                // never applied, permanently, because run() skips a component
+                // whose seed is no longer Pending.
+                core.supersede(&obsolete, &winner).await?;
+                tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
+                for pr in &s.pairs {
+                    if pr.a_id == obsolete || pr.b_id == obsolete {
+                        // As the manual apply settles it (`apply_pair_supersede_ui`):
+                        // done, with the model's reasoning kept as the record
+                        // of why. Leaving it Superseded listed the applied
+                        // replacement as awaiting confirmation forever, behind
+                        // Keep buttons that could only return a validation
+                        // error against the already-superseded side.
+                        core.store
+                            .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
+                            .await?;
+                    } else {
+                        // Both sides survived. Writing the direction here
+                        // anyway named an artifact the pair does not contain.
+                        // Not left pending either: the roots this verdict was
+                        // drawn from are unchanged, so re-arming would build
+                        // the identical prompt and receive the identical
+                        // answer forever. An unanswered question goes where
+                        // the others go: to a person.
+                        core.store
+                            .set_pair_state(
+                                pr.id,
+                                PairState::Contradiction,
+                                Some(&format!(
+                                    "{obsolete} was superseded; these two were not separated"
+                                )),
+                            )
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+
+            // Proposal mode: nothing is hidden, the pair carries the direction
+            // and an operator confirms via "apply supersede".
             for pr in &s.pairs {
                 if pr.a_id == obsolete || pr.b_id == obsolete {
                     core.store
                         .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
                         .await?;
-                    continue;
+                } else {
+                    // Both sides survived. Writing the direction here anyway
+                    // named an artifact the pair does not contain, and Ops
+                    // rendered an "apply supersede" button for it — a button
+                    // that would hide a third artifact on the strength of a
+                    // question about two others.
+                    core.store
+                        .set_pair_state(
+                            pr.id,
+                            PairState::Contradiction,
+                            Some(&format!(
+                                "{obsolete} was superseded; these two were not separated"
+                            )),
+                        )
+                        .await?;
                 }
-                // Both sides survived. Writing the direction here anyway named
-                // an artifact the pair does not contain, and Ops rendered an
-                // "apply supersede" button for it — a button that would hide a
-                // third artifact on the strength of a question about two others.
-                //
-                // Not left pending either. The roots this verdict was drawn from
-                // are unchanged by the supersede, so re-arming the pair would
-                // build the identical prompt and, against an endpoint that
-                // caches by prompt, receive the identical answer forever. An
-                // unanswered question goes where the others go: to a person.
-                core.store
-                    .set_pair_state(
-                        pr.id,
-                        PairState::Contradiction,
-                        Some(&format!(
-                            "{obsolete} was superseded; these two were not separated"
-                        )),
-                    )
-                    .await?;
             }
-            if core.consolidate.autonomous {
-                core.supersede(&obsolete, &winner.id).await?;
-                tracing::info!(superseded = %obsolete, by = %winner.id, "applied a replacement");
-            } else {
-                tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
-            }
+            tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
             Ok(())
         }
         Relation::Duplicate => {
@@ -589,9 +652,19 @@ mod tests {
 
         run(&core, &first.to_string()).await.unwrap();
 
+        // Applied (autonomy is on), so its own pair is done — Dismissed, as
+        // the manual apply settles it, with the direction cleared.
         let held = core.store.get_pair(first).await.unwrap();
-        assert_eq!(held.state, PairState::Superseded);
-        assert_eq!(held.obsolete_id.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(held.state, PairState::Dismissed);
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[1].as_str())
+        );
 
         let survivors = core.store.get_pair(second).await.unwrap();
         assert_eq!(
@@ -894,6 +967,117 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_applied_replacement_does_not_wait_for_an_operator() {
+        // The pair used to stay in Superseded — the state every consumer reads
+        // as "awaiting confirmation" — with Keep buttons that could only
+        // return a validation error against the already-superseded side.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
+        ]));
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some(),
+            "the replacement was not applied"
+        );
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Superseded, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an applied replacement is still listed as awaiting confirmation"
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Dismissed, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the applied pair should be settled the way the manual apply settles it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacement_naming_a_root_already_out_of_results_is_applied_to_the_carrier() {
+        // A component holding a finished merge flattens to roots that are
+        // already superseded. Applying blindly errored *after* the pairs were
+        // settled, and run()'s Pending guard made the error permanent: the
+        // verdict was recorded on the pairs yet never applied.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"c","detail":"superseded by the merge"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 30 s", [0.99, 0.02]),
+                ("timeout was 30 seconds once", [0.98, 0.04]),
+            ],
+        )
+        .await;
+        // uuid v7 sorts by creation, so the roots letter as a, b, c.
+        // Oldest, so the newest-wins guard accepts it as obsolete.
+        sqlx::query("UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?")
+            .bind(&ids[2])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let merged = crate::jobs::merge::write(
+            &core,
+            &MergedDraft {
+                text: "timeout is 30 seconds".into(),
+                title: None,
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+        // The merge finished: its roots are superseded, only it and c remain.
+        crate::jobs::merge::finish(&core, &merged.id).await.unwrap();
+        let pair = queue_pair(&core, &merged.id, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        // Every root besides c is superseded, so the live carrier — the merge
+        // itself, a member — wins, and the settle happens after the apply.
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[2])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(merged.id.as_str()),
+            "the replacement was not applied against the live carrier"
+        );
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the component was left pending"
         );
     }
 
