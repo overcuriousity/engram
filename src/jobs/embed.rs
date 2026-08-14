@@ -214,8 +214,18 @@ pub async fn rearm_if_more(core: &Core, corpus_id: &str) -> Result<()> {
         .await?
         .unwrap_or(0)
         + 1;
+    //
+    // Idle-only, and not merely because every automatic arming is. `run_one`
+    // calls this after `complete_job`, and between those two awaits another
+    // worker's `settle` can reach `finish`, whose own idle-only arming
+    // legitimately resurrects the row this just closed — at which point a second
+    // worker can claim it. A `Guard::Any` upsert would then flip that `running`
+    // row back to `pending` and put two workers into `run_corpus` for one
+    // corpus, where whichever finishes second closes the row the other re-armed
+    // and the source is left half-embedded. That is the trap the doc comment
+    // above describes, reached from the other side.
     core.store
-        .enqueue_seq(Stage::Embed, "corpus", corpus_id, next_seq)
+        .rearm_idle_seq(Stage::Embed, "corpus", corpus_id, next_seq)
         .await
 }
 
@@ -284,7 +294,16 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
 pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()> {
     let pending = core.store.pending_artifacts_for_corpus(corpus_id).await?;
     for c in &pending {
-        core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;
+        // Idle-only, like every other automatic arming. Two workers reach this
+        // for the same corpus whenever one batch meets a refused chunk while
+        // another worker is already inside the per-chunk unit an earlier batch
+        // armed — and a `Guard::Any` upsert would put that `running` row back to
+        // `pending` under it. A third claim then runs `split_oversize` on the
+        // same chunk beside the first, and one parent ends up with two full sets
+        // of siblings.
+        core.store
+            .rearm_idle_seq(Stage::Embed, "artifact", &c.id, 0)
+            .await?;
     }
     tracing::info!(
         corpus_id,
@@ -588,6 +607,105 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A corpus with `n` chunks, none of them embedded yet.
+    async fn corpus_with_pending_chunks(core: &Core, n: usize) -> (String, Vec<String>) {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<_> = (0..n)
+            .map(|i| NewArtifact {
+                ordinal: i as i64,
+                text: format!("chunk {i}"),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: Some(i as i64),
+                caveats: vec![],
+            })
+            .collect();
+        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        (src.id, made.iter().map(|c| c.id.clone()).collect())
+    }
+
+    async fn job_state(core: &Core, stage: Stage, target: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE stage = ? AND target_id = ?")
+            .bind(stage.as_str())
+            .bind(target)
+            .fetch_optional(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn isolating_a_batch_leaves_a_chunk_already_being_split_alone() {
+        // Two workers reach this for one corpus: A is inside `split_oversize`
+        // for a chunk an earlier batch isolated, while B's batch meets a
+        // different refused chunk and isolates everything pending. Arming
+        // whatever state it found flipped A's row back to `pending`, a third
+        // claim ran `split_oversize` beside A, and one parent chunk ended up
+        // with two full sets of siblings.
+        let core = crate::core::test_support::test_core().await;
+        let (src, chunks) = corpus_with_pending_chunks(&core, 2).await;
+
+        core.store
+            .enqueue(Stage::Embed, "artifact", &chunks[0])
+            .await
+            .unwrap();
+        let claimed = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(claimed.target_id, chunks[0]);
+
+        split_into_artifact_jobs(&core, &src).await.unwrap();
+
+        assert_eq!(
+            job_state(&core, Stage::Embed, &chunks[0]).await.as_deref(),
+            Some("running"),
+            "isolating the batch reset a chunk a worker was already splitting"
+        );
+        // Its sibling, which nothing was inside, is armed as it should be.
+        assert_eq!(
+            job_state(&core, Stage::Embed, &chunks[1]).await.as_deref(),
+            Some("pending")
+        );
+    }
+
+    #[tokio::test]
+    async fn coming_back_for_another_batch_does_not_disturb_a_running_row() {
+        // `run_one` calls this after `complete_job`, and in that gap another
+        // worker's `settle` can reach `finish`, whose idle-only arming
+        // legitimately reopens the row — and a second worker can claim it.
+        // Arming whatever state it found then put two workers into `run_corpus`
+        // for one corpus, and whichever finished second closed the row the other
+        // had re-armed, leaving the source half-embedded.
+        let core = crate::core::test_support::test_core().await;
+        let (src, _) = corpus_with_pending_chunks(&core, 2).await;
+
+        core.store
+            .enqueue(Stage::Embed, "corpus", &src)
+            .await
+            .unwrap();
+        core.store.claim_job().await.unwrap().unwrap();
+
+        rearm_if_more(&core, &src).await.unwrap();
+        assert_eq!(
+            job_state(&core, Stage::Embed, &src).await.as_deref(),
+            Some("running"),
+            "a second worker was let into run_corpus for a corpus already being embedded"
+        );
+
+        // The path this exists for is untouched: a row closed with chunks still
+        // pending comes back for the next batch.
+        sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed' AND target_id = ?")
+            .bind(&src)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        rearm_if_more(&core, &src).await.unwrap();
+        assert_eq!(
+            job_state(&core, Stage::Embed, &src).await.as_deref(),
+            Some("pending"),
+            "a corpus with chunks left stopped half-embedded"
+        );
+    }
 
     #[tokio::test]
     async fn an_artifact_retired_before_its_first_embed_lands_retired() {
