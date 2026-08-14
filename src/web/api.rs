@@ -8,11 +8,43 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+/// One of `text`, `html` or `url` — never two.
+///
+/// Supplying more than one is a validation error rather than a precedence
+/// rule, because every precedence rule here would silently discard something
+/// the caller meant to capture.
 #[derive(serde::Deserialize)]
 pub struct IngestRequest {
-    pub text: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// HTML the browser has already rendered and authenticated.
+    #[serde(default)]
+    pub html: Option<String>,
+    /// With `html`: where it came from, and the base for relative links.
+    /// Alone: the page to fetch.
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// `"selection"` when `html` is a fragment the operator highlighted rather
+    /// than a whole page. It exempts the capture from the extraction floor,
+    /// which is a guess about whole pages: three sentences deliberately picked
+    /// out are not a login wall, and refusing them for being short refuses a
+    /// capture that was asked for in as many words.
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// Whether this request may skip the extraction floor.
+///
+/// Only where there is a fragment to be exempt. A server-side GET has no
+/// selection in it: `scope` there is a claim made by a client that never
+/// looked at the page, and honouring it on the `url` path would let anyone
+/// switch off the one guard that catches a login wall — which is the whole
+/// reason the floor exists. So the exemption is tied to `html` having arrived
+/// alongside it.
+fn floor_exempt(req: &IngestRequest) -> bool {
+    req.html.is_some() && req.scope.as_deref() == Some("selection")
 }
 
 #[derive(serde::Deserialize)]
@@ -122,14 +154,100 @@ pub struct StatusResponse {
     pub vectors: u64,
 }
 
+/// Capture channels. `origin` is derived from which field arrived, not
+/// hardcoded: it is the only record of how a document got here.
+const ORIGIN_WEB: &str = "web";
+const ORIGIN_EXTENSION: &str = "extension";
+const ORIGIN_FETCH: &str = "fetch";
+
+/// Readability and the markdown conversion, off the async worker.
+///
+/// Both are synchronous walks of a DOM that can be megabytes — `fetch_max_bytes`
+/// and the request body limit are both 8 MB — and run inline they hold a Tokio
+/// worker for long enough to stall whatever else that thread was serving.
+/// `Readability` is `!Send`, which is why this could not be awaited across;
+/// inside a `spawn_blocking` closure it is created and dropped without ever
+/// crossing an await, and only the owned `String` has to move.
+async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        crate::core::extract::html_to_markdown(&html, url.as_ref(), min_chars)
+    })
+    .await
+    // A `JoinError` is a panic in `dom_smoothie` or `html2md` — two parsers
+    // fed whatever a remote page contained — or a cancelled runtime. Neither
+    // is anything the caller did, so it must not come back as a 400 telling
+    // them their page was malformed while the crash goes unrecorded.
+    .map_err(|e| Error::Internal(format!("extraction did not finish: {e}")))?
+}
+
 async fn ingest(
     State(st): State<AppState>,
     _id: Identity,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let supplied = [
+        req.text.is_some(),
+        req.html.is_some(),
+        // A `url` alongside `html` is provenance, not a second body.
+        req.url.is_some() && req.html.is_none(),
+    ]
+    .iter()
+    .filter(|p| **p)
+    .count();
+    if supplied != 1 {
+        return Err(Error::Validation(
+            "supply exactly one of `text`, `html` or `url`".into(),
+        ));
+    }
+
+    let parsed_url = match &req.url {
+        Some(raw) => {
+            let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
+            // `Url::parse` accepts `javascript:` and `data:` happily, and the
+            // scheme allowlist lives in `fetch_html` — which the `html` plus
+            // `url` path never calls. This value is stored and rendered as a
+            // link on the corpus page, so the check belongs here too.
+            if !matches!(u.scheme(), "http" | "https") {
+                return Err(Error::Validation(format!(
+                    "url: `{}` is not a scheme a page is read over",
+                    u.scheme()
+                )));
+            }
+            Some(u)
+        }
+        None => None,
+    };
+
+    // A highlighted fragment is exempt from the floor. See `floor_exempt`.
+    let floor = if floor_exempt(&req) {
+        0
+    } else {
+        st.core.capture.min_extracted_chars
+    };
+
+    let (text, origin) = if let Some(text) = req.text {
+        (text, ORIGIN_WEB)
+    } else if let Some(html) = req.html {
+        (
+            extract(html, parsed_url.clone(), floor).await?,
+            ORIGIN_EXTENSION,
+        )
+    } else {
+        let u = parsed_url.as_ref().expect("one-of check guarantees a url");
+        let html = crate::core::fetch::fetch_html(u, &st.core.capture).await?;
+        (
+            extract(html, parsed_url.clone(), floor).await?,
+            ORIGIN_FETCH,
+        )
+    };
+
     let out = st
         .core
-        .ingest(&req.text, "web", req.title.as_deref())
+        .ingest_capture(
+            crate::core::ingest::Capture::new(text, origin)
+                .with_title(req.title)
+                .with_source_url(parsed_url.map(|u| u.to_string())),
+        )
         .await?;
     // 201 for a new capture, 200 when the text was already stored.
     let code = if out.duplicate {
@@ -138,6 +256,83 @@ async fn ingest(
         StatusCode::CREATED
     };
     Ok((code, Json(out)))
+}
+
+const ORIGIN_UPLOAD: &str = "upload";
+
+/// Whether an upload's filename claims to be a text file.
+///
+/// Only consulted when the part carried no `Content-Type`. Case-insensitive,
+/// because a browser on a case-preserving filesystem will happily send
+/// `NOTES.TXT`, and refusing that would be a rule about shouting.
+fn named_txt(filename: Option<&str>) -> bool {
+    filename.is_some_and(|n| {
+        std::path::Path::new(n)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+    })
+}
+
+/// `.txt` and nothing else, for now. PDF is a `SourceView` implementation and
+/// a later plan; refusing everything else by name is what keeps this one from
+/// quietly ingesting the bytes of a format it cannot read.
+async fn upload(
+    State(st): State<AppState>,
+    _id: Identity,
+    mut multipart: axum::extract::Multipart,
+) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().map(str::to_string);
+        // A part may legally carry no `Content-Type` at all, and letting that
+        // skip the check turns "`.txt` and nothing else" into "anything whose
+        // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
+        // An absent type is not a pass; it just moves the question to the
+        // name, which is the only other thing the sender told us.
+        let declared = field.content_type().unwrap_or("").to_string();
+        if declared.is_empty() {
+            if !named_txt(filename.as_deref()) {
+                return Err(Error::Validation(
+                    "that upload declares no type and is not named `.txt` — \
+                     only text/plain is accepted"
+                        .into(),
+                ));
+            }
+        } else if !declared.starts_with("text/plain") {
+            return Err(Error::Validation(format!(
+                "that file is `{declared}` — only text/plain is accepted"
+            )));
+        }
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
+        // Refused rather than lossily converted: a corpus is quoted back
+        // verbatim, so text that arrived mangled would be a fidelity loss
+        // nothing downstream could detect.
+        let text = String::from_utf8(bytes.to_vec())
+            .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
+
+        let out = st
+            .core
+            .ingest_capture(
+                crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD).with_title(filename),
+            )
+            .await?;
+        let code = if out.duplicate {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        return Ok((code, Json(out)));
+    }
+    Err(Error::Validation("no file in the upload".into()))
 }
 
 #[derive(serde::Deserialize)]
@@ -264,13 +459,31 @@ pub struct SearchParams {
     pub include_deprecated: bool,
     #[serde(default)]
     pub include_superseded: bool,
+    /// Which client is asking. Only `extension` is honoured; see
+    /// `Door::from_client`.
+    pub door: Option<String>,
 }
 
 async fn search(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Query(q): Query<SearchParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+    use crate::store::feedback::Door;
+    let door = q
+        .door
+        .as_deref()
+        .map(Door::from_client)
+        .unwrap_or(Door::Api);
+    // The extension's panel is a search-as-you-type box exactly like the web
+    // UI's: it debounces at 200ms, so one query arrives as a run of its own
+    // prefixes. Marking those stamps `last_seen_at` on whatever "loo", "loop",
+    // "loop d" happened to match, and that is the field `resurface` reads —
+    // typing would quietly drain the forgotten-chunk feature and disqualify
+    // those artifacts from the stale list. `src/web/ui.rs` opts out for this
+    // reason; the panel has to as well. What an operator actually read is
+    // stamped when they open the artifact, not while they are still typing.
+    let typing = matches!(door, Door::Extension);
     let query = SearchQuery {
         q: q.q,
         limit: q.limit.unwrap_or(0),
@@ -286,16 +499,21 @@ async fn search(
             })
             .unwrap_or_default(),
         category: q.category.filter(|c| !c.is_empty()),
-        // An API call is one deliberate question; only the typing UI opts out.
-        mark: true,
+        // An API call is one deliberate question; only a typing UI opts out.
+        mark: !typing,
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
     };
-    Ok(Json(
-        st.core
-            .search(&query, crate::store::feedback::Door::Api)
-            .await?,
-    ))
+    // Coalescing folds a keystroke into the query it was an early spelling of,
+    // and it folds only within one scope — so a box that types has to say who
+    // is typing, or two operators' panels fold into each other's queries. A
+    // deliberate API call is one event and has nothing to fold with.
+    let origin: crate::store::feedback::Origin = if typing {
+        door.by(id.subject)
+    } else {
+        door.into()
+    };
+    Ok(Json(st.core.search(&query, origin).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -471,6 +689,7 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
+        .route("/corpora/upload", post(upload))
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
@@ -489,7 +708,7 @@ pub fn api_router() -> Router<AppState> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -500,7 +719,15 @@ mod tests {
     }
 
     pub async fn app_token_and_core() -> (axum::Router, String, crate::core::Core) {
-        let core = crate::core::test_support::test_core().await;
+        app_from_core(crate::core::test_support::test_core().await).await
+    }
+
+    /// Wrap a core a test has already adjusted — feedback switched on, say —
+    /// in the real router. Factored out rather than duplicated so there stays
+    /// one way to build a test app, and it is the one the binary builds.
+    pub async fn app_from_core(
+        core: crate::core::Core,
+    ) -> (axum::Router, String, crate::core::Core) {
         let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1")
             .await
             .unwrap();
@@ -553,6 +780,397 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     }
 
+    /// A minimal multipart body. Hand-rolled rather than pulling a builder in
+    /// for three tests.
+    /// `mime` of `None` omits the part's `Content-Type` header entirely, which
+    /// is legal and which a client may well do.
+    fn post_file(
+        uri: &str,
+        token: &str,
+        filename: &str,
+        mime: Option<&str>,
+        body: &[u8],
+    ) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let mut buf: Vec<u8> = Vec::new();
+        let typed = match mime {
+            Some(m) => format!("Content-Type: {m}\r\n"),
+            None => String::new(),
+        };
+        buf.extend_from_slice(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+                 {typed}\r\n"
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(format!("\r\n--{B}--\r\n").as_bytes());
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_extension_search_records_its_own_door() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+
+        let res = app
+            .oneshot(get(
+                "/api/v1/search?q=loop+device&door=extension",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        // A search from the panel is the least contaminated query there is:
+        // composed while reading, before anything came back. The judging page
+        // can only weigh it that way if the door says which it was.
+        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(doors, vec!["extension".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_search_from_the_panel_does_not_stamp_what_a_prefix_matched() {
+        // The extension's panel is a search-as-you-type box: it debounces at
+        // 200ms, so "loop device" arrives as a run of its own prefixes. If
+        // those mark, every artifact "loo" happened to match gets its
+        // `last_seen_at` stamped — the field `resurface` reads — and typing
+        // quietly drains the forgotten-artifact feature and empties the stale
+        // list. `src/web/ui.rs` opts out for this reason; so must this door.
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "the loop device is what makes this work".into(),
+                    corpus_span: None,
+                    title: Some("loop".into()),
+                    category: Some("note".into()),
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        for c in &made {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+
+        let (app, token, core) = app_from_core(core).await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=loo&door=extension", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert_eq!(
+            stamped, 0,
+            "typing in the panel must not stamp last_seen_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_api_search_still_counts_as_seeing() {
+        // The other half of the rule above: an API call is one question asked
+        // on purpose, and it must go on marking what it showed.
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "the loop device is what makes this work".into(),
+                    corpus_span: None,
+                    title: Some("loop".into()),
+                    category: Some("note".into()),
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        for c in &made {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+
+        let (app, token, core) = app_from_core(core).await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=loop+device", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        let stamped = core
+            .vectors
+            .resurface(10, i64::MAX, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.payload.last_seen_at.is_some())
+            .count();
+        assert!(stamped > 0, "a deliberate search still counts as seeing");
+    }
+
+    #[tokio::test]
+    async fn a_client_cannot_claim_a_door_that_would_launder_its_query() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+
+        // `ask` and `judge` are never captured, so naming one would be a way
+        // to have a contaminated query recorded as a clean one — or to have a
+        // real one silently dropped.
+        let res = app
+            .oneshot(get("/api/v1/search?q=loop+device&door=judge", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(doors, vec!["api".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_filename_becomes_the_title_hint() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "mounting-notes.txt",
+                Some("text/plain"),
+                b"alpha para\n\nbeta para",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.title_hint.as_deref(), Some("mounting-notes.txt"));
+        assert_eq!(src.origin, "upload");
+        assert_eq!(src.source_url, None);
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_is_not_utf8_is_refused() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "notes.txt",
+                Some("text/plain"),
+                &[0xff, 0xfe, 0x00, 0x41],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_upload_of_the_wrong_type_is_refused_with_the_reason() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "notes.pdf",
+                Some("application/pdf"),
+                b"%PDF-1.7",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = json_of(res).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(msg.contains("application/pdf"), "got {msg}");
+    }
+
+    #[tokio::test]
+    async fn an_upload_with_no_declared_type_is_judged_by_its_name() {
+        // A multipart part may legally carry no `Content-Type`, and treating
+        // that as "fine" turned the `.txt` door into "anything that decodes as
+        // UTF-8": a `.csv`, a `.json`, a page of HTML.
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "rows.csv",
+                None,
+                b"id,name\n1,alpha\n2,beta",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+
+        // Named `.txt` and nothing else to go on: accepted, as before.
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "NOTES.TXT",
+                None,
+                b"alpha para\n\nbeta para",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn only_a_supplied_fragment_is_exempt_from_the_extraction_floor() {
+        // `scope: "selection"` exempts a highlighted fragment, because three
+        // sentences picked out on purpose are a real capture. There is no
+        // selection in a server-side fetch, though — so on the `url` path the
+        // claim is only a way to switch off the guard that catches a login
+        // wall, and it must not be honoured there.
+        let req = |html: Option<&str>, url: Option<&str>, scope: Option<&str>| {
+            serde_json::from_value::<super::IngestRequest>(serde_json::json!({
+                "html": html,
+                "url": url,
+                "scope": scope,
+            }))
+            .unwrap()
+        };
+
+        assert!(super::floor_exempt(&req(
+            Some("<p>three sentences</p>"),
+            Some("https://example.test/a"),
+            Some("selection"),
+        )));
+        assert!(!super::floor_exempt(&req(
+            None,
+            Some("https://example.test/a"),
+            Some("selection"),
+        )));
+        assert!(!super::floor_exempt(&req(
+            Some("<p>a whole page</p>"),
+            None,
+            None
+        )));
+    }
+
+    #[tokio::test]
+    async fn capture_accepts_exactly_one_of_text_html_or_url() {
+        let (app, token) = app_and_token().await;
+
+        let long = "<html><body><article><h2>Loop devices</h2><p>".to_string()
+            + &"the article body has to clear the extraction floor, so it says \
+                rather more than it needs to. "
+                .repeat(6)
+            + "</p></article></body></html>";
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": long }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"text": "a", "url": "https://example.test/"}),
+            serde_json::json!({"text": "a", "html": "<p>b</p>"}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/v1/corpora", &token, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "accepted {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_html_capture_records_its_url_as_provenance_not_as_origin() {
+        let (app, token, core) = app_token_and_core().await;
+        let html = "<html><body><article><h2>Mounting</h2><p>".to_string()
+            + &"read-only until you have a hash of the source image. ".repeat(8)
+            + "</p></article></body></html>";
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": html, "url": "https://example.test/notes" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.origin, "extension");
+        assert_eq!(
+            src.source_url.as_deref(),
+            Some("https://example.test/notes")
+        );
+        // Extraction, not the raw HTML: nothing downstream learns HTML exists.
+        assert!(
+            src.raw_text.contains("## Mounting"),
+            "got: {}",
+            src.raw_text
+        );
+        assert!(!src.raw_text.contains("<article>"));
+    }
+
+    #[tokio::test]
+    async fn a_page_that_extracts_to_nothing_is_refused_and_stores_no_corpus() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": "<html><body><p>Subscribe to read.</p></body></html>" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn every_api_route_rejects_an_unauthenticated_request() {
         // A missing auth check on one route is the failure mode that matters
@@ -563,6 +1181,7 @@ mod tests {
             ("GET", "/api/v1/resurface"),
             ("GET", "/api/v1/corpora"),
             ("POST", "/api/v1/corpora"),
+            ("POST", "/api/v1/corpora/upload"),
             ("GET", "/api/v1/corpora/abc"),
             ("DELETE", "/api/v1/corpora/abc"),
             ("POST", "/api/v1/corpora/abc/reprocess"),
@@ -688,6 +1307,75 @@ mod tests {
         let second = json_of(res).await;
         assert_eq!(first["id"], second["id"]);
         assert_eq!(second["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn a_source_url_is_refused_unless_it_is_one_a_page_is_read_over() {
+        // `Url::parse` accepts these, and `html` plus `url` never reaches the
+        // scheme allowlist in `fetch_html`. What is stored here is rendered
+        // as a link on the corpus page, in the operator's own session.
+        let (app, token) = app_and_token().await;
+        for bad in [
+            "javascript:fetch('/api/v1/tokens')",
+            "data:text/html,<script>1</script>",
+            "file:///etc/passwd",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    "/api/v1/corpora",
+                    &token,
+                    serde_json::json!({"html":"<article><p>a body</p></article>","url":bad}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "accepted {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selection_is_not_held_to_the_whole_page_extraction_floor() {
+        // The floor is a guess about whole pages: too little text out of one
+        // means a login wall or an empty shell. A fragment the operator
+        // highlighted and asked for by name means neither, and refusing it —
+        // with a message about login walls, no less — refuses the capture
+        // that was requested.
+        let (app, token) = app_and_token().await;
+        let short = "<p>The loop device is what makes this work.</p>";
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":short,"scope":"selection"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "selection refused");
+
+        // The same fragment without the scope is still held to the floor.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":short}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // And a selection that extracted to nothing at all is still an error,
+        // rather than an empty corpus stored in silence.
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":"<div></div>","scope":"selection"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -397,6 +397,7 @@ mod startup_tests {
             },
             consolidate: ConsolidateConfig::default(),
             feedback: FeedbackConfig::default(),
+            capture: CaptureConfig::default(),
             pacing: engram::config::PacingConfig::default(),
         }
     }

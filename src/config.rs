@@ -14,6 +14,38 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     #[serde(default)]
     pub pacing: PacingConfig,
+    #[serde(default)]
+    pub capture: CaptureConfig,
+}
+
+/// What the two supplied-from-outside capture paths are allowed to cost.
+///
+/// The fetch limits are deliberately separate from `MAX_BODY_BYTES`: that one
+/// bounds what a client may send us, and says nothing about what we go and
+/// retrieve on their behalf.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct CaptureConfig {
+    /// Ceiling on a server-side GET. Generous, but it is a network fetch and
+    /// not a local model call, so it is not measured in minutes.
+    pub fetch_timeout_secs: u64,
+    /// Bytes read from a fetched URL before the transfer is abandoned.
+    pub fetch_max_bytes: usize,
+    /// Characters an extraction must yield to count as a capture. Below this,
+    /// the page reduced to navigation and boilerplate: report it, store
+    /// nothing. A corpus that silently holds a cookie banner instead of the
+    /// document is the failure this whole path is shaped to prevent.
+    pub min_extracted_chars: usize,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            fetch_timeout_secs: 30,
+            fetch_max_bytes: 8 * 1024 * 1024,
+            min_extracted_chars: 200,
+        }
+    }
 }
 
 /// Pacing for every inference call, not just synthesis.
@@ -533,6 +565,22 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn the_capture_defaults_are_the_documented_ones() {
+        let c = CaptureConfig::default();
+        assert_eq!(c.fetch_timeout_secs, 30);
+        assert_eq!(c.fetch_max_bytes, 8 * 1024 * 1024);
+        // The floor below which extraction is reported as a failure rather
+        // than stored as a corpus.
+        assert_eq!(c.min_extracted_chars, 200);
+    }
+
+    #[test]
+    fn the_example_config_carries_the_capture_block() {
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert_eq!(cfg.capture.min_extracted_chars, 200);
     }
 
     #[test]

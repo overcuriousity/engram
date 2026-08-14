@@ -1,0 +1,119 @@
+/* The core UI's register: no chrome around the content, one accent, and a
+   dark mode that follows the browser rather than a setting nobody would find
+   in a side panel. */
+:root {
+  --bg: #fff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #2f6f4f;
+  --danger: #b3261e;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --line: #2a2e35;
+    --accent: #7fb69a;
+    --danger: #f2b8b5;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` is a presentation hint and loses to any `display` rule, and the
+   two things that toggle in this panel both set one. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  padding: .75rem;
+}
+
+label {
+  color: var(--muted);
+  font-size: .8rem;
+}
+
+input,
+button {
+  width: 100%;
+  padding: .5rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  cursor: pointer;
+}
+
+#pairing {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: .75rem;
+}
+
+/* Not a call to action. Unpairing is something you go looking for, not
+   something to hit while reaching for Capture. */
+button.quiet {
+  margin-top: .5rem;
+  padding: .25rem 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: .8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+#status {
+  margin: 0;
+  color: var(--muted);
+  font-size: .85rem;
+}
+
+#status.error { color: var(--danger); }
+
+.hit {
+  border-top: 1px solid var(--line);
+  padding: .5rem 0;
+}
+
+.hit h3 {
+  margin: 0 0 .15rem;
+  font-size: .9rem;
+}
+
+.hit a { color: inherit; }
+
+.hit p {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* The answer, above the artifacts it was drawn from. Not muted: it is the
+   thing that was asked for, and the sources under it are the evidence. */
+.answer {
+  margin: 0 0 .5rem;
+  white-space: pre-wrap;
+}

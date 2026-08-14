@@ -25,6 +25,12 @@ pub enum Door {
     /// captured: those queries are composed in full knowledge of the answer,
     /// which is exactly the contamination this whole feature exists to avoid.
     Judge,
+    /// A search made from the browser extension, usually over a selection on
+    /// the page being read. Recorded like `Ui` and `Api`, and distinguished
+    /// from them because it is the strongest uncontaminated query there is:
+    /// composed before anything came back, about text the operator is looking
+    /// at rather than text engram showed them.
+    Extension,
     /// The retrieval behind `ask`. Never captured either, for a different
     /// reason: its right answer is a synthesis across several artifacts, so
     /// "which one was it" has no well-defined meaning to judge.
@@ -37,13 +43,27 @@ impl Door {
             Door::Ui => "ui",
             Door::Api => "api",
             Door::Mcp => "mcp",
+            Door::Extension => "extension",
             Door::Judge => "judge",
             Door::Ask => "ask",
         }
     }
 
     pub fn captured(&self) -> bool {
-        matches!(self, Door::Ui | Door::Api | Door::Mcp)
+        matches!(self, Door::Ui | Door::Api | Door::Mcp | Door::Extension)
+    }
+
+    /// The door a client is allowed to claim for itself.
+    ///
+    /// Only `extension`. Everything else falls back to `Api`, because a client
+    /// that could name `Ask` or `Judge` could mark a contaminated query as a
+    /// clean one — or have a real one silently dropped — which is the exact
+    /// thing the judging loop exists to prevent.
+    pub fn from_client(raw: &str) -> Door {
+        match raw {
+            "extension" => Door::Extension,
+            _ => Door::Api,
+        }
     }
 }
 
@@ -124,10 +144,12 @@ impl Store {
     /// it. What survives is the final wording: the query that was actually
     /// meant, asked once.
     ///
-    /// Only the UI folds, and only within one `scope`. A keystroke burst is
-    /// something a text box produces; a call through the API or MCP is a
-    /// deliberate query, and an agent narrowing one search into a longer one
-    /// made two decisions worth judging separately.
+    /// Only text boxes fold, and only within one `scope`. That is the web UI's
+    /// search field and the browser extension's panel, both of which search as
+    /// you type — the panel debounces at 200ms, so one query still arrives as
+    /// several. A call through the API or MCP is a deliberate query, and an
+    /// agent narrowing one search into a longer one made two decisions worth
+    /// judging separately.
     pub async fn record_search(&self, ev: NewEvent, coalesce_secs: i64) -> Result<String> {
         // One capture at a time. Two of these overlapping would read the same
         // previous event and both try to upgrade to a write, which fails
@@ -140,7 +162,7 @@ impl Store {
         // `scope IS ?` rather than `=`, so a UI event recorded without a
         // subject still finds its own predecessor instead of matching nothing.
         let prev = match ev.door {
-            Door::Ui => {
+            Door::Ui | Door::Extension => {
                 sqlx::query(
                     "SELECT id, query, created_at,
                             (SELECT COUNT(*) FROM search_candidates
@@ -650,6 +672,26 @@ mod tests {
         scoped(query, door, None)
     }
 
+    #[test]
+    fn only_the_extension_may_name_its_own_door() {
+        // The door is how a search is weighted later, so a client that could
+        // name any of them could label an `ask` retrieval as a deliberate
+        // query and quietly poison the eval set.
+        assert!(matches!(Door::from_client("extension"), Door::Extension));
+        for other in ["ui", "judge", "ask", "mcp", "", "nonsense"] {
+            assert!(
+                matches!(Door::from_client(other), Door::Api),
+                "client named {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extension_search_is_captured_like_a_ui_one() {
+        assert!(Door::Extension.captured());
+        assert_eq!(Door::Extension.as_str(), "extension");
+    }
+
     fn scoped(query: &str, door: Door, scope: Option<&str>) -> NewEvent {
         NewEvent {
             query: query.into(),
@@ -730,6 +772,23 @@ mod tests {
             store.record_search(ev(q, Door::Ui), 15).await.unwrap();
         }
         assert_eq!(queries(&store).await, vec!["datenträger nicht erkannt"]);
+    }
+
+    #[tokio::test]
+    async fn a_typing_burst_in_the_extension_panel_collapses_the_same_way() {
+        // The panel searches as you type and debounces at 200ms, so one query
+        // reaches here as several. Left unfolded, every prefix fragment would
+        // become its own row waiting to be judged — the eval set filling with
+        // half-words is exactly what folding exists to prevent, and the door
+        // it arrived through does not change that.
+        let store = Store::memory().await.unwrap();
+        for q in ["loop", "loop dev", "loop device"] {
+            store
+                .record_search(ev(q, Door::Extension), 15)
+                .await
+                .unwrap();
+        }
+        assert_eq!(queries(&store).await, vec!["loop device"]);
     }
 
     #[tokio::test]

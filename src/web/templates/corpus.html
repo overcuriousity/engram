@@ -17,6 +17,22 @@
   </form>
 </div>
 
+{% if let Some(u) = source_url %}
+{# The one hop back to where this was read. A link, not text: a URL you
+   cannot click is a URL you retype.
+
+   Only over http and https. Ingest refuses anything else, and this is the
+   second half of that: escaping keeps a `javascript:` URL inside the
+   attribute, it does not stop the attribute from working, and this page is
+   rendered in the operator's authenticated session. A row that predates the
+   check reads as text rather than as something to press. #}
+{% if u.starts_with("https://") || u.starts_with("http://") %}
+<p class="muted">From <a href="{{ u }}" rel="noreferrer noopener">{{ u }}</a></p>
+{% else %}
+<p class="muted">From {{ u }}</p>
+{% endif %}
+{% endif %}
+
 {% if restored %}
 <div class="flag" role="status">
   <div aria-hidden="true">⚠</div>

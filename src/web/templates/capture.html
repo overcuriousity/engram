@@ -21,6 +21,14 @@
      the same rule the search box follows. #}
   <textarea class="textarea" name="text" placeholder="Paste anything worth keeping."></textarea>
   <p id="size-hint" class="muted" hidden></p>
+  {# A drop target rather than a second page. The file goes to the API
+     endpoint, not through this form, because the form posts a urlencoded body
+     and this one is multipart. #}
+  <label class="row muted" id="drop"
+         style="border:1px dashed var(--line);padding:.6rem;border-radius:.4rem">
+    <input type="file" name="file" accept=".txt,text/plain" hidden>
+    <span>…or drop a <code>.txt</code> file here.</span>
+  </label>
   <div class="row">
     <button class="btn btn-accent" type="submit">Capture</button>
     <span class="spinner">saving…</span>
@@ -61,6 +69,43 @@
       hint.textContent = 'About ' + segments + ' segments — roughly ' + segments +
         ' model calls before this is searchable.';
     });
+
+    var drop = document.getElementById('drop');
+    var picker = drop && drop.querySelector('input[type=file]');
+    function send(file) {
+      if (!file) return;
+      var payload = new FormData();
+      payload.append('file', file);
+      // The session cookie authenticates this: it is same-origin, so no token
+      // is involved.
+      fetch('/api/v1/corpora/upload', { method: 'POST', body: payload })
+        // Not every failure answers in JSON. A file over the 8 MB body limit
+        // is rejected by the framework before the handler sees it, and that
+        // reply is plain text — parsing it threw, and with nothing catching
+        // the throw the drop zone sat there having visibly done nothing.
+        .then(function (r) {
+          return r.json()
+            .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
+            .then(function (j) { return [r.ok, j]; });
+        })
+        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
+        .then(function (pair) {
+          var result = document.getElementById('capture-result');
+          // The server's reason, verbatim. A generic "upload failed" would
+          // hide the two things that actually go wrong here: wrong type and
+          // wrong encoding.
+          result.textContent = pair[0] ? 'Captured.' : (pair[1].error || 'Upload failed.');
+          if (pair[0]) htmx.trigger(document.body, 'captured');
+        });
+    }
+    if (drop) {
+      picker.addEventListener('change', function () { send(picker.files[0]); });
+      drop.addEventListener('dragover', function (e) { e.preventDefault(); });
+      drop.addEventListener('drop', function (e) {
+        e.preventDefault();
+        send(e.dataTransfer.files[0]);
+      });
+    }
   })();
 </script>
 {% endblock %}

@@ -51,6 +51,43 @@ pub enum NearDupeAction {
     Discard,
 }
 
+/// One capture, whichever door it arrived through.
+///
+/// A struct rather than four positional arguments: `origin` and `source_url`
+/// are two different facts about the same event, and every existing caller
+/// that has nothing to say about the second should not have to say `None`.
+#[derive(Debug, Clone)]
+pub struct Capture {
+    pub text: String,
+    /// The channel: `web`, `mcp`, `extension`, `fetch`, `upload`.
+    pub origin: String,
+    pub title_hint: Option<String>,
+    /// Where the text was read. Provenance, never an instruction: nothing
+    /// downstream ever fetches this.
+    pub source_url: Option<String>,
+}
+
+impl Capture {
+    pub fn new(text: impl Into<String>, origin: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            origin: origin.into(),
+            title_hint: None,
+            source_url: None,
+        }
+    }
+
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title_hint = title;
+        self
+    }
+
+    pub fn with_source_url(mut self, url: Option<String>) -> Self {
+        self.source_url = url;
+        self
+    }
+}
+
 impl Core {
     /// Store the text and queue processing. Deliberately makes no inference
     /// call: capture must stay instant and must survive a dead endpoint.
@@ -60,6 +97,15 @@ impl Core {
         origin: &str,
         title_hint: Option<&str>,
     ) -> Result<IngestOutcome> {
+        self.ingest_capture(Capture::new(text, origin).with_title(title_hint.map(str::to_string)))
+            .await
+    }
+
+    /// The same thing, for a door that also knows where the text was read.
+    pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
+        let text = c.text.as_str();
+        let origin = c.origin.as_str();
+        let title_hint = c.title_hint.as_deref();
         if text.trim().is_empty() {
             return Err(Error::Validation("text is empty".into()));
         }
@@ -84,7 +130,7 @@ impl Core {
 
         let src = match self
             .store
-            .insert_corpus_with_signature(text, origin, title_hint, sig)
+            .insert_corpus_with_signature(text, origin, title_hint, sig, c.source_url.as_deref())
             .await?
         {
             Insertion::Created(src) => src,
@@ -712,6 +758,34 @@ mod tests {
     use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    #[tokio::test]
+    async fn a_capture_remembers_where_it_came_from() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(
+                crate::core::ingest::Capture::new("alpha para\n\nbeta para", "extension")
+                    .with_source_url(Some("https://example.test/notes".into())),
+            )
+            .await
+            .unwrap();
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        // The channel and the location are two different facts. Overloading
+        // one with the other loses the channel and leaves the URL unqueryable.
+        assert_eq!(src.origin, "extension");
+        assert_eq!(
+            src.source_url.as_deref(),
+            Some("https://example.test/notes")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_capture_has_no_source_url() {
+        let core = test_core().await;
+        let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.source_url, None);
+    }
 
     /// A body long enough to have a stable shingle signature.
     fn manual(marker: &str) -> String {

@@ -27,6 +27,13 @@ pub enum Error {
     Store(String),
     #[error("malformed llm output: {0}")]
     MalformedLlmOutput(String),
+    /// This server broke, and no amount of fixing the request will help. Kept
+    /// apart from `Validation` so that a panic in a parser fed a hostile page
+    /// is not reported to the caller as "your input was malformed": the two
+    /// need different status codes, and a 400 hides a crash from every log
+    /// that watches for 5xx.
+    #[error("internal: {0}")]
+    Internal(String),
 }
 
 impl Error {
@@ -50,7 +57,9 @@ impl Error {
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Forbidden => StatusCode::FORBIDDEN,
             Error::Inference { .. } | Error::Vector(_) => StatusCode::BAD_GATEWAY,
-            Error::Store(_) | Error::MalformedLlmOutput(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -61,6 +70,7 @@ impl Error {
         match self {
             Error::Store(_) => "internal error".into(),
             Error::MalformedLlmOutput(_) => "internal error".into(),
+            Error::Internal(_) => "internal error".into(),
             other => other.to_string(),
         }
     }

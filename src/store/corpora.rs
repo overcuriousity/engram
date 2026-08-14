@@ -89,6 +89,9 @@ pub struct Corpus {
     /// Both cleared when an operator chooses to keep both.
     pub near_dupe_of: Option<String>,
     pub near_dupe_score: Option<f64>,
+    /// The page this was captured from, for the two doors that know one.
+    /// `None` for a paste, an upload or an MCP capture.
+    pub source_url: Option<String>,
     /// Set when this row is a placeholder for a corpus that was never captured
     /// here — its artifacts came back from the vector store and needed a parent
     /// to hang from. `raw_text` is then those artifacts joined, not the source
@@ -126,6 +129,7 @@ fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
             .unwrap_or_default(),
         near_dupe_of: r.get("near_dupe_of"),
         near_dupe_score: r.get("near_dupe_score"),
+        source_url: r.get("source_url"),
         restored_at: r.get("restored_at"),
     }
 }
@@ -139,7 +143,7 @@ impl Store {
     ) -> Result<Corpus> {
         let sig = super::shingle::signature(raw_text);
         Ok(self
-            .insert_corpus_with_signature(raw_text, origin, title_hint, sig)
+            .insert_corpus_with_signature(raw_text, origin, title_hint, sig, None)
             .await?
             .into_corpus())
     }
@@ -163,6 +167,7 @@ impl Store {
         origin: &str,
         title_hint: Option<&str>,
         shingles: Vec<u64>,
+        source_url: Option<&str>,
     ) -> Result<Insertion> {
         let src = Corpus {
             id: new_id(),
@@ -177,12 +182,13 @@ impl Store {
             shingles,
             near_dupe_of: None,
             near_dupe_score: None,
+            source_url: source_url.map(str::to_string),
             // A capture, not a placeholder. See `ensure_restored_corpus`.
             restored_at: None,
         };
         let res = sqlx::query(
-            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, source_url)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(content_hash) DO NOTHING",
         )
         .bind(&src.id)
@@ -194,6 +200,7 @@ impl Store {
         .bind(src.created_at)
         .bind(src.updated_at)
         .bind(super::shingle::encode(&src.shingles))
+        .bind(&src.source_url)
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
@@ -470,11 +477,11 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let sig = super::super::shingle::signature("the same text");
         let first = s
-            .insert_corpus_with_signature("the same text", "web", None, sig.clone())
+            .insert_corpus_with_signature("the same text", "web", None, sig.clone(), None)
             .await
             .unwrap();
         let second = s
-            .insert_corpus_with_signature("the same text", "mcp", Some("later"), sig)
+            .insert_corpus_with_signature("the same text", "mcp", Some("later"), sig, None)
             .await
             .unwrap();
 

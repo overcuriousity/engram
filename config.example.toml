@@ -235,3 +235,20 @@ cooldown_secs = 0
 # too; a call that succeeds closes it.
 breaker_after = 3
 breaker_probe_secs = 60
+
+[capture]
+# The upload, paste-a-link and extension doors.
+#
+# Seconds a server-side GET may take. This is a network fetch, not a model
+# call, so it is not measured in minutes.
+fetch_timeout_secs = 30
+# Bytes read from a fetched URL before the transfer is abandoned. Separate
+# from the 8 MB request-body limit: that one bounds what you send engram,
+# this one bounds what engram goes and gets.
+fetch_max_bytes = 8388608
+# Characters an extraction must yield to count as a capture. A page that
+# reduces to less than this was a login wall or a cookie banner, and is
+# reported as a failure rather than stored. Fidelity outranks convenience:
+# a corpus that quietly holds the subscribe prompt instead of the article is
+# worse than no capture at all.
+min_extracted_chars = 200

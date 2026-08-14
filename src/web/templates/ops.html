@@ -149,6 +149,13 @@
 <p class="muted">Nothing deprecated, nothing hidden, nothing waiting on a decision, nothing retrying.</p>
 {% endif %}
 
+<h3>Browser extension</h3>
+{# The extension mints its own token through /ui/pair, so it needs nothing
+   from the form below. Listed here because this is where the tokens it
+   creates show up. #}
+<p><a href="/extension/install">Install it</a> — capture the page you are
+reading, and search from a panel beside it.</p>
+
 <h3>API tokens</h3>
 <div id="token-result"></div>
 <form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"

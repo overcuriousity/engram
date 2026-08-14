@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+{% block title %}Pair the extension — engram{% endblock %}
+{% block content %}
+<h2>Pair the extension</h2>
+{# The origin is stated because it is the one thing the operator can check:
+   the extension will ask the browser for permission to reach exactly this
+   host, and nothing else. #}
+<p>This gives the browser extension a token for <strong>{{ origin }}</strong>.</p>
+{% if signed_in %}
+<form method="post" action="/ui/pair">
+  <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+  <input type="hidden" name="state" value="{{ state }}">
+  <button class="btn btn-accent" type="submit">Pair</button>
+</form>
+<p class="muted">You can revoke it any time under Housekeeping → API tokens.</p>
+{% else %}
+{# This window belongs to the browser's auth flow, and it cannot be sent
+   through sign-in and back: the login redirect carries no return path, so it
+   would land on the search page and the flow would never reach the extension.
+   Signing in happens in an ordinary tab instead — the session cookie is the
+   same one — and then this page is asked for again. #}
+<p>You are not signed in to engram in this window, so there is no account to
+  mint a token for.</p>
+<ol>
+  <li><a href="/auth/login" target="_blank" rel="noopener">Sign in to engram
+      in a new tab</a>, then come back here.</li>
+  <li>
+    <form method="get" action="/ui/pair">
+      <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+      <input type="hidden" name="state" value="{{ state }}">
+      <button class="btn btn-accent" type="submit">I have signed in — continue</button>
+    </form>
+  </li>
+</ol>
+{% endif %}
+{% endblock %}

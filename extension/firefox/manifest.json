@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "engram",
+  "version": "0.1.0",
+  "description": "Capture what you are reading into engram, and search it from here.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "engram@localhost",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage",
+    "identity"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "scripts": ["shared/shim.js", "shared/background.js"] },
+  "icons": {
+    "16": "shared/icon-16.png",
+    "32": "shared/icon-32.png",
+    "48": "shared/icon-48.png",
+    "128": "shared/icon-128.png"
+  },
+  "sidebar_action": {
+    "default_panel": "shared/panel.html",
+    "default_title": "engram",
+    "default_icon": {
+      "16": "shared/icon-16.png",
+      "32": "shared/icon-32.png"
+    }
+  },
+  "action": {
+    "default_title": "engram",
+    "default_icon": {
+      "16": "shared/icon-16.png",
+      "32": "shared/icon-32.png",
+      "48": "shared/icon-48.png",
+      "128": "shared/icon-128.png"
+    }
+  },
+  "omnibox": { "keyword": "eg" }
+}

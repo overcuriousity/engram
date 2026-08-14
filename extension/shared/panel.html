@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>engram</title>
+<link rel="stylesheet" href="panel.css">
+<main>
+  <!-- Shown only while unpaired. A form rather than a `prompt()`, because
+       `permissions.request` is only granted while the browser still counts a
+       click as a user gesture: pairing has to end at a button, and a prompt
+       spends the gesture that opened it. -->
+  <section id="pairing" hidden>
+    <label for="origin">engram address</label>
+    <input id="origin" type="url" placeholder="https://engram.example" autocomplete="off">
+    <button id="pair" class="primary" type="button">Pair</button>
+  </section>
+
+  <button id="capture" class="primary">Capture this page</button>
+  <p id="status" hidden></p>
+
+  <label for="q">Search</label>
+  <input id="q" type="search" autocomplete="off">
+
+  <label for="ask">Ask</label>
+  <form id="ask-form"><input id="ask" type="text" autocomplete="off"></form>
+
+  <div id="results"></div>
+
+  <button id="forget" class="quiet" type="button" hidden>Forget this deployment</button>
+</main>
+<script src="shim.js"></script>
+<script src="api.js"></script>
+<script src="pair.js"></script>
+<script src="panel.js"></script>
