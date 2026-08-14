@@ -88,6 +88,21 @@ one that has to be in the header.
 - [ ] Capture the same page twice.
       Expected: the second says it is already captured, or names the
       near-duplicate it matched.
+- [ ] Open the panel from the toolbar on one tab, switch to another, press
+      "Capture this page".
+      Expected: a permission prompt asking to read pages, and then the
+      capture. `activeTab` covers only the tab the opening click happened in,
+      and a side panel outlives that tab — so the panel asks once for a real
+      host permission. Declining is not a crash: the line reads "engram cannot
+      read this tab", naming the context-menu route, not the browser's
+      "Cannot access contents of the page".
+- [ ] Right-click an ordinary page (nothing selected) → "Capture this page".
+      Expected: the same capture, with no permission prompt ever. A
+      context-menu click is a gesture on that tab, so `activeTab` covers it;
+      this is the route that works without granting anything.
+- [ ] Press Forget, then Capture again.
+      Expected: the read-pages permission was handed back with the token, so
+      the prompt appears again.
 
 ### 4. Search and ask
 
@@ -115,6 +130,11 @@ one that has to be in the header.
       The panel has to register its message listener before the background
       script sends work; `shared/background.js` holds the work and the panel
       asks for it on load, so a just-opened panel must not miss the first one.
+- [ ] Same again, and count what happened: exactly one capture and one search
+      event, never two. The parked work and the direct message are two routes
+      to the same panel, and whichever arrives first has to take the work off
+      the other — a second delivery would store the capture twice and record
+      the query as two searches with two embeddings behind them.
 
 ### 6. Failure paths
 

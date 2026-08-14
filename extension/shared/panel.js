@@ -98,9 +98,50 @@ $('forget').addEventListener('click', async () => {
   if (cfg) {
     await engramShim.permissions.remove({ origins: [cfg.origin + '/*'] }).catch(() => {});
   }
+  // And the permission to read pages, for the same reason: with no deployment
+  // to send a capture to, being able to read every page is access held for
+  // nothing. It is asked for again the next time Capture needs it.
+  await engramShim.permissions.remove({ origins: ALL_HOSTS }).catch(() => {});
+  hasAllHosts = false;
   $('results').textContent = '';
   say('Forgotten. The token is still listed under Housekeeping until revoked.');
   await reflectPairing();
+});
+
+/// Reading a page needs either `activeTab` or a host permission for it.
+///
+/// `activeTab` is granted for the tab the invoking gesture happened in and for
+/// no other. A context menu entry therefore always has it, and the panel only
+/// has it for the tab it was opened from — but a side panel stays open across
+/// tab switches, so by the time Capture is pressed the operator is very often
+/// somewhere else, and the injection fails with a browser error the panel had
+/// no business showing raw.
+///
+/// The way out is a real host permission, which the manifest declares as
+/// optional and which is asked for once. Both are tracked here so the click
+/// handler can decide whether to ask *before* it awaits anything: like
+/// pairing, `permissions.request` is only granted while the click still counts
+/// as a user gesture, and awaiting first spends it.
+const ALL_HOSTS = ['https://*/*', 'http://*/*'];
+let hasAllHosts = false;
+let openedForTabId = null;
+let tabChanged = false;
+
+engramShim.permissions
+  .contains({ origins: ALL_HOSTS })
+  .then((ok) => { hasAllHosts = ok; })
+  .catch(() => {});
+
+engramShim.tabs
+  .query({ active: true, currentWindow: true })
+  .then(([tab]) => { openedForTabId = tab ? tab.id : null; })
+  .catch(() => {});
+
+// Only the id is read, which every browser gives without a permission — the
+// url would need one. Switching back to the tab the panel was opened from
+// restores the grant, so this is assigned rather than latched.
+engramShim.tabs.onActivated.addListener((info) => {
+  tabChanged = info.tabId !== openedForTabId;
 });
 
 /// Ask the active tab for its HTML, or for the selection's.
@@ -111,16 +152,25 @@ async function grab(scope) {
   const [tab] = await engramShim.tabs.query({ active: true, currentWindow: true });
   if (!tab) throw new Error('No page to capture.');
 
-  await engramShim.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (s) => { globalThis.__engramScope = s; },
-    args: [scope],
-  });
-  const [injected] = await engramShim.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['shared/content.js'],
-  });
-  return injected && injected.result;
+  try {
+    await engramShim.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (s) => { globalThis.__engramScope = s; },
+      args: [scope],
+    });
+    const [injected] = await engramShim.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['shared/content.js'],
+    });
+    return injected && injected.result;
+  } catch (e) {
+    // No grant for this tab, or a page no extension may read at all — a
+    // browser settings page, an add-on listing, a PDF viewer. "Cannot access
+    // contents of the page" is true and useless; this says what to do.
+    throw new Error(
+      'engram cannot read this tab. Right-click the page and choose ' +
+      '“Capture this page”, or allow engram to read pages when it asks.');
+  }
 }
 
 async function capture(scope) {
@@ -151,7 +201,21 @@ async function capture(scope) {
   }
 }
 
-$('capture').addEventListener('click', () => capture('page'));
+$('capture').addEventListener('click', async () => {
+  // First, and before anything is awaited. The panel is open on a tab it was
+  // not opened from and holds no host permission, so the injection is about to
+  // fail — asking now, while the click is still a user gesture, is the only
+  // moment the browser will honour the request. A refusal is not fatal: the
+  // capture goes ahead and `grab` reports what it could not read.
+  if (tabChanged && !hasAllHosts) {
+    try {
+      hasAllHosts = await engramShim.permissions.request({ origins: ALL_HOSTS });
+    } catch (e) {
+      // Some browsers throw rather than answering false. Same outcome.
+    }
+  }
+  await capture('page');
+});
 
 /// Render hits as rows linking back to the deployment.
 ///

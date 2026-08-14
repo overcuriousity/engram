@@ -22,6 +22,7 @@ shim.action.onClicked.addListener((tab) => {
 const MENU = {
   search: 'engram-search-selection',
   capture: 'engram-capture-selection',
+  page: 'engram-capture-page',
 };
 
 shim.runtime.onInstalled.addListener(() => {
@@ -34,6 +35,16 @@ shim.runtime.onInstalled.addListener(() => {
     id: MENU.capture,
     title: 'Capture selection',
     contexts: ['selection'],
+  });
+  // The whole-page twin of the panel's Capture button, and the one path to it
+  // that needs no host permission: a context-menu click is a gesture on the
+  // tab it happened in, so `activeTab` covers exactly that page. The panel's
+  // button cannot rely on that once the operator has switched tabs — see
+  // `panel.js` — so this is the route that always works.
+  shim.contextMenus.create({
+    id: MENU.page,
+    title: 'Capture this page',
+    contexts: ['page'],
   });
 });
 
@@ -67,15 +78,33 @@ async function handOver(work, tabId) {
   pendingWork = { work, at: Date.now() };
   try {
     await shim.openPanel(tabId);
-    await shim.runtime.sendMessage(work);
-    // Delivered to a panel that was already listening. Cleared only if this
-    // is still the work parked: a second entry pressed in between owns the
-    // spot now, and clearing it would drop that one instead.
-    if (pendingWork && pendingWork.work === work) pendingWork = null;
   } catch (e) {
-    // The panel had no listener yet and will ask on load, or it could not be
-    // opened at all. The parked copy covers the first case and expires out of
-    // the second.
+    // Chrome refuses to open a side panel outside a user gesture, which an
+    // omnibox entry may not count as. The panel may still be open already, so
+    // this is not the end of the attempt — the send below decides.
+  }
+
+  // Claim the work back before sending it. While `openPanel` was settling the
+  // panel may have finished loading, asked for what was parked and got it:
+  // `collect()` emptying the spot is the record that it did, and sending the
+  // same work again would run it twice — a capture stored twice over, an
+  // omnibox query recorded as two searches with two embeddings behind them.
+  //
+  // Taking the spot before the `await` rather than after is what makes this a
+  // handover instead of a second race: whoever empties it owns delivery, and
+  // the `pending` listener cannot run in between.
+  if (!pendingWork || pendingWork.work !== work) return;
+  pendingWork = null;
+
+  try {
+    await shim.runtime.sendMessage(work);
+  } catch (e) {
+    // No listener: the panel is not up yet and will ask on load. Park it again
+    // — but only if nothing newer took the spot in the meantime, because a
+    // second entry pressed since owns it now and stamping over it would drop
+    // that one instead. The fresh timestamp is deliberate; the TTL is about
+    // how long uncollected work may sit, and it has only just become that.
+    if (!pendingWork) pendingWork = { work, at: Date.now() };
   }
 }
 
@@ -95,6 +124,8 @@ shim.contextMenus.onClicked.addListener(async (info, tab) => {
     await handOver({ type: 'search', q: info.selectionText }, tab.id);
   } else if (info.menuItemId === MENU.capture) {
     await handOver({ type: 'capture', scope: 'selection' }, tab.id);
+  } else if (info.menuItemId === MENU.page) {
+    await handOver({ type: 'capture', scope: 'page' }, tab.id);
   }
 });
 

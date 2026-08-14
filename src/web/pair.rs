@@ -92,6 +92,9 @@ struct PairTemplate {
     origin: String,
     redirect_uri: String,
     state: String,
+    /// Whether this window has a session. `false` renders the way back in
+    /// rather than the Pair button; see `pair_page`.
+    signed_in: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -107,9 +110,19 @@ pub struct PairParams {
 /// A button rather than an automatic mint. The operator sees which origin they
 /// are pairing with and presses something; a flow that minted on page load
 /// would hand a token to anything that could get this URL opened.
+///
+/// `Option<Identity>` rather than `Identity`, because this page is opened
+/// inside `launchWebAuthFlow`'s own window and a 401 there is a dead end:
+/// `redirect_unauthenticated_browsers` rewrites it into `/auth/login?go=1`,
+/// which carries no return path, so signing in lands on `/ui/search` and the
+/// flow never reaches its redirect sink — `pair()` rejects with nothing the
+/// operator can act on. First run is exactly when there is no session, so that
+/// is the case that has to work. Rendered signed-out, the page says what is
+/// missing and offers the way back; minting still requires an `Identity`, on
+/// the POST.
 async fn pair_page(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Option<Identity>,
     headers: HeaderMap,
     Query(p): Query<PairParams>,
 ) -> Result<Response> {
@@ -124,6 +137,7 @@ async fn pair_page(
         origin: request_origin(&headers).unwrap_or_default(),
         redirect_uri: p.redirect_uri,
         state: p.state,
+        signed_in: id.is_some(),
     })
     .into_response())
 }
@@ -292,6 +306,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(id.subject, "user-1");
+    }
+
+    #[tokio::test]
+    async fn pairing_without_a_session_offers_the_way_back_instead_of_a_dead_end() {
+        // This page opens inside `launchWebAuthFlow`'s own window. A 401 there
+        // is rewritten into `/auth/login?go=1`, which carries no return path —
+        // so signing in lands on the search page, the flow never reaches its
+        // redirect sink, and `pair()` rejects with nothing to act on. First run
+        // is exactly the case with no session, so it has to render.
+        let (app, _token, _core) = crate::web::api::tests::app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/pair?redirect_uri=https%3A%2F%2Fabc.chromiumapp.org%2F&state=n1")
+                    .header("host", "engram.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("not signed in"), "got {html}");
+        // The state carries through, so continuing after sign-in resumes this
+        // flow rather than starting a new one.
+        assert!(html.contains("value=\"n1\""), "got {html}");
+        // And no button that would ask for a token there is nobody to mint for.
+        assert!(!html.contains(">Pair<"), "got {html}");
+
+        // Minting still needs an identity: the POST is unchanged.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/pair")
+                    .method("POST")
+                    .header("host", "engram.example")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "redirect_uri=https%3A%2F%2Fabc.chromiumapp.org%2F&state=n1",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

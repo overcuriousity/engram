@@ -10,12 +10,42 @@ use crate::error::{Error, Result};
 /// module exists to prevent. Cheaper and far more predictable than teaching
 /// the splitter a second heading syntax it would then have to carry through
 /// windowing and line numbering.
+///
+/// Fenced code is left exactly as it arrived. Inside a fence a `---` under a
+/// non-blank line is content — YAML front matter, a config snippet, a rule
+/// drawn in ASCII — and rewriting it would both invent a heading the document
+/// never had and *delete* the underline line, which is a stored artifact
+/// quietly differing from the page it was captured from.
 fn setext_to_atx(md: &str) -> String {
     let lines: Vec<&str> = md.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut fence: Option<&str> = None;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
+
+        // Fence state first, and nothing else happens on a fence line.
+        match fence {
+            Some(open) => {
+                // Only the marker that opened it closes it, so a ``` block
+                // quoting ~~~ does not end early.
+                if fence_marker(line) == Some(open) {
+                    fence = None;
+                }
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            None => {
+                if let Some(m) = fence_marker(line) {
+                    fence = Some(m);
+                    out.push(line.to_string());
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
         let next = lines.get(i + 1).copied().unwrap_or("");
         let underline = next.trim_end();
         // An underline only makes a heading of a non-blank line above it. A
@@ -42,6 +72,19 @@ fn setext_to_atx(md: &str) -> String {
         }
     }
     out.join("\n")
+}
+
+/// The fence marker a line opens or closes a code block with, if any.
+///
+/// Up to three leading spaces, per CommonMark; a fourth makes it indented code
+/// instead — which needs no tracking here, because an indented `---` carries
+/// its indent into the all-dashes test below and fails it.
+fn fence_marker(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim_start();
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m))
 }
 
 /// Turn a rendered page into the markdown the segmenter wants.
@@ -182,6 +225,39 @@ mod tests {
     fn both_setext_levels_become_the_hashes_the_splitter_reads() {
         assert_eq!(setext_to_atx("Title\n====="), "# Title");
         assert_eq!(setext_to_atx("Section\n-----"), "## Section");
+    }
+
+    #[test]
+    fn a_rule_inside_a_code_block_is_left_exactly_as_it_arrived() {
+        // A captured page full of config snippets is the normal case, and a
+        // `---` in one is content: YAML front matter, a table rule, a divider
+        // drawn by hand. Promoting it invents a heading the document never had
+        // *and deletes the line*, so the stored artifact quietly differs from
+        // the page it came from.
+        let fenced = "before\n\n```yaml\nfoo\n---\nbar\n```\n\nafter";
+        assert_eq!(setext_to_atx(fenced), fenced);
+
+        let tilde = "~~~\ntitle\n===\n~~~";
+        assert_eq!(setext_to_atx(tilde), tilde);
+
+        // A ``` block quoting ~~~ is not closed by the quote.
+        let nested = "```\n~~~\nfoo\n---\n```\n\nSection\n---";
+        assert_eq!(
+            setext_to_atx(nested),
+            "```\n~~~\nfoo\n---\n```\n\n## Section"
+        );
+    }
+
+    #[test]
+    fn a_heading_after_a_code_block_is_still_promoted() {
+        // The fence tracking must not swallow the rest of the document: what
+        // the splitter needs is the headings, and a page with one snippet in
+        // it still has to hand them over.
+        let md = "```\ncode\n```\n\nRead-only first\n---\n\nbody";
+        assert_eq!(
+            setext_to_atx(md),
+            "```\ncode\n```\n\n## Read-only first\n\nbody"
+        );
     }
 
     #[test]

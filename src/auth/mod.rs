@@ -87,6 +87,26 @@ impl FromRequestParts<AppState> for Identity {
     }
 }
 
+/// `Option<Identity>` for the one page that has to render for a browser with
+/// no session rather than be bounced to a login it cannot come back from —
+/// see `src/web/pair.rs`. Only "no credentials" becomes `None`; a store
+/// failure while checking is still an error, because treating one as
+/// signed-out would silently show the signed-out page to someone who is not.
+impl axum::extract::OptionalFromRequestParts<AppState> for Identity {
+    type Rejection = Error;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        match <Identity as FromRequestParts<AppState>>::from_request_parts(parts, state).await {
+            Ok(id) => Ok(Some(id)),
+            Err(Error::Unauthorized) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
