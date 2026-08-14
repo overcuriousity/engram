@@ -221,6 +221,14 @@ pub(crate) async fn full_lifecycle_reconcile(core: &Core) -> Result<usize> {
 /// The above with its cap as a parameter, so a test can reproduce what the two
 /// truncated scans do to each other without seeding `DRIFT_SCAN` artifacts.
 pub(crate) async fn full_lifecycle_reconcile_scanning(core: &Core, scan: usize) -> Result<usize> {
+    // Under the same lock as every lifecycle transition. The scan reads the
+    // row side and the payload side at different moments and then writes
+    // payloads from the row snapshot; interleaved with a payload-first reveal
+    // it would write the stale hidden state back over the fresh payload —
+    // and, writing with no marker, leave nothing behind for the complete
+    // marker pass to find it by. The scan is capped at `scan`, so the hold is
+    // bounded.
+    let _guard = core.lifecycle_lock.lock().await;
     // Both scans are capped, and neither cap lines up with the other:
     // `list_non_active_artifacts` returns the newest rows while `non_active_ids`
     // scrolls in point-id order. So set membership across the two proves
@@ -280,7 +288,15 @@ pub(crate) async fn full_lifecycle_reconcile_scanning(core: &Core, scan: usize) 
             repaired = rows.len(),
             "lifecycle state disagreed between sqlite and the vector store"
         );
+        // Marked before the payload write, cleared only after it returns: an
+        // interrupted repair is then ordinary marked drift the next marker
+        // pass finishes, instead of a best-effort scan's private problem.
+        let repaired: Vec<String> = rows.iter().map(|r| r.artifact_id.clone()).collect();
+        for id in &repaired {
+            core.store.mark_lifecycle_dirty(id).await?;
+        }
         core.vectors.apply_lifecycle(&rows).await?;
+        core.store.clear_lifecycle_dirty(&repaired).await?;
     }
     Ok(rows.len())
 }
@@ -1366,6 +1382,34 @@ pub(crate) mod tests {
             full_lifecycle_reconcile_scanning(&core, 1).await.unwrap(),
             0,
             "the edge of a page was reported as a disagreement"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_scan_repair_leaves_no_marker_behind_on_a_base_in_agreement() {
+        // The scan writes payloads from row state. An interrupted write must
+        // be findable by the complete marker pass, so the ids are marked
+        // dirty before the payload write and cleared only after it returns —
+        // the same contract every lifecycle mutator honours. A marker left
+        // standing afterwards would have the next marker pass rewrite a
+        // payload that is already correct.
+        let core = test_core().await;
+        let ids = seed(&core, &[("a text", [1.0, 0.0])]).await;
+        // Drift no SQLite write produced: the payload hides what the row
+        // shows.
+        core.vectors
+            .set_lifecycle(&ids[0], ArtifactStatus::Deprecated, None)
+            .await
+            .unwrap();
+
+        assert_eq!(full_lifecycle_reconcile(&core).await.unwrap(), 1);
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the scan left markers standing on a base in agreement"
         );
     }
 
