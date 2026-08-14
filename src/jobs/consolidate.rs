@@ -95,6 +95,32 @@ fn keeper(members: &[Chunk]) -> &Chunk {
         .expect("a cluster has at least one member")
 }
 
+/// Whether the clustering pass answered a filed near-identical pair, and with
+/// what record. `known` is false when the member's row could not be read this
+/// sweep — an unreadable member is not a gone member, and closing on a
+/// transient store error would settle a live pair permanently, since
+/// `record_settled_pair` only updates pending rows.
+fn close_filed_pair(
+    a_known: bool,
+    b_known: bool,
+    a_live: bool,
+    b_live: bool,
+    a_id: &str,
+    b_id: &str,
+) -> Option<String> {
+    if !a_known || !b_known {
+        return None;
+    }
+    match (a_live, b_live) {
+        // Both still in results, so nothing here was answered — a supersede
+        // that failed and warned. The pair stays filed for the next sweep.
+        (true, true) => None,
+        (true, false) => Some(format!("near-identical; {a_id} kept")),
+        (false, true) => Some(format!("near-identical; {b_id} kept")),
+        (false, false) => Some("near-identical; neither side is in results any more".to_string()),
+    }
+}
+
 /// Where dedupe units sort in the queue.
 ///
 /// `claim_job` orders by `(state, attempts, seq, id)`, and a segmentation
@@ -386,12 +412,24 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // the filed rows are closed against it below, and re-reading every pair's two
     // artifacts would be the same lookups a second time.
     let mut live: HashSet<String> = HashSet::new();
+    // Ids whose row could not be read this sweep. Unreadable is not gone: the
+    // closing pass must not settle a pair on the strength of a store that was
+    // briefly unwell.
+    let mut unknown: HashSet<String> = HashSet::new();
     for id in &in_a_cluster {
         // An artifact the vector store still lists but SQLite has dropped is
         // ordinary: a delete can lag a sweep. It is not an error.
-        let Ok(c) = core.store.get_artifact(id).await else {
-            tracing::debug!(artifact_id = %id, "pair names an artifact that is gone");
-            continue;
+        let c = match core.store.get_artifact(id).await {
+            Ok(c) => c,
+            Err(Error::NotFound) => {
+                tracing::debug!(artifact_id = %id, "pair names an artifact that is gone");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(artifact_id = %id, error = %e, "could not read a clustered artifact this sweep");
+                unknown.insert(id.clone());
+                continue;
+            }
         };
         if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
             // The row says hidden but the vector store still offered this point
@@ -456,18 +494,18 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // `NoConflict` with a detail, as the merge path does: the question is
     // settled and there is nothing here for a person. `Superseded` would put it
     // on the Capture page behind an "apply" button for something already applied.
+    // A pair with an unreadable member stays filed for the next sweep.
     for p in &filed {
-        let a_live = live.contains(&p.a_id) && !hidden.contains(&p.a_id);
-        let b_live = live.contains(&p.b_id) && !hidden.contains(&p.b_id);
-        if a_live && b_live {
-            // Both still in results, so nothing here was answered — a supersede
-            // that failed above, and warned. It stays filed for the next sweep.
+        let alive = |id: &String| live.contains(id) && !hidden.contains(id);
+        let Some(detail) = close_filed_pair(
+            !unknown.contains(&p.a_id),
+            !unknown.contains(&p.b_id),
+            alive(&p.a_id),
+            alive(&p.b_id),
+            &p.a_id,
+            &p.b_id,
+        ) else {
             continue;
-        }
-        let detail = match (a_live, b_live) {
-            (true, false) => format!("near-identical; {} kept", p.a_id),
-            (false, true) => format!("near-identical; {} kept", p.b_id),
-            _ => "near-identical; neither side is in results any more".to_string(),
         };
         if let Err(e) = core
             .store
@@ -2267,6 +2305,30 @@ pub(crate) mod tests {
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.examined, out.superseded, out.queued), (0, 0, 0));
+    }
+
+    #[test]
+    fn an_unreadable_member_leaves_the_filed_pair_alone() {
+        // A transient BUSY on one member used to read as "gone", closing the
+        // pair as NoConflict while both artifacts were live — permanently,
+        // because record_settled_pair only updates pending rows.
+        assert_eq!(close_filed_pair(false, true, false, true, "a", "b"), None);
+        assert_eq!(close_filed_pair(true, false, true, false, "a", "b"), None);
+        // Both readable and live: genuinely unanswered, stays filed.
+        assert_eq!(close_filed_pair(true, true, true, true, "a", "b"), None);
+        // Known-gone or known-hidden sides do close.
+        assert_eq!(
+            close_filed_pair(true, true, true, false, "a", "b").as_deref(),
+            Some("near-identical; a kept")
+        );
+        assert_eq!(
+            close_filed_pair(true, true, false, true, "a", "b").as_deref(),
+            Some("near-identical; b kept")
+        );
+        assert_eq!(
+            close_filed_pair(true, true, false, false, "a", "b").as_deref(),
+            Some("near-identical; neither side is in results any more")
+        );
     }
 
     #[tokio::test]
