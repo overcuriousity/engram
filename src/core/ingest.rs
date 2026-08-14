@@ -637,6 +637,29 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // The measure those windows produced goes with them. It is not
+                // just stale: the reconciliation sweep identifies a document
+                // whose last window resolved but whose `settle` never ran by
+                // having no coverage, so a value left over from the previous run
+                // reads as "already finished". A rerun that dies in exactly that
+                // window would then be stuck in `segmenting` for good — nothing
+                // resolves again to trigger `settle`, and the one sweep that
+                // repairs it has been told there is nothing to repair.
+                self.store.clear_corpus_coverage(&src.id).await?;
+                // And the units that name those windows, which outlive them.
+                // Planning arms idle-only, so a unit still queued from the run
+                // being replaced would carry its attempts into the rerun — the
+                // person who asked for another try would get a window that gives
+                // up after one.
+                self.store.delete_window_jobs(&src.id).await?;
+                // The title unit is armed once per corpus and never again, so
+                // that a document the model will not name stops costing calls.
+                // The row is what remembers that, which also means a corpus left
+                // unnamed by a transient failure could never be named again —
+                // including by the person who noticed and asked for the rerun.
+                // An explicit reprocess is exactly the case that rule is not
+                // meant to cover.
+                self.store.delete_job(Stage::Title, &src.id).await?;
                 // Reprocessing a parked capture is a decision to process it, so
                 // the park has to be lifted with it. Leaving the flag set means
                 // a fully synthesized and embedded corpus sits on the review
@@ -667,6 +690,16 @@ impl Core {
                     "consolidate is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
+            // Units the queue arms for itself, one per inference call. An
+            // operator reprocesses a document, not one of its windows: asking
+            // for `synthesize` re-windows the whole thing and arms them all.
+            Stage::SegmentWindow | Stage::Title | Stage::Judge => {
+                return Err(Error::Validation(
+                    "that stage is a single inference call the queue arms itself; \
+                     reprocess the document instead"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -686,6 +719,104 @@ mod tests {
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn reprocessing_forgets_the_previous_runs_coverage() {
+        // The reconciliation sweep identifies a document whose last window
+        // resolved but whose `settle` never ran by its having no coverage. A
+        // reprocess that left the previous run's measure behind made its own
+        // rerun the one case the repair could not see: if that rerun died in
+        // exactly that window, nothing would resolve again to trigger `settle`,
+        // and the sweep would read the stale number as "already finished". The
+        // document sits in `segmenting` for good — never renumbered, never
+        // embedded, never in search.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        core.store.set_corpus_coverage(&out.id, 0.87).await.unwrap();
+
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
+
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .coverage
+                .is_none(),
+            "the rerun carried the previous run's coverage, hiding it from the repair sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocessing_gives_every_window_its_attempts_back() {
+        // Planning arms idle-only now, so the window units are the one piece of
+        // the previous run that a reprocess would otherwise inherit: a rerun
+        // asked for by a person would start its windows four attempts in and
+        // give up on them almost at once. `clear_segments` drops the rows the
+        // units name but not the units, which outlive them.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        let attempts: Vec<i64> =
+            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(
+            !attempts.is_empty(),
+            "the rerun should have armed its windows again"
+        );
+        assert!(
+            attempts.iter().all(|&a| a == 0),
+            "the rerun inherited the previous run's attempts: {attempts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocessing_gives_a_corpus_that_was_never_named_another_chance() {
+        // A title unit is armed once per corpus and never again, so that a
+        // document the model will not name stops costing four calls a day
+        // forever. The row is what remembers that — and it outlived a
+        // reprocess, so a corpus left unnamed by an endpoint that was briefly
+        // down could never be named again, including by the person who noticed
+        // and asked for the rerun.
+        let core = test_core().await;
+        let src = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        for _ in 0..200 {
+            sqlx::query("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            if !crate::jobs::run_one(&core).await.unwrap_or(false) {
+                break;
+            }
+        }
+        assert!(
+            core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "the fixture must arm a title unit"
+        );
+
+        core.reprocess(&src.id, Stage::Synthesize).await.unwrap();
+
+        assert!(
+            !core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "reprocess left the spent title unit behind, so the corpus can never be named"
+        );
     }
 
     #[tokio::test]
@@ -1030,7 +1161,7 @@ mod tests {
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         let first = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1049,7 +1180,7 @@ mod tests {
             "reprocess must forget the windowing so it can be redone"
         );
 
-        crate::jobs::synthesize::run(&core, &out.id).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
         assert_eq!(
             core.store
                 .artifacts_for_corpus(&out.id)

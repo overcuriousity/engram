@@ -326,6 +326,25 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
+    /// Is every chunk still waiting to be embedded already armed as its own
+    /// unit? True means the source has been taken off the batch path and onto
+    /// the per-chunk one, and re-arming its batch would only spend another call
+    /// discovering the same refusal.
+    pub async fn pending_artifacts_are_isolated(&self, corpus_id: &str) -> Result<bool> {
+        let unarmed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifacts a
+              WHERE a.corpus_id = ? AND a.embed_state = 'pending'
+                AND NOT EXISTS (
+                  SELECT 1 FROM jobs j
+                   WHERE j.stage = 'embed' AND j.target_id = a.id AND j.state != 'done'
+                )",
+        )
+        .bind(corpus_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(unarmed == 0)
+    }
+
     /// Put every chunk of a source back in the embed queue's path. Re-embedding
     /// only happens for rows that say they still need it, so asking for it has
     /// to say so first.

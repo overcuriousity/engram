@@ -81,10 +81,10 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_superseded ON artifacts(superseded_by);
 CREATE INDEX IF NOT EXISTS idx_artifacts_status     ON artifacts(status);
 
 -- ── Segments ─────────────────────────────────────────────────────────────────
--- The windows a corpus was split into for synthesis. These rows are the job's
--- memory: a window that succeeds is written and marked done before the next is
--- attempted, so a failure costs the windows that had not started and nothing
--- else.
+-- The windows a corpus was split into for synthesis. One window is one
+-- inference call and one queue unit, so these rows say what the units are and
+-- which of them have resolved; the attempt count and the backoff belong to the
+-- job, not here.
 CREATE TABLE IF NOT EXISTS segments (
   corpus_id  TEXT    NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
   idx        INTEGER NOT NULL,
@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS segments (
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
+  -- is the count that governs its backoff and its settling, and two counters for
+  -- one thing is exactly what made the incident behind that change so hard to
+  -- read. Left in place because `migrate` cannot drop a column; remove it
+  -- whenever the database is next recreated, and do not start writing to it.
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   PRIMARY KEY (corpus_id, idx)
@@ -121,9 +126,30 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_error  TEXT,
   claimed_at  INTEGER,
   created_at  INTEGER NOT NULL DEFAULT 0,
+  -- Position within the batch of units armed together: the window index, the
+  -- judge pair's index, the embed batch number. Zero for singletons. Claiming
+  -- orders by it, so every document's first window runs before any document's
+  -- second — which is what stops a large ingest starving a small one behind it.
+  seq         INTEGER NOT NULL DEFAULT 0,
   UNIQUE(stage, target_id)
 );
-CREATE INDEX IF NOT EXISTS idx_jobs_ready   ON jobs(state, run_after);
+-- Ready work in the order `claim_job` takes it: least-tried first, then oldest.
+--
+-- The column order is the query's, not the filter's. `run_after` last looks
+-- wrong until you try it the other way round: an inequality ends an index's
+-- usable ordering, so `(state, run_after, attempts, id)` finds the ready rows
+-- and then sorts them in a temp B-tree on every poll. This walks `state`,
+-- `attempts`, `id` in claim order, tests `run_after` on each entry, and stops
+-- at the first row that is ready — covering, and no sort.
+--
+-- Dropped by its old name rather than widened in place. `migrate` applies this
+-- file to every database on every start, and `CREATE INDEX IF NOT EXISTS` on a
+-- name that already exists is a silent no-op, so a deployment carrying an
+-- earlier version of this index would have kept it. The drop is how an existing
+-- base actually picks the new one up.
+DROP INDEX IF EXISTS idx_jobs_ready;
+DROP INDEX IF EXISTS idx_jobs_claim;
+CREATE INDEX IF NOT EXISTS idx_jobs_claim2  ON jobs(state, attempts, seq, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 
 -- ── Consolidation ────────────────────────────────────────────────────────────
@@ -138,6 +164,12 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   detail         TEXT,
   created_at     INTEGER NOT NULL,
   judge_attempts INTEGER NOT NULL DEFAULT 0,
+  -- Of those attempts, the ones the endpoint answered and the answer could not
+  -- be read. Counted apart from `judge_attempts` because only this half says
+  -- anything about the pair: a call an outage ate says something about the
+  -- endpoint, and shelving a pair for that would empty the review queue every
+  -- time the model is down.
+  judge_unreadable INTEGER NOT NULL DEFAULT 0,
   obsolete_id    TEXT REFERENCES artifacts(id),
   UNIQUE(a_id, b_id)
 );

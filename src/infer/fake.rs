@@ -66,6 +66,9 @@ pub struct FakeSynthesizer {
     /// Fail only on windows containing this marker. Lets a test model the
     /// realistic case — some windows succeed, one does not.
     fail_on_marker: Option<String>,
+    /// Answer, but with something the parser cannot read. Distinct from the
+    /// two above, which model an endpoint that never answered at all.
+    unparsable_on_marker: Option<String>,
 }
 
 impl FakeSynthesizer {
@@ -73,6 +76,7 @@ impl FakeSynthesizer {
         Self {
             fail_with: Some(msg.to_string()),
             fail_on_marker: None,
+            unparsable_on_marker: None,
         }
     }
 
@@ -80,6 +84,19 @@ impl FakeSynthesizer {
         Self {
             fail_with: None,
             fail_on_marker: Some(marker.to_string()),
+            unparsable_on_marker: None,
+        }
+    }
+
+    /// The model replies to every window and its reply for the marked one
+    /// cannot be parsed however often it is asked. This is what a duplicate
+    /// JSON key looks like from the caller's side, and it is a property of the
+    /// window's text rather than of the endpoint.
+    pub fn unparsable_on(marker: &str) -> Self {
+        Self {
+            fail_with: None,
+            fail_on_marker: None,
+            unparsable_on_marker: Some(marker.to_string()),
         }
     }
 }
@@ -95,6 +112,13 @@ impl Synthesizer for FakeSynthesizer {
                 role: "chunk",
                 detail: format!("refusing window containing {marker}"),
             });
+        }
+        if let Some(marker) = &self.unparsable_on_marker
+            && text.contains(marker.as_str())
+        {
+            return Err(Error::MalformedLlmOutput(
+                "duplicate field `tags` at line 1 column 630".into(),
+            ));
         }
         if let Some(m) = &self.fail_with {
             return Err(Error::Inference {
@@ -279,35 +303,6 @@ impl Synthesizer for RecordingSynthesizer {
     }
     fn budget(&self) -> SynthesisBudget {
         self.budget
-    }
-}
-
-/// Segments like `FakeSynthesizer` but reports a cooldown, so a test can assert
-/// the job actually paces itself instead of running flat out.
-pub struct PacedSynthesizer {
-    inner: FakeSynthesizer,
-    cooldown: std::time::Duration,
-}
-
-impl PacedSynthesizer {
-    pub fn new(cooldown: std::time::Duration) -> Self {
-        Self {
-            inner: FakeSynthesizer::default(),
-            cooldown,
-        }
-    }
-}
-
-#[async_trait]
-impl Synthesizer for PacedSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        self.inner.segment(input).await
-    }
-    fn budget(&self) -> SynthesisBudget {
-        self.inner.budget()
-    }
-    fn cooldown(&self) -> std::time::Duration {
-        self.cooldown
     }
 }
 

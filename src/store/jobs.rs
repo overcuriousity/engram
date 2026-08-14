@@ -11,13 +11,21 @@ pub const MAX_ATTEMPTS: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    /// Splits a corpus into windows and arms one `SegmentWindow` per window.
+    /// Makes no inference call itself.
     Synthesize,
     Enrich,
+    /// One window, one call. The unit the job model is built around.
+    SegmentWindow,
+    /// Naming one document. One call.
+    Title,
     Embed,
     /// The periodic consolidation sweep. Its target is the collection rather
     /// than any one corpus, so there is exactly one of these in the queue at a
-    /// time.
+    /// time. Local work: it arms `Judge` units rather than calling the model.
     Consolidate,
+    /// One pair, one call.
+    Judge,
 }
 
 impl Stage {
@@ -25,16 +33,22 @@ impl Stage {
         match self {
             Stage::Synthesize => "synthesize",
             Stage::Enrich => "enrich",
+            Stage::SegmentWindow => "segment_window",
+            Stage::Title => "title",
             Stage::Embed => "embed",
             Stage::Consolidate => "consolidate",
+            Stage::Judge => "judge",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
             "enrich" => Some(Stage::Enrich),
+            "segment_window" => Some(Stage::SegmentWindow),
+            "title" => Some(Stage::Title),
             "embed" => Some(Stage::Embed),
             "consolidate" => Some(Stage::Consolidate),
+            "judge" => Some(Stage::Judge),
             _ => None,
         }
     }
@@ -83,62 +97,207 @@ pub fn backoff_secs(attempts: i64) -> i64 {
     2i64.saturating_pow(exp).min(21_600)
 }
 
-impl Store {
-    pub async fn enqueue(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
-        // Idempotent per (stage, target). A conflicting row that already
-        // finished or failed is re-armed, which is exactly what a manual
-        // reprocess needs.
-        sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
-             VALUES (?, ?, ?, 'pending', 0, 0, ?)
+/// Which existing rows an arming upsert may disturb.
+///
+/// Each carries its whole statement rather than a fragment to paste in, so
+/// there is no construction step for anything to be smuggled through.
+#[derive(Clone, Copy)]
+enum Guard {
+    /// Anything, running included. An operator's reprocess.
+    Any,
+    /// Only a row closed while its work was not.
+    Closed,
+}
+
+/// The upsert the three guards share, spelled out once per guard because a
+/// statement assembled at runtime is a statement nobody can read in the source.
+macro_rules! arm_job {
+    ($guard:literal) => {
+        concat!(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq)
+             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)
              ON CONFLICT(stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
-               claimed_at = NULL, created_at = excluded.created_at",
+               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq ",
+            $guard
+        )
+    };
+}
+
+impl Guard {
+    fn statement(self) -> &'static str {
+        match self {
+            Guard::Any => arm_job!(""),
+            Guard::Closed => arm_job!("WHERE jobs.state = 'done'"),
+        }
+    }
+}
+
+impl Store {
+    pub async fn enqueue(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
+        self.enqueue_seq(stage, target_kind, target_id, 0).await
+    }
+
+    /// Arm a unit at a given position within its batch.
+    ///
+    /// `enqueue` is this with `seq = 0`, which is right for a singleton and
+    /// wrong for the thirty-four windows of one document: left at zero they
+    /// would sort among themselves by row id, and a document captured later
+    /// would wait behind all of them.
+    ///
+    /// Idempotent per (stage, target). A conflicting row is re-armed whatever
+    /// state it is in, running included — which is what an operator's reprocess
+    /// needs and what nothing automatic should do. Automatic arming wants
+    /// `arm_seq` or `rearm_idle_seq` below.
+    pub async fn enqueue_seq(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        seq: i64,
+    ) -> Result<()> {
+        self.upsert_job(stage, target_kind, target_id, seq, Guard::Any)
+            .await
+    }
+
+    /// Arm a unit only if nothing is going to run it.
+    ///
+    /// What every automatic arming wants, and `enqueue_seq` is not it: a unit
+    /// already queued is already going to run, and winding its `attempts` back
+    /// to zero is how a window the model will not read never reaches the ceiling
+    /// that lets its document settle — forever young, and its corpus forever
+    /// `segmenting`. Only a row closed while its work was not is resurrected.
+    ///
+    /// There was once a middle tier that armed anything a worker was not inside,
+    /// on the reasoning that a merely *queued* unit is safe to disturb. It is
+    /// not, for the reason above, and every caller it had has moved here.
+    pub async fn rearm_idle_seq(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        seq: i64,
+    ) -> Result<()> {
+        self.upsert_job(stage, target_kind, target_id, seq, Guard::Closed)
+            .await
+    }
+
+    /// The one upsert the three above differ only in the guard on.
+    async fn upsert_job(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        seq: i64,
+        guard: Guard,
+    ) -> Result<()> {
+        sqlx::query(guard.statement())
+            .bind(stage.as_str())
+            .bind(target_kind)
+            .bind(target_id)
+            .bind(now())
+            .bind(seq)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The `seq` a job currently carries, so a unit that re-arms itself can
+    /// climb rather than re-entering at the front of its batch.
+    pub async fn job_seq(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT seq FROM jobs WHERE stage = ? AND target_id = ?")
+                .bind(stage.as_str())
+                .bind(target_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Is anything going to run this unit? `Some` for a row that is queued or
+    /// that a worker is inside, `None` for one that is closed or was never
+    /// armed.
+    ///
+    /// What a sweep needs before spending budget on a unit: a pair whose
+    /// judgement is already queued is already going to be judged, and arming it
+    /// again is a no-op that costs another pair its turn.
+    pub async fn live_job(&self, stage: Stage, target_id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM jobs
+              WHERE stage = ? AND target_id = ? AND state IN ('pending', 'running')",
         )
         .bind(stage.as_str())
-        .bind(target_kind)
         .bind(target_id)
-        .bind(now())
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    /// Forget that this unit was ever armed.
+    ///
+    /// Only an operator asking for the work again wants this. A row surviving
+    /// its completion is what lets a stage give up for good, so removing one
+    /// undoes exactly that — which is the point when the person who owns the
+    /// collection has asked for another try.
+    pub async fn delete_job(&self, stage: Stage, target_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM jobs WHERE stage = ? AND target_id = ?")
+            .bind(stage.as_str())
+            .bind(target_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forget every window unit of one document.
+    ///
+    /// The units are keyed `corpus#idx` and outlive the window rows they name,
+    /// so `clear_segments` on its own leaves a rerun sharing the attempt counts
+    /// of the run it replaces — and since planning arms idle-only, it would keep
+    /// them. Only an operator asking for the work again wants this, for the same
+    /// reason `delete_job` exists: a rerun a person asked for is a clean slate
+    /// or it is not one.
+    ///
+    /// Matched on the `corpus#` prefix rather than with `LIKE`, so an id
+    /// carrying a wildcard character cannot widen the delete.
+    pub async fn delete_window_jobs(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM jobs
+              WHERE stage = 'segment_window'
+                AND substr(target_id, 1, length(?) + 1) = ? || '#'",
+        )
+        .bind(corpus_id)
+        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Queue work that has already been tried, so the next attempt waits.
-    ///
-    /// `enqueue` resets `attempts` to zero, which is right for a reprocess a
-    /// person asked for and wrong for a stage re-arming itself: a synthesize
-    /// job that keeps failing would come straight back with a two-second
-    /// delay and hammer an endpoint that is down. This keeps the attempt count
-    /// climbing so the backoff means something.
-    pub async fn enqueue_after(
-        &self,
-        stage: Stage,
-        target_kind: &str,
-        target_id: &str,
-        attempts: i64,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?)
-             ON CONFLICT(stage, target_id) DO UPDATE SET
-               state = 'pending', attempts = excluded.attempts,
-               run_after = excluded.run_after, claimed_at = NULL",
-        )
-        .bind(stage.as_str())
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(attempts)
-        .bind(now() + backoff_secs(attempts))
-        .bind(now())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    /// Has this unit ever been armed? A row survives being completed, so this
+    /// distinguishes "never asked" from "asked, and done asking" — which is the
+    /// only thing separating a first settle from the fiftieth for a stage that
+    /// is allowed to give up.
+    pub async fn has_job(&self, stage: Stage, target_id: &str) -> Result<bool> {
+        Ok(self.job_seq(stage, target_id).await?.is_some())
     }
 
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
+    ///
+    /// Least-tried first, then earliest position in its batch, then oldest.
+    ///
+    /// Ordering by id alone made the queue strictly sequential in the one case
+    /// where that hurts: `fail_job` re-arms the row in place, so a job that
+    /// cannot get through keeps its original id and reclaims the front of the
+    /// queue every time its backoff expires, ahead of everything captured since.
+    /// One document the model would not parse therefore held up every document
+    /// behind it. Sorting by `attempts` puts work that has already had its turn
+    /// behind work that has not — a reordering rather than a demotion, since the
+    /// sore thumb still runs as soon as nothing fresher is ready.
+    ///
+    /// `seq` then interleaves whole documents. Without it, a corpus armed as
+    /// thirty-four units takes thirty-four consecutive ids and reproduces the
+    /// same head-of-line blocking one level down.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE jobs
@@ -146,7 +305,7 @@ impl Store {
               WHERE id = (
                 SELECT id FROM jobs
                  WHERE state = 'pending' AND run_after <= ?
-                 ORDER BY id LIMIT 1
+                 ORDER BY attempts, seq, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
         )
@@ -402,6 +561,188 @@ mod tests {
             "the work was abandoned; an endpoint that comes back would never be noticed"
         );
         assert!(s.failed_jobs(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn work_that_keeps_failing_stops_holding_the_head_of_the_queue() {
+        // `fail_job` re-arms the row in place, so a job that fails over and
+        // over keeps its original id. Ordering by id alone therefore handed the
+        // queue's front to the one target that could not make progress, every
+        // time its backoff expired, ahead of everything captured since.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "sore-thumb")
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let j = s.claim_job().await.unwrap().unwrap();
+            s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+            // Past the backoff it just set; the delay is not what this test is
+            // about.
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+        }
+
+        // Captured long after, and with a lower row id nowhere in sight.
+        s.enqueue(Stage::Synthesize, "corpus", "fresh")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            next.target_id, "fresh",
+            "the failing job kept the front of the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_that_yielded_is_not_starved_once_it_is_the_only_work_left() {
+        // Yielding must be a reordering, not a demotion: the sore thumb still
+        // runs when nothing fresher is ready.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "sore-thumb")
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let j = s.claim_job().await.unwrap().unwrap();
+            s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+            // Past the backoff it just set; the delay is not what this test is
+            // about.
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap();
+        assert_eq!(
+            next.expect("the failing job was abandoned").target_id,
+            "sore-thumb"
+        );
+    }
+
+    #[tokio::test]
+    async fn units_of_two_documents_interleave_rather_than_queueing_behind_each_other() {
+        // A thirty-four window document takes thirty-four consecutive row ids.
+        // Under id ordering a capture made during that ingest waits for every
+        // one of them before producing a single artifact.
+        let s = Store::memory().await.unwrap();
+        for i in 0..3 {
+            s.enqueue_seq(Stage::SegmentWindow, "segment", &format!("doc-a#{i}"), i)
+                .await
+                .unwrap();
+        }
+        for i in 0..3 {
+            s.enqueue_seq(Stage::SegmentWindow, "segment", &format!("doc-b#{i}"), i)
+                .await
+                .unwrap();
+        }
+
+        let mut order = Vec::new();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            order.push(j.target_id);
+            s.complete_job(j.id).await.unwrap();
+        }
+        assert_eq!(
+            order,
+            vec![
+                "doc-a#0", "doc-b#0", "doc-a#1", "doc-b#1", "doc-a#2", "doc-b#2"
+            ],
+            "the second document waited for the whole of the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn attempts_still_outrank_seq() {
+        // The fairness fix must survive the interleaving one: a unit that keeps
+        // failing sinks below fresher work whatever its position in a document.
+        let s = Store::memory().await.unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "segment", "sore#0", 0)
+            .await
+            .unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
+
+        s.enqueue_seq(Stage::SegmentWindow, "segment", "fresh#9", 9)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let next = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(next.target_id, "fresh#9", "a failing unit kept the front");
+    }
+
+    #[tokio::test]
+    async fn arming_a_unit_a_worker_is_already_inside_leaves_it_alone() {
+        // One row per unit, so putting a running one back in the queue hands the
+        // same window to a second worker while the first is still inside the
+        // model call — and `write_segment_artifacts` has each of them deleting
+        // the artifacts the other just wrote.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::SegmentWindow, "segment", "src-1#0")
+            .await
+            .unwrap();
+        s.claim_job().await.unwrap().unwrap();
+
+        s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
+            .await
+            .unwrap();
+        assert!(
+            s.claim_job().await.unwrap().is_none(),
+            "a second worker could claim a window already being segmented"
+        );
+
+        // An operator's reprocess still gets through: they are asking for the
+        // work to be redone, having presumably changed what it would produce.
+        s.enqueue(Stage::SegmentWindow, "segment", "src-1#0")
+            .await
+            .unwrap();
+        assert!(s.claim_job().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_sweeps_arming_only_resurrects_a_closed_unit() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::SegmentWindow, "segment", "src-1#0")
+            .await
+            .unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(j.id, 4, "unreadable reply").await.unwrap();
+
+        // Queued and waiting out a backoff: already going to run, so the sweep
+        // has nothing to add and must not wind it back.
+        s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
+            .await
+            .unwrap();
+        let (attempts, run_after): (i64, i64) =
+            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE target_id = 'src-1#0'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(attempts, 1, "the sweep reset a unit's attempt count");
+        assert!(run_after > now(), "the sweep cleared a unit's backoff");
+
+        // Closed while its work was not: exactly what the sweep exists for.
+        s.complete_job(j.id).await.unwrap();
+        s.rearm_idle_seq(Stage::SegmentWindow, "segment", "src-1#0", 0)
+            .await
+            .unwrap();
+        assert!(
+            s.claim_job().await.unwrap().is_some(),
+            "the sweep left a closed unit's unfinished work unarmed"
+        );
     }
 
     #[tokio::test]

@@ -365,9 +365,9 @@ mod startup_tests {
                     tokenizer_path: None,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
-                    cooldown_secs: 0,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
+                    cooldown_secs: None,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
@@ -397,6 +397,7 @@ mod startup_tests {
             },
             consolidate: ConsolidateConfig::default(),
             feedback: FeedbackConfig::default(),
+            pacing: engram::config::PacingConfig::default(),
         }
     }
 

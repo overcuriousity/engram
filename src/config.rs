@@ -12,6 +12,39 @@ pub struct Config {
     pub consolidate: ConsolidateConfig,
     #[serde(default)]
     pub feedback: FeedbackConfig,
+    #[serde(default)]
+    pub pacing: PacingConfig,
+}
+
+/// Pacing for every inference call, not just synthesis.
+///
+/// The roles share one GPU, so a per-role gap could not bound total load: three
+/// roles each honouring their own cooldown still interleave into unbroken work.
+/// One gap in front of all of them is the only version of this setting that
+/// means what it says.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PacingConfig {
+    /// Minimum seconds between the end of one background call and the start of
+    /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
+    /// and the pacer exists to protect the GPU from batch work, not from them.
+    pub cooldown_secs: u64,
+    /// Consecutive transport failures before background calls are held.
+    /// Unreadable model output does not count — the endpoint answered. Zero
+    /// disables the breaker, as zero disables the cooldown above.
+    pub breaker_after: usize,
+    /// How long to hold them for before letting one through to probe.
+    pub breaker_probe_secs: u64,
+}
+
+impl Default for PacingConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_secs: 0,
+            breaker_after: 3,
+            breaker_probe_secs: 60,
+        }
+    }
 }
 
 /// Recording real searches so they can be judged later.
@@ -220,17 +253,19 @@ pub struct SynthesizeRole {
     /// is what truncates the answer.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
-    /// Seconds to idle between segmentation calls.
-    ///
-    /// Segmenting a long source is minutes of uninterrupted generation, which
-    /// on a desktop GPU is a sustained thermal load rather than a burst. This
-    /// buys the card time to settle between windows. It does not save energy —
-    /// the same tokens are generated either way — so it is off by default and
-    /// exists for the machine sitting next to someone.
-    #[serde(default)]
-    pub cooldown_secs: u64,
+    /// Seconds to wait on one call before giving up on it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Moved to `[pacing]`, and kept here only to be complained about.
+    ///
+    /// Pacing is one queue in front of one endpoint now, so a cooldown per role
+    /// could never bound the total load — several roles each honouring their own
+    /// still interleave into unbroken work. Nothing reads this, and without the
+    /// field the operator's thermal pacing would parse cleanly and silently stop
+    /// happening: unknown keys are ignored, which is right for forward
+    /// compatibility and wrong for a setting someone chose on purpose.
+    #[serde(default)]
+    pub cooldown_secs: Option<u64>,
     /// Tokens of the document's verbatim opening prepended to every window, so
     /// an artifact from deep in a long document still knows what product and
     /// version it belongs to. Zero disables it.
@@ -370,6 +405,7 @@ impl Config {
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
+        cfg.warn_on_moved_keys();
         Ok(cfg)
     }
 
@@ -431,6 +467,20 @@ impl Config {
             )));
         }
         Ok(())
+    }
+
+    /// A setting that moved is a setting that stopped working, and an unknown
+    /// key parses without complaint. Say so once at startup rather than letting
+    /// an operator discover the pacing they configured has been off since the
+    /// upgrade.
+    fn warn_on_moved_keys(&self) {
+        if self.infer.synthesize.cooldown_secs.is_some() {
+            tracing::warn!(
+                "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \
+                 being ignored; pacing is one gap in front of one endpoint now, so it can no \
+                 longer be set per role"
+            );
+        }
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file

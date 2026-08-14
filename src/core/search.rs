@@ -331,6 +331,15 @@ impl Core {
             n => n.min(MAX_LIMIT),
         };
 
+        // Embedding the query is a model call, and so is the reranker, so a
+        // search is a person waiting on the endpoint exactly as `ask` is — and
+        // it is the more common way in, through the UI and through MCP. Without
+        // the lane a worker is free to start a window the instant the query
+        // lands, and the query then waits out twenty to seventy seconds of it.
+        // `ask` takes one too and holds it across this; the lane is a count, so
+        // nesting is what it is built for.
+        let _lane = self.gate.interactive();
+
         let started = std::time::Instant::now();
         // Prefixes repeat constantly inside one search and whole queries repeat
         // across sessions, so this is the difference between one embedding call
@@ -576,6 +585,73 @@ mod tests {
                 crate::jobs::embed::run(core, &c.id).await.unwrap();
             }
         }
+    }
+
+    /// An embedder that stops inside the call, so a test can look at what the
+    /// rest of the system is doing while a search waits on the endpoint.
+    struct BlockingEmbedder {
+        inner: crate::infer::fake::FakeEmbedder,
+        started: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Embedder for BlockingEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.inner.embed(texts).await
+        }
+        fn dim(&self) -> usize {
+            self.inner.dim()
+        }
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+        fn max_input_tokens(&self) -> usize {
+            self.inner.max_input_tokens()
+        }
+    }
+
+    // Real time rather than `start_paused`: the SQLite pool's own timeouts are
+    // tokio timers too, and a paused clock auto-advances them the moment every
+    // task is idle, so the pool times out before the test starts.
+    #[tokio::test]
+    async fn a_search_holds_the_interactive_lane_while_it_runs() {
+        // `ask` took the lane and a plain search did not, which left the more
+        // common way in — the UI and MCP — free to be overtaken: a worker could
+        // start a window the instant the query landed, and the person waiting on
+        // their search then waited out twenty to seventy seconds of it. The
+        // query embed is a model call, and so is the reranker.
+        let mut core = test_core().await;
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        core.embedder = std::sync::Arc::new(BlockingEmbedder {
+            inner: crate::infer::fake::FakeEmbedder::new(core.embedder.dim()),
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let core = std::sync::Arc::new(core);
+
+        let searching = tokio::spawn({
+            let core = core.clone();
+            async move { core.search(&q("timeout"), Door::Api).await }
+        });
+        started.notified().await;
+
+        let gate = core.gate.clone();
+        let worker = tokio::spawn(async move {
+            gate.background().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !worker.is_finished(),
+            "a background call started while a search was waiting on the endpoint"
+        );
+
+        release.notify_one();
+        searching.await.unwrap().unwrap();
+        worker.await.unwrap();
     }
 
     fn q(text: &str) -> SearchQuery {

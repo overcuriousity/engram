@@ -1,12 +1,15 @@
 pub mod consolidate;
 pub mod embed;
+pub mod judge;
 pub mod reconcile;
 pub mod synthesize;
+pub mod window;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+use crate::store::jobs::{Job, MAX_ATTEMPTS, Stage};
 use std::time::Duration;
+use tracing::Instrument;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A job still marked `running` after this long belonged to a process that died.
@@ -26,21 +29,36 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         target = %job.target_id,
         attempt = job.attempts
     );
-    let _guard = span.enter();
+    // `.instrument`, not `span.enter()`: a guard held across an `.await` does
+    // not travel with the future, so every line logged after the first
+    // suspension point lost its `job{...}` prefix — which in a journal full of
+    // interleaved windows is the only thing saying which job spoke.
+    run_claimed(core, job).instrument(span).await
+}
 
+async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Synthesize | Stage::Enrich, _) => synthesize::run(core, &job.target_id).await,
+        (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
         // The sweep looks at the whole collection, so it ignores the target.
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
+        (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
+        (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
+        (Stage::Judge, _) => judge::run(core, &job.target_id).await,
     };
 
     match result {
         Ok(()) => {
             core.store.complete_job(job.id).await?;
+            // After completing, never before: the queue is keyed by (stage,
+            // target), so a handler that re-armed itself would be upserting the
+            // very row this `complete_job` then closes.
+            if job.stage == Stage::Embed && job.target_kind == "corpus" {
+                embed::rearm_if_more(core, &job.target_id).await?;
+            }
             Ok(true)
         }
         // The target was deleted while the job waited. Retrying can never
@@ -53,40 +71,27 @@ pub async fn run_one(core: &Core) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // Out of attempts against the synthesizer. The windows that were
-                // actually tried are recorded as failed; the ones that never
-                // ran go back in the queue.
-                (Stage::Synthesize, _) if exhausted => {
-                    tracing::warn!(error = %e, "segmentation is not getting through; backing off");
-                    match synthesize::fail_pending_segments(core, &job.target_id, &e.to_string())
-                        .await
-                    {
-                        Ok(_) => {
-                            core.store.complete_job(job.id).await?;
-                            // Always, not only when a window went untried. A
-                            // segment the endpoint refused is not a verdict on
-                            // the text — the endpoint was loading a model, or
-                            // the machine was asleep — and the state it records
-                            // is what the next attempt starts from rather than
-                            // where it stops. After closing this job, never
-                            // before: the queue is keyed by (stage, target), so
-                            // an earlier enqueue would be the very row
-                            // `complete_job` then marks done.
-                            core.store
-                                .enqueue_after(
-                                    Stage::Synthesize,
-                                    "corpus",
-                                    &job.target_id,
-                                    job.attempts,
-                                )
-                                .await?;
-                        }
-                        Err(fe) => {
-                            core.store
-                                .fail_job(job.id, job.attempts, &fe.to_string())
-                                .await?;
-                        }
-                    }
+                // A pair the model will not judge stays pending, and a later
+                // sweep decides again whether it is worth asking about. Holding
+                // a unit at the six-hour ceiling for it would keep re-asking a
+                // question the sweep may no longer want answered.
+                //
+                // That later decision is `pairs_to_judge`'s
+                // `MAX_UNREADABLE_JUDGEMENTS` test. Without one, closing the
+                // unit here is not a hand-off but a loop: the next sweep finds
+                // the pair pending with no live job and arms it for another
+                // `MAX_ATTEMPTS`, forever.
+                (Stage::Judge, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not judge this pair; leaving it for a later sweep");
+                    core.store.complete_job(job.id).await?;
+                }
+                // A name is decoration and the corpus already has its fallback,
+                // so this is the one unit that stops asking. Everything else
+                // stays queued at the backoff ceiling, because everything else
+                // carries knowledge that would otherwise be lost.
+                (Stage::Title, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not name this corpus; leaving it unnamed");
+                    core.store.complete_job(job.id).await?;
                 }
                 // A whole source failing together usually means the endpoint is
                 // down, but it can also be one chunk the embedder rejects.

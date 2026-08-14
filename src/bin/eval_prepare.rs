@@ -20,9 +20,8 @@ use engram::vector::memory::MemoryVectors;
 use std::sync::Arc;
 
 /// How many times the whole corpus is driven before its remaining segments are
-/// called hopeless. `synthesize::run` resumes from the first pending segment, so
-/// a pass is one attempt at each segment still outstanding — this stands in for
-/// the job runner's own attempt budget.
+/// called hopeless. A pass drains every unit the queue will hand over, so this
+/// stands in for the job runner's own attempt budget.
 const MAX_PASSES: usize = 4;
 
 #[tokio::main]
@@ -72,19 +71,23 @@ async fn main() -> Result<()> {
         tracing::info!(file = %name, bytes = text.len(), "synthesising");
         let out = core.ingest(&text, "eval", Some(&name)).await?;
 
-        // Stand in for the job runner: `synthesize::run` resumes from the first
-        // pending segment, so repeating it is what drives a multi-segment corpus
-        // to completion.
+        // Be the job runner. Planning arms one unit per window and the queue
+        // hands them over one at a time, so a pass here is "drain what is ready"
+        // rather than "one attempt at each outstanding segment". The backoff is
+        // wound back between passes: this is a batch tool with a whole corpus to
+        // get through, not a service pacing itself against a live endpoint.
+        engram::jobs::synthesize::plan(&core, &out.id).await?;
         let mut passes = 0;
         loop {
-            if let Err(e) = engram::jobs::synthesize::run(&core, &out.id).await {
-                tracing::warn!(error = %e, file = %name, "synthesis pass failed");
-            }
+            while engram::jobs::run_one(&core).await.unwrap_or(false) {}
             passes += 1;
             let pending = core.store.pending_segments(&out.id).await?;
             if pending.is_empty() {
                 break;
             }
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await?;
             if passes >= MAX_PASSES {
                 bail!(
                     "{name}: {} segment(s) still unsynthesised after {MAX_PASSES} passes. \

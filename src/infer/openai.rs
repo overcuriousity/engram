@@ -73,7 +73,6 @@ pub struct HttpSynthesizer {
     budget: SynthesisBudget,
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
-    cooldown: std::time::Duration,
 }
 
 impl HttpSynthesizer {
@@ -94,7 +93,6 @@ impl HttpSynthesizer {
             },
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
-            cooldown: std::time::Duration::from_secs(cfg.cooldown_secs),
         }
     }
 
@@ -175,10 +173,6 @@ impl Synthesizer for HttpSynthesizer {
 
     fn budget(&self) -> SynthesisBudget {
         self.budget
-    }
-
-    fn cooldown(&self) -> std::time::Duration {
-        self.cooldown
     }
 
     async fn title(&self, text: &str, artifact_titles: &[String]) -> Result<Option<String>> {
@@ -494,9 +488,9 @@ mod tests {
             tokenizer_path: None,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
-            cooldown_secs: 0,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
+            cooldown_secs: None,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {

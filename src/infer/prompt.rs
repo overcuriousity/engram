@@ -152,9 +152,23 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
 /// alone, the model saw two anonymous spec lists with different numbers and
 /// called them a contradiction — correctly, on the evidence it was given.
-pub fn judge_prompt(a: (&str, &str), b: (&str, &str)) -> String {
+/// `attempt` is how many times this pair has already been asked about, and it is
+/// in the prompt for one reason: the endpoint caches by exact prompt text and
+/// replays a cached reply in milliseconds. A retry of a reply the parser could
+/// not read would otherwise re-read the same unreadable bytes, five times, and
+/// call it five attempts.
+///
+/// Zero adds nothing at all, so a first ask stays byte-identical to what it has
+/// always been — and keeps hitting the cache when it should, on a pair the sweep
+/// re-arms after a settled verdict was lost.
+pub fn judge_prompt(a: (&str, &str), b: (&str, &str), attempt: i64) -> String {
+    let retry = if attempt > 0 {
+        format!("(attempt {})\n", attempt + 1)
+    } else {
+        String::new()
+    };
     format!(
-        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
+        "{retry}----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
         a.0, a.1, b.0, b.1
     )
 }
@@ -501,10 +515,30 @@ mod tests {
         let p = judge_prompt(
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
+            0,
         );
         assert!(p.contains("Title: FAT16 Specifications"), "{p}");
         assert!(p.contains("Title: FAT32 Specifications"), "{p}");
         assert!(p.contains("Die max. Partitionsgröße: 2 GB."));
+    }
+
+    #[test]
+    fn a_retry_does_not_ask_the_endpoint_the_question_it_has_cached() {
+        // The endpoint replays a cached reply for an identical prompt in
+        // milliseconds. A pair whose reply the parser could not read is retried
+        // up to `MAX_ATTEMPTS` times, and every one of those would have read the
+        // same unreadable bytes back.
+        let pair = (
+            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+            ("FAT32 Specifications", "32 Bit Clusternummern."),
+        );
+        let first = judge_prompt(pair.0, pair.1, 0);
+        let second = judge_prompt(pair.0, pair.1, 1);
+        assert_ne!(first, second);
+        assert_ne!(second, judge_prompt(pair.0, pair.1, 2));
+        // A first ask stays exactly what it was, so the cache still earns its
+        // keep on a pair the sweep re-arms after a verdict was lost.
+        assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
     }
 
     #[test]
