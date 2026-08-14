@@ -63,9 +63,11 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- than `corpus_id IS NULL`: a null is an absence, and the failure modes
   -- merging can produce want to hang off an assertion.
   provenance       TEXT NOT NULL DEFAULT 'captured',
-  -- How many artifacts a merge was written from. Compared against the surviving
-  -- `artifact_sources` rows to notice a source that has since been deleted;
-  -- without it "lost a source" cannot be told from "only ever had two".
+  -- How many captured roots a merge was written from — the number of
+  -- `artifact_sources` rows it started with, not the number of arguments it was
+  -- called with, which for a merge of a merge is fewer. Compared against the
+  -- surviving rows to notice a source that has since been deleted; without it
+  -- "lost a source" cannot be told from "only ever had two".
   source_count     INTEGER NOT NULL DEFAULT 0,
   -- Set in the same UPDATE that changes status/superseded_by, cleared once the
   -- payload write is acknowledged. The lifecycle repair reads this instead of

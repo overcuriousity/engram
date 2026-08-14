@@ -251,6 +251,17 @@ impl Store {
         // Resolved before the transaction opens: this is a read, and holding a
         // write transaction across it buys nothing.
         let resolved = self.roots_of(sources).await?;
+        // The roots actually about to be written, deduped the way the table
+        // dedupes them: `artifact_sources` is keyed on (child_id, root_id), so
+        // two sources sharing a root produce one row.
+        //
+        // Counting `sources` instead counted the inputs, which for a merge of a
+        // merge is fewer than the roots — M2 = merge(M1(a,b), c) recorded two
+        // against three rows. `merged_missing_a_source` asks whether the count
+        // exceeds the surviving rows, so deleting a root left 2 > 2, false, and
+        // the orphan flag never fired for a merge of a merge at all. That is
+        // precisely the case the counter was added for.
+        let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
 
         let mut tx = self.pool.begin().await?;
         let created_at = now();
@@ -258,7 +269,7 @@ impl Store {
             id: new_id(),
             corpus_id: None,
             provenance: Provenance::Merged,
-            source_count: sources.len() as i64,
+            source_count: root_ids.len() as i64,
             ordinal: 0,
             text: new.text.clone(),
             corpus_span: None,

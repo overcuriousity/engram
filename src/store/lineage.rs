@@ -298,6 +298,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_merge_of_a_merge_notices_a_lost_root_too() {
+        // `source_count` counted the arguments the call was given, which for a
+        // merge of a merge is fewer than the roots it wrote: M2 = merge(M1(a,b),
+        // c) recorded two against three lineage rows. `merged_missing_a_source`
+        // asks whether the count exceeds the surviving rows, so losing a root
+        // left 2 > 2 — false — and the orphan flag never fired for a merge of a
+        // merge at all. That is the case the counter was added for.
+        let s = Store::memory().await.unwrap();
+        let (a, b, c) = three(&s).await;
+        let m1 = s
+            .insert_merged_artifact(&merged("a and b"), &[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        let m2 = s
+            .insert_merged_artifact(&merged("a and b and c"), &[m1.id.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(m2.source_count, 3, "the count is the roots, not the inputs");
+
+        s.delete_artifact(&a).await.unwrap();
+
+        assert!(
+            s.merged_missing_a_source(10).await.unwrap().contains(&m2.id),
+            "a merge of a merge lost a root without saying so"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sources_sharing_a_root_are_counted_once() {
+        // Merging M(a,b) with `a` itself is a component the sweep can build, and
+        // it names `a` twice. `artifact_sources` is keyed on (child_id, root_id)
+        // so it writes one row — and a count of three against two rows would
+        // report a lost source that was never there.
+        let s = Store::memory().await.unwrap();
+        let (a, b, _) = three(&s).await;
+        let m1 = s
+            .insert_merged_artifact(&merged("a and b"), &[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        let m2 = s
+            .insert_merged_artifact(&merged("still a and b"), &[m1.id.clone(), a.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(m2.source_count, 2);
+        assert!(
+            s.merged_missing_a_source(10).await.unwrap().is_empty(),
+            "a shared root was reported as a loss"
+        );
+    }
+
+    #[tokio::test]
     async fn a_merge_whose_roots_are_still_active_is_findable() {
         // The write path indexes a merged artifact before superseding its
         // roots, so a crash in between leaves exactly this state. Nothing else
