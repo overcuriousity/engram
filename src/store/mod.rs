@@ -269,7 +269,6 @@ mod tests {
     #[tokio::test]
     async fn a_column_added_after_deployment_reaches_a_database_that_predates_it() {
         // The upgrade path, and the trap in it. `CREATE TABLE IF NOT EXISTS` is
-        // The upgrade path, and the trap in it. `CREATE TABLE IF NOT EXISTS` is
         // a no-op against a table that already exists, so a column added to
         // schema.sql never reaches a running base — and the check at the end of
         // migrate() then refuses to start it. An operator would have been asked

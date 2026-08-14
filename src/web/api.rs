@@ -26,6 +26,13 @@ pub struct IngestRequest {
     pub url: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// `"selection"` when `html` is a fragment the operator highlighted rather
+    /// than a whole page. It exempts the capture from the extraction floor,
+    /// which is a guess about whole pages: three sentences deliberately picked
+    /// out are not a login wall, and refusing them for being short refuses a
+    /// capture that was asked for in as many words.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -141,6 +148,22 @@ const ORIGIN_WEB: &str = "web";
 const ORIGIN_EXTENSION: &str = "extension";
 const ORIGIN_FETCH: &str = "fetch";
 
+/// Readability and the markdown conversion, off the async worker.
+///
+/// Both are synchronous walks of a DOM that can be megabytes — `fetch_max_bytes`
+/// and the request body limit are both 8 MB — and run inline they hold a Tokio
+/// worker for long enough to stall whatever else that thread was serving.
+/// `Readability` is `!Send`, which is why this could not be awaited across;
+/// inside a `spawn_blocking` closure it is created and dropped without ever
+/// crossing an await, and only the owned `String` has to move.
+async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        crate::core::extract::html_to_markdown(&html, url.as_ref(), min_chars)
+    })
+    .await
+    .map_err(|e| Error::Validation(format!("extraction did not finish: {e}")))?
+}
+
 async fn ingest(
     State(st): State<AppState>,
     _id: Identity,
@@ -163,31 +186,37 @@ async fn ingest(
 
     let parsed_url = match &req.url {
         Some(raw) => {
-            Some(url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?)
+            let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
+            // `Url::parse` accepts `javascript:` and `data:` happily, and the
+            // scheme allowlist lives in `fetch_html` — which the `html` plus
+            // `url` path never calls. This value is stored and rendered as a
+            // link on the corpus page, so the check belongs here too.
+            if !matches!(u.scheme(), "http" | "https") {
+                return Err(Error::Validation(format!(
+                    "url: `{}` is not a scheme a page is read over",
+                    u.scheme()
+                )));
+            }
+            Some(u)
         }
         None => None,
+    };
+
+    // A highlighted fragment is exempt from the floor. See `IngestRequest`.
+    let floor = if req.scope.as_deref() == Some("selection") {
+        0
+    } else {
+        st.core.capture.min_extracted_chars
     };
 
     let (text, origin) = if let Some(text) = req.text {
         (text, ORIGIN_WEB)
     } else if let Some(html) = req.html {
-        // Synchronous and self-contained: `Readability` is !Send and must not
-        // be alive across the awaits above or below it.
-        let md = crate::core::extract::html_to_markdown(
-            &html,
-            parsed_url.as_ref(),
-            st.core.capture.min_extracted_chars,
-        )?;
-        (md, ORIGIN_EXTENSION)
+        (extract(html, parsed_url.clone(), floor).await?, ORIGIN_EXTENSION)
     } else {
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
         let html = crate::core::fetch::fetch_html(u, &st.core.capture).await?;
-        let md = crate::core::extract::html_to_markdown(
-            &html,
-            parsed_url.as_ref(),
-            st.core.capture.min_extracted_chars,
-        )?;
-        (md, ORIGIN_FETCH)
+        (extract(html, parsed_url.clone(), floor).await?, ORIGIN_FETCH)
     };
 
     let out = st
@@ -1033,6 +1062,75 @@ pub(crate) mod tests {
         let second = json_of(res).await;
         assert_eq!(first["id"], second["id"]);
         assert_eq!(second["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn a_source_url_is_refused_unless_it_is_one_a_page_is_read_over() {
+        // `Url::parse` accepts these, and `html` plus `url` never reaches the
+        // scheme allowlist in `fetch_html`. What is stored here is rendered
+        // as a link on the corpus page, in the operator's own session.
+        let (app, token) = app_and_token().await;
+        for bad in [
+            "javascript:fetch('/api/v1/tokens')",
+            "data:text/html,<script>1</script>",
+            "file:///etc/passwd",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    "/api/v1/corpora",
+                    &token,
+                    serde_json::json!({"html":"<article><p>a body</p></article>","url":bad}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "accepted {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selection_is_not_held_to_the_whole_page_extraction_floor() {
+        // The floor is a guess about whole pages: too little text out of one
+        // means a login wall or an empty shell. A fragment the operator
+        // highlighted and asked for by name means neither, and refusing it —
+        // with a message about login walls, no less — refuses the capture
+        // that was requested.
+        let (app, token) = app_and_token().await;
+        let short = "<p>The loop device is what makes this work.</p>";
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":short,"scope":"selection"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "selection refused");
+
+        // The same fragment without the scope is still held to the floor.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":short}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // And a selection that extracted to nothing at all is still an error,
+        // rather than an empty corpus stored in silence.
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"html":"<div></div>","scope":"selection"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

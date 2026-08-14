@@ -79,7 +79,16 @@
       // The session cookie authenticates this: it is same-origin, so no token
       // is involved.
       fetch('/api/v1/corpora/upload', { method: 'POST', body: payload })
-        .then(function (r) { return r.json().then(function (j) { return [r.ok, j]; }); })
+        // Not every failure answers in JSON. A file over the 8 MB body limit
+        // is rejected by the framework before the handler sees it, and that
+        // reply is plain text — parsing it threw, and with nothing catching
+        // the throw the drop zone sat there having visibly done nothing.
+        .then(function (r) {
+          return r.json()
+            .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
+            .then(function (j) { return [r.ok, j]; });
+        })
+        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
         .then(function (pair) {
           var result = document.getElementById('capture-result');
           // The server's reason, verbatim. A generic "upload failed" would

@@ -59,11 +59,29 @@ pub fn request_origin(headers: &HeaderMap) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+    // `https` when the proxy did not say, because the proxy not saying is the
+    // common case — nginx forwards no `X-Forwarded-Proto` unless told to — and
+    // guessing wrong in that direction is the expensive one. This origin is
+    // shown to the operator as the address to pair with, and a deployment
+    // named `http://` there is a bearer token sent in cleartext. Loopback is
+    // the exception, and the one deployment genuinely reached without TLS.
+    let scheme = match headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) {
+        Some(s) => s,
+        None if is_loopback(host) => "http",
+        None => "https",
+    };
     Some(format!("{scheme}://{host}"))
+}
+
+/// Whether a `Host` names this machine, port and all.
+fn is_loopback(host: &str) -> bool {
+    // An IPv6 literal is bracketed and full of colons of its own, so the port
+    // separator is the one after the bracket rather than the first one.
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    name == "localhost" || name == "::1" || name.starts_with("127.")
 }
 
 #[derive(Template)]
@@ -200,11 +218,37 @@ mod tests {
             Some("https://engram.example")
         );
 
-        let mut plain = HeaderMap::new();
-        plain.insert("host", HeaderValue::from_static("localhost:8080"));
+        // No `X-Forwarded-Proto`, which is what nginx sends unless it has been
+        // told otherwise. Guessing `http` there names the deployment by a
+        // scheme it does not answer on, and this origin is the address the
+        // operator is shown to pair with — a bearer token in cleartext.
+        let mut unforwarded = HeaderMap::new();
+        unforwarded.insert("host", HeaderValue::from_static("engram.example"));
         assert_eq!(
-            request_origin(&plain).as_deref(),
-            Some("http://localhost:8080")
+            request_origin(&unforwarded).as_deref(),
+            Some("https://engram.example")
+        );
+
+        // Loopback is the exception: the one deployment genuinely reached
+        // without TLS, and telling an operator to pair with `https://localhost`
+        // would send them somewhere nothing is listening.
+        for host in ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"] {
+            let mut plain = HeaderMap::new();
+            plain.insert("host", HeaderValue::from_str(host).unwrap());
+            assert_eq!(
+                request_origin(&plain).as_deref(),
+                Some(format!("http://{host}").as_str()),
+                "{host}"
+            );
+        }
+
+        // An explicit header still wins in both directions.
+        let mut forwarded_plain = HeaderMap::new();
+        forwarded_plain.insert("host", HeaderValue::from_static("engram.example"));
+        forwarded_plain.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(
+            request_origin(&forwarded_plain).as_deref(),
+            Some("http://engram.example")
         );
 
         assert_eq!(request_origin(&HeaderMap::new()), None);
@@ -242,7 +286,7 @@ mod tests {
             .find_map(|kv| kv.strip_prefix("token="))
             .unwrap();
         assert!(fragment.contains("state=nonce123"));
-        assert!(fragment.contains("origin=http%3A%2F%2Fengram.example"));
+        assert!(fragment.contains("origin=https%3A%2F%2Fengram.example"));
 
         let id = crate::auth::tokens::verify(&core.store, &percent_decode(token))
             .await

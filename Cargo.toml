@@ -55,6 +55,9 @@ dom_smoothie = "0.18.0"
 # HTML → markdown. Pre-1.0, and the fallback if that becomes unacceptable is
 # plain-text extraction, which costs the splitter its heading boundaries.
 html2md = "0.2.15"
+# Decoding fetched pages that are not UTF-8. Already in the tree by way of
+# the HTML crates; named here because this uses it directly.
+encoding_rs = "0.8.35"
 url = "2"
 schemars = "1.2.2"
 

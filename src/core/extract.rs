@@ -78,6 +78,17 @@ pub fn html_to_markdown(
         .trim()
         .to_string();
 
+    // Nothing at all is its own case, and it holds even where the floor does
+    // not. A selection is exempt from the floor because the operator picked
+    // the text and three sentences are a legitimate capture — but a fragment
+    // readability found no content in is an empty corpus, and storing one
+    // silently is worse than saying so.
+    if markdown.is_empty() {
+        return Err(Error::Validation(
+            "nothing survived extraction — there was no text in what was captured".into(),
+        ));
+    }
+
     // The guard the whole path exists for. A server-side GET does not fail
     // loudly when it is served a login wall — it succeeds, and returns the
     // wall. Counting what survived extraction is how that becomes an error
