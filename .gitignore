@@ -4,6 +4,10 @@
 *.db
 *.db-wal
 *.db-shm
+# A copy kept aside before a schema change is still the knowledge base, and
+# `*.db` does not cover a suffixed name. One such file reached this repository
+# once; the pattern is here so the next one cannot.
+*.db.*
 
 # Evaluation corpus. Whatever documents the operator actually wants to search,
 # and never publishable by default — the harness reads it from ENGRAM_EVAL_DIR,
