@@ -168,6 +168,16 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
 
+        // The judge became the dedupe unit and its stage name went with it. A
+        // leftover row would otherwise be claimed under `Stage::parse`'s
+        // Synthesize fallback and aimed at a pair id. Deleted rather than
+        // renamed: the pair is still pending, so the next sweep re-arms it
+        // under its real stage, and a rename could collide with a dedupe row
+        // the sweep has already written for the same pair.
+        sqlx::query("DELETE FROM jobs WHERE stage = 'judge'")
+            .execute(&self.pool)
+            .await?;
+
         let mut missing = Vec::new();
         for (table, columns) in schema_columns(SCHEMA) {
             // The table-valued form of `PRAGMA table_info`, which takes a bind

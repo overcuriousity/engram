@@ -846,4 +846,26 @@ mod tests {
         let again = s.claim_job().await.unwrap().unwrap();
         assert_eq!(again.attempts, 1, "requeue must reset the attempt counter");
     }
+
+    #[tokio::test]
+    async fn a_legacy_judge_row_is_not_claimed_as_something_else() {
+        // `Stage::parse` has no 'judge' arm and `claim_job` falls back to
+        // Synthesize, so a leftover row from the branch this replaced was
+        // claimed as a synthesize job aimed at a pair id.
+        let s = Store::memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, run_after, attempts, seq)
+             VALUES ('judge', 'pair', '17', 'pending', 0, 0, 0)",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        s.migrate().await.unwrap();
+
+        assert!(
+            s.claim_job().await.unwrap().is_none(),
+            "a legacy judge row survived migration and was claimed"
+        );
+    }
 }
