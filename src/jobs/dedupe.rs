@@ -34,8 +34,9 @@ use crate::store::pairs::{ArtifactPair, PairState};
 pub struct Settlement {
     pub relation: Relation,
     pub detail: Option<String>,
-    /// The artifact named obsolete, already checked against newest-wins. Only
-    /// set for `Replaced`.
+    /// The root named obsolete, already checked against newest-wins. A root and
+    /// not a member, because roots are what the model was shown and therefore
+    /// the only things its letter can be naming. Only set for `Replaced`.
     pub obsolete: Option<String>,
     /// Only set for `Duplicate`, and only once the loss check has passed.
     pub merged: Option<MergedDraft>,
@@ -105,6 +106,14 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             core.consolidate.merge_max_roots
         );
         settle_all(core, &pairs, PairState::Oversized, Some(&detail)).await?;
+        return Ok(());
+    }
+
+    // Two members can flatten to one root — a merge and one of its own sources
+    // meet this way — and one root is nothing to compare. Asking would spend a
+    // call to be told an artifact matches itself.
+    if root_ids.len() < 2 {
+        settle_all(core, &pairs, PairState::Dismissed, None).await?;
         return Ok(());
     }
 
@@ -201,14 +210,19 @@ fn interpret(
         // obsolete is exactly the failure mode worth guarding against, since it
         // would hide the side more likely to be current.
         //
-        // The letter indexes `members`, which is what `dedupe_prompt` lettered.
+        // The letter indexes `roots`. `run` builds the lettered list from the
+        // flattened roots and never shows a merged member's own text, so a
+        // letter resolved against `members` would name a different artifact
+        // whenever the two lists diverge — which is exactly when the component
+        // contains an earlier merge. That mismatch superseded an artifact the
+        // model had never been shown.
         let named = v
             .supersedes
             .map(|c| (c as u8 - b'a') as usize)
-            .and_then(|i| members.get(i));
+            .and_then(|i| roots.get(i));
         obsolete = match named {
             Some(named)
-                if members
+                if roots
                     .iter()
                     .all(|o| o.id == named.id || named.created_at <= o.created_at) =>
             {
@@ -269,11 +283,14 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .obsolete
                 .clone()
                 .expect("interpret sets this or downgrades to Conflict");
+            // Among the roots, for the same reason the letter was: the obsolete
+            // side is a root, and a winner drawn from `members` could be a
+            // merged artifact whose own sources include the one being hidden.
             let winner = s
-                .members
+                .roots
                 .iter()
                 .find(|m| m.id != obsolete)
-                .expect("a component has at least two members");
+                .expect("run dismisses a component with fewer than two roots");
             for pr in &s.pairs {
                 core.store
                     .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
@@ -526,6 +543,68 @@ mod tests {
                 .superseded_by
                 .is_none(),
             "a proposal hid an artifact without being asked to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_letter_names_the_root_it_was_shown_beside_not_the_nth_member() {
+        // The component holds an earlier merge and one captured artifact, so the
+        // members are {M, c} and the lettered roots are {a, b, c}. The two lists
+        // diverge, and the model only ever saw the second — answering "b" means
+        // the root b, whose text was on the screen. Resolved against the members
+        // the same letter lands on the merge, which was never shown and never
+        // named. Under autonomy that hides the wrong artifact outright.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"b","detail":"b is the stale one"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 30 s", [0.99, 0.02]),
+                ("timeout is thirty seconds", [0.98, 0.04]),
+            ],
+        )
+        .await;
+        // uuid v7 sorts by creation, so the roots letter as a, b, c and the
+        // merge sorts after all three.
+        let merged = crate::jobs::merge::write(
+            &core,
+            &MergedDraft {
+                text: "timeout is 30 seconds".into(),
+                title: None,
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+        let pair = queue_pair(&core, &merged.id, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[1])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[0].as_str()),
+            "the letter did not resolve to the root it was shown beside"
+        );
+        assert!(
+            core.store
+                .get_artifact(&merged.id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "an artifact the model was never shown was superseded"
         );
     }
 
