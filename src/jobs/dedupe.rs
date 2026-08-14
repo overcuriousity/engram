@@ -119,6 +119,12 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
 
     // Flatten before anything else, and never show the model a merged member's
     // own text.
+    //
+    // From `members`, not the list the component arrived with: the partition
+    // above drops retired members and their pairs, and roots resolved from the
+    // stale list would put a retired artifact back into the prompt, the fan-in
+    // cap, and the loss check — the question this unit is no longer asking.
+    let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
     let root_map = core.store.roots_of(&member_ids).await?;
     // A member with no roots at all is a merge whose sources were deleted out
     // from under it. Its text is a paraphrase with nothing behind it — not
@@ -510,6 +516,53 @@ mod tests {
             .find(|p| (p.a_id == a || p.b_id == a) && (p.a_id == b || p.b_id == b))
             .expect("the pair was just recorded")
             .id
+    }
+
+    #[tokio::test]
+    async fn a_retired_members_roots_do_not_count_against_the_cap() {
+        // C is deprecated while the unit waits. Its pair is dismissed and it
+        // is dropped from the component — but its root must also leave the
+        // question, or a two-root component at the cap is settled Oversized
+        // for fan-in it does not have, and C's text is shown to the model as
+        // an original.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.consolidate.merge_max_roots = 2;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.93, 0.37]),
+                ("c text", [0.90, 0.44]),
+            ],
+        )
+        .await;
+        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        queue_pair(&core, &ids[1], &ids[2]).await;
+        core.deprecate(&ids[2]).await.unwrap();
+
+        run(&core, &seed_pair.to_string()).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Oversized, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a retired member's root was counted against merge_max_roots"
+        );
+        // The live pair reached the model and took its verdict.
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::NoConflict, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     async fn disagreeing(core: &Core) -> Vec<String> {
