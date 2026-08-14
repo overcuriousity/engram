@@ -12,7 +12,7 @@
 {% for p in pairs %}
 <div class="decide">
   <div class="decide-head">
-    {% if p.contradiction %}<b>These two disagree</b>{% else %}<b>These two cover the same ground</b>{% endif %}
+    {% if p.contradiction %}<b>These two disagree</b>{% else %}{% if p.would_merge %}<b>The model would merge these</b>{% else %}<b>These two cover the same ground</b>{% endif %}{% endif %}
     — {{ p.percent }}% alike.
     <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> and
     <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>.

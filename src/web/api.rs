@@ -441,6 +441,14 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Superseded, 100)
             .await?,
+        // Merge verdicts recorded while autonomy is off. Their own key for
+        // the same reason they are their own state: a consumer counting
+        // `contradictions` must not see pairs the model judged complementary.
+        "merge_proposals": st
+            .core
+            .store
+            .pairs_by_state(PairState::WouldMerge, 100)
+            .await?,
         "pairs": st
             .core
             .store

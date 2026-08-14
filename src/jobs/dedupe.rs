@@ -335,18 +335,14 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 // Recorded, not applied. Reading the verdicts before letting the
                 // system act on them is the cheapest evidence available about
                 // whether the contract holds on real data, and it is the only
-                // reason the switch is a switch rather than a leap.
-                let detail = s
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "would merge".to_string());
-                return settle_all(
-                    core,
-                    &s.pairs,
-                    PairState::Contradiction,
-                    Some(&format!("would merge: {detail}")),
-                )
-                .await;
+                // reason the switch is a switch rather than a leap. Its own
+                // state rather than Contradiction: filing a mergeable pair
+                // among genuine conflicts made the UI claim the two disagree,
+                // and steered the operator toward hiding a side the model
+                // judged complementary. The draft is discarded — once autonomy
+                // is on, the unit re-judges and merges then.
+                return settle_all(core, &s.pairs, PairState::WouldMerge, s.detail.as_deref())
+                    .await;
             }
 
             // Every member, not just the roots. A merged member is not its own
@@ -899,5 +895,45 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn with_autonomy_off_a_duplicate_verdict_is_filed_as_would_merge() {
+        // It used to be filed as Contradiction, so the UI said "These two
+        // disagree" about a pair the model judged complementary, and offered
+        // only the lossy keep-one buttons for it.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = false;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"same claim",
+                "merged":{"text":"engram needs Rust 1.21.4 and 1.30.0 to build.","tags":[],"caveats":[]}}"#
+                .into(),
+        ]));
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let found = core
+            .store
+            .pairs_by_state(PairState::WouldMerge, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "the verdict must land as its own state");
+        assert_eq!(found[0].detail.as_deref(), Some("same claim"));
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Contradiction, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a mergeable pair was filed among genuine conflicts"
+        );
+        // Recorded, not applied: no merge written, nothing hidden.
+        for id in &ids {
+            let c = core.store.get_artifact(id).await.unwrap();
+            assert!(c.superseded_by.is_none());
+        }
+        assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
     }
 }
