@@ -497,7 +497,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_replacement_is_only_proposed_while_autonomy_is_off() {
+        // The observation window. Switched off, the pass still asks and still
+        // records what it would have done -- which is the whole point: an
+        // operator can read the verdicts before granting the authority to act
+        // on them, rather than switching autonomy on blind.
         let mut core = test_core().await;
+        core.consolidate.autonomous = false;
         core.completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));

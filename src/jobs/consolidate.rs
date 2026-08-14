@@ -1,16 +1,38 @@
-//! Consolidation: what to do about two artifacts the index says are the same.
+//! Consolidation: what to do about artifacts the index says are the same.
 //!
-//! Three thresholds and three outcomes. At or above `auto_supersede` the pair
-//! is near enough to identical that the older one is hidden — it is still
-//! stored, still readable, and one write undoes it. Between `review_min` and
-//! that, the pair goes on a queue for a person, because two genuinely distinct
-//! artifacts about one subsystem sit at 0.88 routinely and acting on that score
-//! destroys knowledge rather than duplication. Below `review_min`, nothing.
+//! This sweep is no longer where duplicates are found. `jobs::relate` asks each
+//! artifact for its own neighbours when it is embedded, which is exact and
+//! costs no inference, where a sampled sweep needed both members of a pair in
+//! one draw — a probability that decays as (sample/N)² and leaves a given pair
+//! waiting years on a large base. What remains here is the backlog, the
+//! backstop, the clustering that spans many pairs at once, and the repairs.
 //!
-//! Nothing here rewrites an artifact. A merged artifact would be synthetic text
-//! standing where a stored passage used to, with no segment to verify it
-//! against and no corpus lines to show beside it, which is the one failure mode
-//! this design exists to avoid.
+//! Two thresholds still divide the work. At or above `auto_supersede` a group
+//! collapses onto its newest member for free: no call, no rewrite, and the
+//! survivor is a stored original. Between `review_min` and that, the group goes
+//! to `jobs::dedupe`, because two genuinely distinct artifacts about one
+//! subsystem sit at 0.88 routinely and acting on that score alone destroys
+//! knowledge rather than duplication.
+//!
+//! **On merging.** This header used to say that nothing here rewrites an
+//! artifact, and that a merged artifact would be synthetic text standing where
+//! a stored passage used to. Merging is now permitted, narrowly, and the four
+//! conditions that make it safe are part of that argument rather than
+//! exceptions to it:
+//!
+//! - Superseding is preferred wherever one stored original suffices, so most
+//!   groups still produce no synthetic text at all (`Relation::Replaced`).
+//! - A merged artifact is a distinct `provenance` kind naming what it was
+//!   written from, never mistakable for a captured passage.
+//! - The originals are superseded, never deleted — still stored, still
+//!   readable, one write from active, and one button from restored.
+//! - No merge may drop a value or a literal any source carried
+//!   (`jobs::merge::losses`), and one that would is escalated rather than
+//!   written.
+//!
+//! A disagreement about a value is still never settled here. It goes to a
+//! person, because deciding which of two facts is current is the judgement a
+//! model is worst at.
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -1494,7 +1516,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_pass_asks_by_default_and_acts_only_when_told_to() {
+    async fn the_pass_records_what_it_would_do_when_autonomy_is_off() {
         // This asserted `judged == 0` while the flag was called `judge`, because
         // that flag gated whether the model was *asked*. `autonomous` gates
         // whether the answer is *acted on*, and the two cannot be the same
@@ -1502,9 +1524,11 @@ pub(crate) mod tests {
         // having read no verdicts at all, which is exactly the leap the flag
         // exists to avoid.
         //
-        // So the default asks and records. `max_dedupe_per_tick = 0` is what
-        // switches the model off, and it has its own test.
+        // So the two are separate switches. `max_dedupe_per_tick = 0` stops the
+        // asking and has its own test; this one pins that turning acting off
+        // still leaves a verdict to read.
         let mut core = test_core().await;
+        core.consolidate.autonomous = false;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old versus new"}"#.into(),
         ]));

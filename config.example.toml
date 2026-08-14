@@ -173,14 +173,17 @@ per_point = 5
 interval_hours = 24
 # Let the dedupe pass act on what it decides: superseding where one stored
 # artifact plainly replaces another, and writing one merged artifact where each
-# side carries something the other lacks. Off by default for now — the verdicts
-# are recorded either way, so the queue can be read before the system is allowed
-# to act on it.
+# side carries something the other lacks. On by default.
 #
-# A disagreement about a value is never settled this way. It goes to the
-# conflicts queue on Ops, because deciding which of two facts is current is the
-# judgement a model is worst at.
-autonomous = false
+# Turning it off does not stop the pass asking — the verdicts are recorded
+# either way, so you can read what it would have done before letting it do it.
+# `max_dedupe_per_tick = 0` is what switches the model off entirely.
+#
+# A disagreement about a value is never settled this way. It goes to the review
+# queue on Capture, because deciding which of two facts is current is the
+# judgement a model is worst at. Nothing is deleted, no merge that would drop a
+# number, command or path is written, and every merge has an undo on Ops.
+autonomous = true
 # How often the dedupe pass arms model calls, and how many per tick. Together
 # these are a rate — twenty an hour by default — and a rate is the right shape
 # because the fixed quantity is what the hardware gets through, not how big the

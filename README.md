@@ -30,6 +30,15 @@ stand on its own, with a title, a category and tags. Artifacts are what gets
 embedded, ranked, read and edited. One call turns one segment into several
 artifacts; no artifact spans two segments.
 
+Most artifacts are *captured* — written from one segment of one corpus, with the
+lines they came from shown beside them. A few are *merged*: written by
+consolidation out of two or more captured artifacts that said the same thing,
+and listing what they were written from instead of corpus lines. The originals
+are hidden rather than deleted, one button restores them, and no merge is
+written that would drop a number, command or path any of its sources carried.
+Consolidation prefers to keep an original wherever one will do, so merging is
+what happens when neither artifact alone was sufficient.
+
 ## Asking for something
 
 Type the situation, not the keywords. The query is embedded whole and matched

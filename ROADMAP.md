@@ -21,8 +21,18 @@ means making the background job do more, never adding a model call to the query
 path.
 
 **Fidelity outranks convenience.** Retrieval returns the exact source artifact.
-A paraphrase or a synthetic summary must never silently replace or outrank the
+A paraphrase or a synthetic summary must never *silently* replace or outrank the
 original wording — that is the one failure mode this design exists to avoid.
+
+Consolidation may write a merged artifact out of several others, and the word
+doing the work above is "silently". Four conditions make it an application of
+this principle rather than an exception to it: superseding is preferred wherever
+one stored original suffices, so most groups produce no synthetic text at all; a
+merged artifact is a distinct provenance kind that names what it was written
+from; the originals are superseded rather than deleted, still stored and one
+button from restored; and no merge may drop a value, command or path any source
+carried. A disagreement about a value is never settled this way — it goes to a
+person. See `docs/superpowers/specs/2026-08-14-autonomous-consolidation-design.md`.
 
 **Lean beats clever.** Anything that adds a storage tier, a model dependency or
 a layer crossing without a measured retrieval gain does not go in.
@@ -85,12 +95,24 @@ to the query path.
   loses to C, leaving A pointing at something hidden. Between `review_min`
   (0.88) and that, the pair goes on the `artifact_pairs` queue instead — 0.88 is
   where two genuinely distinct artifacts about one subsystem routinely sit.
-  The staleness half is the opt-in `consolidate.judge`: queued pairs are
-  filtered on fact-shaped tokens (`src/infer/facts.rs`) with no inference at
-  all, and only a pair whose values actually differ reaches the model, which is
-  asked one yes/no question under a per-sweep budget. Nothing is ever merged or
-  deleted, and which of two contradictory artifacts is current stays the
-  reader's judgement.
+  Which of two contradictory artifacts is current stays the reader's judgement.
+- ~~**Autonomous consolidation.**~~ Done — detection no longer samples: a
+  `Stage::Relate` unit asks each artifact for its own neighbours when it is
+  embedded (`VectorStore::neighbours`, one query, no embedding call), so
+  coverage is complete regardless of how large the base has grown. The sampled
+  sweep kept needing both members of a pair in one draw, a probability decaying
+  as (sample/N)² — years per pair at a hundred thousand artifacts.
+  `Stage::Dedupe` then settles a whole connected component in one call, with
+  four verdicts: distinct, conflict, replaced, duplicate. `replaced` is
+  preferred wherever it applies, because the survivor is then a stored original
+  with a valid span. `duplicate` writes a merged artifact — a distinct
+  `provenance` kind naming its sources through `artifact_sources` — and
+  supersedes what it replaced; a re-merge is always written from the captured
+  roots, so information loss stays one generation deep however often a group is
+  merged. Two free checks refuse any merge that would drop a value or a literal
+  (`jobs::merge::losses`). A value conflict is escalated to a person and never
+  merged, and every merge is undoable. See
+  `docs/superpowers/specs/2026-08-14-autonomous-consolidation-design.md`.
 - **Caveats on artifacts.** Done as part of the above, and worth naming
   separately: the synthesis call now also returns the conditions under which an
   artifact does not apply. It costs output tokens on a call already being made,

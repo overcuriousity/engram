@@ -259,12 +259,23 @@ mod tests {
             cfg.consolidate.auto_supersede > cfg.consolidate.review_min,
             "superseding at or below the review threshold would hide distinct artifacts"
         );
-        // Asking is on by default; *acting* on the answer is not. The dedupe
-        // pass records its verdicts either way, so an operator can read what it
-        // would have done before granting it the authority to do it.
+        // Autonomy is on: a shipped instance consolidates its own knowledge base
+        // without being asked. That is a deliberate choice and the largest risk
+        // in the design, and what bounds it is not this flag — it is that a
+        // value conflict is escalated rather than settled, that a merge which
+        // would drop a value is refused, that the originals are superseded
+        // rather than deleted, and that every merge has an undo.
+        //
+        // What stays bounded here is the *spend*. A rate rather than a
+        // per-sweep count, so it does not grow with the base.
+        assert!(cfg.consolidate.autonomous);
         assert!(
-            !cfg.consolidate.autonomous,
-            "acting on a verdict without being asked to must be opt-in"
+            cfg.consolidate.max_dedupe_per_tick > 0 && cfg.consolidate.dedupe_interval_mins > 0,
+            "the pass must have a rate, or it either never runs or is unbounded"
+        );
+        assert!(
+            cfg.consolidate.merge_max_roots >= 2,
+            "a merge needs at least two sources to be a merge"
         );
     }
 

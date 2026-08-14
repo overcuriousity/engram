@@ -194,7 +194,7 @@ impl Default for ConsolidateConfig {
             sample: 2000,
             per_point: 5,
             interval_hours: 24,
-            autonomous: false,
+            autonomous: true,
             dedupe_interval_mins: 15,
             max_dedupe_per_tick: 5,
             merge_max_roots: 8,
