@@ -8,9 +8,22 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+/// One of `text`, `html` or `url` — never two.
+///
+/// Supplying more than one is a validation error rather than a precedence
+/// rule, because every precedence rule here would silently discard something
+/// the caller meant to capture.
 #[derive(serde::Deserialize)]
 pub struct IngestRequest {
-    pub text: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// HTML the browser has already rendered and authenticated.
+    #[serde(default)]
+    pub html: Option<String>,
+    /// With `html`: where it came from, and the base for relative links.
+    /// Alone: the page to fetch.
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
 }
@@ -122,14 +135,68 @@ pub struct StatusResponse {
     pub vectors: u64,
 }
 
+/// Capture channels. `origin` is derived from which field arrived, not
+/// hardcoded: it is the only record of how a document got here.
+const ORIGIN_WEB: &str = "web";
+const ORIGIN_EXTENSION: &str = "extension";
+const ORIGIN_FETCH: &str = "fetch";
+
 async fn ingest(
     State(st): State<AppState>,
     _id: Identity,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let supplied = [
+        req.text.is_some(),
+        req.html.is_some(),
+        // A `url` alongside `html` is provenance, not a second body.
+        req.url.is_some() && req.html.is_none(),
+    ]
+    .iter()
+    .filter(|p| **p)
+    .count();
+    if supplied != 1 {
+        return Err(Error::Validation(
+            "supply exactly one of `text`, `html` or `url`".into(),
+        ));
+    }
+
+    let parsed_url = match &req.url {
+        Some(raw) => {
+            Some(url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?)
+        }
+        None => None,
+    };
+
+    let (text, origin) = if let Some(text) = req.text {
+        (text, ORIGIN_WEB)
+    } else if let Some(html) = req.html {
+        // Synchronous and self-contained: `Readability` is !Send and must not
+        // be alive across the awaits above or below it.
+        let md = crate::core::extract::html_to_markdown(
+            &html,
+            parsed_url.as_ref(),
+            st.core.capture.min_extracted_chars,
+        )?;
+        (md, ORIGIN_EXTENSION)
+    } else {
+        let u = parsed_url.as_ref().expect("one-of check guarantees a url");
+        let html = crate::core::fetch::fetch_html(u, &st.core.capture).await?;
+        let md = crate::core::extract::html_to_markdown(
+            &html,
+            parsed_url.as_ref(),
+            st.core.capture.min_extracted_chars,
+        )?;
+        (md, ORIGIN_FETCH)
+    };
+
     let out = st
         .core
-        .ingest(&req.text, "web", req.title.as_deref())
+        .ingest_capture(
+            crate::core::ingest::Capture::new(text, origin)
+                .with_title(req.title)
+                .with_source_url(parsed_url.map(|u| u.to_string())),
+        )
         .await?;
     // 201 for a new capture, 200 when the text was already stored.
     let code = if out.duplicate {
@@ -551,6 +618,88 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn capture_accepts_exactly_one_of_text_html_or_url() {
+        let (app, token) = app_and_token().await;
+
+        let long = "<html><body><article><h2>Loop devices</h2><p>".to_string()
+            + &"the article body has to clear the extraction floor, so it says \
+                rather more than it needs to. "
+                .repeat(6)
+            + "</p></article></body></html>";
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": long }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"text": "a", "url": "https://example.test/"}),
+            serde_json::json!({"text": "a", "html": "<p>b</p>"}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/v1/corpora", &token, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "accepted {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_html_capture_records_its_url_as_provenance_not_as_origin() {
+        let (app, token, core) = app_token_and_core().await;
+        let html = "<html><body><article><h2>Mounting</h2><p>".to_string()
+            + &"read-only until you have a hash of the source image. ".repeat(8)
+            + "</p></article></body></html>";
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": html, "url": "https://example.test/notes" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.origin, "extension");
+        assert_eq!(
+            src.source_url.as_deref(),
+            Some("https://example.test/notes")
+        );
+        // Extraction, not the raw HTML: nothing downstream learns HTML exists.
+        assert!(
+            src.raw_text.contains("## Mounting"),
+            "got: {}",
+            src.raw_text
+        );
+        assert!(!src.raw_text.contains("<article>"));
+    }
+
+    #[tokio::test]
+    async fn a_page_that_extracts_to_nothing_is_refused_and_stores_no_corpus() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({ "html": "<html><body><p>Subscribe to read.</p></body></html>" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
     #[tokio::test]
