@@ -603,6 +603,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// most once, so the depth is bounded by the pairs that exist, and the call rate
 /// is the gate's job rather than this number's.
 pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
+    // `max_dedupe_per_tick = 0` is the off switch for the model (see `run`'s
+    // comment on the `autonomous` flag). Off means off: no 200-row read per
+    // tick, and no "budget spent" log line implying a budget was spent.
+    if core.consolidate.max_dedupe_per_tick == 0 {
+        return Ok(0);
+    }
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
@@ -2310,6 +2316,28 @@ pub(crate) mod tests {
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.examined, out.superseded, out.queued), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_zero_dedupe_budget_arms_nothing_and_reads_nothing() {
+        // With the budget at zero every tick still ran the 200-row query and
+        // logged "budget spent" — dead work on the sweep's hot path, and a
+        // misleading log line. The observable half: nothing is armed and no
+        // pair is touched.
+        let mut core = test_core().await;
+        core.consolidate.max_dedupe_per_tick = 0;
+        disagreeing(&core).await;
+        let out = run(&core).await.unwrap();
+        assert_eq!(out.judged, 0);
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the pending pair must be left exactly as it was"
+        );
     }
 
     #[test]
