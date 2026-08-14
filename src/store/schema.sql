@@ -126,6 +126,11 @@ CREATE TABLE IF NOT EXISTS artifact_sources (
   -- CASCADE because a deleted intermediate does not invalidate the root.
   via_id     TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
+  -- Set when an operator explicitly restored this root out of the merge. The
+  -- unfinished-merge repair must never hide such a root again; a *new* merge
+  -- decision writes fresh rows with 0, which is new evidence rather than a
+  -- repair of old state.
+  restored   INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (child_id, root_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sources_root ON artifact_sources(root_id);

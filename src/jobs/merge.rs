@@ -65,9 +65,12 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let roots = core.store.roots_of(std::slice::from_ref(&m.id)).await?;
-    for root in roots.get(&m.id).into_iter().flatten() {
-        let Ok(r) = core.store.get_artifact(root).await else {
+    // `roots_to_hide`, not `roots_of`: a root an operator explicitly restored
+    // out of this merge stays in results, and this repair path — re-run by the
+    // sweep for as long as the merge stands — must not undo that decision on
+    // every tick.
+    for root in core.store.roots_to_hide(&m.id).await? {
+        let Ok(r) = core.store.get_artifact(&root).await else {
             continue;
         };
         if r.status != ArtifactStatus::Active || r.superseded_by.is_some() {
@@ -77,7 +80,7 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // active, and an operator deprecating a root between the read and here
         // is an ordinary race rather than a reason to abandon the other roots —
         // the sweep's repair reaches whatever is left.
-        if let Err(e) = core.supersede(root, &m.id).await {
+        if let Err(e) = core.supersede(&root, &m.id).await {
             tracing::warn!(root = %root, merged = %m.id, error = %e,
                 "could not hide a merged artifact's root; it stays active");
         }
@@ -516,6 +519,62 @@ mod tests {
                 Some(m.id.as_str())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn restoring_one_merge_source_survives_the_next_sweep() {
+        // "Put it back" on a merge-hidden artifact used to last exactly one
+        // sweep: merged_with_active_roots cannot tell a crash-interrupted
+        // merge from an operator's explicit restore, and finish re-hid it.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let d = draft("Mount the filesystem, or attach the volume, before writing.");
+        let m = write(&core, &d, &ids).await.unwrap();
+        crate::jobs::embed::run(&core, &m.id).await.unwrap();
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some(),
+            "the merge never finished; the test setup is wrong"
+        );
+
+        core.unsupersede(&ids[0]).await.unwrap();
+
+        crate::jobs::consolidate::run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the sweep re-hid an artifact an operator had explicitly restored"
+        );
+        // The rest of the merge is untouched: the other source stays hidden,
+        // the merge stays active.
+        assert!(
+            core.store
+                .get_artifact(&ids[1])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
+        assert_eq!(
+            core.store.get_artifact(&m.id).await.unwrap().status,
+            ArtifactStatus::Active
+        );
     }
 
     #[tokio::test]

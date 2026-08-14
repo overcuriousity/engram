@@ -103,6 +103,10 @@ impl Store {
             // predating it, which is correct: those settlements predate the
             // column and are not reopenable by merge id.
             ("artifact_pairs", "merged_into", "TEXT"),
+            // The operator's partial restore of a merge source. 0 on every
+            // existing row, which is correct: nothing predating the column
+            // was explicitly restored.
+            ("artifact_sources", "restored", "INTEGER NOT NULL DEFAULT 0"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,

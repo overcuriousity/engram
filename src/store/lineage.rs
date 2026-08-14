@@ -93,6 +93,10 @@ impl Store {
     /// behind. Nothing else would see it: the merge looks finished from the
     /// artifact side and absent from the pair side, and only a join across the
     /// lineage says otherwise.
+    ///
+    /// A root an operator explicitly restored (`restored = 1`) is not an
+    /// unfinished merge, and the repair must not see it — re-hiding it undid
+    /// the operator's decision on every sweep.
     pub async fn merged_with_active_roots(&self, limit: i64) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT DISTINCT s.child_id FROM artifact_sources s
@@ -104,12 +108,42 @@ impl Store {
                 AND child.embed_state = 'embedded'
                 AND root.status = 'active'
                 AND root.superseded_by IS NULL
+                AND s.restored = 0
               LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(|r| r.get("child_id")).collect())
+    }
+
+    /// Record that an operator explicitly restored this captured root: no
+    /// repair may hide it behind a merge again. Every merge naming it, not
+    /// one — the operator's decision is about the root, not about a lineage
+    /// edge. A *new* merge decision may still hide it: `insert_merged_artifact`
+    /// writes fresh rows with `restored = 0`, and that is new evidence rather
+    /// than a repair of old state.
+    pub async fn mark_source_restored(&self, root_id: &str) -> Result<()> {
+        sqlx::query("UPDATE artifact_sources SET restored = 1 WHERE root_id = ?")
+            .bind(root_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The roots `merge::finish` is allowed to hide: the lineage minus every
+    /// root an operator explicitly restored. Distinct from `roots_of`, which
+    /// answers "what was this written from" and must keep seeing the true
+    /// closure.
+    pub async fn roots_to_hide(&self, child_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT root_id FROM artifact_sources
+              WHERE child_id = ? AND restored = 0 ORDER BY root_id",
+        )
+        .bind(child_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("root_id")).collect())
     }
 
     /// Active merged artifacts whose embedding can no longer arrive: no live

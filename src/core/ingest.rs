@@ -258,6 +258,8 @@ impl Core {
     /// job. Clearing the row first loses the only page that offers the undo
     /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
+        // Read before clearing: afterwards nothing says who was hiding it.
+        let winner = self.store.get_artifact(artifact_id).await?.superseded_by;
         // Marked before either store is touched. This direction writes the
         // payload first, so without it a crash between the two would leave
         // drift no row write ever announced.
@@ -271,6 +273,15 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
             .await?;
+        // A restore out of a merge is an operator overruling the merge for
+        // this one source. Recorded on the lineage, or the sweep's
+        // unfinished-merge repair re-hides it on the next tick, every tick.
+        if let Some(w) = winner
+            && let Ok(wc) = self.store.get_artifact(&w).await
+            && wc.provenance == crate::store::artifacts::Provenance::Merged
+        {
+            self.store.mark_source_restored(artifact_id).await?;
+        }
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
     }
