@@ -160,6 +160,13 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
             )
             .await?;
     }
+    // And by lineage, for an undo that outran the embed: before `finish` runs,
+    // nothing is superseded by this merge, so `restored` above is empty — but
+    // the pairs were settled the moment the merge was written, and leaving
+    // them would keep the duplicates invisible to every later sweep.
+    core.store
+        .dismiss_pairs_merged_into(&m.id, "merge undone")
+        .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
     Ok(())
 }
@@ -767,6 +774,49 @@ mod tests {
                 "the sweep merged the pair again after an explicit undo"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn undoing_a_merge_before_its_embed_lands_still_releases_its_pairs() {
+        // Pairs are settled at write time; roots are superseded at embed time.
+        // An undo in between used to find nothing superseded, dismiss nothing,
+        // and leave the pairs no_conflict behind a deprecated merge — both
+        // duplicates active, and record_pair unable to ever re-file them.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        core.store
+            .set_pair_merged(pair, &m.id, Some("duplicate"))
+            .await
+            .unwrap();
+        // No embed ran: nothing is superseded by m yet.
+
+        undo(&core, &m.id).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(
+            p.state,
+            crate::store::pairs::PairState::Dismissed,
+            "the pair stayed settled behind a deprecated merge: {p:?}"
+        );
+        assert_eq!(p.merged_into, None);
     }
 
     #[tokio::test]

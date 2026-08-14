@@ -334,6 +334,25 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// Dismiss every pair a merge being undone had settled, by the lineage the
+    /// settlement recorded. `pairs_among` covers only what the merge had
+    /// already hidden — before the embed lands that is nothing, while the
+    /// pairs were settled the moment the merge was written. Dismissed, not
+    /// Contradiction: an undo is an operator overruling the verdict, and
+    /// `record_pair` respecting dismissed rows is what makes that last.
+    pub async fn dismiss_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs
+                SET state = 'dismissed', detail = ?, merged_into = NULL
+              WHERE merged_into = ?",
+        )
+        .bind(detail)
+        .bind(merged_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Pending pairs in the order the judge should spend its budget on them.
     ///
     /// Least-attempted first, then by score. A pair whose reply could not be
