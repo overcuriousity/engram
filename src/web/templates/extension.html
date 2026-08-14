@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+{% block title %}Browser extension — engram{% endblock %}
+{% block content %}
+<h2>Browser extension</h2>
+<p class="muted">Capture what you are reading without reaching for the paste
+box, and search from a panel beside the page.</p>
+
+{# Install differs by browser, and saying so plainly is better than one button
+   that works for half the people who press it. #}
+<h3>Firefox</h3>
+{% if have_xpi %}
+<p><a href="/extension/firefox.xpi">Install</a> — one click.</p>
+{% else %}
+<p class="muted">Not in this build. The Firefox package is signed once per
+release and committed; a checkout that has not been through one does not carry
+it.</p>
+{% endif %}
+<p class="muted">There is no auto-update: one signed artifact serves every
+deployment, and a manifest naming a single update host could not do that.
+Come back here after a deployment.</p>
+
+<h3>Chrome</h3>
+<p><a href="/extension/chrome.zip">Download</a>, unzip it, open
+<code>chrome://extensions</code>, turn on Developer mode, and press
+<em>Load unpacked</em>.</p>
+<p class="muted">Chrome blocks off-store installs for ordinary users, so there
+is no one-click path and no auto-update. An enterprise policy allowlist is the
+alternative, and is not the default here.</p>
+
+<h3>Pairing</h3>
+<p>Open the panel and press Capture. It will ask for
+<strong>{{ origin }}</strong>, and for permission to reach that one host —
+nothing else, and no access to any other site.</p>
+<p class="muted">The token appears under Housekeeping → API tokens as
+“browser extension”, and can be revoked there.</p>
+{% endblock %}

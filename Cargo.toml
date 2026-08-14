@@ -67,3 +67,9 @@ tempfile = "3"
 temp-env = "0.3"
 wiremock = "0.6.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
+
+[build-dependencies]
+# Packs the Chrome extension at compile time. A build dependency, not a
+# runtime one: the zip is a build artifact, not something the server assembles
+# per request.
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
