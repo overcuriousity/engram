@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>engram</title>
+<link rel="stylesheet" href="panel.css">
+<main>
+  <button id="capture" class="primary">Capture this page</button>
+  <p id="status" hidden></p>
+
+  <label for="q">Search</label>
+  <input id="q" type="search" autocomplete="off">
+
+  <label for="ask">Ask</label>
+  <form id="ask-form"><input id="ask" type="text" autocomplete="off"></form>
+
+  <div id="results"></div>
+</main>
+<script src="shim.js"></script>
+<script src="api.js"></script>
+<script src="pair.js"></script>
+<script src="panel.js"></script>

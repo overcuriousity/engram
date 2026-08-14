@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "engram",
+  "version": "0.1.0",
+  "description": "Capture what you are reading into engram, and search it from here.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "engram@localhost",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage",
+    "identity"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "scripts": ["shared/shim.js", "shared/background.js"] },
+  "sidebar_action": {
+    "default_panel": "shared/panel.html",
+    "default_title": "engram"
+  },
+  "action": { "default_title": "engram" },
+  "omnibox": { "keyword": "eg" }
+}
