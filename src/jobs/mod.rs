@@ -3,6 +3,7 @@ pub mod consolidate;
 pub mod embed;
 pub mod judge;
 pub mod reconcile;
+pub mod relate;
 pub mod synthesize;
 pub mod window;
 
@@ -49,6 +50,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Judge, _) => judge::run(core, &job.target_id).await,
+        (Stage::Relate, _) => relate::run(core, &job.target_id).await,
     };
 
     match result {

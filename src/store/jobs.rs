@@ -26,6 +26,15 @@ pub enum Stage {
     Consolidate,
     /// One pair, one call.
     Judge,
+    /// One artifact, one neighbour query. No inference: `neighbours` looks the
+    /// vector up by point id, so this costs a round trip and nothing else.
+    ///
+    /// What makes duplicate detection complete rather than sampled. The sweep
+    /// draws `sample` points and computes pairs only within that draw, so both
+    /// members of a pair have to land in the same one — probability (s/N)^2,
+    /// which decays quadratically and leaves a given pair waiting years on a
+    /// large base.
+    Relate,
 }
 
 impl Stage {
@@ -38,6 +47,7 @@ impl Stage {
             Stage::Embed => "embed",
             Stage::Consolidate => "consolidate",
             Stage::Judge => "judge",
+            Stage::Relate => "relate",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -49,6 +59,7 @@ impl Stage {
             "embed" => Some(Stage::Embed),
             "consolidate" => Some(Stage::Consolidate),
             "judge" => Some(Stage::Judge),
+            "relate" => Some(Stage::Relate),
             _ => None,
         }
     }

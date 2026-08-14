@@ -403,12 +403,19 @@ impl VectorStore for MemoryVectors {
                 p.payload.artifact_id != artifact_id
                     && status_of(&p.payload) == ArtifactStatus::Active
             })
-            .map(|p| SearchHit {
-                payload: p.payload.clone(),
-                score: cosine(&seed.vector, &p.vector),
-                // The seed is an artifact, not a query. "Loosely related" is
-                // the honest description of every neighbour list.
-                similarity: None,
+            .map(|p| {
+                let cos = cosine(&seed.vector, &p.vector);
+                SearchHit {
+                    payload: p.payload.clone(),
+                    score: cos,
+                    // Stated rather than left `None`. This is one dense lookup
+                    // with no fusion, so the score *is* a cosine — and the
+                    // relate unit compares it against `review_min`, which is a
+                    // cosine threshold. Leaving it unset would make a caller
+                    // read `score`, which everywhere else in this trait means a
+                    // fused rank that is not comparable to anything.
+                    similarity: Some(cos),
+                }
             })
             .collect();
         hits.sort_by(|a, b| {

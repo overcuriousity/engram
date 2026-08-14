@@ -1867,6 +1867,14 @@ impl VectorStore for QdrantVectors {
         let mut hits = hits_of(res);
         hits.retain(|h| h.payload.artifact_id != artifact_id);
         hits.truncate(limit);
+        // One dense query, no prefetch and no fusion, so Qdrant's score here
+        // *is* the cosine. Stated rather than left at `hits_of`'s `None`: the
+        // relate unit compares this against `review_min`, a cosine threshold,
+        // and `score` everywhere else in this trait is a fused rank that means
+        // nothing across queries.
+        for h in &mut hits {
+            h.similarity = Some(h.score);
+        }
         Ok(hits)
     }
 

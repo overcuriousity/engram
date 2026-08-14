@@ -289,7 +289,15 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             artifact_id = %chunk.id,
             "chunk was edited while it was being embedded; leaving it pending"
         );
+        return Ok(());
     }
+    // Only now: the vector is in the index, so a neighbour query has something
+    // to find. Armed rather than run inline — a Qdrant query that fails must not
+    // fail the embed job, whose retry would pay for the embedding again.
+    //
+    // This is what makes duplicate detection complete rather than sampled; see
+    // the module header of `jobs::relate`.
+    crate::jobs::relate::arm(core, &chunk.id, 0).await?;
     Ok(())
 }
 
@@ -1259,16 +1267,30 @@ mod tests {
     #[tokio::test]
     async fn a_long_document_re_arms_itself_until_it_is_drained() {
         let core = test_core().await;
-        let id = corpus_with_chunks(&core, BATCH * 2 + 5).await;
+        let chunks = BATCH * 2 + 5;
+        let id = corpus_with_chunks(&core, chunks).await;
         core.store
             .enqueue(Stage::Embed, "corpus", &id)
             .await
             .unwrap();
 
+        // The termination guard is what this test exists for: the batch job
+        // re-arms itself, and a re-arm that does not stop is an infinite queue
+        // rather than a slow one.
+        //
+        // The exact total is what pins it, and it is now two things rather than
+        // one: three batch claims, plus one `relate` unit per artifact that
+        // reached the index. Either number drifting shows up here — an extra
+        // batch claim means the re-arm ran long, and a missing relate unit means
+        // an artifact was indexed without ever being checked for duplicates,
+        // which is the silent half.
         let mut claims = 0;
         while crate::jobs::run_one(&core).await.unwrap() {
             claims += 1;
-            assert!(claims < 20, "the re-arm never terminated");
+            assert!(
+                claims <= 3 + chunks,
+                "the re-arm never terminated: {claims} claims"
+            );
         }
 
         assert!(
@@ -1279,7 +1301,11 @@ mod tests {
                 .is_empty(),
             "the re-arm did not drain the corpus"
         );
-        assert_eq!(claims, 3, "expected one claim per batch");
+        assert_eq!(
+            claims,
+            3 + chunks,
+            "expected one claim per batch, plus one relate unit per artifact"
+        );
     }
 
     #[tokio::test]
