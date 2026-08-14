@@ -56,7 +56,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let pairs = core.store.open_component(id).await?;
+    let mut pairs = core.store.open_component(id).await?;
     let mut member_ids: Vec<String> = pairs
         .iter()
         .flat_map(|p| [p.a_id.clone(), p.b_id.clone()])
@@ -65,6 +65,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     member_ids.dedup();
 
     let mut members = Vec::new();
+    let mut retired: std::collections::HashSet<String> = Default::default();
     for mid in &member_ids {
         // Reported, not swallowed. `a_id` and `b_id` are `ON DELETE CASCADE` and
         // every pool sets `foreign_keys`, so a pair naming an artifact that is
@@ -76,10 +77,40 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         // waits out a backoff, and spending the scarcest thing in the system to
         // rule on an artifact no longer in results buys nothing.
         if c.status != ArtifactStatus::Active || c.superseded_by.is_some() {
-            settle_all(core, &pairs, PairState::Dismissed, None).await?;
-            return Ok(());
+            retired.insert(c.id);
+            continue;
         }
         members.push(c);
+    }
+    if !retired.is_empty() {
+        // Only the pairs naming a retired member are answered by its
+        // retirement. Dismissing the whole component killed sibling pairs
+        // between still-active duplicates — record_pair is INSERT OR IGNORE
+        // and Dismissed appears on no list, so nothing could ever re-file
+        // them and the surviving duplication was invisible forever.
+        let (dead, live): (Vec<_>, Vec<_>) = pairs
+            .into_iter()
+            .partition(|pr| retired.contains(&pr.a_id) || retired.contains(&pr.b_id));
+        settle_all(
+            core,
+            &dead,
+            PairState::Dismissed,
+            Some("a member is no longer in results"),
+        )
+        .await?;
+        pairs = live;
+        // Dropping a member can strand others with no surviving pair; they
+        // are simply not part of this unit's question any more.
+        let named: std::collections::HashSet<&str> = pairs
+            .iter()
+            .flat_map(|pr| [pr.a_id.as_str(), pr.b_id.as_str()])
+            .collect();
+        members.retain(|c| named.contains(c.id.as_str()));
+        // The seed pair itself may be among the dead; the survivors keep
+        // their own units and nothing further is owed here.
+        if !pairs.iter().any(|pr| pr.id == id) {
+            return Ok(());
+        }
     }
     if members.len() < 2 {
         settle_all(core, &pairs, PairState::Dismissed, None).await?;
@@ -967,6 +998,44 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_member_dismisses_only_its_own_pairs() {
+        // Dismissing the whole component killed sibling pairs between
+        // still-active duplicates permanently: record_pair is INSERT OR
+        // IGNORE and Dismissed appears on no list, so the surviving
+        // duplication became invisible forever.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.93, 0.37]),
+                ("timeout is 90 seconds", [0.94, 0.34]),
+            ],
+        )
+        .await;
+        let p_ab = queue_pair(&core, &ids[0], &ids[1]).await;
+        let p_bc = queue_pair(&core, &ids[1], &ids[2]).await;
+        core.deprecate(&ids[2]).await.unwrap();
+
+        run(&core, &p_ab.to_string()).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(p_bc).await.unwrap().state,
+            PairState::Dismissed,
+            "the pair naming the retired artifact should be dismissed"
+        );
+        assert_eq!(
+            core.store.get_pair(p_ab).await.unwrap().state,
+            PairState::NoConflict,
+            "the pair between two live artifacts must still be judged, not dismissed"
         );
     }
 
