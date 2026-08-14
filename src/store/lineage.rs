@@ -112,6 +112,33 @@ impl Store {
         Ok(rows.iter().map(|r| r.get("child_id")).collect())
     }
 
+    /// Active merged artifacts whose embedding can no longer arrive: no live
+    /// embed job below the retry ceiling. The write path settles the pairs the
+    /// moment the merge is written, so a merge stuck here is invisible to
+    /// search, its roots were never superseded, and nothing else would notice
+    /// — the only signal was a forever-retrying job.
+    pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT a.id FROM artifacts a
+              WHERE a.provenance = 'merged'
+                AND a.status = 'active'
+                AND a.superseded_by IS NULL
+                AND a.embed_state != 'embedded'
+                AND NOT EXISTS (
+                      SELECT 1 FROM jobs j
+                       WHERE j.stage = 'embed'
+                         AND j.target_id = a.id
+                         AND j.state IN ('pending', 'running')
+                         AND j.attempts < ?)
+              LIMIT ?",
+        )
+        .bind(crate::store::jobs::MAX_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
     /// Active merged artifacts, other than `child_id`, every root of which is
     /// also a root of `child_id`.
     ///

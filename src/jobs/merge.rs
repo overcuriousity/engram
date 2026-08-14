@@ -164,6 +164,44 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Retire a merge whose embedding can never arrive, and hand its pairs back
+/// to a person.
+///
+/// Safe by the write path's own ordering: the roots are superseded only after
+/// the embed lands, so a stranded merge has hidden nothing — the base is
+/// exactly what it was before the verdict, plus one unindexed artifact.
+/// Deprecated rather than deleted for the same reason `undo` deprecates: the
+/// lineage is the record of what was attempted.
+///
+/// The reopened pairs go to `Contradiction`, not back to `Pending`: re-arming
+/// the model would regenerate the same unembeddable draft, at full price,
+/// forever.
+pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
+    let m = core.store.get_artifact(merged_id).await?;
+    if m.provenance != Provenance::Merged
+        || m.status != ArtifactStatus::Active
+        || m.superseded_by.is_some()
+        || m.embed_state == crate::store::artifacts::EmbedState::Embedded
+    {
+        // The embed landed (or someone else acted) between the scan and
+        // here. Nothing is stranded any more.
+        return Ok(());
+    }
+    core.deprecate(&m.id).await?;
+    let reopened = core
+        .store
+        .reopen_pairs_merged_into(
+            &m.id,
+            "the merged text could not be indexed; resolve by hand",
+        )
+        .await?;
+    // The forever-retrying job was this state's only signal; with the merge
+    // retired it is pure noise.
+    core.store.delete_job(Stage::Embed, &m.id).await?;
+    tracing::warn!(merged = %m.id, reopened, "reaped a merge that could not be embedded");
+    Ok(())
+}
+
 /// Flag merged artifacts that have lost a source to a delete.
 ///
 /// The text still carries what the deleted source said, so this is not data

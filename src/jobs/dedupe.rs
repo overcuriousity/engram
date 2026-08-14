@@ -446,13 +446,15 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // captured roots, and `subsumed_merges` catches the merged members.
             let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
             let m = crate::jobs::merge::write(core, draft, &sources).await?;
-            settle_all(
-                core,
-                &s.pairs,
-                PairState::NoConflict,
-                Some(&format!("merged into {}", m.id)),
-            )
-            .await
+            // `merged_into` rather than a detail string: if the embed never
+            // lands, the sweep's reap has to find exactly these pairs and
+            // reopen them (`reap_stranded`).
+            for pr in &s.pairs {
+                core.store
+                    .set_pair_merged(pr.id, &m.id, s.detail.as_deref())
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

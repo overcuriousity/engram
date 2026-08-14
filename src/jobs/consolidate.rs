@@ -314,6 +314,19 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
         Err(e) => tracing::warn!(error = %e, "could not look for unfinished merges"),
     }
+    // The opposite failure: a merge that will never be embedded. Its pairs
+    // are already settled, its roots were never superseded, and its only
+    // signal was a forever-retrying embed job.
+    match core.store.stranded_merges(50).await {
+        Ok(stranded) => {
+            for id in stranded {
+                if let Err(e) = crate::jobs::merge::reap_stranded(core, &id).await {
+                    tracing::warn!(merged = %id, error = %e, "could not reap a stranded merge");
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not look for stranded merges"),
+    }
     // A merged artifact whose source was deleted still carries what that source
     // said, so this is not data loss — it is a claim of provenance the artifact
     // can no longer support, and saying so beats quietly showing one fewer.
@@ -2254,5 +2267,103 @@ pub(crate) mod tests {
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.examined, out.superseded, out.queued), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
+        // The pairs are settled the moment the merge is written. If the embed
+        // then fails permanently the merge is stranded active-but-unindexed,
+        // the roots are never superseded, and the settled pairs mean the
+        // duplicates can never be merged again — with a forever-retrying job
+        // as the only signal.
+        use crate::store::artifacts::NewMerged;
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "both".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[ids[0].clone(), ids[1].clone()],
+            )
+            .await
+            .unwrap();
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &m.id)
+            .await
+            .unwrap();
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let pid = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        core.store
+            .set_pair_merged(pid, &m.id, Some("same claim"))
+            .await
+            .unwrap();
+        // The embed job has exhausted its retries and cannot succeed.
+        sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
+            .bind(crate::store::jobs::MAX_ATTEMPTS)
+            .bind(&m.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_artifact(&m.id).await.unwrap().status,
+            ArtifactStatus::Deprecated,
+            "the stranded merge should be retired"
+        );
+        let p = core.store.get_pair(pid).await.unwrap();
+        assert_eq!(
+            p.state,
+            PairState::Contradiction,
+            "the pair goes back to a person"
+        );
+        for id in &ids {
+            assert_eq!(
+                core.store.get_artifact(id).await.unwrap().status,
+                ArtifactStatus::Active
+            );
+        }
+
+        // And a healthy in-flight merge is left alone.
+        let m2 = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "x".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[ids[0].clone(), ids[1].clone()],
+            )
+            .await
+            .unwrap();
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &m2.id)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&m2.id).await.unwrap().status,
+            ArtifactStatus::Active,
+            "a merge whose embed is still in flight was reaped"
+        );
     }
 }
