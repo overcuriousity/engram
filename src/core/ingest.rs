@@ -258,10 +258,19 @@ impl Core {
     /// job. Clearing the row first loses the only page that offers the undo
     /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
+        // Marked before either store is touched. This direction writes the
+        // payload first, so without it a crash between the two would leave
+        // drift no row write ever announced.
+        self.store.mark_lifecycle_dirty(artifact_id).await?;
         self.vectors
             .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
             .await?;
         self.store.set_superseded_by(artifact_id, None).await?;
+        // Both stores agree now, so the marker the row write set has nothing
+        // left to describe. Cleared only here, never before the payload write.
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
+            .await?;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
     }
@@ -292,6 +301,9 @@ impl Core {
             .await?;
         self.vectors
             .set_lifecycle(loser_id, ArtifactStatus::Superseded, Some(winner_id))
+            .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
         tracing::info!(loser_id, winner_id, "superseded an artifact");
         Ok(())
@@ -330,6 +342,9 @@ impl Core {
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Deprecated, None)
             .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
         tracing::info!(artifact_id = id, "deprecated an artifact");
         Ok(())
     }
@@ -355,11 +370,16 @@ impl Core {
         if self.store.get_artifact(id).await?.superseded_by.is_some() {
             return self.unsupersede(id).await;
         }
+        // As in `unsupersede`: payload first, so the marker has to go first.
+        self.store.mark_lifecycle_dirty(id).await?;
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Active, None)
             .await?;
         self.store
             .set_artifact_status(id, ArtifactStatus::Active)
+            .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
         tracing::info!(artifact_id = id, "reactivated an artifact");
         Ok(())
@@ -446,6 +466,17 @@ impl Core {
             tracing::info!(done = n, total, "lifecycle backfill progress");
         }
         self.heal_store_drift().await?;
+        // The two-sided scan runs here and nowhere else. It is O(hidden
+        // artifacts), which autonomous merging makes grow without bound, so it
+        // stopped being something the sweep can afford on every tick — but a
+        // backfill is exactly the moment to catch drift with no SQLite write
+        // behind it: a payload edited out of band, or a base that predates
+        // `lifecycle_dirty` and therefore has interrupted writes nothing marked.
+        match crate::jobs::consolidate::full_lifecycle_reconcile(self).await {
+            Ok(0) => {}
+            Ok(fixed) => tracing::info!(fixed, "reconciled lifecycle drift the marker never saw"),
+            Err(e) => tracing::warn!(error = %e, "could not run the full lifecycle reconcile"),
+        }
         tracing::info!(n, "backfilled lifecycle fields into the vector store");
         Ok(n)
     }

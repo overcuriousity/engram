@@ -102,16 +102,60 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 /// Broader than `heal_dangling_supersessions`, which repairs one specific case
 /// (a winner that has since been deleted) in the SQLite direction only.
 ///
+/// Reads `lifecycle_dirty` rather than scanning. The marker is written in the
+/// same UPDATE that changes `status`/`superseded_by` and cleared once the
+/// payload write is acknowledged, so the work list is exactly the writes that
+/// did not finish — which is almost always empty.
+///
+/// The scan it replaced could not survive this feature. Autonomous merging makes
+/// hidden artifacts grow monotonically, every merge hiding at least two
+/// permanently, so both capped scans were on course to be truncated forever:
+/// repairing a shifting window of an ever-growing set, and reporting success
+/// either way. `full_lifecycle_reconcile` keeps that scan for the drift that
+/// arises with no SQLite write behind it, but it no longer runs every sweep.
+///
 /// Returns how many artifacts it rewrote, which is a number worth asserting on:
 /// a repair that fires on a base in agreement is a bug that hides behind a
 /// correct end state.
 async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
-    repair_lifecycle_drift_scanning(core, DRIFT_SCAN).await
+    let dirty = core.store.dirty_lifecycle_artifacts(DRIFT_SCAN).await?;
+    if dirty.is_empty() {
+        return Ok(0);
+    }
+    let rows: Vec<crate::vector::LifecycleRow> = dirty.iter().map(lifecycle_row_of).collect();
+    core.vectors.apply_lifecycle(&rows).await?;
+    // Only after the payload write returns. Clearing first would turn a failed
+    // write into permanent drift that nothing is left to notice.
+    let ids: Vec<String> = dirty.iter().map(|c| c.id.clone()).collect();
+    core.store.clear_lifecycle_dirty(&ids).await?;
+    tracing::info!(
+        repaired = rows.len(),
+        "finished lifecycle writes that never reached the vector store"
+    );
+    Ok(rows.len())
+}
+
+/// The full two-sided scan, for drift that arose with no SQLite write behind it
+/// — a payload edited out of band, or a base predating `lifecycle_dirty`.
+///
+/// Still on the sweep, behind the marker, and the division of labour is the
+/// point. The marker is *complete* for everything this system does to itself:
+/// every lifecycle transition marks before it writes and clears only once both
+/// stores agree, so no in-system write can drift unseen however large the base
+/// grows. This scan is *best-effort* for everything else, and past `DRIFT_SCAN`
+/// hidden artifacts it samples rather than covers.
+///
+/// Deleting it was tempting and wrong. The skew it alone catches is the worse
+/// of the two: a payload that says deprecated behind a row that says active
+/// leaves the artifact out of search, off every Ops list, and out of reach of
+/// the one button that would restore it. Incomplete cover for that beats none.
+pub(crate) async fn full_lifecycle_reconcile(core: &Core) -> Result<usize> {
+    full_lifecycle_reconcile_scanning(core, DRIFT_SCAN).await
 }
 
 /// The above with its cap as a parameter, so a test can reproduce what the two
 /// truncated scans do to each other without seeding `DRIFT_SCAN` artifacts.
-async fn repair_lifecycle_drift_scanning(core: &Core, scan: usize) -> Result<usize> {
+pub(crate) async fn full_lifecycle_reconcile_scanning(core: &Core, scan: usize) -> Result<usize> {
     // Both scans are capped, and neither cap lines up with the other:
     // `list_non_active_artifacts` returns the newest rows while `non_active_ids`
     // scrolls in point-id order. So set membership across the two proves
@@ -206,7 +250,19 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             "could not restore every artifact whose winner was deleted; retrying on the next sweep"
         );
     }
+    // Two passes, and the order is deliberate. The marker first: it is cheap,
+    // it is complete for every lifecycle write this system makes, and it does
+    // not grow with the base. Then the scan, which is the only thing that sees
+    // drift no SQLite write produced — a payload edited out of band leaves an
+    // artifact out of search, off every Ops list, and out of reach of the button
+    // that would restore it, and nothing else in the system would ever notice.
     if let Err(e) = repair_lifecycle_drift(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not finish interrupted lifecycle writes; retrying on the next sweep"
+        );
+    }
+    if let Err(e) = full_lifecycle_reconcile(core).await {
         tracing::warn!(
             error = %e,
             "could not reconcile lifecycle state with the vector store; retrying on the next sweep"
@@ -950,7 +1006,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_drift_repair_rewrites_nothing_when_the_two_stores_agree() {
+    async fn the_full_reconcile_rewrites_nothing_when_the_two_stores_agree() {
         // Both scans are capped and neither cap lines up with the other, so
         // "missing from the other list" used to read as drift. On a base with
         // more hidden artifacts than one scan returns, that reported the whole
@@ -977,6 +1033,91 @@ pub(crate) mod tests {
             0,
             "the repair fired on a base that agrees with itself"
         );
+        assert_eq!(
+            full_lifecycle_reconcile(&core).await.unwrap(),
+            0,
+            "the full scan fired on a base that agrees with itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_write_that_lost_its_payload_is_repaired_from_the_marker() {
+        // The scan this replaced was capped at DRIFT_SCAN from both sides, and
+        // autonomous merging makes hidden artifacts grow without bound — every
+        // merge hides at least two, permanently. Past the cap it repaired a
+        // shifting window of an ever-growing set and reported success either
+        // way. The marker's work list is the writes that did not finish, which
+        // is almost always empty and never grows with the base.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+
+        // Row written, payload not — exactly what a crash between the two
+        // leaves behind.
+        core.store
+            .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the row write left no marker, so nothing would ever look for it"
+        );
+
+        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
+
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the marker outlived the repair, so every sweep would redo it"
+        );
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            !hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "a deprecated artifact is still in search"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_lifecycle_change_leaves_no_marker() {
+        // If the four mutators did not clear it, the repair would rewrite every
+        // payload they ever touched, on every sweep, forever — write
+        // amplification behind a permanently correct end state.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("first", [1.0, 0.0]),
+                ("second", [0.0, 1.0]),
+                ("third", [0.5, 0.5]),
+            ],
+        )
+        .await;
+
+        core.deprecate(&ids[0]).await.unwrap();
+        core.supersede(&ids[1], &ids[2]).await.unwrap();
+        core.reactivate(&ids[0]).await.unwrap();
+        core.unsupersede(&ids[1]).await.unwrap();
+
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a completed lifecycle change left its marker behind"
+        );
+        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -993,17 +1134,22 @@ pub(crate) mod tests {
         core.deprecate(&ids[1]).await.unwrap();
 
         assert_eq!(
-            repair_lifecycle_drift_scanning(&core, 1).await.unwrap(),
+            full_lifecycle_reconcile_scanning(&core, 1).await.unwrap(),
             0,
             "the edge of a page was reported as a disagreement"
         );
     }
 
     #[tokio::test]
-    async fn the_drift_repair_notices_a_payload_naming_the_wrong_status() {
+    async fn the_full_reconcile_notices_a_payload_naming_the_wrong_status() {
         // Not just hidden-or-not: a payload that says superseded behind a row
         // that says deprecated is drift too, and comparing set membership alone
         // never saw it.
+        //
+        // This is also precisely the drift the marker cannot see, and why the
+        // scan is kept rather than deleted: the payload was written out of band,
+        // so no SQLite write happened and nothing was marked. The marker covers
+        // what this system does to itself; the scan covers everything else.
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -1012,7 +1158,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
+        assert_eq!(
+            repair_lifecycle_drift(&core).await.unwrap(),
+            0,
+            "the marker claimed to see drift that no SQLite write produced"
+        );
+        assert_eq!(full_lifecycle_reconcile(&core).await.unwrap(), 1);
         let stored = core
             .vectors
             .lifecycle_of(std::slice::from_ref(&ids[0]))

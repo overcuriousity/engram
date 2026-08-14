@@ -695,12 +695,18 @@ impl Store {
         } else {
             ArtifactStatus::Active
         };
-        let res = sqlx::query("UPDATE artifacts SET superseded_by = ?, status = ? WHERE id = ?")
-            .bind(by)
-            .bind(status.as_str())
-            .bind(artifact_id)
-            .execute(&self.pool)
-            .await?;
+        // The marker rides the same statement as the change it describes. Two
+        // statements could be interrupted between, which is the exact failure
+        // this is here to catch — a lifecycle change that never reached the
+        // payload and that nothing afterwards knows to look for.
+        let res = sqlx::query(
+            "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1 WHERE id = ?",
+        )
+        .bind(by)
+        .bind(status.as_str())
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -712,13 +718,67 @@ impl Store {
     /// other end. Does not touch `superseded_by`; callers that mean to clear
     /// a supersession should use `set_superseded_by(id, None)` instead.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
+        // Marked dirty in the same statement, like `set_superseded_by`. See
+        // `dirty_lifecycle_artifacts`.
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET status = ? WHERE id = ?")
+            sqlx::query("UPDATE artifacts SET status = ?, lifecycle_dirty = 1 WHERE id = ?")
                 .bind(status.as_str())
                 .bind(id)
                 .execute(&self.pool)
                 .await?,
         )
+    }
+
+    /// Artifacts whose lifecycle row has changed since the payload was last
+    /// written. The drift repair's whole work list.
+    ///
+    /// This replaced a pair of capped scans over every non-active artifact.
+    /// Merging makes hidden artifacts grow monotonically — every merge hides at
+    /// least two, permanently — so those scans were on course to be truncated
+    /// forever, repairing a shifting window of an ever-growing set while
+    /// reporting success either way. What needs repairing is the writes that
+    /// did not finish, and that set is almost always empty.
+    pub async fn dirty_lifecycle_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
+        let rows =
+            sqlx::query("SELECT * FROM artifacts WHERE lifecycle_dirty = 1 ORDER BY id LIMIT ?")
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Mark an artifact's lifecycle as in flight before either store is
+    /// written.
+    ///
+    /// For `supersede` and `deprecate` this is redundant — the row write sets
+    /// the marker itself, and it comes first. The reveal direction is why this
+    /// exists: `reactivate` and `unsupersede` write the *payload* first, on
+    /// purpose, so that a half-finished reveal leaves the artifact visible
+    /// rather than hidden behind a payload no page explains. Without marking
+    /// up front, a crash between the two stores leaves drift that no row write
+    /// ever announced, and the marker would miss the one direction whose
+    /// intermediate state it was most needed for.
+    pub async fn mark_lifecycle_dirty(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET lifecycle_dirty = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear the marker once the payload write has been acknowledged.
+    ///
+    /// Never before it. Clearing first turns a failed payload write into
+    /// permanent drift with nothing left that knows to look for it, which is
+    /// precisely the state this mechanism exists to make impossible.
+    pub async fn clear_lifecycle_dirty(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            sqlx::query("UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Stamp an artifact as confirmed accurate now — what search ranking's
