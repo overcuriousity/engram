@@ -369,6 +369,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     }
 
     let mut members: HashMap<String, Vec<Chunk>> = HashMap::new();
+    // Which of the clustered ids this sweep found active. Read once here because
+    // the filed rows are closed against it below, and re-reading every pair's two
+    // artifacts would be the same lookups a second time.
+    let mut live: HashSet<String> = HashSet::new();
     for id in &in_a_cluster {
         // An artifact the vector store still lists but SQLite has dropped is
         // ordinary: a delete can lag a sweep. It is not an error.
@@ -386,6 +390,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             tracing::debug!(artifact_id = %id, status = c.status.as_str(), "skipping a hidden artifact");
             continue;
         }
+        live.insert(id.clone());
         let root = clusters.find(id);
         members.entry(root).or_default().push(c);
     }
@@ -423,6 +428,44 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 by = %keep.id,
                 "hid a near-identical artifact"
             );
+        }
+    }
+
+    // Close the rows the clustering just answered.
+    //
+    // `NearIdentical` is where a pair is filed, not where it ends, and nothing
+    // used to move it out again. That is not merely untidy: the read above is
+    // `pairs_by_state(NearIdentical, 500)`, ordered by score, so once five
+    // hundred already-acted-on rows have accumulated a newly filed pair with a
+    // lower score never enters the window. Its cluster is never formed and its
+    // duplicate is never hidden — silently, and permanently on a growing base.
+    //
+    // `NoConflict` with a detail, as the merge path does: the question is
+    // settled and there is nothing here for a person. `Superseded` would put it
+    // on the Capture page behind an "apply" button for something already applied.
+    for p in &filed {
+        let a_live = live.contains(&p.a_id) && !hidden.contains(&p.a_id);
+        let b_live = live.contains(&p.b_id) && !hidden.contains(&p.b_id);
+        if a_live && b_live {
+            // Both still in results, so nothing here was answered — a supersede
+            // that failed above, and warned. It stays filed for the next sweep.
+            continue;
+        }
+        let detail = match (a_live, b_live) {
+            (true, false) => format!("near-identical; {} kept", p.a_id),
+            (false, true) => format!("near-identical; {} kept", p.b_id),
+            _ => "near-identical; neither side is in results any more".to_string(),
+        };
+        if let Err(e) = core
+            .store
+            .set_pair_state(
+                p.id,
+                crate::store::pairs::PairState::NoConflict,
+                Some(&detail),
+            )
+            .await
+        {
+            tracing::warn!(pair = p.id, error = %e, "could not close a settled near-identical pair");
         }
     }
 
@@ -1454,6 +1497,79 @@ pub(crate) mod tests {
                 .as_deref(),
             Some(ids[1].as_str()),
             "the newest member should have survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_the_cluster_pass_answered_stops_occupying_the_window() {
+        // `NearIdentical` is where a pair is filed, not where it ends. The read
+        // that feeds the cluster pass is `pairs_by_state(NearIdentical, 500)`
+        // ordered by score, so a row left in that state forever is not merely
+        // untidy — it holds a slot. Past five hundred already-acted-on rows a
+        // newly filed pair with a lower score never enters the window at all,
+        // and the duplicate it names is never hidden. On a growing base that is
+        // permanent and silent.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        core.store
+            .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
+            .await
+            .unwrap();
+        core.vectors.delete_artifacts(&ids).await.unwrap();
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::NearIdentical, 500)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an answered pair is still holding a slot in the window"
+        );
+        let closed = core
+            .store
+            .pairs_by_state(PairState::NoConflict, 10)
+            .await
+            .unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(
+            closed[0].detail.as_deref(),
+            Some(format!("near-identical; {} kept", ids[1]).as_str()),
+            "the row does not say which side survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_supersede_failed_stays_filed_for_the_next_sweep() {
+        // The other half of the same rule. Closing a row means the question was
+        // answered; a cluster whose members are all still in results answered
+        // nothing, and closing it anyway would lose the duplicate for good.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        core.store
+            .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
+            .await
+            .unwrap();
+        core.vectors.delete_artifacts(&ids).await.unwrap();
+        // Deprecated by an operator, so `supersede` refuses both directions and
+        // the cluster pass hides nothing.
+        core.deprecate(&ids[0]).await.unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        run(&core).await.unwrap();
+
+        // Neither side is in results, so the question is moot rather than open —
+        // it closes, but it does not claim a survivor.
+        let closed = core
+            .store
+            .pairs_by_state(PairState::NoConflict, 10)
+            .await
+            .unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(
+            closed[0].detail.as_deref(),
+            Some("near-identical; neither side is in results any more")
         );
     }
 
