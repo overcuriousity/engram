@@ -37,31 +37,51 @@ shim.runtime.onInstalled.addListener(() => {
   });
 });
 
-// Work the panel has not collected yet.
+// Work the panel has not collected yet, and when it was parked.
 //
 // Opening the panel and immediately messaging it is a race: a panel that was
 // closed has not registered its listener when the message goes out. So the
 // work is parked here first. If `sendMessage` finds a listener the panel
 // already has it and the parking spot is cleared; if it does not, the panel
 // asks for this on load.
+//
+// It expires, because work that is never collected is worse than work that is
+// lost. `openPanel` can refuse — Chrome will not open a side panel outside a
+// user gesture, which an omnibox entry may not count as — and `sendMessage`
+// can report a delivered message as a failure. Either leaves a parking spot
+// nothing empties, and the next panel to open, minutes later on a different
+// tab, would run it: a capture aimed at a page the operator left long ago,
+// stored silently under the wrong URL. The race this covers resolves in well
+// under a second, so a short life costs nothing.
 let pendingWork = null;
+const PENDING_TTL_MS = 15000;
+
+function collect() {
+  const parked = pendingWork;
+  pendingWork = null;
+  if (!parked) return null;
+  return Date.now() - parked.at > PENDING_TTL_MS ? null : parked.work;
+}
 
 async function handOver(work, tabId) {
-  pendingWork = work;
-  await shim.openPanel(tabId);
+  pendingWork = { work, at: Date.now() };
   try {
+    await shim.openPanel(tabId);
     await shim.runtime.sendMessage(work);
-    // Delivered to an open panel.
-    pendingWork = null;
+    // Delivered to a panel that was already listening. Cleared only if this
+    // is still the work parked: a second entry pressed in between owns the
+    // spot now, and clearing it would drop that one instead.
+    if (pendingWork && pendingWork.work === work) pendingWork = null;
   } catch (e) {
-    // No listener yet. The panel is opening and will ask.
+    // The panel had no listener yet and will ask on load, or it could not be
+    // opened at all. The parked copy covers the first case and expires out of
+    // the second.
   }
 }
 
 shim.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === 'pending') {
-    sendResponse(pendingWork);
-    pendingWork = null;
+    sendResponse(collect());
   }
   // Nothing here is asynchronous, so the channel does not need holding open.
   return false;

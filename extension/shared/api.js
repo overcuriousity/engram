@@ -37,6 +37,11 @@ globalThis.engramApi = {
     }
 
     if (res.status === 401) {
+      // Cleared here, not merely reported. Every caller treats `config()`
+      // returning something as "paired", so a revoked token left in storage
+      // is not a failed call — it is a panel that can never be used again
+      // short of reinstalling the extension.
+      await this.forget();
       throw new Error('That token no longer works — pair again.');
     }
     const body = await res.json().catch(() => ({}));

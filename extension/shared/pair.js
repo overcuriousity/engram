@@ -5,6 +5,12 @@ globalThis.engramPair = {
   // the token comes back to this extension and to nothing else. It arrives in
   // the fragment, which is never sent to a server and does not land in a proxy
   // log. No credential is ever written into a downloadable file.
+  //
+  // Host permission is deliberately *not* requested here. `permissions.request`
+  // is only honoured while the browser still counts a click as a user gesture,
+  // and by the time this returns that gesture is long spent: the auth flow is a
+  // whole trip out through a browser window and back. The panel asks for
+  // permission first, from inside the click, and calls this afterwards.
   async pair(origin) {
     const redirect = engramShim.identity.getRedirectURL();
     const state = crypto.randomUUID();
@@ -22,21 +28,11 @@ globalThis.engramPair = {
     const token = fragment.get('token');
     if (!token) throw new Error('engram returned no token.');
 
-    // The origin the deployment reported for itself, not the one typed: the
-    // extension asks the browser for permission to reach exactly that host.
-    const learned = fragment.get('origin') || origin;
-    const granted = await engramShim.permissions.request({ origins: [learned + '/*'] });
-    if (!granted) throw new Error('Permission for ' + learned + ' was declined.');
-
-    await engramApi.save(learned, token);
-    return learned;
-  },
-
-  // The fallback for when `launchWebAuthFlow` is unavailable: a token pasted
-  // from Housekeeping → API tokens. Same end state, one more step.
-  async pairManually(origin, token) {
-    const granted = await engramShim.permissions.request({ origins: [origin + '/*'] });
-    if (!granted) throw new Error('Permission for ' + origin + ' was declined.');
+    // The address configured here, not the one the deployment reports for
+    // itself. A deployment behind a proxy knows an internal host name, or a
+    // scheme its proxy did not forward, while the browser reaches it at
+    // another; what was typed is the address that resolves, and it is the one
+    // host permission was just granted for.
     await engramApi.save(origin, token);
     return origin;
   },

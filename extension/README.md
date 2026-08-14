@@ -44,16 +44,32 @@ beyond the field labels.
 
 With engram running and you signed in to it in that browser:
 
-- [ ] Open the panel, press Capture.
-      Expected: "Not paired yet." and a prompt for the engram address.
-- [ ] Enter the address.
-      Expected: a browser window on `/ui/pair` naming that origin; press Pair;
-      the window closes; the panel says "Paired."
-- [ ] A permission prompt names your deployment's host and nothing else.
-- [ ] Chrome: Details → Site access shows exactly one host. Firefox:
+- [ ] Open the panel while unpaired.
+      Expected: an "engram address" field and a Pair button above Capture.
+- [ ] Enter the address you reach engram at and press Pair.
+      Expected, in this order: a permission prompt naming that one host; then
+      a browser window on `/ui/pair`; press Pair there; the window closes; the
+      panel says "Paired with …" and the address field is gone.
+- [ ] The permission prompt names your deployment's host and nothing else.
+      Chrome: Details → Site access shows exactly one host. Firefox:
       `about:addons` → Permissions shows one host. Neither says "all sites".
 - [ ] In engram: Housekeeping → API tokens holds one token named
       "browser extension".
+- [ ] Type a host with no scheme (`engram.example`).
+      Expected: it is read as `https://` and pairs, rather than being refused
+      or silently reaching for `http://`.
+
+The order above is the whole reason this is a form and not a `prompt()`.
+`permissions.request` is only granted while the browser still counts a click
+as a user gesture, and a gesture does not survive the round trip through the
+auth-flow window — asking for permission afterwards fails with "this function
+must be called during a user gesture". So the permission is asked for first,
+inside the click, and the token flow runs after it.
+
+The address stored is the one typed, never the one the deployment reports for
+itself: a deployment behind a proxy knows an internal host name, or a scheme
+its proxy did not forward, and the address the browser actually reaches is the
+one that has to be in the header.
 
 ### 3. Capture
 
@@ -107,7 +123,22 @@ With engram running and you signed in to it in that browser:
       considered and cut. A capture is lost and said so, rather than held in
       a queue that may never drain.
 - [ ] Revoke the token in Housekeeping, press Capture.
-      Expected: the panel reports it rather than hanging.
+      Expected: "That token no longer works — pair again.", **and the address
+      field comes back**. The stored token is cleared on the 401, because
+      everything treats a stored token as "paired" and one that can never work
+      would otherwise leave the panel unusable short of reinstalling.
+- [ ] Pair again from that state. It works, with no clearing of extension
+      storage in between.
+- [ ] Press "Forget this deployment".
+      Expected: the address field returns, and the host disappears from
+      Chrome's Site access / Firefox's Permissions. The token is still listed
+      in Housekeeping — the panel says so rather than implying it revoked it.
+
+### 7. Icons
+
+- [ ] The toolbar button shows the engram mark, not a puzzle piece or a grey
+      letter.
+- [ ] `chrome://extensions` and `about:addons` show it beside the name.
 
 ## Two things I could not check while writing this
 
@@ -121,14 +152,30 @@ Named here because they are the likeliest to break and the cheapest to spot:
    in both rather than leaving two.
 2. **The just-opened-panel race** (check 5, last box). The handoff through
    `pendingWork` in the background script exists to close it, but only a real
-   browser can say whether it does.
+   browser can say whether it does. Parked work expires after 15 seconds,
+   because the ways it can fail to be collected — `sidePanel.open` refusing
+   outside a user gesture, `sendMessage` reporting a delivered message as a
+   failure — all end with work sitting there for the next panel to pick up and
+   run against whatever tab is open by then. If the race turns out not to
+   exist, delete the parking spot rather than keeping both paths.
 
 ## Releasing
 
-The Chrome package is built from source by `build.rs` at compile time, so a
-deployment always serves the build that matches it. The Firefox XPI must be
-AMO-signed, which is a network round trip that does not belong in
-`cargo build`, so it is signed once per release and committed.
+Both packages are built from source by `build.rs` at compile time, so a
+deployment always serves the build that matches it. `/extension/install` links
+to them.
+
+The Firefox one is unsigned, and Firefox will not install an unsigned add-on
+permanently. That leaves three ways to run it, and the install page lists all
+three: load it temporarily through `about:debugging` (works everywhere, gone
+at the next restart), set `xpinstall.signatures.required` to `false` (Developer
+Edition, Nightly and ESR only — release Firefox ignores it), or have it signed.
+
+Signing is not publishing. An **unlisted** submission is signed and handed
+back; it is never reviewed, listed or searchable, and Mozilla is the only
+vendor that touches it. It does need a free AMO account, and it is a network
+round trip that does not belong in `cargo build` — so it happens once per
+release and the result is committed.
 
 ```sh
 # 1. Bump `version` in BOTH manifests. They must match.
@@ -136,11 +183,25 @@ AMO-signed, which is a network round trip that does not belong in
 ./extension/pack.sh
 cd extension/firefox && zip -r ../../engram-unsigned.zip . && cd ../..
 # 3. AMO → Developer Hub → Submit a New Add-on → "On your own site"
-#    (unlisted). Mozilla signs it; it is never listed, reviewed or
-#    searchable. That signing step is the one place a vendor touches this.
-# 4. Commit the signed result:
-cp ~/Downloads/engram-*.xpi assets/extension/firefox.xpi
-git add -f assets/extension/firefox.xpi
+#    (unlisted). Mozilla signs it and gives it back.
+# 4. Commit the signed result. `build.rs` prefers it over the unsigned
+#    package and drops a marker beside it, which is what makes the install
+#    page offer one click instead of the three fallbacks.
+cp ~/Downloads/engram-*.xpi extension/firefox-signed.xpi
+git add extension/firefox-signed.xpi
+```
+
+### Icons
+
+`extension/shared/icon-*.png` are rasterized from `assets/icon.svg` and
+committed, for the same reason the web icons are: a build must not need a
+rasterizer installed. Regenerate them after editing that file:
+
+```sh
+for s in 16 32 48 128; do
+  magick -background none -density 1200 assets/icon.svg \
+    -resize ${s}x${s} -depth 8 -strip PNG32:extension/shared/icon-$s.png
+done
 ```
 
 ### No auto-update, and why

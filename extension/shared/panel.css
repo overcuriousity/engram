@@ -24,6 +24,10 @@
 
 * { box-sizing: border-box; }
 
+/* `hidden` is a presentation hint and loses to any `display` rule, and the
+   two things that toggle in this panel both set one. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -58,6 +62,27 @@ button.primary {
   background: var(--accent);
   color: #fff;
   border-color: transparent;
+  cursor: pointer;
+}
+
+#pairing {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: .75rem;
+}
+
+/* Not a call to action. Unpairing is something you go looking for, not
+   something to hit while reaching for Capture. */
+button.quiet {
+  margin-top: .5rem;
+  padding: .25rem 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: .8rem;
+  text-align: left;
   cursor: pointer;
 }
 
