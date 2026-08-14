@@ -89,6 +89,12 @@ impl Store {
             // Nullable, and rightly so: a corpus captured before the extension
             // and link doors existed was read from nowhere this can name.
             ("corpora", "source_url", "TEXT"),
+            // The three that arrived with merging. Every artifact predating it
+            // was captured, from a corpus, with nothing outstanding — which is
+            // what each default says, so the append needs no backfill.
+            ("artifacts", "provenance", "TEXT NOT NULL DEFAULT 'captured'"),
+            ("artifacts", "source_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("artifacts", "lifecycle_dirty", "INTEGER NOT NULL DEFAULT 0"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -121,6 +127,28 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
             tracing::info!(table, column, "added a column to an existing database");
+        }
+
+        // The one change merging needed that an append cannot make. `corpus_id`
+        // went from NOT NULL to nullable because a merged artifact belongs to no
+        // single corpus, and SQLite can add a column but not relax a constraint
+        // on one that is already there. Left unsaid, such a database passes every
+        // check here and then fails at the first merge, on a NOT NULL constraint,
+        // a long way from the cause. So it is said here, and it names the cost:
+        // this is the case `ADDED_COLUMNS` deliberately does not cover.
+        let strict_corpus: Option<i64> = sqlx::query_scalar(
+            r#"SELECT "notnull" FROM pragma_table_info('artifacts') WHERE name = 'corpus_id'"#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if strict_corpus == Some(1) {
+            return Err(crate::error::Error::Store(
+                "this database predates merging: artifacts.corpus_id is still NOT NULL, \
+                 and a merged artifact belongs to no corpus. SQLite cannot relax that \
+                 constraint in place, so the artifacts table has to be rebuilt — copy it \
+                 into one declared by the current schema, or recreate the database."
+                    .into(),
+            ));
         }
 
         sqlx::raw_sql(SCHEMA)
@@ -310,6 +338,107 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(seq, 0);
+    }
+
+    #[tokio::test]
+    async fn a_base_captured_before_merging_gains_the_provenance_columns() {
+        // The three columns merging added to `artifacts`. All of them have
+        // defaults that say exactly what was true of every artifact predating
+        // merging — captured, from a corpus, nothing outstanding — so this is an
+        // append, and 608 artifacts bought with GPU time must not be recreated
+        // to gain it.
+        let store = Store::memory().await.unwrap();
+        // Both indexes name a column being dropped, so they go first — the same
+        // ordering constraint migrate() respects by running the appends before
+        // it applies schema.sql.
+        for stmt in [
+            "DROP INDEX IF EXISTS idx_artifacts_dirty",
+            "DROP INDEX IF EXISTS idx_artifacts_provenance",
+            "ALTER TABLE artifacts DROP COLUMN provenance",
+            "ALTER TABLE artifacts DROP COLUMN source_count",
+            "ALTER TABLE artifacts DROP COLUMN lifecycle_dirty",
+        ] {
+            sqlx::query(stmt)
+                .execute(&store.pool)
+                .await
+                .expect("the fixture needs an artifacts table from before merging");
+        }
+
+        store
+            .migrate()
+            .await
+            .expect("migrate refused a base captured before merging");
+
+        for column in ["provenance", "source_count", "lifecycle_dirty"] {
+            let has: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name = ?",
+            )
+            .bind(column)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(has, 1, "{column} was never added to the existing table");
+        }
+
+        // And the defaults have to be the truth about an artifact that predates
+        // merging, or every one of them reads back as a merge with no sources.
+        let c = store
+            .insert_corpus_with_signature("alpha\n\nbeta", "web", None, vec![], None)
+            .await
+            .unwrap()
+            .into_corpus();
+        let made = store
+            .insert_artifacts(
+                &c.id,
+                &[artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "alpha".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let got = store.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(got.provenance, artifacts::Provenance::Captured);
+        assert_eq!(got.source_count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_base_whose_corpus_id_is_still_not_null_is_named_as_such() {
+        // The change an append cannot make. A merged artifact belongs to no
+        // corpus, so `corpus_id` had to become nullable, and SQLite cannot relax
+        // that in place. The failure has to arrive at startup naming the table
+        // to rebuild — not at the first merge, as a bare constraint violation.
+        let store = Store::memory().await.unwrap();
+        // Put the constraint back the way a pre-merging base declared it. Both
+        // indexes name the column, so they come out first and the schema puts
+        // them back.
+        for stmt in [
+            "DROP INDEX IF EXISTS idx_artifacts_corpus",
+            "DROP INDEX IF EXISTS idx_artifacts_window",
+            "ALTER TABLE artifacts DROP COLUMN corpus_id",
+            "ALTER TABLE artifacts ADD COLUMN corpus_id TEXT NOT NULL DEFAULT ''",
+        ] {
+            sqlx::query(stmt)
+                .execute(&store.pool)
+                .await
+                .expect("the fixture needs an artifacts table from before merging");
+        }
+
+        let err = store
+            .migrate()
+            .await
+            .expect_err("migrate accepted a base that cannot hold a merged artifact");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("corpus_id") && msg.contains("rebuilt"),
+            "the error has to name the column and the remedy, got: {msg}"
+        );
     }
 
     #[tokio::test]
