@@ -875,7 +875,11 @@ mod tests {
                 r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
             ))
             .unwrap();
-            assert_eq!(d.relation, Relation::Replaced, "{letter} was not a direction");
+            assert_eq!(
+                d.relation,
+                Relation::Replaced,
+                "{letter} was not a direction"
+            );
             assert_eq!(d.supersedes, Some(want));
         }
     }

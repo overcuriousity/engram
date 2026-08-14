@@ -373,7 +373,10 @@ mod tests {
         s.delete_artifact(&a).await.unwrap();
 
         assert!(
-            s.merged_missing_a_source(10).await.unwrap().contains(&m2.id),
+            s.merged_missing_a_source(10)
+                .await
+                .unwrap()
+                .contains(&m2.id),
             "a merge of a merge lost a root without saying so"
         );
     }

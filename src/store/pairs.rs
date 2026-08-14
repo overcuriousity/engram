@@ -24,6 +24,17 @@ use sqlx::Row;
 /// queue, and an operator settles it by hand.
 pub const MAX_UNREADABLE_JUDGEMENTS: i64 = super::jobs::MAX_ATTEMPTS;
 
+/// How many pending pairs `open_component` may follow outward from its seed.
+///
+/// A bound on the walk, not on which pairs may be judged: the seed is read
+/// directly and is always in the component, however far down the score ordering
+/// it sits. Small under `cfg(test)` so that the difference between the two is
+/// something a test can actually reach.
+#[cfg(not(test))]
+const COMPONENT_WINDOW: i64 = 5_000;
+#[cfg(test)]
+const COMPONENT_WINDOW: i64 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairState {
@@ -301,8 +312,29 @@ impl Store {
     /// `Pending` only. A dismissed, near-identical or oversized row carries a
     /// decision, and following it would pull an already-settled artifact into a
     /// group that is about to be superseded.
+    ///
+    /// The window bounds how far a component may grow, and nothing else. It is
+    /// ordered by score and capped, so on a base with more than `WINDOW` pending
+    /// pairs the lowest-scoring ones fall outside it — and reading the seed from
+    /// the window alone returned an empty component for exactly those. The unit
+    /// then found fewer than two members, settled an empty slice, and returned
+    /// without recording an attempt; `pairs_to_judge` orders by `judge_attempts`
+    /// ascending, so that pair sorted to the front and was armed again on every
+    /// tick, consuming a slot of the per-tick budget forever without ever being
+    /// judged. The seed is read directly and joins the window if it is missing.
     pub async fn open_component(&self, pair_id: i64) -> Result<Vec<ArtifactPair>> {
-        let open = self.pairs_by_state(PairState::Pending, 5_000).await?;
+        let mut open = self
+            .pairs_by_state(PairState::Pending, COMPONENT_WINDOW)
+            .await?;
+        if !open.iter().any(|p| p.id == pair_id) {
+            let seed = self.get_pair(pair_id).await?;
+            // Settled while the unit waited. That is the one case where an empty
+            // component is the right answer, and `run` treats it as such.
+            if seed.state != PairState::Pending {
+                return Ok(vec![]);
+            }
+            open.push(seed);
+        }
         let Some(seed) = open.iter().find(|p| p.id == pair_id) else {
             return Ok(vec![]);
         };
@@ -626,6 +658,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(s.open_component(seed).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pair_below_the_window_is_still_the_seed_of_its_own_component() {
+        // The window bounds how far the walk may go, not which pairs may be
+        // judged. It is ordered by score, so on a base with more pending pairs
+        // than it holds the lowest-scoring ones fall outside — and reading the
+        // seed from the window alone gave those an empty component. The unit
+        // then found fewer than two members, settled an empty slice and returned
+        // without recording an attempt, and `pairs_to_judge` orders by attempts
+        // ascending: the pair sorted to the front and was armed again every
+        // tick, spending a slot of the per-tick budget forever without ever
+        // being judged.
+        let s = Store::memory().await.unwrap();
+        let m = four_artifacts(&s).await;
+        s.record_pair(&m[0], &m[1], 0.99).await.unwrap();
+        s.record_pair(&m[1], &m[2], 0.98).await.unwrap();
+        s.record_pair(&m[2], &m[3], 0.97).await.unwrap();
+        s.record_pair(&m[3], &m[0], 0.90).await.unwrap();
+
+        let window = s
+            .pairs_by_state(PairState::Pending, COMPONENT_WINDOW)
+            .await
+            .unwrap();
+        let all = s.pairs_by_state(PairState::Pending, 100).await.unwrap();
+        let seed = all
+            .iter()
+            .find(|p| !window.iter().any(|w| w.id == p.id))
+            .expect("the fixture must put one pair outside the window")
+            .id;
+
+        let comp = s.open_component(seed).await.unwrap();
+
+        assert!(
+            comp.iter().any(|p| p.id == seed),
+            "a pair outside the window has no component of its own: {comp:?}"
+        );
     }
 
     #[tokio::test]

@@ -92,7 +92,11 @@ impl Store {
             // The three that arrived with merging. Every artifact predating it
             // was captured, from a corpus, with nothing outstanding — which is
             // what each default says, so the append needs no backfill.
-            ("artifacts", "provenance", "TEXT NOT NULL DEFAULT 'captured'"),
+            (
+                "artifacts",
+                "provenance",
+                "TEXT NOT NULL DEFAULT 'captured'",
+            ),
             ("artifacts", "source_count", "INTEGER NOT NULL DEFAULT 0"),
             ("artifacts", "lifecycle_dirty", "INTEGER NOT NULL DEFAULT 0"),
         ];
