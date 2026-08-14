@@ -2,6 +2,7 @@ pub mod classify;
 pub mod consolidate;
 pub mod dedupe;
 pub mod embed;
+pub mod merge;
 pub mod reconcile;
 pub mod relate;
 pub mod synthesize;
