@@ -28,8 +28,13 @@ fn setext_to_atx(md: &str) -> String {
         match fence {
             Some(open) => {
                 // Only the marker that opened it closes it, so a ``` block
-                // quoting ~~~ does not end early.
-                if fence_marker(line) == Some(open) {
+                // quoting ~~~ does not end early — and only a bare one, since
+                // a closing fence may carry no info string. Without that, a
+                // block quoting "```yaml" ends on the quote and everything
+                // after it is read as prose: the `---` two lines down becomes
+                // a heading and is deleted, which is the failure this whole
+                // function is here to stop.
+                if closes(line, open) {
                     fence = None;
                 }
                 out.push(line.to_string());
@@ -85,6 +90,23 @@ fn fence_marker(line: &str) -> Option<&'static str> {
         return None;
     }
     ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m))
+}
+
+/// Whether this line closes a block opened with `marker`.
+///
+/// An opening fence may name a language; a closing one may not. That asymmetry
+/// is what keeps a snippet quoting another snippet's fence from ending the
+/// block it is inside.
+fn closes(line: &str, marker: &str) -> bool {
+    let trimmed = line.trim_start();
+    if line.len() - trimmed.len() > 3 {
+        return false;
+    }
+    trimmed.strip_prefix(marker).is_some_and(|rest| {
+        rest.trim_end()
+            .chars()
+            .all(|c| c == marker.as_bytes()[0] as char)
+    })
 }
 
 /// Turn a rendered page into the markdown the segmenter wants.
@@ -246,6 +268,18 @@ mod tests {
             setext_to_atx(nested),
             "```\n~~~\nfoo\n---\n```\n\n## Section"
         );
+
+        // Nor by a quoted *opening* fence of its own kind: a closing fence may
+        // carry no info string, so "```yaml" inside a block is content. Read
+        // as a closer it would end the block three lines early and the `---`
+        // below would be eaten as a heading.
+        let quoted = "```\n```yaml\nfoo\n---\nbar\n```";
+        assert_eq!(setext_to_atx(quoted), quoted);
+
+        // A closer may still be padded, indented up to three, or longer than
+        // the fence that opened it.
+        let padded = "```\nfoo\n---\n  ```  ";
+        assert_eq!(setext_to_atx(padded), padded);
     }
 
     #[test]
