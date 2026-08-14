@@ -73,7 +73,21 @@ pub async fn run(core: &Core) -> Result<usize> {
             // `settle` rather than a job, because there is no inference here —
             // it is the same local work `finish` does, and re-running it on a
             // document that is fine is what the coverage test rules out.
-            if c.coverage.is_none() && !core.store.artifacts_for_corpus(&c.id).await?.is_empty() {
+            //
+            // Windowless corpora are excluded here for the same reason they are
+            // excluded from planning above, and it has to be said twice because
+            // the coverage test does not imply it: artifacts that pre-date
+            // windows have no coverage either, and so do the placeholder corpora
+            // `heal_dangling_supersessions` writes to give an orphaned artifact a
+            // parent. Settling one finds zero windows, decides everything is
+            // resolved, and runs `finish` — which measures coverage against a
+            // placeholder's empty source, logs that most of it is unclaimed, and
+            // arms a `Title` unit. That last part is the expensive half: a model
+            // call to name a document that has no text to name it from.
+            if !segments.is_empty()
+                && c.coverage.is_none()
+                && !core.store.artifacts_for_corpus(&c.id).await?.is_empty()
+            {
                 crate::jobs::window::settle(core, &c.id).await?;
                 armed += 1;
                 continue;
@@ -302,6 +316,54 @@ mod tests {
         assert!(
             core.store.has_job(Stage::Title, &src.id).await.unwrap(),
             "the document was never handed to the namer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corpus_with_no_windows_at_all_is_not_settled_or_named() {
+        // The mirror of the repair above, and the reason it needs a second
+        // condition rather than only the coverage test. A corpus with artifacts
+        // and no window rows is either older than windows or one of the
+        // placeholders `heal_dangling_supersessions` writes to give an orphaned
+        // artifact a parent — and neither has coverage, so coverage alone reads
+        // both as a document whose `finish` never ran.
+        //
+        // Settling one finds no windows, decides everything is resolved, and
+        // measures a placeholder's empty source before arming a `Title` unit: a
+        // model call to name a document that has no text to name it from.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "an artifact older than windows".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_corpus(&src.id)
+                .await
+                .unwrap()
+                .coverage
+                .is_none(),
+            "a document with no windows was measured against a source it never had"
+        );
+        assert!(
+            !core.store.has_job(Stage::Title, &src.id).await.unwrap(),
+            "a model call was spent naming a document with nothing to name it from"
         );
     }
 
