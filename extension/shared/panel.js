@@ -165,10 +165,16 @@ $('ask-form').addEventListener('submit', async (e) => {
 });
 
 // Work handed over from the background script — a context-menu entry or an
-// omnibox query. Wired in Task 5; the listener registers now so nothing sent
-// before it exists is lost.
-engramShim.runtime.onMessage.addListener((msg) => {
+// omnibox query.
+function doWork(msg) {
   if (!msg) return;
   if (msg.type === 'capture') capture(msg.scope);
   if (msg.type === 'search') { $('q').value = msg.q; runSearch(); }
-});
+}
+
+engramShim.runtime.onMessage.addListener(doWork);
+
+// A panel that was closed when the menu entry fired missed the message: it
+// had no listener yet. The background script parks anything undelivered, and
+// this is the panel collecting it.
+engramShim.runtime.sendMessage({ type: 'pending' }).then(doWork).catch(() => {});
