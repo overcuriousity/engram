@@ -400,29 +400,29 @@ impl Store {
             return Ok(vec![]);
         };
 
-        let mut members: std::collections::HashSet<&str> = [seed.a_id.as_str(), seed.b_id.as_str()]
-            .into_iter()
-            .collect();
+        // Adjacency once, then a flood fill from the seed's two artifacts. A
+        // pair joins the component only once one of its artifacts is already
+        // in it, and the pair that brings that artifact in can come anywhere
+        // in the list — the fixed-point loop this replaces got that right by
+        // rescanning the whole window per growth pass, which is quadratic at
+        // the window size for one long chain.
+        let mut by_artifact: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+        for (i, p) in open.iter().enumerate() {
+            by_artifact.entry(p.a_id.as_str()).or_default().push(i);
+            by_artifact.entry(p.b_id.as_str()).or_default().push(i);
+        }
         let mut picked: std::collections::HashSet<i64> = [seed.id].into_iter().collect();
-        // A fixed point rather than one pass. A pair joins the component only
-        // once one of its artifacts is already in it, and the pair that brings
-        // that artifact in can come later in the list — a single pass would
-        // return a component whose contents depended on row order.
-        loop {
-            let mut grew = false;
-            for p in &open {
-                if picked.contains(&p.id) {
-                    continue;
+        let mut queue: Vec<&str> = vec![seed.a_id.as_str(), seed.b_id.as_str()];
+        let mut seen: std::collections::HashSet<&str> = queue.iter().copied().collect();
+        while let Some(id) = queue.pop() {
+            for &i in by_artifact.get(id).into_iter().flatten() {
+                let p = &open[i];
+                picked.insert(p.id);
+                for other in [p.a_id.as_str(), p.b_id.as_str()] {
+                    if seen.insert(other) {
+                        queue.push(other);
+                    }
                 }
-                if members.contains(p.a_id.as_str()) || members.contains(p.b_id.as_str()) {
-                    members.insert(p.a_id.as_str());
-                    members.insert(p.b_id.as_str());
-                    picked.insert(p.id);
-                    grew = true;
-                }
-            }
-            if !grew {
-                break;
             }
         }
         Ok(open
