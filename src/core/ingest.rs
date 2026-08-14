@@ -258,6 +258,13 @@ impl Core {
     /// job. Clearing the row first loses the only page that offers the undo
     /// while the artifact is still hidden from search.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.unsupersede_locked(artifact_id).await
+    }
+
+    /// The body of `unsupersede`, entered with `lifecycle_lock` already held —
+    /// `reactivate` routes here so a superseded artifact is not locked twice.
+    async fn unsupersede_locked(&self, artifact_id: &str) -> Result<()> {
         // Read before clearing: afterwards nothing says who was hiding it.
         let winner = self.store.get_artifact(artifact_id).await?.superseded_by;
         // Marked before either store is touched. This direction writes the
@@ -302,6 +309,7 @@ impl Core {
     ///
     /// Row before payload, like `supersede`.
     pub async fn repoint_supersession(&self, artifact_id: &str, winner_id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
         let winner = self.store.get_artifact(winner_id).await?;
         if winner.status != ArtifactStatus::Active || winner.superseded_by.is_some() {
             return Err(Error::Validation(format!(
@@ -327,6 +335,7 @@ impl Core {
     /// on, since the artifact is already listed on Ops with its `superseded_by`
     /// set, even if the search-side flag has not caught up yet.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
         // Neither side may be retired. `set_superseded_by` writes
         // `status = 'superseded'` unconditionally, so superseding an artifact
         // an operator deprecated would silently overwrite that decision with
@@ -366,6 +375,7 @@ impl Core {
     /// payload first would instead hide the artifact behind a row that still
     /// says active, and the repair, reading the row, would undo it.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
         // A superseded artifact is already out of search, and `deprecate` does
         // not clear `superseded_by`, so this would leave a row that is both:
         // listed on Ops under "deprecated" *and* under "hidden as near
@@ -413,8 +423,9 @@ impl Core {
     /// in results immediately, still listed on Ops as deprecated, and one more
     /// press finishes the job.
     pub async fn reactivate(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
         if self.store.get_artifact(id).await?.superseded_by.is_some() {
-            return self.unsupersede(id).await;
+            return self.unsupersede_locked(id).await;
         }
         // As in `unsupersede`: payload first, so the marker has to go first.
         self.store.mark_lifecycle_dirty(id).await?;

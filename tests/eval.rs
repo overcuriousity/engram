@@ -332,6 +332,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             std::time::Duration::ZERO,
         )),
         corpus_locks: Default::default(),
+        lifecycle_lock: Default::default(),
     };
     let translated = index(&core, &artifacts).await;
 

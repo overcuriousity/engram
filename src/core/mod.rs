@@ -93,6 +93,14 @@ pub struct Core {
     /// One lock per document, so the local writes that rearrange a document
     /// cannot interleave with each other. Reach for it through `corpus_lock`.
     pub corpus_locks: CorpusLocks,
+    /// Serializes every lifecycle transition against the sweep's marker
+    /// repair. Each transition is two writes to two stores plus a dirty
+    /// marker, none of it atomic; without mutual exclusion the repair can
+    /// read a stale row mid-reveal, write the old state back over the new
+    /// payload, and the reveal then clears the marker — row active, payload
+    /// hidden, and nothing left that would ever notice. Shared by every
+    /// clone, like the background queue.
+    pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Core {
@@ -138,6 +146,7 @@ impl Core {
                 ),
             ),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -239,6 +248,7 @@ pub mod test_support {
                 std::time::Duration::ZERO,
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

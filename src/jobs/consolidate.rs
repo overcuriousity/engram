@@ -177,6 +177,11 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 /// a repair that fires on a base in agreement is a bug that hides behind a
 /// correct end state.
 async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
+    // Under the same lock as every lifecycle transition: the repair reads
+    // rows, writes payloads and clears markers, and interleaving that with a
+    // payload-first reveal is exactly the sequence that hides an artifact
+    // with no marker left to find it by.
+    let _guard = core.lifecycle_lock.lock().await;
     let dirty = core.store.dirty_lifecycle_artifacts(DRIFT_SCAN).await?;
     if dirty.is_empty() {
         return Ok(0);
