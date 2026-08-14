@@ -228,11 +228,17 @@ async fn ingest(
     let (text, origin) = if let Some(text) = req.text {
         (text, ORIGIN_WEB)
     } else if let Some(html) = req.html {
-        (extract(html, parsed_url.clone(), floor).await?, ORIGIN_EXTENSION)
+        (
+            extract(html, parsed_url.clone(), floor).await?,
+            ORIGIN_EXTENSION,
+        )
     } else {
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
         let html = crate::core::fetch::fetch_html(u, &st.core.capture).await?;
-        (extract(html, parsed_url.clone(), floor).await?, ORIGIN_FETCH)
+        (
+            extract(html, parsed_url.clone(), floor).await?,
+            ORIGIN_FETCH,
+        )
     };
 
     let out = st

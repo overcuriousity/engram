@@ -65,7 +65,10 @@ pub fn request_origin(headers: &HeaderMap) -> Option<String> {
     // shown to the operator as the address to pair with, and a deployment
     // named `http://` there is a bearer token sent in cleartext. Loopback is
     // the exception, and the one deployment genuinely reached without TLS.
-    let scheme = match headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) {
+    let scheme = match headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(s) => s,
         None if is_loopback(host) => "http",
         None => "https",

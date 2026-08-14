@@ -52,8 +52,7 @@ fn pack(manifest_path: &str, out: &Path) {
     let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let manifest =
-        std::fs::read(manifest_path).unwrap_or_else(|e| panic!("{manifest_path}: {e}"));
+    let manifest = std::fs::read(manifest_path).unwrap_or_else(|e| panic!("{manifest_path}: {e}"));
     zip.start_file("manifest.json", opts).unwrap();
     zip.write_all(&manifest).unwrap();
 

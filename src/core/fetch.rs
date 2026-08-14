@@ -109,8 +109,7 @@ fn decode(bytes: &[u8], content_type: &str) -> String {
         .map(|(_, v)| v.trim().trim_matches('"'))
         .unwrap_or("utf-8");
 
-    let encoding = encoding_rs::Encoding::for_label(label.as_bytes())
-        .unwrap_or(encoding_rs::UTF_8);
+    let encoding = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
     encoding.decode(bytes).0.into_owned()
 }
 
@@ -167,8 +166,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/latin"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(body, "text/html; charset=windows-1252"),
+                ResponseTemplate::new(200).set_body_raw(body, "text/html; charset=windows-1252"),
             )
             .mount(&server)
             .await;
@@ -188,7 +186,10 @@ mod tests {
         );
         // An encoding nobody has heard of is read as UTF-8 rather than
         // refused: a wrong guess renders badly, and refusing loses the page.
-        assert_eq!(decode("café".as_bytes(), "text/html; charset=made-up"), "café");
+        assert_eq!(
+            decode("café".as_bytes(), "text/html; charset=made-up"),
+            "café"
+        );
     }
 
     #[tokio::test]
