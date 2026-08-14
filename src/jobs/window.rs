@@ -210,6 +210,12 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
 /// idempotent: ordinals are renumbered, coverage recomputed, the embed job
 /// re-armed for the artifacts that have appeared since.
 pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
+    // Held for the whole read-then-finish, so no window's artifacts can be
+    // rewritten underneath the decision or the renumbering it leads to. Taken
+    // here rather than at each caller: this and `write_segment_artifacts` are the
+    // only two holders, neither is reachable from inside the other, and a lock
+    // acquired at call sites is one somebody eventually forgets to acquire.
+    let _corpus = core.corpus_lock(corpus_id).await;
     for w in core.store.segments_for_corpus(corpus_id).await? {
         let resolved = match w.state {
             SegmentState::Done => true,
@@ -303,12 +309,17 @@ pub(crate) fn resolve_span(
 /// Replace the chunks of one window. Same "replace, never append" guarantee as
 /// before; the key is the window rather than the whole source, so a retry of
 /// window 4 cannot disturb windows 0 to 3.
+///
+/// The delete and the insert are one unit against the rest of the document: a
+/// `settle` running between them would renumber a document that is missing a
+/// window's worth of artifacts and hand out ordinals this insert then duplicates.
 pub(crate) async fn write_segment_artifacts(
     core: &Core,
     corpus_id: &str,
     segment_idx: i64,
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
+    let _corpus = core.corpus_lock(corpus_id).await;
     let old = core
         .store
         .artifact_ids_for_segment(corpus_id, segment_idx)

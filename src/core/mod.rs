@@ -52,6 +52,12 @@ impl QueryCache {
     }
 }
 
+/// Live per-document locks, keyed by corpus id. Shared by every clone of
+/// `Core`: a per-clone map would lock nothing, the same way a per-clone gate
+/// would pace nothing.
+pub type CorpusLocks =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
+
 #[derive(Clone)]
 pub struct Core {
     pub store: Store,
@@ -79,6 +85,9 @@ pub struct Core {
     /// because a per-clone gate would pace nothing: the point is one queue of
     /// calls in front of one GPU.
     pub gate: Arc<crate::infer::gate::InferenceGate>,
+    /// One lock per document, so the local writes that rearrange a document
+    /// cannot interleave with each other. Reach for it through `corpus_lock`.
+    pub corpus_locks: CorpusLocks,
 }
 
 impl Core {
@@ -122,7 +131,41 @@ impl Core {
                     std::time::Duration::from_secs(cfg.pacing.breaker_probe_secs),
                 ),
             ),
+            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Exclusive access to one document's artifact rows, for as long as the
+    /// guard is held.
+    ///
+    /// Windows became independently schedulable units, which means two workers
+    /// can be inside two windows of one document at once — where before, one job
+    /// owned the whole thing. The two local writes that rearrange a document are
+    /// not safe against each other: `write_segment_artifacts` deletes a window's
+    /// artifacts and inserts their replacements, while `finish` renumbers every
+    /// ordinal in the document. Interleaved, they leave duplicate or gapped
+    /// ordinals and a status that depends on which finished last. It converges on
+    /// the next settle, and until then the document is wrong.
+    ///
+    /// Never hold this across an inference call. The whole point of splitting a
+    /// document into units was to stop one window blocking the rest, and a lock
+    /// held around `segment` would hand that back — serialised, and for minutes.
+    /// Every holder does local SQLite work, which SQLite serialises anyway.
+    ///
+    /// `tokio::sync::Mutex` because a waiter must yield its thread rather than
+    /// park a worker on it.
+    pub async fn corpus_lock(&self, corpus_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.corpus_locks.lock().expect("corpus locks");
+            // Entries nobody is holding or waiting on are dropped rather than
+            // accumulating one per document for the life of the process. A
+            // holder's guard owns its `Arc`, and so does a task that has cloned
+            // one and not yet locked it, so anything still in use counts above
+            // one and survives.
+            locks.retain(|_, l| Arc::strong_count(l) > 1);
+            Arc::clone(locks.entry(corpus_id.to_string()).or_default())
+        };
+        lock.lock_owned().await
     }
 }
 
@@ -188,6 +231,7 @@ pub mod test_support {
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,
             )),
+            corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -212,6 +256,47 @@ mod tests {
             !cfg.consolidate.judge,
             "the only inference-costing stage must be opt-in"
         );
+    }
+
+    #[tokio::test]
+    async fn one_document_is_locked_at_a_time_and_two_documents_are_not() {
+        let core = test_support::test_core().await;
+
+        let held = core.corpus_lock("doc-a").await;
+        let core2 = core.clone();
+        let blocked = tokio::spawn(async move {
+            let _second = core2.corpus_lock("doc-a").await;
+        });
+
+        // Another document is a different lock, so it must not be behind this
+        // one: two workers segmenting two documents was the point of units.
+        let other = core.corpus_lock("doc-b").await;
+        drop(other);
+
+        tokio::task::yield_now().await;
+        assert!(
+            !blocked.is_finished(),
+            "two writers were let into one document at once"
+        );
+        drop(held);
+        blocked.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn locks_nobody_is_holding_do_not_accumulate() {
+        // One entry per document, kept for the life of the process, would be a
+        // slow leak on a base that ingests continuously.
+        let core = test_support::test_core().await;
+        for i in 0..50 {
+            drop(core.corpus_lock(&format!("doc-{i}")).await);
+        }
+        let held = core.corpus_lock("doc-held").await;
+        assert_eq!(
+            core.corpus_locks.lock().unwrap().len(),
+            1,
+            "released locks were kept"
+        );
+        drop(held);
     }
 
     #[tokio::test]

@@ -292,6 +292,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         gate: std::sync::Arc::new(engram::infer::gate::InferenceGate::new(
             std::time::Duration::ZERO,
         )),
+        corpus_locks: Default::default(),
     };
     let translated = index(&core, &artifacts).await;
 
