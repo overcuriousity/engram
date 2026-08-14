@@ -166,6 +166,52 @@ pub fn spawn_retention_ticker(
     })
 }
 
+/// Arm dedupe units at a steady rate, independent of the consolidation sweep.
+///
+/// Its own ticker rather than a passenger on that sweep, for the same reason
+/// retention got one: the pacing of model calls has nothing to do with the
+/// rhythm of duplicate *discovery*. The sweep runs daily because re-examining
+/// the whole collection more often buys nothing; the calls want a rate the
+/// hardware can actually sustain.
+///
+/// What it does not do is cap units in flight. A unit the queue cannot get
+/// through — an open breaker, a dead endpoint — would then block every other
+/// pair permanently, which is the head-of-line blocking the per-pair units were
+/// introduced to remove. `live_job` skips a pair whose unit is already queued,
+/// and the ordering in `pairs_to_judge` keeps a pair that keeps failing from
+/// starving the rest.
+pub fn spawn_dedupe_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !core.consolidate.enabled || core.consolidate.max_dedupe_per_tick == 0 {
+            tracing::info!("dedupe pass disabled");
+            return;
+        }
+        let period =
+            std::time::Duration::from_secs(core.consolidate.dedupe_interval_mins.max(1) * 60);
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    match crate::jobs::consolidate::arm_dedupe(&core).await {
+                        Ok(n) if n > 0 => tracing::info!(armed = n, "armed dedupe units"),
+                        // A failed tick is retried on the next one; there is
+                        // nothing here worth taking the process down for.
+                        Err(e) => tracing::warn!(error = %e, "could not arm dedupe units"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        tracing::info!("dedupe ticker stopped");
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

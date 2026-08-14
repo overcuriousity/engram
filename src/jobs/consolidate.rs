@@ -73,6 +73,17 @@ fn keeper(members: &[Chunk]) -> &Chunk {
         .expect("a cluster has at least one member")
 }
 
+/// Where dedupe units sort in the queue.
+///
+/// `claim_job` orders by `(state, attempts, seq, id)`, and a segmentation
+/// window's seq is its index within a document — a few hundred at most. Starting
+/// dedupe far above that puts it behind every piece of capture work of equal
+/// attempt count, so hygiene consumes what capture leaves over.
+///
+/// The asymmetry is deliberate: a large ingest may delay tidying up, and tidying
+/// up may not delay an ingest. Nothing is lost by a dedupe unit waiting.
+const DEDUPE_SEQ_BASE: i64 = 1_000_000;
+
 /// How many hidden artifacts the drift repair compares per sweep, from either
 /// side. A base with more than this many hidden artifacts drifting at once is
 /// not a case worth unbounded scanning for; the next sweep continues.
@@ -426,16 +437,19 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    if cfg.autonomous {
-        // Armed, not asked. `judged` counts the calls this sweep is responsible
-        // for rather than the calls it made, since it now makes none. There is
-        // deliberately no contradiction count beside it: the answers arrive one
-        // unit at a time long after the sweep has returned, and a zero logged
-        // here read as "the judge found nothing" rather than "the judge has not
-        // been asked yet". `pairs_by_state(Contradiction, ..)` is where that
-        // number actually lives, and the API and Ops both read it from there.
-        out.judged = arm_dedupe(core).await?;
-    }
+    // Armed, not asked. `judged` counts the calls this sweep is responsible for
+    // rather than the calls it made, since it makes none. There is deliberately
+    // no verdict count beside it: the answers arrive one unit at a time long
+    // after the sweep has returned, and a zero logged here would read as "the
+    // pass found nothing" rather than "the pass has not been asked yet".
+    // `pairs_by_state(Contradiction, ..)` is where that number actually lives.
+    //
+    // Not gated on `autonomous`. That flag decides whether a verdict is *acted
+    // on*, and gating the asking on it too would mean the observation window it
+    // exists to provide had nothing in it: an operator switching autonomy on
+    // would be doing so having read no verdicts at all. `max_dedupe_per_tick =
+    // 0` is what switches the model off.
+    out.judged = arm_dedupe(core).await?;
 
     if out.superseded > 0 || out.queued > 0 || out.judged > 0 {
         tracing::info!(
@@ -467,15 +481,15 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// the sweep into units was for. Nothing runs away: `live_job` arms a pair at
 /// most once, so the depth is bounded by the pairs that exist, and the call rate
 /// is the gate's job rather than this number's.
-async fn arm_dedupe(core: &Core) -> Result<usize> {
+pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
     for p in pending {
-        if armed >= core.consolidate.max_judgements {
+        if armed >= core.consolidate.max_dedupe_per_tick {
             tracing::info!(
-                budget = core.consolidate.max_judgements,
-                "judge budget spent; the rest wait for the next sweep"
+                budget = core.consolidate.max_dedupe_per_tick,
+                "dedupe budget spent; the rest wait for the next tick"
             );
             break;
         }
@@ -555,7 +569,12 @@ async fn arm_dedupe(core: &Core) -> Result<usize> {
         // guard above already skips those; this is what keeps it true if the
         // two ever drift.
         core.store
-            .rearm_idle_seq(Stage::Dedupe, "pair", &target, armed as i64)
+            .rearm_idle_seq(
+                Stage::Dedupe,
+                "pair",
+                &target,
+                DEDUPE_SEQ_BASE + armed as i64,
+            )
             .await?;
         armed += 1;
     }
@@ -1295,6 +1314,95 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn dedupe_units_sort_behind_capture_work() {
+        // A large ingest may delay tidying up; tidying up may not delay an
+        // ingest. `claim_job` orders by (state, attempts, seq, id), and a
+        // window's seq is its index within a document, so dedupe starting at
+        // DEDUPE_SEQ_BASE puts it behind every piece of capture work of equal
+        // attempt count. Nothing is lost by a dedupe unit waiting; a document
+        // stuck behind twenty model calls is the thing this system was
+        // restructured to prevent.
+        let core = test_core().await;
+        core.store
+            .enqueue(Stage::SegmentWindow, "segment", "w0")
+            .await
+            .unwrap();
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 1);
+
+        let first = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            first.stage,
+            Stage::SegmentWindow,
+            "a dedupe unit was claimed ahead of capture work"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dedupe_budget_is_per_tick_not_per_sweep() {
+        // `max_judgements` bounded what one sweep armed, which was right while
+        // the sweep was the only producer of pairs. The relate units file them
+        // continuously now, so a number per 24-hour tick is not a budget but a
+        // queue that only grows — the budget is a rate, and the ticker is what
+        // applies it.
+        let mut core = test_core().await;
+        core.consolidate.max_dedupe_per_tick = 1;
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.0, 1.0]),
+                ("timeout is 90 seconds", [0.5, 0.5]),
+                ("timeout is 120 seconds", [0.3, 0.7]),
+            ],
+        )
+        .await;
+        // Two independent pairs, so neither is swallowed by the other's
+        // component.
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        core.store
+            .record_pair(&ids[2], &ids[3], 0.90)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            arm_dedupe(&core).await.unwrap(),
+            1,
+            "the budget was ignored"
+        );
+        // And the next tick reaches the other one rather than re-arming the
+        // first: `live_job` skips a pair whose unit is already queued.
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 1);
+        assert_eq!(
+            arm_dedupe(&core).await.unwrap(),
+            0,
+            "a pair with a live unit was armed again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_budget_asks_nothing_and_still_records_everything() {
+        // The one switch that turns the model off. Finding, recording and
+        // clustering pairs is free and keeps happening; only the asking stops.
+        let mut core = test_core().await;
+        core.consolidate.max_dedupe_per_tick = 0;
+        disagreeing(&core).await;
+
+        let out = run(&core).await.unwrap();
+
+        assert_eq!(out.queued, 1, "the pair was not recorded");
+        assert_eq!(out.judged, 0, "a call was armed on a zero budget");
+    }
+
+    #[tokio::test]
     async fn the_cluster_pass_settles_a_pair_the_relate_unit_filed() {
         // The relate unit files a pair above `auto_supersede` rather than
         // acting on it, because resolving where it is found leaves A pointing
@@ -1386,12 +1494,47 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn autonomy_is_off_by_default() {
-        let core = test_core().await;
-        disagreeing(&core).await;
-        let out = run(&core).await.unwrap();
+    async fn the_pass_asks_by_default_and_acts_only_when_told_to() {
+        // This asserted `judged == 0` while the flag was called `judge`, because
+        // that flag gated whether the model was *asked*. `autonomous` gates
+        // whether the answer is *acted on*, and the two cannot be the same
+        // switch: an operator turning autonomy on would otherwise be doing it
+        // having read no verdicts at all, which is exactly the leap the flag
+        // exists to avoid.
+        //
+        // So the default asks and records. `max_dedupe_per_tick = 0` is what
+        // switches the model off, and it has its own test.
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"old versus new"}"#.into(),
+        ]));
+        let ids = disagreeing(&core).await;
+
+        let out = sweep_and_dedupe(&core).await;
+
         assert_eq!(out.queued, 1);
-        assert_eq!(out.judged, 0, "the judge ran without being asked for");
+        assert_eq!(out.judged, 1, "nothing was armed, so nothing can be read");
+        // Recorded...
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Superseded, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // ...and not acted on.
+        for id in &ids {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "the pass hid an artifact without being granted the authority"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1535,7 +1678,7 @@ pub(crate) mod tests {
         // One sweep must not be able to occupy the GPU for an hour.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.consolidate.max_judgements = 1;
+        core.consolidate.max_dedupe_per_tick = 1;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -1778,7 +1921,7 @@ pub(crate) mod tests {
         // sweep's budget forever and the rest would never be judged at all.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.consolidate.max_judgements = 1;
+        core.consolidate.max_dedupe_per_tick = 1;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
             r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
@@ -1825,7 +1968,7 @@ pub(crate) mod tests {
         // behind it a wait of up to `interval_hours`.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.consolidate.max_judgements = 5;
+        core.consolidate.max_dedupe_per_tick = 5;
         let ids = seed(
             &core,
             &[
@@ -1894,7 +2037,7 @@ pub(crate) mod tests {
         // went on re-arming it while pairs recorded since never got a turn.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.consolidate.max_judgements = 1;
+        core.consolidate.max_dedupe_per_tick = 1;
         // Two pairs in the review band and nothing near enough to cluster, so
         // the sweep has a second pair to reach once the first is spoken for.
         let ids = seed(

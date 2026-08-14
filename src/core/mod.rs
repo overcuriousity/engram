@@ -259,9 +259,12 @@ mod tests {
             cfg.consolidate.auto_supersede > cfg.consolidate.review_min,
             "superseding at or below the review threshold would hide distinct artifacts"
         );
+        // Asking is on by default; *acting* on the answer is not. The dedupe
+        // pass records its verdicts either way, so an operator can read what it
+        // would have done before granting it the authority to do it.
         assert!(
             !cfg.consolidate.autonomous,
-            "the only inference-costing stage must be opt-in"
+            "acting on a verdict without being asked to must be opt-in"
         );
     }
 

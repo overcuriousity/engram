@@ -149,8 +149,22 @@ pub struct ConsolidateConfig {
     /// before the system is allowed to act on it. A value conflict is escalated
     /// to a person either way.
     pub autonomous: bool,
-    /// Ceiling on dedupe calls per sweep, so one sweep cannot occupy the GPU.
-    pub max_judgements: usize,
+    /// How often the dedupe ticker arms units, in minutes.
+    ///
+    /// Its own ticker rather than a passenger on the sweep. `max_judgements`
+    /// bounded what *one sweep* armed, which was right while the sweep was the
+    /// only producer of pairs; the relate units file them continuously now, so a
+    /// number per 24-hour tick is not a budget but a queue that only grows.
+    ///
+    /// The fixed quantity in this system is neither the base nor the sweep — it
+    /// is what the hardware can get through. So the budget is a rate.
+    pub dedupe_interval_mins: u64,
+    /// Units armed per tick. With the default interval that is a ceiling of
+    /// twenty calls an hour, whatever the base has grown to.
+    ///
+    /// Zero switches the model off entirely: pairs are still found, recorded and
+    /// clustered — all of which is free — and nothing is ever asked about.
+    pub max_dedupe_per_tick: usize,
     /// How many captured roots one merged artifact may be written from.
     ///
     /// Above this the component is left alone and surfaced instead. A merge of
@@ -181,7 +195,8 @@ impl Default for ConsolidateConfig {
             per_point: 5,
             interval_hours: 24,
             autonomous: false,
-            max_judgements: 20,
+            dedupe_interval_mins: 15,
+            max_dedupe_per_tick: 5,
             merge_max_roots: 8,
             stale_after_days: 365,
             stale_max_hits: 0,

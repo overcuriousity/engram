@@ -181,10 +181,19 @@ interval_hours = 24
 # conflicts queue on Ops, because deciding which of two facts is current is the
 # judgement a model is worst at.
 autonomous = false
-max_judgements = 20
+# How often the dedupe pass arms model calls, and how many per tick. Together
+# these are a rate — twenty an hour by default — and a rate is the right shape
+# because the fixed quantity is what the hardware gets through, not how big the
+# knowledge base has grown. The old per-sweep ceiling was a queue that only grew.
+#
+# Set max_dedupe_per_tick = 0 to switch the model off entirely. Duplicates are
+# still found, recorded and clustered, all of which costs no inference; nothing
+# is ever asked about.
+dedupe_interval_mins = 15
+max_dedupe_per_tick = 5
 # How many captured artifacts one merged artifact may be written from. Above
-# this the group is surfaced on Ops instead of merged: a merge of forty sources
-# stops being one atomic piece of knowledge, which is what an artifact is.
+# this the group is surfaced for a person instead of merged: a merge of forty
+# sources stops being one atomic piece of knowledge, which is what an artifact is.
 merge_max_roots = 8
 
 # Recording real searches so they can be judged later, and turned into the
