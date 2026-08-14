@@ -947,6 +947,25 @@ impl Store {
         self.set_artifact_flags(id, &[], None).await
     }
 
+    /// `Chunk::in_results`, answered from two columns instead of the full row.
+    ///
+    /// For callers that triage many artifacts and read the text of few —
+    /// `arm_dedupe` walks up to 200 pairs per tick and skips most of them, and
+    /// paying two full-row fetches (text included) per skipped pair was the
+    /// bulk of the tick's work. `None` means the row is gone, which is its own
+    /// answer rather than an error: a pair cascades away mid-loop and the
+    /// caller moves on.
+    pub async fn artifact_in_results(&self, id: &str) -> Result<Option<bool>> {
+        let row = sqlx::query(
+            "SELECT status = 'active' AND superseded_by IS NULL AS live
+               FROM artifacts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<bool, _>("live")))
+    }
+
     /// Record that an operator reviewed a merge's lost sources and accepted it
     /// as a merge of what remains. `source_count` comes down to the surviving
     /// lineage count, so the orphan scan's comparison goes quiet — without
@@ -1277,6 +1296,40 @@ mod tests {
             .await
             .unwrap();
         assert!(!s.get_artifact(&made[1].id).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn liveness_is_answerable_without_fetching_the_row() {
+        // What `arm_dedupe` reads 200 times per tick, most of them for pairs
+        // it goes on to skip — two columns, never the text.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.artifact_in_results(&made[0].id).await.unwrap(),
+            Some(true)
+        );
+        s.set_superseded_by(&made[0].id, Some(&made[1].id))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.artifact_in_results(&made[0].id).await.unwrap(),
+            Some(false)
+        );
+        s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.artifact_in_results(&made[1].id).await.unwrap(),
+            Some(false)
+        );
+        // A missing row is its own answer, not an error: the caller treats a
+        // cascaded-away pair differently from a store that is unwell.
+        assert_eq!(s.artifact_in_results("no-such-id").await.unwrap(), None);
     }
 
     #[tokio::test]

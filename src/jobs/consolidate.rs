@@ -661,13 +661,18 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // `NotFound` reaches `run_one`, which reads it as the sweep's own target
         // being gone: it completes the job, and every pair behind this one waits
         // for the next tick — up to `interval_hours` away.
-        let (a, b) = match (
-            core.store.get_artifact(&p.a_id).await,
-            core.store.get_artifact(&p.b_id).await,
+        //
+        // The status query, not `get_artifact`: this loop triages up to 200
+        // pairs per tick and arms at most a handful, and in-flight pairs lead
+        // the ordering — so most iterations used to pay two full-row fetches,
+        // text included, for a pair they went on to skip. The unit re-reads
+        // the full rows itself; nothing here needs more than liveness.
+        let (a_live, b_live) = match (
+            core.store.artifact_in_results(&p.a_id).await?,
+            core.store.artifact_in_results(&p.b_id).await?,
         ) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(Error::NotFound), _) | (_, Err(Error::NotFound)) => continue,
-            (Err(e), _) | (_, Err(e)) => return Err(e),
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
         };
 
         // A pair queued in the review band can have a member retired after the
@@ -682,7 +687,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // returns a validation error and the pair stays pending forever. The
         // same guard runs in `run`'s cluster pass and review band, and again in
         // the unit itself, because a pair can be retired while it waits.
-        if !a.in_results() || !b.in_results() {
+        if !a_live || !b_live {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
                 .await?;
