@@ -149,8 +149,15 @@ pub struct ConsolidateConfig {
     /// before the system is allowed to act on it. A value conflict is escalated
     /// to a person either way.
     pub autonomous: bool,
-    /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
+    /// Ceiling on dedupe calls per sweep, so one sweep cannot occupy the GPU.
     pub max_judgements: usize,
+    /// How many captured roots one merged artifact may be written from.
+    ///
+    /// Above this the component is left alone and surfaced instead. A merge of
+    /// forty sources is no longer one atomic piece of knowledge, which is what
+    /// `schema.sql` defines an artifact to be — so past the cap the honest
+    /// answer is to stop rather than to write something nobody asked for.
+    pub merge_max_roots: usize,
     /// An active artifact not confirmed accurate (`last_verified_at`) in this
     /// many days becomes a deprecation-review candidate — never anything more
     /// automatic than that. See `stale_max_hits`.
@@ -175,6 +182,7 @@ impl Default for ConsolidateConfig {
             interval_hours: 24,
             autonomous: false,
             max_judgements: 20,
+            merge_max_roots: 8,
             stale_after_days: 365,
             stale_max_hits: 0,
         }

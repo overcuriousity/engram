@@ -287,6 +287,57 @@ impl Store {
         Ok(rows.iter().map(row_to_pair).collect())
     }
 
+    /// Every `Pending` pair reachable from this one through a shared artifact.
+    ///
+    /// One component, one call. Three related artifacts settled pairwise cost
+    /// two calls and produce a merged artifact that is superseded almost
+    /// immediately — and with the re-merge rule flattening to captured roots
+    /// each time, the intermediate merge is written and thrown away for nothing.
+    ///
+    /// Computed at the moment of use rather than snapshotted when the unit was
+    /// armed. Membership changes while a unit waits out a backoff, and acting on
+    /// a stale group would rewrite artifacts that have since been answered.
+    ///
+    /// `Pending` only. A dismissed, near-identical or oversized row carries a
+    /// decision, and following it would pull an already-settled artifact into a
+    /// group that is about to be superseded.
+    pub async fn open_component(&self, pair_id: i64) -> Result<Vec<ArtifactPair>> {
+        let open = self.pairs_by_state(PairState::Pending, 5_000).await?;
+        let Some(seed) = open.iter().find(|p| p.id == pair_id) else {
+            return Ok(vec![]);
+        };
+
+        let mut members: std::collections::HashSet<&str> = [seed.a_id.as_str(), seed.b_id.as_str()]
+            .into_iter()
+            .collect();
+        let mut picked: std::collections::HashSet<i64> = [seed.id].into_iter().collect();
+        // A fixed point rather than one pass. A pair joins the component only
+        // once one of its artifacts is already in it, and the pair that brings
+        // that artifact in can come later in the list — a single pass would
+        // return a component whose contents depended on row order.
+        loop {
+            let mut grew = false;
+            for p in &open {
+                if picked.contains(&p.id) {
+                    continue;
+                }
+                if members.contains(p.a_id.as_str()) || members.contains(p.b_id.as_str()) {
+                    members.insert(p.a_id.as_str());
+                    members.insert(p.b_id.as_str());
+                    picked.insert(p.id);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        Ok(open
+            .into_iter()
+            .filter(|p| picked.contains(&p.id))
+            .collect())
+    }
+
     /// Count one model call against a pair, whether or not it produced an
     /// answer. Written before the call, so a run that dies mid-judgement still
     /// leaves the pair at the back of the next sweep's queue.
@@ -487,6 +538,110 @@ mod tests {
                 state.as_str()
             );
         }
+    }
+
+    /// Four artifacts under one corpus, for the component tests.
+    async fn four_artifacts(s: &Store) -> Vec<String> {
+        let src = s.insert_corpus("four", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..4)
+            .map(|i| NewArtifact {
+                ordinal: i,
+                text: format!("artifact {i}"),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        s.insert_artifacts(&src.id, &new)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_component_gathers_every_pending_pair_that_shares_an_artifact() {
+        // One component, one call. Merging a four-artifact group pairwise costs
+        // three calls and writes two merged artifacts that are superseded
+        // almost immediately.
+        let s = Store::memory().await.unwrap();
+        let m = four_artifacts(&s).await;
+        s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
+        s.record_pair(&m[1], &m[2], 0.90).await.unwrap();
+        s.record_pair(&m[3], &m[0], 0.89).await.unwrap();
+        let seed = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        let comp = s.open_component(seed).await.unwrap();
+        assert_eq!(comp.len(), 3, "the component stopped short: {comp:?}");
+    }
+
+    #[tokio::test]
+    async fn a_component_is_the_same_set_whichever_pair_seeds_it() {
+        // The fixed point is what makes this true. A single pass would return a
+        // component whose contents depended on which row happened to come
+        // first, so two units for one group could act on different sets.
+        let s = Store::memory().await.unwrap();
+        let m = four_artifacts(&s).await;
+        s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
+        s.record_pair(&m[1], &m[2], 0.90).await.unwrap();
+        s.record_pair(&m[2], &m[3], 0.89).await.unwrap();
+
+        let all = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        let mut sets: Vec<Vec<i64>> = Vec::new();
+        for p in &all {
+            let mut ids: Vec<i64> = s
+                .open_component(p.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect();
+            ids.sort_unstable();
+            sets.push(ids);
+        }
+        assert_eq!(sets[0].len(), 3);
+        assert!(
+            sets.iter().all(|s| *s == sets[0]),
+            "the component depended on which pair seeded it: {sets:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_pair_never_drags_an_answered_artifact_into_a_component() {
+        // Pending only. A dismissed or near-identical row carries a decision,
+        // and following it would pull an already-settled artifact into a group
+        // that is about to be superseded and rewritten.
+        let s = Store::memory().await.unwrap();
+        let m = four_artifacts(&s).await;
+        s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
+        s.record_pair(&m[1], &m[2], 0.90).await.unwrap();
+        let all = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        let (seed, other) = (all[0].id, all[1].id);
+        s.set_pair_state(other, PairState::Dismissed, None)
+            .await
+            .unwrap();
+
+        assert_eq!(s.open_component(seed).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_component_of_a_pair_that_is_no_longer_open_is_empty() {
+        // The unit re-reads its own pair before acting. A sibling unit that
+        // already settled the group must find nothing to do rather than an
+        // empty-but-plausible component.
+        let s = Store::memory().await.unwrap();
+        let m = four_artifacts(&s).await;
+        s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(p, PairState::NoConflict, None)
+            .await
+            .unwrap();
+
+        assert!(s.open_component(p).await.unwrap().is_empty());
     }
 
     #[tokio::test]

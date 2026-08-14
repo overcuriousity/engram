@@ -182,6 +182,10 @@ interval_hours = 24
 # judgement a model is worst at.
 autonomous = false
 max_judgements = 20
+# How many captured artifacts one merged artifact may be written from. Above
+# this the group is surfaced on Ops instead of merged: a merge of forty sources
+# stops being one atomic piece of knowledge, which is what an artifact is.
+merge_max_roots = 8
 
 # Recording real searches so they can be judged later, and turned into the
 # query/artifact pairs the evaluation harness scores against. Off by default: a
