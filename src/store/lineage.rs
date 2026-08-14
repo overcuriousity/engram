@@ -30,6 +30,13 @@ impl Store {
     ///
     /// A merged artifact resolves through `artifact_sources`, which already
     /// holds the closure, so this is one query per id and not a traversal.
+    ///
+    /// A merged artifact with no lineage rows — every root deleted out from
+    /// under it — resolves to the *empty* list, never to itself. Its text is a
+    /// synthesis, and handing it back as a root is how a paraphrase of a
+    /// paraphrase ends up in a prompt as an original, or recorded as another
+    /// merge's `root_id`. The empty answer makes that state visible to the
+    /// caller instead; the dedupe unit escalates such a component to a person.
     pub async fn roots_of(&self, artifact_ids: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in artifact_ids {
@@ -40,19 +47,21 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
             let roots: Vec<String> = rows.iter().map(|r| r.get("root_id")).collect();
-            // No lineage rows means a captured artifact — or a merged one every
-            // root of which has since been deleted. The two are told apart by
-            // `source_count`, and the second is `merged_missing_a_source`'s
-            // business; treating it as its own root here is the safe reading,
-            // since it keeps the artifact in the prompt rather than dropping it.
-            out.insert(
-                id.clone(),
-                if roots.is_empty() {
-                    vec![id.clone()]
+            let entry = if roots.is_empty() {
+                let provenance: Option<String> =
+                    sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
+                        .bind(id)
+                        .fetch_optional(&self.pool)
+                        .await?;
+                if provenance.as_deref() == Some("merged") {
+                    vec![]
                 } else {
-                    roots
-                },
-            );
+                    vec![id.clone()]
+                }
+            } else {
+                roots
+            };
+            out.insert(id.clone(), entry);
         }
         Ok(out)
     }

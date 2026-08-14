@@ -1050,10 +1050,11 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             .unwrap_or_default();
         let mut sources = Vec::new();
         for rid in roots.get(&c.id).into_iter().flatten() {
-            // A source deleted since leaves no row. `orphaned` is what says so,
-            // rather than the list quietly being one shorter — and `roots_of`
-            // answers "itself" once the last row is gone, which must not be
-            // rendered as a merge written from itself.
+            // A source deleted since leaves no row. `orphaned` is what says
+            // so, rather than the list quietly being one shorter. `roots_of`
+            // now answers an empty list for a merge that lost every source;
+            // the self guard stays as defense against a base written before
+            // that change.
             if rid == &c.id {
                 continue;
             }
@@ -1416,10 +1417,10 @@ pub(crate) async fn build_artifact_detail(
             .await
             .unwrap_or_default();
         for rid in roots.get(&c.id).into_iter().flatten() {
-            // `roots_of` answers "itself" for an artifact with no lineage rows,
-            // which is the safe reading where it is used to build a prompt and
-            // the wrong one here: it would list a merge that has lost every
-            // source as having been written from itself.
+            // `roots_of` now answers an empty list for a merge with no lineage
+            // rows, so nothing here would list a merge as written from itself;
+            // the guard stays as defense against a base written before that
+            // change.
             if rid == &c.id {
                 continue;
             }

@@ -120,6 +120,23 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     // Flatten before anything else, and never show the model a merged member's
     // own text.
     let root_map = core.store.roots_of(&member_ids).await?;
+    // A member with no roots at all is a merge whose sources were deleted out
+    // from under it. Its text is a paraphrase with nothing behind it — not
+    // something to show the model as an original, and not something a rule can
+    // settle. A person decides.
+    if members
+        .iter()
+        .any(|c| root_map.get(&c.id).is_none_or(|r| r.is_empty()))
+    {
+        settle_all(
+            core,
+            &pairs,
+            PairState::Contradiction,
+            Some("a merged member has lost its sources; resolve by hand"),
+        )
+        .await?;
+        return Ok(());
+    }
     let mut root_ids: Vec<String> = root_map.values().flatten().cloned().collect();
     root_ids.sort();
     root_ids.dedup();
@@ -1000,6 +1017,53 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_lost_its_sources_is_never_shown_as_an_original() {
+        // The self-root fallback put a model-synthesized paraphrase in the
+        // prompt as a captured original, and a Duplicate verdict would then
+        // record a merged artifact as root_id — paraphrase drift, one
+        // generation per merge, which the lineage design exists to prevent.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        let completer = Arc::new(ScriptedCompleter::new(vec![]));
+        core.completer = completer.clone();
+        let ids = disagreeing(&core).await;
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "a paraphrase".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[ids[0].clone()],
+            )
+            .await
+            .unwrap();
+        // Its every source cascades away, as a corpus deletion does.
+        sqlx::query("DELETE FROM artifact_sources WHERE child_id = ?")
+            .bind(&m.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let pair = queue_pair(&core, &m.id, &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            completer.calls(),
+            0,
+            "a rootless merge reached the model as an original"
+        );
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Contradiction,
+            "the component goes to a person rather than being judged on a paraphrase"
         );
     }
 
