@@ -572,6 +572,60 @@ pub(crate) mod tests {
 
     /// Seed artifacts with hand-placed vectors, so the test controls the exact
     /// similarity rather than depending on what the fake embedder produces.
+    /// The same, with a title on each artifact.
+    ///
+    /// The title is the subject, and the dedupe prompt is built around that:
+    /// synthesis writes a body that stands alone within its segment, which is
+    /// not the same as naming what it is about. Anything testing the
+    /// same-subject rule needs titles or it is testing something else.
+    pub(crate) async fn seed_titled(
+        core: &crate::core::Core,
+        rows: &[(&str, &str, [f32; 2])],
+    ) -> Vec<String> {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (title, text, _))| NewArtifact {
+                ordinal: i as i64,
+                text: (*text).to_string(),
+                corpus_span: None,
+                title: Some((*title).to_string()),
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        let points: Vec<VectorPoint> = made
+            .iter()
+            .zip(rows)
+            .map(|(c, (title, text, v))| VectorPoint {
+                vector: v.to_vec(),
+                sparse: Default::default(),
+                payload: VectorPayload {
+                    artifact_id: c.id.clone(),
+                    corpus_id: c.corpus_id.clone().unwrap_or_default(),
+                    text: (*text).to_string(),
+                    title: Some((*title).to_string()),
+                    category: None,
+                    tags: vec![],
+                    created_at: c.created_at,
+                    last_seen_at: None,
+                    hit_count: None,
+                    superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    provenance: None,
+                },
+            })
+            .collect();
+        core.vectors.upsert(points).await.unwrap();
+        made.into_iter().map(|c| c.id).collect()
+    }
+
     pub(crate) async fn seed(
         core: &crate::core::Core,
         vectors: &[(&str, [f32; 2])],
@@ -1342,9 +1396,17 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_confident_direction_proposes_a_supersede_but_does_not_apply_it() {
-        // The judge names a direction; an operator still has to confirm it.
-        // Nothing about either artifact changes here — only the pair.
+    async fn a_confident_direction_is_applied_once_autonomy_is_on() {
+        // This asserted "proposed, not applied" until 2026-08-14, and the
+        // rename is what changed it: `consolidate.judge` gated whether the
+        // model was *asked*, and `consolidate.autonomous` gates whether the
+        // answer is *acted on*. The same `= true` therefore means something
+        // else, and a test that kept the old assertion would have been pinning
+        // a behaviour the flag no longer selects.
+        //
+        // The proposal path did not disappear — it is what `autonomous = false`
+        // does, and `dedupe::tests::a_replacement_is_only_proposed_while_autonomy_is_off`
+        // is where it is pinned now.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
@@ -1359,18 +1421,22 @@ pub(crate) mod tests {
             .pairs_by_state(PairState::Superseded, 10)
             .await
             .unwrap();
-        assert_eq!(found.len(), 1, "the pair did not land as proposed");
+        assert_eq!(found.len(), 1, "the pair did not land as decided");
         assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
 
-        // Proposed, not applied.
-        assert!(
+        // Applied, and the survivor is a stored original rather than a rewrite.
+        assert_eq!(
             core.store
                 .get_artifact(&ids[0])
                 .await
                 .unwrap()
                 .superseded_by
-                .is_none(),
-            "the judge's proposal must not hide anything by itself"
+                .as_deref(),
+            Some(ids[1].as_str())
+        );
+        assert_eq!(
+            core.store.get_artifact(&ids[1]).await.unwrap().provenance,
+            crate::store::artifacts::Provenance::Captured
         );
     }
 
