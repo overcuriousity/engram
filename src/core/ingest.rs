@@ -637,6 +637,15 @@ impl Core {
                 // no chunks at all. Re-windowing is also the point of a
                 // reprocess after a model or budget change.
                 self.store.clear_segments(&src.id).await?;
+                // The measure those windows produced goes with them. It is not
+                // just stale: the reconciliation sweep identifies a document
+                // whose last window resolved but whose `settle` never ran by
+                // having no coverage, so a value left over from the previous run
+                // reads as "already finished". A rerun that dies in exactly that
+                // window would then be stuck in `segmenting` for good — nothing
+                // resolves again to trigger `settle`, and the one sweep that
+                // repairs it has been told there is nothing to repair.
+                self.store.clear_corpus_coverage(&src.id).await?;
                 // And the units that name those windows, which outlive them.
                 // Planning arms idle-only, so a unit still queued from the run
                 // being replaced would carry its attempts into the rerun — the
@@ -710,6 +719,36 @@ mod tests {
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn reprocessing_forgets_the_previous_runs_coverage() {
+        // The reconciliation sweep identifies a document whose last window
+        // resolved but whose `settle` never ran by its having no coverage. A
+        // reprocess that left the previous run's measure behind made its own
+        // rerun the one case the repair could not see: if that rerun died in
+        // exactly that window, nothing would resolve again to trigger `settle`,
+        // and the sweep would read the stale number as "already finished". The
+        // document sits in `segmenting` for good — never renumbered, never
+        // embedded, never in search.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        core.store.set_corpus_coverage(&out.id, 0.87).await.unwrap();
+
+        core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
+
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .coverage
+                .is_none(),
+            "the rerun carried the previous run's coverage, hiding it from the repair sweep"
+        );
     }
 
     #[tokio::test]

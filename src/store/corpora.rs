@@ -304,6 +304,20 @@ impl Store {
         Ok(())
     }
 
+    /// Forget what the last run measured, so the next one is measured against
+    /// its own windows. Also what the reconciliation sweep reads as "this
+    /// document never finished": a stale value there is indistinguishable from a
+    /// document that finished cleanly, which is the wrong answer for a source
+    /// whose windows are being thrown away and re-cut.
+    pub async fn clear_corpus_coverage(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET coverage = NULL, updated_at = ? WHERE id = ?")
+            .bind(now())
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// The stored corpus most like this signature, if any clears `min`.
     ///
     /// A full scan of the signature column. A single-operator base holds
