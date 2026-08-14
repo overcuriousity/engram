@@ -59,6 +59,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             &crate::infer::prompt::judge_prompt(
                 (a.title.as_deref().unwrap_or("untitled"), &a.text),
                 (b.title.as_deref().unwrap_or("untitled"), &b.text),
+                p.judge_attempts,
             ),
         )
         .await
@@ -126,9 +127,21 @@ async fn apply(
                 .await?;
         }
         // A reply that cannot be read is an error, not a verdict: the pair stays
-        // pending and a later sweep asks again.
+        // pending, and the unit retries under the queue's backoff.
+        //
+        // Retrying is only worth anything because `judge_prompt` carries the
+        // attempt number. `MalformedLlmOutput` is retryable, so this re-queues
+        // the unit — and against an endpoint that caches by exact prompt, an
+        // unchanged prompt would replay the same unreadable bytes for every one
+        // of `MAX_ATTEMPTS`. One varying byte is what makes the second ask a
+        // second ask.
         Err(e) => {
-            tracing::warn!(pair = p.id, error = %e, "judge reply unreadable; pair stays pending");
+            tracing::warn!(
+                pair = p.id,
+                attempt = p.judge_attempts,
+                error = %e,
+                "judge reply unreadable; pair stays pending"
+            );
             return Err(e);
         }
     }
