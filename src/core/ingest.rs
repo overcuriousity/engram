@@ -754,8 +754,20 @@ impl Core {
     /// the ones that can be freed should be. The state a failure leaves behind
     /// is the recoverable one, so the next deletion or sweep finishes the job.
     pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
+        // Under the lifecycle lock like every other transition: this path
+        // reveals payload-first, and interleaving with the sweep's repair —
+        // which reads rows and writes payloads — is exactly the sequence that
+        // hides an artifact with no marker left to find it by.
+        let _guard = self.lifecycle_lock.lock().await;
         let mut first_err = None;
         for id in self.store.dangling_superseded().await? {
+            // Marked before the payload write, as `unsupersede` does and for
+            // the same reason: this direction writes the payload first, so
+            // without it a crash between the two stores would leave drift no
+            // row write ever announced. A payload write that fails below
+            // leaves the marker standing — correctly: the failed reveal is
+            // then findable drift, and the heal retries on the next sweep.
+            self.store.mark_lifecycle_dirty(&id).await?;
             if let Err(e) = self
                 .vectors
                 .set_lifecycle(&id, ArtifactStatus::Active, None)

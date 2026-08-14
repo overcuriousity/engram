@@ -1124,6 +1124,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_heal_reveals_with_the_marker_protocol_and_leaves_none_standing() {
+        // Payload-first direction, so the contract is unsupersede's: mark
+        // before the payload write, clear only once both stores agree. Without
+        // the mark, a crash between the two writes is drift no marker ever
+        // announced; and without the lock, the sweep's repair can interleave
+        // and write the stale hidden state back with nothing left to notice.
+        let core = test_core().await;
+        let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.0, 1.0])]).await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+
+        core.delete_artifact(&ids[1]).await.unwrap(); // runs the heal
+
+        let a = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            a.in_results(),
+            "the heal did not restore the dangling loser"
+        );
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the heal left a marker on a base in agreement"
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_the_survivor_puts_the_artifact_it_hid_back() {
         // `superseded_by` has no foreign key behind it. Deleting the keeper
         // left the loser pointing at nothing, hidden from search in favour of a
