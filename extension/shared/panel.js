@@ -74,6 +74,96 @@ async function capture(scope) {
 
 $('capture').addEventListener('click', () => capture('page'));
 
+/// Render hits as rows linking back to the deployment.
+///
+/// Built with `createElement` and `textContent` rather than assembled as an
+/// HTML string: artifact text is whatever a captured page contained, and
+/// putting that through `innerHTML` would run it.
+async function render(hits, answer) {
+  const box = $('results');
+  box.textContent = '';
+
+  if (answer) {
+    const p = document.createElement('p');
+    p.className = 'answer';
+    p.textContent = answer;
+    box.appendChild(p);
+  }
+
+  if (!hits.length) {
+    if (!answer) box.textContent = 'Nothing.';
+    return;
+  }
+
+  const cfg = await engramApi.config();
+  for (const h of hits) {
+    const el = document.createElement('div');
+    el.className = 'hit';
+
+    const title = document.createElement('h3');
+    const link = document.createElement('a');
+    link.href = cfg.origin + '/ui/artifacts/' + h.artifact_id;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    link.textContent = h.title || 'Untitled';
+    title.appendChild(link);
+
+    const body = document.createElement('p');
+    body.textContent = h.text;
+
+    el.append(title, body);
+    box.appendChild(el);
+  }
+}
+
+let searchTimer;
+
+async function runSearch() {
+  const q = $('q').value.trim();
+  if (!q) { $('results').textContent = ''; return; }
+  if (!(await engramApi.config())) { say('Not paired yet.', true); return; }
+  try {
+    // `door=extension` is how the judging page tells a query typed while
+    // reading from one typed in the web UI. Only this value is honoured
+    // server-side; a client cannot claim to be `ask` or `judge`.
+    const hits = await engramApi.call(
+      '/api/v1/search?door=extension&q=' + encodeURIComponent(q));
+    say('');
+    await render(hits);
+  } catch (e) {
+    say(e.message, true);
+  }
+}
+
+// Debounced, because this is search-as-you-type and every keystroke would
+// otherwise be an embedding call on the deployment.
+$('q').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 200);
+});
+
+$('ask-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = $('ask').value.trim();
+  if (!q || !(await ensurePaired())) return;
+  // `infer.ask.timeout_secs` defaults to 900. A popup would have closed long
+  // before this returns; a panel is still here.
+  say('Thinking… this can take a while.');
+  try {
+    const out = await engramApi.call('/api/v1/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ q }),
+    });
+    // `dropped` counts what was retrieved and left out for budget. Said out
+    // loud, because a missing citation is otherwise silent.
+    say(out.dropped ? out.dropped + ' more were retrieved but did not fit.' : '');
+    await render(out.citations || [], out.answer);
+  } catch (err) {
+    say(err.message, true);
+  }
+});
+
 // Work handed over from the background script — a context-menu entry or an
 // omnibox query. Wired in Task 5; the listener registers now so nothing sent
 // before it exists is lost.
