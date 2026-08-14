@@ -24,8 +24,8 @@ pub enum Stage {
     /// than any one corpus, so there is exactly one of these in the queue at a
     /// time. Local work: it arms `Judge` units rather than calling the model.
     Consolidate,
-    /// One pair, one call.
-    Judge,
+    /// One component of near-duplicate artifacts, one call.
+    Dedupe,
     /// One artifact, one neighbour query. No inference: `neighbours` looks the
     /// vector up by point id, so this costs a round trip and nothing else.
     ///
@@ -46,7 +46,7 @@ impl Stage {
             Stage::Title => "title",
             Stage::Embed => "embed",
             Stage::Consolidate => "consolidate",
-            Stage::Judge => "judge",
+            Stage::Dedupe => "dedupe",
             Stage::Relate => "relate",
         }
     }
@@ -58,7 +58,7 @@ impl Stage {
             "title" => Some(Stage::Title),
             "embed" => Some(Stage::Embed),
             "consolidate" => Some(Stage::Consolidate),
-            "judge" => Some(Stage::Judge),
+            "dedupe" => Some(Stage::Dedupe),
             "relate" => Some(Stage::Relate),
             _ => None,
         }

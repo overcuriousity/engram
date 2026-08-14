@@ -260,7 +260,7 @@ mod tests {
             "superseding at or below the review threshold would hide distinct artifacts"
         );
         assert!(
-            !cfg.consolidate.judge,
+            !cfg.consolidate.autonomous,
             "the only inference-costing stage must be opt-in"
         );
     }

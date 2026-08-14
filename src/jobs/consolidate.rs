@@ -407,7 +407,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    if cfg.judge {
+    if cfg.autonomous {
         // Armed, not asked. `judged` counts the calls this sweep is responsible
         // for rather than the calls it made, since it now makes none. There is
         // deliberately no contradiction count beside it: the answers arrive one
@@ -415,7 +415,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         // here read as "the judge found nothing" rather than "the judge has not
         // been asked yet". `pairs_by_state(Contradiction, ..)` is where that
         // number actually lives, and the API and Ops both read it from there.
-        out.judged = arm_judgements(core).await?;
+        out.judged = arm_dedupe(core).await?;
     }
 
     if out.superseded > 0 || out.queued > 0 || out.judged > 0 {
@@ -448,7 +448,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// the sweep into units was for. Nothing runs away: `live_job` arms a pair at
 /// most once, so the depth is bounded by the pairs that exist, and the call rate
 /// is the gate's job rather than this number's.
-async fn arm_judgements(core: &Core) -> Result<usize> {
+async fn arm_dedupe(core: &Core) -> Result<usize> {
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
@@ -522,7 +522,7 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
         // until it does — spending the budget on itself over and over while
         // pairs recorded since never get a turn.
         let target = p.id.to_string();
-        if core.store.live_job(Stage::Judge, &target).await? {
+        if core.store.live_job(Stage::Dedupe, &target).await? {
             continue;
         }
 
@@ -536,7 +536,7 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
         // guard above already skips those; this is what keeps it true if the
         // two ever drift.
         core.store
-            .rearm_idle_seq(Stage::Judge, "pair", &target, armed as i64)
+            .rearm_idle_seq(Stage::Dedupe, "pair", &target, armed as i64)
             .await?;
         armed += 1;
     }
@@ -556,7 +556,7 @@ pub(crate) mod tests {
     /// The sweep no longer calls the model: it decides which pairs are worth
     /// asking about and arms a unit each. Tests about what the judge *said*
     /// therefore have to drive the queue too, which is what a worker does.
-    async fn sweep_and_judge(core: &crate::core::Core) -> Outcome {
+    async fn sweep_and_dedupe(core: &crate::core::Core) -> Outcome {
         let out = run(core).await.unwrap();
         for _ in 0..100 {
             sqlx::query("UPDATE jobs SET run_after = 0")
@@ -940,7 +940,7 @@ pub(crate) mod tests {
         // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         assert_eq!(
             core.store
                 .pairs_by_state(PairState::Pending, 10)
@@ -972,7 +972,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_whose_member_was_deprecated_never_reaches_the_judge() {
+    async fn a_pair_whose_member_was_deprecated_never_reaches_the_dedupe_pass() {
         // The other half of the same rule, and the one that leaves a button
         // nothing can press: a judgement can propose a supersede, Ops renders
         // "Apply supersede" for it, and `Core::supersede` refuses a deprecated
@@ -984,7 +984,7 @@ pub(crate) mod tests {
         core.completer = completer.clone();
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
 
         core.deprecate(&ids[0]).await.unwrap();
 
@@ -1313,7 +1313,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_judge_is_off_by_default() {
+    async fn autonomy_is_off_by_default() {
         let core = test_core().await;
         disagreeing(&core).await;
         let out = run(&core).await.unwrap();
@@ -1322,15 +1322,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_enabled_judge_marks_a_real_contradiction() {
+    async fn an_enabled_dedupe_pass_marks_a_real_contradiction() {
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"contradicts":true,"detail":"1.21.4 versus 1.30.0"}"#.into(),
         ]));
         disagreeing(&core).await;
 
-        let out = sweep_and_judge(&core).await;
+        let out = sweep_and_dedupe(&core).await;
         assert_eq!(out.judged, 1, "one pair should have been armed: {out:?}");
         let found = core
             .store
@@ -1346,13 +1346,13 @@ pub(crate) mod tests {
         // The judge names a direction; an operator still has to confirm it.
         // Nothing about either artifact changes here — only the pair.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"contradicts":true,"detail":"old flag vs new flag","obsolete":"a"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
 
-        let out = sweep_and_judge(&core).await;
+        let out = sweep_and_dedupe(&core).await;
         assert_eq!(out.judged, 1, "one pair should have been armed: {out:?}");
         let found = core
             .store
@@ -1381,7 +1381,7 @@ pub(crate) mod tests {
         // with the sweep's own bias, so it must fall back to a plain
         // contradiction rather than being trusted.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         let ids = disagreeing(&core).await;
         // Force `b` (ids[1]) strictly newer than `a`: `now()` is second-grained,
         // so two rows inserted in the same test would otherwise tie, and a tie
@@ -1422,7 +1422,7 @@ pub(crate) mod tests {
         // so the single best merge candidate was the one case the model was
         // never shown.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         seed(
             &core,
             &[
@@ -1446,10 +1446,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_judge_stops_at_its_budget() {
+    async fn the_dedupe_pass_stops_at_its_budget() {
         // One sweep must not be able to occupy the GPU for an hour.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.consolidate.max_judgements = 1;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"contradicts":false}"#.into(),
@@ -1467,15 +1467,15 @@ pub(crate) mod tests {
         )
         .await;
 
-        sweep_and_judge(&core).await;
+        sweep_and_dedupe(&core).await;
         assert_eq!(completer.calls(), 1, "the budget was ignored");
     }
 
     #[tokio::test]
-    async fn a_failed_judgement_leaves_the_pair_pending() {
+    async fn a_failed_dedupe_call_leaves_the_pair_pending() {
         // A dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
         ]));
@@ -1623,7 +1623,7 @@ pub(crate) mod tests {
         // it for as long as twenty calls took. The sweep now decides which
         // pairs are worth asking about — all of it local — and arms a unit each.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"contradicts":false}"#.into(),
         ]));
@@ -1635,7 +1635,7 @@ pub(crate) mod tests {
         assert_eq!(completer.calls(), 0, "the sweep called the model");
         assert_eq!(out.judged, 1, "no judge unit was armed: {out:?}");
         let armed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'judge' AND state = 'pending'",
+            "SELECT count(*) FROM jobs WHERE stage = 'dedupe' AND state = 'pending'",
         )
         .fetch_one(&core.store.pool)
         .await
@@ -1659,7 +1659,7 @@ pub(crate) mod tests {
         // What has to remain true here is the part that was never about calls:
         // a dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
         core.completer = completer.clone();
         seed(
@@ -1673,7 +1673,7 @@ pub(crate) mod tests {
         )
         .await;
 
-        let out = sweep_and_judge(&core).await;
+        let out = sweep_and_dedupe(&core).await;
         assert_eq!(out.queued, 2, "not enough pairs to prove anything: {out:?}");
         assert_eq!(
             core.store
@@ -1692,7 +1692,7 @@ pub(crate) mod tests {
         // score alone, the same top-scoring pair would then absorb every
         // sweep's budget forever and the rest would never be judged at all.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.consolidate.max_judgements = 1;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
@@ -1708,8 +1708,8 @@ pub(crate) mod tests {
         )
         .await;
 
-        sweep_and_judge(&core).await;
-        sweep_and_judge(&core).await;
+        sweep_and_dedupe(&core).await;
+        sweep_and_dedupe(&core).await;
 
         let pending = core.store.pairs_to_judge(10).await.unwrap();
         assert!(
@@ -1739,7 +1739,7 @@ pub(crate) mod tests {
         // completes it. One pair that lost a race therefore cost every pair
         // behind it a wait of up to `interval_hours`.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.consolidate.max_judgements = 5;
         let ids = seed(
             &core,
@@ -1776,16 +1776,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let armed = arm_judgements(&core).await.unwrap();
+        let armed = arm_dedupe(&core).await.unwrap();
 
         assert_eq!(
             armed, 1,
             "the pair that lost the race took the whole sweep down with it"
         );
-        let target: String = sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'judge'")
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let target: String =
+            sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'dedupe'")
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
         let surviving = core
             .store
             .pairs_by_state(PairState::Pending, 10)
@@ -1798,7 +1799,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_sweep_leaves_a_judge_unit_that_is_already_queued_alone() {
+    async fn a_sweep_leaves_a_dedupe_unit_that_is_already_queued_alone() {
         // Two ways this went wrong at once. Re-arming a queued unit wound its
         // `attempts` back, so a pair the model will not judge never reached
         // `MAX_ATTEMPTS` and never reached the close-out that hands it to a
@@ -1807,7 +1808,7 @@ pub(crate) mod tests {
         // pair still waiting for its first call leads every sweep: the budget
         // went on re-arming it while pairs recorded since never got a turn.
         let mut core = test_core().await;
-        core.consolidate.judge = true;
+        core.consolidate.autonomous = true;
         core.consolidate.max_judgements = 1;
         // Two pairs in the review band and nothing near enough to cluster, so
         // the sweep has a second pair to reach once the first is spoken for.
@@ -1833,7 +1834,7 @@ pub(crate) mod tests {
         // A sweep arms one unit. Nothing runs it — the worker is busy.
         run(&core).await.unwrap();
         let first: (String, i64) =
-            sqlx::query_as("SELECT target_id, id FROM jobs WHERE stage = 'judge'")
+            sqlx::query_as("SELECT target_id, id FROM jobs WHERE stage = 'dedupe'")
                 .fetch_one(&core.store.pool)
                 .await
                 .unwrap();
@@ -1858,7 +1859,7 @@ pub(crate) mod tests {
             (2, later),
             "the sweep wound a queued judge unit back to zero attempts"
         );
-        let armed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'judge'")
+        let armed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'dedupe'")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();

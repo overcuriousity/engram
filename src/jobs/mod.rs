@@ -1,7 +1,7 @@
 pub mod classify;
 pub mod consolidate;
+pub mod dedupe;
 pub mod embed;
-pub mod judge;
 pub mod reconcile;
 pub mod relate;
 pub mod synthesize;
@@ -49,7 +49,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
-        (Stage::Judge, _) => judge::run(core, &job.target_id).await,
+        (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
     };
 
@@ -84,7 +84,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // unit here is not a hand-off but a loop: the next sweep finds
                 // the pair pending with no live job and arms it for another
                 // `MAX_ATTEMPTS`, forever.
-                (Stage::Judge, _) if exhausted => {
+                (Stage::Dedupe, _) if exhausted => {
                     tracing::warn!(error = %e, "could not judge this pair; leaving it for a later sweep");
                     core.store.complete_job(job.id).await?;
                 }

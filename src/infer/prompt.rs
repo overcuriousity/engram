@@ -121,7 +121,7 @@ pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     )
 }
 
-pub const JUDGE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
+pub const DEDUPE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
 
 First decide whether the two are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
 
@@ -161,7 +161,7 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// Zero adds nothing at all, so a first ask stays byte-identical to what it has
 /// always been — and keeps hitting the cache when it should, on a pair the sweep
 /// re-arms after a settled verdict was lost.
-pub fn judge_prompt(a: (&str, &str), b: (&str, &str), attempt: i64) -> String {
+pub fn dedupe_prompt(a: (&str, &str), b: (&str, &str), attempt: i64) -> String {
     let retry = if attempt > 0 {
         format!("(attempt {})\n", attempt + 1)
     } else {
@@ -512,7 +512,7 @@ mod tests {
         // Given the bodies alone, the model saw two anonymous spec lists with
         // different numbers and called them a contradiction — which was the
         // only honest answer to the question it was actually asked.
-        let p = judge_prompt(
+        let p = dedupe_prompt(
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
             0,
@@ -532,10 +532,10 @@ mod tests {
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
         );
-        let first = judge_prompt(pair.0, pair.1, 0);
-        let second = judge_prompt(pair.0, pair.1, 1);
+        let first = dedupe_prompt(pair.0, pair.1, 0);
+        let second = dedupe_prompt(pair.0, pair.1, 1);
         assert_ne!(first, second);
-        assert_ne!(second, judge_prompt(pair.0, pair.1, 2));
+        assert_ne!(second, dedupe_prompt(pair.0, pair.1, 2));
         // A first ask stays exactly what it was, so the cache still earns its
         // keep on a pair the sweep re-arms after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
@@ -547,8 +547,8 @@ mod tests {
         // deliberately different in content, so similarity puts them in a pair
         // and every number in them differs. Without this rule the feature fires
         // hardest exactly where it is most wrong.
-        assert!(JUDGE_SYSTEM.contains("same subject"));
-        assert!(JUDGE_SYSTEM.contains("Answer false and stop."));
+        assert!(DEDUPE_SYSTEM.contains("same subject"));
+        assert!(DEDUPE_SYSTEM.contains("Answer false and stop."));
     }
 
     #[test]

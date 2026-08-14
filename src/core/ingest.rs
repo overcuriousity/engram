@@ -788,7 +788,7 @@ impl Core {
             // call. An operator reprocesses a document, not one of its windows:
             // asking for `synthesize` re-windows the whole thing and arms them
             // all, and `embed` re-arms a `relate` unit per artifact behind it.
-            Stage::SegmentWindow | Stage::Title | Stage::Judge | Stage::Relate => {
+            Stage::SegmentWindow | Stage::Title | Stage::Dedupe | Stage::Relate => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"

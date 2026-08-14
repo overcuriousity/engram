@@ -55,8 +55,8 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let reply = match core
         .completer
         .complete(
-            crate::infer::prompt::JUDGE_SYSTEM,
-            &crate::infer::prompt::judge_prompt(
+            crate::infer::prompt::DEDUPE_SYSTEM,
+            &crate::infer::prompt::dedupe_prompt(
                 (a.title.as_deref().unwrap_or("untitled"), &a.text),
                 (b.title.as_deref().unwrap_or("untitled"), &b.text),
                 p.judge_attempts,
@@ -129,7 +129,7 @@ async fn apply(
         // A reply that cannot be read is an error, not a verdict: the pair stays
         // pending, and the unit retries under the queue's backoff.
         //
-        // Retrying is only worth anything because `judge_prompt` carries the
+        // Retrying is only worth anything because `dedupe_prompt` carries the
         // attempt number. `MalformedLlmOutput` is retryable, so this re-queues
         // the unit — and against an endpoint that caches by exact prompt, an
         // unchanged prompt would replay the same unreadable bytes for every one

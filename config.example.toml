@@ -171,10 +171,16 @@ auto_supersede = 0.95
 sample = 2000
 per_point = 5
 interval_hours = 24
-# Ask the completion model whether a queued pair actually disagrees. Off by
-# default: it is the only part of consolidation that costs inference, and it
-# only ever sees pairs whose numbers, versions or dates already differ.
-judge = false
+# Let the dedupe pass act on what it decides: superseding where one stored
+# artifact plainly replaces another, and writing one merged artifact where each
+# side carries something the other lacks. Off by default for now — the verdicts
+# are recorded either way, so the queue can be read before the system is allowed
+# to act on it.
+#
+# A disagreement about a value is never settled this way. It goes to the
+# conflicts queue on Ops, because deciding which of two facts is current is the
+# judgement a model is worst at.
+autonomous = false
 max_judgements = 20
 
 # Recording real searches so they can be judged later, and turned into the

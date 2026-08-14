@@ -141,10 +141,14 @@ pub struct ConsolidateConfig {
     pub per_point: usize,
     /// How often the sweep is queued.
     pub interval_hours: u64,
-    /// Whether pairs in the review band that survive the fact-token prefilter
-    /// are sent to the completer. Off by default: it is the only part of
-    /// consolidation that costs inference.
-    pub judge: bool,
+    /// Whether the dedupe pass may act on what it decides: superseding where
+    /// one artifact plainly replaces another, and writing a merged artifact
+    /// where each side carries something the other lacks.
+    ///
+    /// With this off the verdicts are still recorded, so the queue can be read
+    /// before the system is allowed to act on it. A value conflict is escalated
+    /// to a person either way.
+    pub autonomous: bool,
     /// Ceiling on judge calls per sweep, so one sweep cannot occupy the GPU.
     pub max_judgements: usize,
     /// An active artifact not confirmed accurate (`last_verified_at`) in this
@@ -169,7 +173,7 @@ impl Default for ConsolidateConfig {
             sample: 2000,
             per_point: 5,
             interval_hours: 24,
-            judge: false,
+            autonomous: false,
             max_judgements: 20,
             stale_after_days: 365,
             stale_max_hits: 0,
