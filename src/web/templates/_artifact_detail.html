@@ -176,7 +176,12 @@
          and they are the only honest answer to "where did this come from".
          Rendering a corpus it did not come from would be the one dishonesty
          merging must not commit. #}
-      {% if d.sources.is_empty() %}
+      {# On provenance, not on the list being empty. A merge that has lost every
+         source to a delete has an empty list and is still a merge: it has no
+         corpus to link and no span to highlight, so the captured branch would
+         render a dead link over an empty table — on the very artifact whose
+         orphan notice matters most. #}
+      {% if !d.merged %}
       <div class="pane-label">
         <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
       </div>
@@ -190,9 +195,21 @@
         </table>
       </div>
       {% else %}
-      <div class="pane-label">Written from {{ d.sources.len() }} artifacts</div>
+      <div class="pane-label">
+        {% if d.sources.is_empty() %}
+        Written from artifacts that are gone
+        {% else %}
+        Written from {{ d.sources.len() }} artifacts
+        {% endif %}
+      </div>
       <div class="raw">
-        {% if d.orphaned_source %}
+        {% if d.sources.is_empty() %}
+        <p class="muted">
+          Every artifact this was written from has since been deleted. Its
+          content is still in the text above; what is gone is the record of
+          where that content came from.
+        </p>
+        {% else if d.orphaned_source %}
         <p class="muted">
           One of the artifacts this was written from has since been deleted. Its
           content is still in the text above; only the link to it is gone.

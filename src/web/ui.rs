@@ -98,10 +98,20 @@ pub struct ArtifactDetail {
     /// `None` for a merged artifact, which belongs to no corpus. The pane shows
     /// what it was made of instead of corpus lines — see `build_artifact_detail`.
     pub corpus_id: Option<String>,
-    /// What a merged artifact was written from. Empty for a captured one, which
-    /// is what the template branches on: a captured artifact renders the corpus
-    /// lines its span claims, a merged one renders these.
+    /// What a merged artifact was written from. Empty for a captured one — and
+    /// also for a merged one that has lost every source to a delete, which is
+    /// why `merged` and not this is what the template branches on.
     pub sources: Vec<SourceRow>,
+    /// Which of the two panes to render. A merged artifact belongs to no corpus
+    /// and has no span, so the source pane has no document to link and no lines
+    /// to list; it shows what the artifact was written from instead.
+    ///
+    /// The template used to branch on `sources` being empty, which is the same
+    /// question only while a merge still has its sources. One that had lost them
+    /// all fell through to the captured branch and rendered a "Source · …
+    /// highlighted" label over an empty link and an empty line table — on
+    /// exactly the artifact whose orphan notice matters most.
+    pub merged: bool,
     /// True when one of those sources has since been deleted. The text still
     /// carries what it said, so this is a missing link rather than missing
     /// knowledge — and saying so beats listing one source fewer in silence.
@@ -1034,7 +1044,12 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         let mut sources = Vec::new();
         for rid in roots.get(&c.id).into_iter().flatten() {
             // A source deleted since leaves no row. `orphaned` is what says so,
-            // rather than the list quietly being one shorter.
+            // rather than the list quietly being one shorter — and `roots_of`
+            // answers "itself" once the last row is gone, which must not be
+            // rendered as a merge written from itself.
+            if rid == &c.id {
+                continue;
+            }
             if let Ok(r) = st.core.store.get_artifact(rid).await {
                 sources.push(SourceRow {
                     corpus_id: r.corpus_id.clone().unwrap_or_default(),
@@ -1383,8 +1398,9 @@ pub(crate) async fn build_artifact_detail(
         Some(s) => crate::web::corpus_view::for_corpus(s).slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
-    // Only a merged artifact has these, and the template branches on the list
-    // being non-empty rather than on the kind — one fewer field to keep in step.
+    // Only a merged artifact has these. The template branches on `merged`, not
+    // on this list, because a merge can lose every source to a delete and still
+    // be a merge.
     let mut sources = Vec::new();
     if c.provenance == crate::store::artifacts::Provenance::Merged {
         let roots = core
@@ -1393,6 +1409,13 @@ pub(crate) async fn build_artifact_detail(
             .await
             .unwrap_or_default();
         for rid in roots.get(&c.id).into_iter().flatten() {
+            // `roots_of` answers "itself" for an artifact with no lineage rows,
+            // which is the safe reading where it is used to build a prompt and
+            // the wrong one here: it would list a merge that has lost every
+            // source as having been written from itself.
+            if rid == &c.id {
+                continue;
+            }
             if let Ok(r) = core.store.get_artifact(rid).await {
                 sources.push(SourceRow {
                     corpus_id: r.corpus_id.clone().unwrap_or_default(),
@@ -1453,6 +1476,7 @@ pub(crate) async fn build_artifact_detail(
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
         sources,
+        merged: c.provenance == crate::store::artifacts::Provenance::Merged,
         corpus_id: c.corpus_id,
         // A merged artifact has no corpus and so cannot have a restored one.
         corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
@@ -1652,16 +1676,57 @@ mod tests {
 
     #[tokio::test]
     async fn a_captured_artifact_lists_no_sources() {
-        // The template branches on the list being empty, so a captured artifact
-        // filling it would swap its corpus lines for a provenance list it does
-        // not have.
+        // The template branches on provenance, and a captured artifact filling
+        // this list would put a provenance list it does not have where its
+        // corpus lines belong.
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(&core, &[("a text", [1.0, 0.0])]).await;
 
         let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
 
         assert!(d.sources.is_empty());
+        assert!(!d.merged);
         assert!(d.corpus_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_lost_every_source_still_renders_as_a_merge() {
+        // An empty source list is not the same question as "was this captured".
+        // The template branched on the list, so a merge whose sources had all
+        // been deleted fell through to the captured branch and rendered a
+        // "Source · … highlighted" label over an empty link and an empty line
+        // table — on exactly the artifact whose orphan notice matters most.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = crate::jobs::merge::write(
+            &core,
+            &crate::infer::prompt::MergedDraft {
+                title: Some("a and b".into()),
+                text: "a text and b text".into(),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &ids,
+        )
+        .await
+        .unwrap();
+        for id in &ids {
+            core.store.delete_artifact(id).await.unwrap();
+        }
+
+        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+
+        assert!(d.sources.is_empty(), "the fixture did not lose the sources");
+        assert!(d.merged, "a merge was rendered as a captured artifact");
+        assert!(
+            d.source_at_lines.is_empty() && d.slice_lines.is_empty(),
+            "there is no document to link and no lines to show"
+        );
     }
 
     #[tokio::test]
