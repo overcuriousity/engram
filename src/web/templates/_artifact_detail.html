@@ -170,6 +170,13 @@
          against the line numbers actually on screen. The link opens the
          document scrolled to those lines; an artifact with no recorded span
          has none to jump to and gets the plain link. #}
+      {# A merged artifact belongs to no corpus and has no span, so there are no
+         lines to put beside it. What it was written from goes here instead:
+         those artifacts are still stored, each still names its own document,
+         and they are the only honest answer to "where did this come from".
+         Rendering a corpus it did not come from would be the one dishonesty
+         merging must not commit. #}
+      {% if d.sources.is_empty() %}
       <div class="pane-label">
         <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
       </div>
@@ -182,6 +189,25 @@
           {% endfor %}
         </table>
       </div>
+      {% else %}
+      <div class="pane-label">Written from {{ d.sources.len() }} artifacts</div>
+      <div class="raw">
+        {% if d.orphaned_source %}
+        <p class="muted">
+          One of the artifacts this was written from has since been deleted. Its
+          content is still in the text above; only the link to it is gone.
+        </p>
+        {% endif %}
+        {% for src in d.sources %}
+        <p>
+          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
+          {% if !src.corpus_id.is_empty() %}
+          · <a class="muted" href="/ui/corpora/{{ src.corpus_id }}">source document</a>
+          {% endif %}
+        </p>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
   </div>
 </div>

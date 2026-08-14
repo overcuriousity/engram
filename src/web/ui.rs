@@ -98,6 +98,14 @@ pub struct ArtifactDetail {
     /// `None` for a merged artifact, which belongs to no corpus. The pane shows
     /// what it was made of instead of corpus lines — see `build_artifact_detail`.
     pub corpus_id: Option<String>,
+    /// What a merged artifact was written from. Empty for a captured one, which
+    /// is what the template branches on: a captured artifact renders the corpus
+    /// lines its span claims, a merged one renders these.
+    pub sources: Vec<SourceRow>,
+    /// True when one of those sources has since been deleted. The text still
+    /// carries what it said, so this is a missing link rather than missing
+    /// knowledge — and saying so beats listing one source fewer in silence.
+    pub orphaned_source: bool,
     /// True when this artifact's source was never captured here — the artifact
     /// was restored from the vector store and its corpus row is a placeholder.
     /// The pane shows the source beside the artifact, so it has to say when what
@@ -394,12 +402,33 @@ struct OpsTemplate {
     retrying: Vec<RetryingRow>,
     parked: Vec<ParkedRow>,
     superseded: Vec<SupersededRow>,
+    /// Artifacts the dedupe pass wrote out of several others, with what they
+    /// were written from and an undo.
+    merged: Vec<MergedRow>,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
     feedback: Option<crate::store::feedback::Stats>,
+}
+
+struct MergedRow {
+    id: String,
+    title: String,
+    /// What it was written from, in the order the lineage stores them.
+    sources: Vec<SourceRow>,
+    /// True when a source has been deleted since, so the artifact claims less
+    /// provenance than its text carries.
+    orphaned: bool,
+}
+
+pub struct SourceRow {
+    pub id: String,
+    pub title: String,
+    /// Empty when the source belongs to no corpus — a merge of merges resolves
+    /// to captured roots, so in practice this is always set.
+    pub corpus_id: String,
 }
 
 #[derive(Template)]
@@ -845,9 +874,13 @@ fn title_of(c: &crate::store::artifacts::Chunk) -> String {
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
+    // A group past `merge_max_roots` was not merged and will not be: it needs a
+    // person, so it belongs on the page a person opens rather than on
+    // Housekeeping beside the things that resolve themselves.
+    crate::store::pairs::PairState::Oversized,
     crate::store::pairs::PairState::Pending,
 ];
 
@@ -990,6 +1023,34 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
 
+    let mut merged = Vec::new();
+    for c in st.core.store.merged_artifacts(50).await? {
+        let roots = st
+            .core
+            .store
+            .roots_of(std::slice::from_ref(&c.id))
+            .await
+            .unwrap_or_default();
+        let mut sources = Vec::new();
+        for rid in roots.get(&c.id).into_iter().flatten() {
+            // A source deleted since leaves no row. `orphaned` is what says so,
+            // rather than the list quietly being one shorter.
+            if let Ok(r) = st.core.store.get_artifact(rid).await {
+                sources.push(SourceRow {
+                    corpus_id: r.corpus_id.clone().unwrap_or_default(),
+                    title: title_of(&r),
+                    id: r.id,
+                });
+            }
+        }
+        merged.push(MergedRow {
+            orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
+            title: title_of(&c),
+            id: c.id,
+            sources,
+        });
+    }
+
     let deprecated = st
         .core
         .store
@@ -1028,6 +1089,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         retrying,
         parked,
         superseded,
+        merged,
         deprecated,
         stale,
         job_counts: st.core.store.job_counts().await?,
@@ -1043,6 +1105,17 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         },
     })
     .into_response())
+}
+
+/// Take a merge back: what it replaced returns, the merge is retired, and the
+/// pairs behind it are dismissed so the sweep does not simply redo it.
+async fn undo_merge_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(aid): Path<String>,
+) -> Result<Response> {
+    crate::jobs::merge::undo(&st.core, &aid).await?;
+    Ok(Redirect::to("/ui/ops").into_response())
 }
 
 /// Forget every captured search.
@@ -1310,6 +1383,25 @@ pub(crate) async fn build_artifact_detail(
         Some(s) => crate::web::corpus_view::for_corpus(s).slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
+    // Only a merged artifact has these, and the template branches on the list
+    // being non-empty rather than on the kind — one fewer field to keep in step.
+    let mut sources = Vec::new();
+    if c.provenance == crate::store::artifacts::Provenance::Merged {
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&c.id))
+            .await
+            .unwrap_or_default();
+        for rid in roots.get(&c.id).into_iter().flatten() {
+            if let Ok(r) = core.store.get_artifact(rid).await {
+                sources.push(SourceRow {
+                    corpus_id: r.corpus_id.clone().unwrap_or_default(),
+                    title: title_of(&r),
+                    id: r.id,
+                });
+            }
+        }
+    }
     // A missing neighbour list is not a missing pane. The vector store may be
     // down, or this artifact may simply not be embedded yet, and neither is a
     // reason to refuse to show the artifact beside its source.
@@ -1344,8 +1436,10 @@ pub(crate) async fn build_artifact_detail(
         (Some(cid), None) => format!("/ui/corpora/{cid}"),
         (None, _) => String::new(),
     };
+    let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
     Ok(ArtifactDetail {
         related,
+        orphaned_source,
         source_at_lines,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
@@ -1358,6 +1452,7 @@ pub(crate) async fn build_artifact_detail(
         status: c.status,
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
+        sources,
         corpus_id: c.corpus_id,
         // A merged artifact has no corpus and so cannot have a restored one.
         corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
@@ -1438,6 +1533,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
         .route("/ui/ops/artifacts/{id}/deprecate", post(deprecate_ui))
         .route("/ui/ops/artifacts/{id}/reactivate", post(reactivate_ui))
+        .route("/ui/ops/merges/{id}/undo", post(undo_merge_ui))
         .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
         .route(
@@ -1507,6 +1603,65 @@ mod tests {
             !r.snippet.contains('<'),
             "the snippet must not carry markup"
         );
+    }
+
+    #[tokio::test]
+    async fn a_merged_artifact_shows_its_sources_instead_of_corpus_lines() {
+        // A captured artifact renders the corpus lines its span claims. A merged
+        // one has neither corpus nor span, so the pane shows what it was written
+        // from — each source still stored, each still naming its own document.
+        // Rendering a corpus it did not come from would put the wrong lines
+        // beside it forever, which is the one dishonesty merging must not
+        // commit.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = crate::jobs::merge::write(
+            &core,
+            &crate::infer::prompt::MergedDraft {
+                title: Some("a and b".into()),
+                text: "a text and b text".into(),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &ids,
+        )
+        .await
+        .unwrap();
+
+        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+
+        assert_eq!(d.corpus_id, None, "a merged artifact claimed a corpus");
+        assert!(
+            d.slice_lines.is_empty(),
+            "a merged artifact rendered lines from a document it did not come from"
+        );
+        assert_eq!(d.sources.len(), 2);
+        let listed: Vec<&str> = d.sources.iter().map(|s| s.id.as_str()).collect();
+        for id in &ids {
+            assert!(listed.contains(&id.as_str()), "source {id} is not listed");
+        }
+        // And each source still points at the document it was captured from.
+        assert!(d.sources.iter().all(|s| !s.corpus_id.is_empty()));
+        assert!(!d.orphaned_source);
+    }
+
+    #[tokio::test]
+    async fn a_captured_artifact_lists_no_sources() {
+        // The template branches on the list being empty, so a captured artifact
+        // filling it would swap its corpus lines for a provenance list it does
+        // not have.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(&core, &[("a text", [1.0, 0.0])]).await;
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+
+        assert!(d.sources.is_empty());
+        assert!(d.corpus_id.is_some());
     }
 
     #[tokio::test]

@@ -13,6 +13,44 @@
   {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
 </p>
 
+{% if !merged.is_empty() %}
+<h3>Merged</h3>
+<p class="muted">
+  Artifacts the dedupe pass wrote out of several others. What each was written
+  from is listed beside it and is still stored — undoing brings those back and
+  retires the merge, and the pairs behind it stay dismissed so the next sweep
+  does not simply do it again.
+</p>
+<table class="grid">
+  <thead><tr><th>Artifact</th><th>Written from</th><th></th></tr></thead>
+  <tbody>
+  {% for m in merged %}
+    <tr>
+      <td>
+        <a href="/ui/artifacts/{{ m.id }}">{{ m.title }}</a>
+        {% if m.orphaned %}
+        {# Not data loss: the text still says what the deleted source said. It
+           is a claim of provenance the artifact can no longer support, and
+           saying so beats silently listing one source fewer. #}
+        <div class="muted">a source has since been deleted</div>
+        {% endif %}
+      </td>
+      <td>
+        {% for src in m.sources %}
+        <div><a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a></div>
+        {% endfor %}
+      </td>
+      <td>
+        <form method="post" action="/ui/ops/merges/{{ m.id }}/undo">
+          <button class="btn btn-sm" type="submit">Undo merge</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if !deprecated.is_empty() %}
 <h3>Deprecated</h3>
 <p class="muted">Flagged stale with no specific replacement. Still stored and still readable; kept out of results only.</p>
@@ -145,7 +183,7 @@
 
 {# One sentence for everything that is empty. Five headings each answered
    "None." made a base with nothing wrong with it look like a backlog. #}
-{% if deprecated.is_empty() && stale.is_empty() && superseded.is_empty() && parked.is_empty() && retrying.is_empty() %}
+{% if deprecated.is_empty() && stale.is_empty() && superseded.is_empty() && merged.is_empty() && parked.is_empty() && retrying.is_empty() %}
 <p class="muted">Nothing deprecated, nothing hidden, nothing waiting on a decision, nothing retrying.</p>
 {% endif %}
 
