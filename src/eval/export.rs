@@ -21,7 +21,10 @@ pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize)> {
         .iter()
         .map(|c| FrozenArtifact {
             id: c.id.clone(),
-            source: c.corpus_id.clone(),
+            // Empty for a merged artifact, which has no single source document.
+            // The frozen set records what an artifact *is*, and a merge's
+            // sources are its lineage rather than a corpus id.
+            source: c.corpus_id.clone().unwrap_or_default(),
             text: c.text.clone(),
             title: c.title.clone(),
             category: c.category.clone(),
@@ -143,7 +146,12 @@ mod tests {
             frozen[0].id, artifact_id,
             "ids must stay the production ones, or a re-export invalidates every pair"
         );
-        let corpus = store.get_artifact(&artifact_id).await.unwrap().corpus_id;
+        let corpus = store
+            .get_artifact(&artifact_id)
+            .await
+            .unwrap()
+            .corpus_id
+            .expect("a captured artifact names its corpus");
         assert_eq!(
             frozen[0].source, corpus,
             "the cap groups by this, so it has to name a corpus uniquely"

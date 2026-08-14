@@ -98,7 +98,12 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
             return Err(e);
         }
     }
-    settle_corpus(core, &chunk.corpus_id).await
+    match &chunk.corpus_id {
+        Some(corpus_id) => settle_corpus(core, corpus_id).await,
+        // A merged artifact belongs to no corpus, so there is no document whose
+        // coverage this embedding advances and nothing to settle.
+        None => Ok(()),
+    }
 }
 
 /// Embed every chunk of a source that is still waiting, in as few inference
@@ -394,7 +399,12 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         }])
         .await?;
     mark_indexed(core, chunk).await?;
-    settle_corpus(core, &chunk.corpus_id).await
+    match &chunk.corpus_id {
+        Some(corpus_id) => settle_corpus(core, corpus_id).await,
+        // A merged artifact belongs to no corpus, so there is no document whose
+        // coverage this embedding advances and nothing to settle.
+        None => Ok(()),
+    }
 }
 
 /// Cut text on blank lines, packing as many paragraphs into each part as the
@@ -484,6 +494,19 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         )));
     }
 
+    // Splitting means writing siblings into the parent's document, at ordinals
+    // around its own. A merged artifact has neither: no corpus to insert into
+    // and no reading order to preserve, and its siblings would lose the lineage
+    // that says what it was made of. A merge that will not embed is a bug in
+    // the merge — the draft is too long, or the model ran away — and it belongs
+    // on Ops rather than being quietly chopped into fragments nothing can trace.
+    let Some(corpus_id) = chunk.corpus_id.as_deref() else {
+        return Err(Error::Validation(format!(
+            "refusing to split merged artifact {}: it belongs to no corpus",
+            chunk.id
+        )));
+    };
+
     tracing::info!(artifact_id = %chunk.id, parts = parts.len(), "split oversize chunk into siblings");
 
     let base = chunk.ordinal;
@@ -492,7 +515,7 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     // after chunks 3 onward rather than before them, and the next segmentation
     // pass renumbers that wrong order into place permanently.
     core.store
-        .make_room_after(&chunk.corpus_id, base, parts.len() as i64 - 1)
+        .make_room_after(corpus_id, base, parts.len() as i64 - 1)
         .await?;
     let new: Vec<NewArtifact> = parts
         .iter()
@@ -515,7 +538,7 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
         })
         .collect();
 
-    let inserted = core.store.insert_artifacts(&chunk.corpus_id, &new).await?;
+    let inserted = core.store.insert_artifacts(corpus_id, &new).await?;
     core.store.delete_artifact(&chunk.id).await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&chunk.id))
@@ -534,7 +557,13 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
 fn payload_of(chunk: &Chunk) -> VectorPayload {
     VectorPayload {
         artifact_id: chunk.id.clone(),
-        corpus_id: chunk.corpus_id.clone(),
+        // A merged artifact belongs to no corpus and carries the empty string
+        // here. `provenance` below is what tells the two apart — a corpus
+        // filter genuinely should not match an artifact that belongs to none,
+        // and `restore_artifact` reads the kind rather than guessing what an
+        // empty id meant.
+        corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
+        provenance: Some(chunk.provenance.as_str().to_string()),
         text: chunk.text.clone(),
         title: chunk.title.clone(),
         category: chunk.category.clone(),

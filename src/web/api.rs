@@ -632,7 +632,8 @@ async fn patch_artifact(
             .vectors
             .set_payload(&crate::vector::VectorPayload {
                 artifact_id: chunk.id.clone(),
-                corpus_id: chunk.corpus_id.clone(),
+                corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
+                provenance: Some(chunk.provenance.as_str().to_string()),
                 text: chunk.text.clone(),
                 title: chunk.title.clone(),
                 category: chunk.category.clone(),

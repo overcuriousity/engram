@@ -545,9 +545,26 @@ impl Core {
                     }
                 }
                 for p in group {
+                    // A payload with no `provenance` key predates merging, and
+                    // nothing that predates merging is merged — so `captured` is
+                    // the right reading rather than a guess.
+                    let provenance = p
+                        .provenance
+                        .as_deref()
+                        .map(crate::store::artifacts::Provenance::parse)
+                        .unwrap_or(crate::store::artifacts::Provenance::Captured);
                     let restored = crate::store::artifacts::RestoredArtifact {
                         id: p.artifact_id.clone(),
-                        corpus_id: p.corpus_id.clone(),
+                        // A merged artifact carries "" here, which is not a
+                        // corpus that exists; writing it would fail the foreign
+                        // key. The kind above is what says which case this is.
+                        corpus_id: match provenance {
+                            crate::store::artifacts::Provenance::Merged => None,
+                            crate::store::artifacts::Provenance::Captured => {
+                                Some(p.corpus_id.clone())
+                            }
+                        },
+                        provenance,
                         text: p.text.clone(),
                         title: p.title.clone(),
                         category: p.category.clone(),
@@ -1185,6 +1202,7 @@ mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
+                    provenance: None,
                 },
             }])
             .await
@@ -1289,6 +1307,7 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
+                provenance: None,
             },
         }
     }
@@ -1391,7 +1410,7 @@ mod tests {
         );
         let back = core.store.get_artifact("gone").await.unwrap();
         assert_eq!(back.text, "t");
-        assert_eq!(back.corpus_id, corpus);
+        assert_eq!(back.corpus_id.as_deref(), Some(corpus.as_str()));
         assert_eq!(
             back.embed_state,
             EmbedState::Pending,

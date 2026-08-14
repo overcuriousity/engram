@@ -603,7 +603,7 @@ mod tests {
                 sparse: Default::default(),
                 payload: VectorPayload {
                     artifact_id: c.id.clone(),
-                    corpus_id: c.corpus_id.clone(),
+                    corpus_id: c.corpus_id.clone().unwrap_or_default(),
                     text: (*text).to_string(),
                     title: None,
                     category: None,
@@ -615,6 +615,7 @@ mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
+                    provenance: None,
                 },
             })
             .collect();
@@ -653,7 +654,7 @@ mod tests {
                 sparse: Default::default(),
                 payload: VectorPayload {
                     artifact_id: made[0].id.clone(),
-                    corpus_id: made[0].corpus_id.clone(),
+                    corpus_id: made[0].corpus_id.clone().unwrap_or_default(),
                     text: text.to_string(),
                     title: None,
                     category: None,
@@ -665,6 +666,7 @@ mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
+                    provenance: None,
                 },
             }])
             .await

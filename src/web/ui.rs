@@ -95,7 +95,9 @@ pub struct ArtifactDetail {
     pub last_verified_at: Option<i64>,
     /// Conditions the source stated under which this artifact does not apply.
     pub caveats: Vec<String>,
-    pub corpus_id: String,
+    /// `None` for a merged artifact, which belongs to no corpus. The pane shows
+    /// what it was made of instead of corpus lines — see `build_artifact_detail`.
+    pub corpus_id: Option<String>,
     /// True when this artifact's source was never captured here — the artifact
     /// was restored from the vector store and its corpus row is a placeholder.
     /// The pane shows the source beside the artifact, so it has to say when what
@@ -804,7 +806,12 @@ async fn delete_artifact_ui(
     if headers.contains_key("hx-request") {
         return Ok(axum::response::Html(String::new()).into_response());
     }
-    Ok(Redirect::to(&format!("/ui/corpora/{corpus_id}")).into_response())
+    // A merged artifact has no document to return to, so the artifact list is
+    // where deleting one leaves you.
+    Ok(match corpus_id {
+        Some(cid) => Redirect::to(&format!("/ui/corpora/{cid}")).into_response(),
+        None => Redirect::to("/ui/ops").into_response(),
+    })
 }
 
 async fn reprocess_ui(
@@ -1291,8 +1298,18 @@ pub(crate) async fn build_artifact_detail(
     terms: &str,
 ) -> Result<ArtifactDetail> {
     let c = core.store.get_artifact(artifact_id).await?;
-    let src = core.store.get_corpus(&c.corpus_id).await?;
-    let slice = crate::web::corpus_view::for_corpus(&src).slice(&src, c.corpus_span.as_ref(), 3);
+    // A merged artifact belongs to no corpus, so there are no lines to show
+    // beside it and no span to highlight. Task 15 fills that half of the pane
+    // with the artifacts it was written from; until then it renders without a
+    // source block rather than claiming a document it did not come from.
+    let src = match &c.corpus_id {
+        Some(id) => Some(core.store.get_corpus(id).await?),
+        None => None,
+    };
+    let slice = match &src {
+        Some(s) => crate::web::corpus_view::for_corpus(s).slice(s, c.corpus_span.as_ref(), 3),
+        None => crate::web::corpus_view::CorpusSlice::default(),
+    };
     // A missing neighbour list is not a missing pane. The vector store may be
     // down, or this artifact may simply not be embedded yet, and neither is a
     // reason to refuse to show the artifact beside its source.
@@ -1317,12 +1334,15 @@ pub(crate) async fn build_artifact_detail(
     // Built before the struct consumes `c`. The fragment is what makes the
     // browser scroll to the span; the query parameters are what make the page
     // highlight it.
-    let source_at_lines = match c.corpus_span.as_ref() {
-        Some(sp) => format!(
-            "/ui/corpora/{}?from={}&to={}#L{}",
-            c.corpus_id, sp.start_line, sp.end_line, sp.start_line
+    // Empty for a merged artifact: there is no document to link to, and the
+    // template hides the whole source block rather than offering a dead link.
+    let source_at_lines = match (&c.corpus_id, c.corpus_span.as_ref()) {
+        (Some(cid), Some(sp)) => format!(
+            "/ui/corpora/{cid}?from={}&to={}#L{}",
+            sp.start_line, sp.end_line, sp.start_line
         ),
-        None => format!("/ui/corpora/{}", c.corpus_id),
+        (Some(cid), None) => format!("/ui/corpora/{cid}"),
+        (None, _) => String::new(),
     };
     Ok(ArtifactDetail {
         related,
@@ -1339,7 +1359,8 @@ pub(crate) async fn build_artifact_detail(
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
         corpus_id: c.corpus_id,
-        corpus_restored: src.restored_at.is_some(),
+        // A merged artifact has no corpus and so cannot have a restored one.
+        corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
         segment_idx: c.segment_idx,
         slice_label: slice.label,
         slice_lines: slice.lines,
@@ -1508,7 +1529,7 @@ mod tests {
             Err(e) => panic!("detail view failed: {e}"),
         };
 
-        assert_eq!(d.corpus_id, out.id);
+        assert_eq!(d.corpus_id.as_deref(), Some(out.id.as_str()));
         assert!(d.html.contains("alpha"), "the chunk body must be rendered");
         assert!(
             !d.slice_lines.is_empty(),

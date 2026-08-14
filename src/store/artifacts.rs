@@ -54,6 +54,41 @@ impl ArtifactStatus {
     }
 }
 
+/// Where an artifact's text came from.
+///
+/// `Captured` text was written by synthesis over one window of one corpus, so
+/// it has a corpus, a span, and lines to render beside it. `Merged` text was
+/// written by the dedupe pass out of two or more captured artifacts; it has no
+/// corpus and no span, and names its sources through `artifact_sources`
+/// instead.
+///
+/// Nothing may treat the two alike. `verify` cannot check a merged artifact
+/// against a segment that does not exist, and the detail pane cannot render
+/// corpus lines for a span it does not have — so both branch on this rather
+/// than on `corpus_id.is_none()`. A null says a field is absent; this says what
+/// the row *is*, which is what a reader needs in order to know why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provenance {
+    Captured,
+    Merged,
+}
+
+impl Provenance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provenance::Captured => "captured",
+            Provenance::Merged => "merged",
+        }
+    }
+    pub fn parse(s: &str) -> Provenance {
+        match s {
+            "merged" => Provenance::Merged,
+            _ => Provenance::Captured,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CorpusSpan {
     pub start_line: i64,
@@ -63,7 +98,13 @@ pub struct CorpusSpan {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Chunk {
     pub id: String,
-    pub corpus_id: String,
+    /// `None` for a merged artifact, which belongs to no single corpus. Branch
+    /// on `provenance`, not on this: see `Provenance`.
+    pub corpus_id: Option<String>,
+    pub provenance: Provenance,
+    /// How many artifacts a merge was written from, so a source deleted since
+    /// can be noticed. Zero for a captured artifact.
+    pub source_count: i64,
     pub ordinal: i64,
     pub text: String,
     pub corpus_span: Option<CorpusSpan>,
@@ -124,7 +165,12 @@ pub struct NewArtifact {
 #[derive(Debug, Clone)]
 pub struct RestoredArtifact {
     pub id: String,
-    pub corpus_id: String,
+    /// `None` for a merged artifact. A payload carries `corpus_id` as the empty
+    /// string for one of those, which is not a corpus that exists — writing it
+    /// would break the foreign key, and writing it as a corpus id would be a
+    /// lie. `provenance` is what tells the two cases apart.
+    pub corpus_id: Option<String>,
+    pub provenance: Provenance,
     pub text: String,
     pub title: Option<String>,
     pub category: Option<String>,
@@ -142,6 +188,8 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     Chunk {
         id: r.get("id"),
         corpus_id: r.get("corpus_id"),
+        provenance: Provenance::parse(r.get::<String, _>("provenance").as_str()),
+        source_count: r.get("source_count"),
         ordinal: r.get("ordinal"),
         text: r.get("text"),
         corpus_span: span_json.and_then(|s| serde_json::from_str(&s).ok()),
@@ -179,7 +227,9 @@ impl Store {
             let created_at = now();
             let c = Chunk {
                 id: new_id(),
-                corpus_id: corpus_id.to_string(),
+                corpus_id: Some(corpus_id.to_string()),
+                provenance: Provenance::Captured,
+                source_count: 0,
                 ordinal: nc.ordinal,
                 text: nc.text.clone(),
                 corpus_span: nc.corpus_span.clone(),
@@ -199,8 +249,8 @@ impl Store {
                 last_verified_at: Some(created_at),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
+                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -245,12 +295,13 @@ impl Store {
     /// makes `embed_model` true.
     pub async fn restore_artifact(&self, c: &RestoredArtifact) -> Result<bool> {
         let res = sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, superseded_by)
-             VALUES (?, ?, 0, ?, NULL, ?, ?, ?, 'pending', NULL, ?, NULL, '[]', ?, ?, ?)
+            "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, superseded_by)
+             VALUES (?, ?, ?, 0, ?, NULL, ?, ?, ?, 'pending', NULL, ?, NULL, '[]', ?, ?, ?)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&c.id)
         .bind(&c.corpus_id)
+        .bind(c.provenance.as_str())
         .bind(&c.text)
         .bind(&c.title)
         .bind(&c.category)
@@ -739,6 +790,59 @@ mod tests {
             tags: vec!["forensics".into(), "windows".into()],
             segment_idx: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_captured_artifact_is_captured_and_names_its_corpus() {
+        // `provenance` is the discriminator every consumer branches on, never
+        // `corpus_id IS NULL`. A null is an absence; a kind is an assertion,
+        // and the failure modes merging can produce want to hang off an
+        // assertion — `verify` cannot check a merged artifact against a segment
+        // that does not exist, and the detail pane cannot render lines for a
+        // span it does not have.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s.insert_artifacts(&src.id, &[nc(0, "one")]).await.unwrap();
+
+        assert_eq!(made[0].provenance, Provenance::Captured);
+        assert_eq!(made[0].corpus_id.as_deref(), Some(src.id.as_str()));
+
+        let read = s.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(read.provenance, Provenance::Captured);
+        assert_eq!(read.corpus_id.as_deref(), Some(src.id.as_str()));
+        assert_eq!(
+            read.source_count, 0,
+            "a captured artifact was merged from something"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_merged_artifact_gives_it_no_corpus() {
+        // A payload carries `corpus_id` as the empty string for a merged
+        // artifact, and "" is not a corpus that exists — restoring it as one
+        // fails the foreign key, and restoring it as a corpus id would put the
+        // wrong document's lines beside the artifact forever. The kind is what
+        // tells the two cases apart, which is why it rides in the payload.
+        let s = Store::memory().await.unwrap();
+        let restored = RestoredArtifact {
+            id: "merged-1".into(),
+            corpus_id: None,
+            provenance: Provenance::Merged,
+            text: "one artifact out of two".into(),
+            title: None,
+            category: None,
+            tags: vec![],
+            created_at: 1,
+            status: ArtifactStatus::Active,
+            last_verified_at: None,
+            superseded_by: None,
+        };
+
+        assert!(s.restore_artifact(&restored).await.unwrap());
+
+        let back = s.get_artifact("merged-1").await.unwrap();
+        assert_eq!(back.provenance, Provenance::Merged);
+        assert_eq!(back.corpus_id, None);
     }
 
     #[tokio::test]

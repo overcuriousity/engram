@@ -116,8 +116,12 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                         .await?;
                     if job.stage == Stage::Embed && exhausted {
                         core.store.mark_embed_failed(&job.target_id).await?;
-                        if let Ok(c) = core.store.get_artifact(&job.target_id).await {
-                            embed::settle_corpus(core, &c.corpus_id).await?;
+                        // A merged artifact belongs to no corpus, so there is
+                        // no document whose coverage its failure completes.
+                        if let Ok(c) = core.store.get_artifact(&job.target_id).await
+                            && let Some(corpus_id) = c.corpus_id.as_deref()
+                        {
+                            embed::settle_corpus(core, corpus_id).await?;
                         }
                     }
                 }

@@ -49,11 +49,29 @@ CREATE INDEX IF NOT EXISTS idx_corpora_created ON corpora(created_at DESC);
 
 -- ── Artifacts ────────────────────────────────────────────────────────────────
 -- One atomic piece of knowledge, rewritten to stand alone. Superseding hides
--- an artifact and names its replacement; nothing is ever merged or rewritten
--- in place.
+-- an artifact and names its replacement; a captured artifact's text is never
+-- rewritten in place. The dedupe pass may write a *new* artifact out of several
+-- others — see `provenance` and `artifact_sources` — but it never edits one,
+-- and the artifacts it was written from stay stored and one write from active.
 CREATE TABLE IF NOT EXISTS artifacts (
   id               TEXT PRIMARY KEY,
-  corpus_id        TEXT NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
+  -- NULL for a merged artifact, which belongs to no single corpus. Claiming a
+  -- corpus it did not come from would put the wrong lines beside it in the
+  -- detail pane, which is the one dishonesty merging must not commit.
+  corpus_id        TEXT REFERENCES corpora(id) ON DELETE CASCADE,
+  -- 'captured' | 'merged'. The discriminator every consumer branches on, rather
+  -- than `corpus_id IS NULL`: a null is an absence, and the failure modes
+  -- merging can produce want to hang off an assertion.
+  provenance       TEXT NOT NULL DEFAULT 'captured',
+  -- How many artifacts a merge was written from. Compared against the surviving
+  -- `artifact_sources` rows to notice a source that has since been deleted;
+  -- without it "lost a source" cannot be told from "only ever had two".
+  source_count     INTEGER NOT NULL DEFAULT 0,
+  -- Set in the same UPDATE that changes status/superseded_by, cleared once the
+  -- payload write is acknowledged. The lifecycle repair reads this instead of
+  -- scanning, so its cost is the open writes rather than the set of hidden
+  -- artifacts — which merging makes grow without bound.
+  lifecycle_dirty  INTEGER NOT NULL DEFAULT 0,
   ordinal          INTEGER NOT NULL,
   text             TEXT NOT NULL,
   -- Line range in the corpus this came from, as JSON.
@@ -83,6 +101,32 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
 CREATE INDEX IF NOT EXISTS idx_artifacts_window     ON artifacts(corpus_id, segment_idx);
 CREATE INDEX IF NOT EXISTS idx_artifacts_superseded ON artifacts(superseded_by);
 CREATE INDEX IF NOT EXISTS idx_artifacts_status     ON artifacts(status);
+-- Partial: the repair's work list is the open writes, which is almost always
+-- empty. A full index on a column that is 0 for every row but a handful would
+-- be paid for on every lifecycle write and read nothing back.
+CREATE INDEX IF NOT EXISTS idx_artifacts_dirty      ON artifacts(lifecycle_dirty) WHERE lifecycle_dirty = 1;
+CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
+
+-- ── Lineage ──────────────────────────────────────────────────────────────────
+-- What a merged artifact is made of, as resolved captured roots rather than as
+-- parent edges. `root_id` always names a `provenance = 'captured'` artifact, so
+-- a re-merge reads the leaves in one query and is never written from text a
+-- model produced — which is what keeps information loss one generation deep
+-- however many times a group is merged.
+--
+-- The closure duplicates what edges would imply. That is the trade: the fan-in
+-- cap bounds how much, and it buys a hot-path read with no recursive CTE.
+CREATE TABLE IF NOT EXISTS artifact_sources (
+  child_id   TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  root_id    TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- The direct parent through which root_id entered this child; equal to
+  -- root_id for a first-generation merge. Rendering only. SET NULL rather than
+  -- CASCADE because a deleted intermediate does not invalidate the root.
+  via_id     TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (child_id, root_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sources_root ON artifact_sources(root_id);
 
 -- ── Segments ─────────────────────────────────────────────────────────────────
 -- The windows a corpus was split into for synthesis. One window is one

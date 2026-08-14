@@ -58,6 +58,7 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             status: None,
             last_verified_at: None,
             superseded_by: None,
+            provenance: None,
         },
     }
 }
@@ -781,6 +782,7 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             status: None,
             last_verified_at: None,
             superseded_by: None,
+            provenance: None,
         },
     }
 }
@@ -982,6 +984,7 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             // scores, so it has to set the field the formula actually uses.
             last_verified_at: Some(ts),
             superseded_by: None,
+            provenance: None,
         },
     }
 }

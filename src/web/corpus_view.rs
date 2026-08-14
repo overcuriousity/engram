@@ -19,6 +19,10 @@ pub struct CorpusLine {
     pub in_span: bool,
 }
 
+/// `Default` is the empty slice, which is what a merged artifact has: it
+/// belongs to no corpus, so there are no lines to show beside it and no range
+/// to name. The detail pane renders its sources there instead.
+#[derive(Default)]
 pub struct CorpusSlice {
     pub lines: Vec<CorpusLine>,
     /// What to call this range in the UI: `lines 118–141`, later `page 42`.
