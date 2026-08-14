@@ -444,6 +444,36 @@ pub struct SourceRow {
     pub corpus_id: String,
 }
 
+/// The source list a merge renders: its lineage roots, fetched and titled.
+/// One shape for Ops and the detail pane — the two must stay behaviorally
+/// identical (same self-guard, same tolerance for deleted sources, same
+/// corpus fallback), and a copy in each is how they come to disagree about
+/// what a merge was made of.
+async fn source_rows(
+    store: &crate::store::Store,
+    merged_id: &str,
+    roots: &[String],
+) -> Vec<SourceRow> {
+    let mut sources = Vec::new();
+    for rid in roots {
+        // A source deleted since leaves no row; skipping it is what the
+        // `orphaned` flag exists to say out loud. `roots_of` answers an empty
+        // list for a merge that lost every source; the self guard stays as
+        // defense against a base written before that change.
+        if rid == merged_id {
+            continue;
+        }
+        if let Ok(r) = store.get_artifact(rid).await {
+            sources.push(SourceRow {
+                corpus_id: r.corpus_id.clone().unwrap_or_default(),
+                title: title_of(&r),
+                id: r.id,
+            });
+        }
+    }
+    sources
+}
+
 #[derive(Template)]
 #[template(path = "_token_created.html")]
 struct TokenCreatedTemplate {
@@ -1041,31 +1071,22 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut merged = Vec::new();
-    for c in st.core.store.merged_artifacts(50).await? {
-        let roots = st
-            .core
-            .store
-            .roots_of(std::slice::from_ref(&c.id))
-            .await
-            .unwrap_or_default();
-        let mut sources = Vec::new();
-        for rid in roots.get(&c.id).into_iter().flatten() {
-            // A source deleted since leaves no row. `orphaned` is what says
-            // so, rather than the list quietly being one shorter. `roots_of`
-            // now answers an empty list for a merge that lost every source;
-            // the self guard stays as defense against a base written before
-            // that change.
-            if rid == &c.id {
-                continue;
-            }
-            if let Ok(r) = st.core.store.get_artifact(rid).await {
-                sources.push(SourceRow {
-                    corpus_id: r.corpus_id.clone().unwrap_or_default(),
-                    title: title_of(&r),
-                    id: r.id,
-                });
-            }
-        }
+    let merged_chunks = st.core.store.merged_artifacts(50).await?;
+    // One lineage call per page, not one per row: `roots_of` takes the batch.
+    let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
+    let roots = st
+        .core
+        .store
+        .roots_of(&merged_ids)
+        .await
+        .unwrap_or_default();
+    for c in merged_chunks {
+        let sources = source_rows(
+            &st.core.store,
+            &c.id,
+            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
         merged.push(MergedRow {
             orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
             title: title_of(&c),
@@ -1416,22 +1437,12 @@ pub(crate) async fn build_artifact_detail(
             .roots_of(std::slice::from_ref(&c.id))
             .await
             .unwrap_or_default();
-        for rid in roots.get(&c.id).into_iter().flatten() {
-            // `roots_of` now answers an empty list for a merge with no lineage
-            // rows, so nothing here would list a merge as written from itself;
-            // the guard stays as defense against a base written before that
-            // change.
-            if rid == &c.id {
-                continue;
-            }
-            if let Ok(r) = core.store.get_artifact(rid).await {
-                sources.push(SourceRow {
-                    corpus_id: r.corpus_id.clone().unwrap_or_default(),
-                    title: title_of(&r),
-                    id: r.id,
-                });
-            }
-        }
+        sources = source_rows(
+            &core.store,
+            &c.id,
+            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
     }
     // A missing neighbour list is not a missing pane. The vector store may be
     // down, or this artifact may simply not be embedded yet, and neither is a
