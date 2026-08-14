@@ -728,6 +728,17 @@ impl Core {
                 continue;
             }
             self.store.set_superseded_by(&id, None).await?;
+            // Cleared here as everywhere else, because `set_superseded_by`
+            // raises the marker in the same statement as the change it
+            // describes. This path writes the payload first and the row second,
+            // so by now the two already agree — and a marker left standing would
+            // have the next sweep's `repair_lifecycle_drift` rewrite a payload
+            // that is correct, on a base whose stores are in agreement, which is
+            // the one condition that function's own comment says would mean a
+            // bug somewhere.
+            self.store
+                .clear_lifecycle_dirty(std::slice::from_ref(&id))
+                .await?;
             tracing::info!(
                 artifact_id = %id,
                 "restored an artifact whose surviving copy was deleted"
@@ -842,6 +853,54 @@ mod tests {
     use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    #[tokio::test]
+    async fn healing_a_dangling_supersession_leaves_no_unfinished_write_behind() {
+        // `set_superseded_by` raises `lifecycle_dirty` in the same statement as
+        // the change it describes, and every other caller clears it once the
+        // payload write is acknowledged. This path writes the payload *first*,
+        // so the two stores already agree by the time the row is written — and a
+        // marker left standing has the next sweep's `repair_lifecycle_drift`
+        // rewrite a payload that is already correct, on a base in agreement.
+        // That function returns a count precisely so that a repair firing on
+        // such a base is visible rather than hiding behind a correct end state.
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "supersede itself left the write marked as unfinished"
+        );
+
+        // Through `Core`, not the store: the heal hangs off this deletion.
+        core.delete_artifact(&ids[1]).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the artifact still points at a keeper that is gone"
+        );
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the healed artifact is still marked as an unfinished write"
+        );
+    }
 
     #[tokio::test]
     async fn a_capture_remembers_where_it_came_from() {
