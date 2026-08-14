@@ -216,7 +216,11 @@ impl Store {
     }
 
     /// Merged artifacts holding fewer lineage rows than the number of sources
-    /// they were written from.
+    /// they were written from — and not yet flagged for it. The exclusion is
+    /// in the SQL, not the caller: membership in this set is permanent
+    /// (deletes are hard), so without it the oldest flagged rows fill the
+    /// LIMIT forever and a newly orphaned merge past the five-hundredth is
+    /// never seen. Newest first for the same reason.
     ///
     /// A comparison rather than a guess, which is what `source_count` is for:
     /// without it, "lost a source" cannot be told from "only ever had two".
@@ -226,6 +230,8 @@ impl Store {
               WHERE a.provenance = 'merged'
                 AND a.source_count >
                     (SELECT COUNT(*) FROM artifact_sources WHERE child_id = a.id)
+                AND (a.flags IS NULL OR a.flags NOT LIKE '%orphaned_source%')
+              ORDER BY a.created_at DESC, a.id
               LIMIT ?",
         )
         .bind(limit)

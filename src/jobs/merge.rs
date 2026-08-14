@@ -220,11 +220,8 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
 /// hiding behind a correct end state.
 pub async fn flag_orphans(core: &Core) -> Result<usize> {
     let mut n = 0;
+    // The scan already excludes flagged rows, so every id here is new work.
     for id in core.store.merged_missing_a_source(500).await? {
-        let c = core.store.get_artifact(&id).await?;
-        if c.flags.iter().any(|f| f == "orphaned_source") {
-            continue;
-        }
         core.store
             .set_artifact_flags(
                 &id,
@@ -774,6 +771,65 @@ mod tests {
                 "the sweep merged the pair again after an explicit undo"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_already_flagged_merge_does_not_occupy_the_orphan_scan() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        assert_eq!(flag_orphans(&core).await.unwrap(), 1);
+        // Flagged rows leave the scan entirely — not fetched and skipped in
+        // Rust, which is what let 500 of them starve every newer orphan out
+        // of the LIMIT.
+        assert!(
+            core.store
+                .merged_missing_a_source(500)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a flagged merge still occupies a scan slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewing_an_orphaned_merge_is_not_undone_by_the_next_sweep() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        assert_eq!(flag_orphans(&core).await.unwrap(), 1);
+
+        // What mark_artifact_reviewed does for an orphaned merge.
+        core.store.accept_source_loss(&m.id).await.unwrap();
+        core.store.clear_artifact_flags(&m.id).await.unwrap();
+
+        assert_eq!(
+            flag_orphans(&core).await.unwrap(),
+            0,
+            "the sweep re-flagged a merge the operator had reviewed"
+        );
+        assert!(
+            core.store
+                .get_artifact(&m.id)
+                .await
+                .unwrap()
+                .flags
+                .is_empty()
+        );
     }
 
     #[tokio::test]

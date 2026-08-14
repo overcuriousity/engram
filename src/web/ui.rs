@@ -1531,6 +1531,13 @@ async fn mark_artifact_reviewed(
     _id: Identity,
     Path(cid): Path<String>,
 ) -> Result<Response> {
+    // For an orphaned merge, "reviewed" means accepted as a merge of what
+    // remains — recorded on source_count, or the next sweep re-flags it and
+    // the operator's judgement lasts one tick.
+    let c = st.core.store.get_artifact(&cid).await?;
+    if c.flags.iter().any(|f| f == "orphaned_source") {
+        st.core.store.accept_source_loss(&cid).await?;
+    }
     st.core.store.clear_artifact_flags(&cid).await?;
     Ok(axum::response::Html(String::new()).into_response())
 }

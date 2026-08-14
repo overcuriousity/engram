@@ -947,6 +947,24 @@ impl Store {
         self.set_artifact_flags(id, &[], None).await
     }
 
+    /// Record that an operator reviewed a merge's lost sources and accepted it
+    /// as a merge of what remains. `source_count` comes down to the surviving
+    /// lineage count, so the orphan scan's comparison goes quiet — without
+    /// this, clearing the flag lasts exactly one sweep, because the row still
+    /// answers "lost a source" and is flagged all over again.
+    pub async fn accept_source_loss(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE artifacts
+                SET source_count = (SELECT COUNT(*) FROM artifact_sources WHERE child_id = ?)
+              WHERE id = ? AND provenance = 'merged'",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS n FROM artifacts WHERE corpus_id = ? AND embed_state = ?",
