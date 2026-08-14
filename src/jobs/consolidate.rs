@@ -649,20 +649,6 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
             );
             break;
         }
-        // A pair whose unit is still queued from an earlier sweep is already
-        // going to be judged. `pairs_to_judge` orders by `judge_attempts`, and a
-        // pair that has not run yet still has none, so it leads every sweep
-        // until it does — spending the budget on itself over and over while
-        // pairs recorded since never get a turn.
-        //
-        // Checked before the artifact reads, because those in-flight pairs
-        // lead the ordering: with the check after them, every tick re-fetched
-        // both full-text rows for the very pairs it was about to skip.
-        let target = p.id.to_string();
-        if core.store.live_job(Stage::Dedupe, &target).await? {
-            continue;
-        }
-
         // Reported, not skipped, with one exception. Skipping treated a store
         // that was briefly unwell as a pair not worth arming, and since nothing
         // recorded an attempt it led the next sweep's ordering all over again.
@@ -714,6 +700,16 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // The tokeniser under it survives: `dedupe_prompt` is given the values
         // that differ as a prior, and the merge verification refuses any merge
         // that drops one.
+
+        // A pair whose unit is still queued from an earlier sweep is already
+        // going to be judged. `pairs_to_judge` orders by `judge_attempts`, and a
+        // pair that has not run yet still has none, so it leads every sweep
+        // until it does — spending the budget on itself over and over while
+        // pairs recorded since never get a turn.
+        let target = p.id.to_string();
+        if core.store.live_job(Stage::Dedupe, &target).await? {
+            continue;
+        }
 
         // `seq` is the pair's position in this sweep. Left at zero, twenty
         // judge units would all sort ahead of every document's second window.
