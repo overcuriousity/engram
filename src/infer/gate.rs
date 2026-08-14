@@ -216,7 +216,13 @@ impl Drop for InteractiveLease {
         {
             let mut st = self.gate.state.lock().expect("gate state");
             st.interactive = st.interactive.saturating_sub(1);
-            st.last_finished = Some(Instant::now());
+            // `last_finished` is deliberately not stamped. It was, and it made
+            // the cooldown restart on every interactive call — which for search
+            // means every keystroke's embed. A person paging through the UI held
+            // background work off forever: each page pushed the gap out again,
+            // and nothing here ages or bounds that. The cooldown paces batch
+            // work against the GPU, and the interactive lane is already the
+            // exception to it — `[pacing]` says so in as many words.
         }
         self.gate.resumed.notify_waiters();
     }
@@ -277,6 +283,40 @@ mod tests {
         let started = tokio::time::Instant::now();
         let _lease = g.interactive();
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_person_paging_through_the_ui_cannot_starve_background_work() {
+        // The lease used to stamp `last_finished` on the way out, so every
+        // interactive call restarted the cooldown — and for search that is every
+        // keystroke's embed. Each page pushed the gap out again, with nothing here
+        // ageing the background work that was waiting, so on a long enough
+        // browsing session it never ran at all.
+        let g = gate(600);
+        // A background call has just ended, so the cooldown is what the waiter
+        // below is waiting on.
+        g.call_succeeded();
+        let t0 = tokio::time::Instant::now();
+        let g2 = Arc::clone(&g);
+        let waiter = tokio::spawn(async move {
+            g2.background().await;
+            tokio::time::Instant::now()
+        });
+
+        // Ten pages of results, each one an interactive call that begins and
+        // ends, spread across the cooldown the waiter is already serving.
+        for _ in 0..10 {
+            let lease = g.interactive();
+            tokio::time::advance(Duration::from_secs(60)).await;
+            drop(lease);
+        }
+
+        let started_at = waiter.await.unwrap();
+        assert_eq!(
+            started_at.duration_since(t0),
+            Duration::from_secs(600),
+            "the searches pushed the cooldown out from under work that was already waiting"
+        );
     }
 
     #[tokio::test(start_paused = true)]
