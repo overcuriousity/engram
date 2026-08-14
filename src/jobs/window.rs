@@ -216,7 +216,25 @@ pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
             // `jobs.attempts` rather than a counter on the segment: the unit is
             // the job now, and two counters for one thing is what made the
             // original incident so hard to read.
-            SegmentState::Failed => attempts_for(core, corpus_id, w.idx).await >= MAX_ATTEMPTS,
+            SegmentState::Failed => match attempts_for(core, corpus_id, w.idx).await {
+                Ok(n) => n >= MAX_ATTEMPTS,
+                // A query that failed says nothing about the window, and now
+                // that two workers can be in one corpus at once, `SQLITE_BUSY`
+                // here is routine. Reading it as "spent" would settle a document
+                // that still has retries left and report it `partial`. Deferring
+                // costs one settle: the next window to resolve runs this again,
+                // and the reconciliation sweep finishes the document if none
+                // does.
+                Err(e) => {
+                    tracing::warn!(
+                        corpus_id,
+                        window = w.idx,
+                        error = %e,
+                        "could not read the window's attempts; deferring the settle"
+                    );
+                    false
+                }
+            },
             SegmentState::Pending => false,
         };
         if !resolved {
@@ -230,17 +248,17 @@ pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
 ///
 /// A missing row means the unit is gone — dropped as stale, or never armed —
 /// and nothing is going to try that window again, so it counts as spent rather
-/// than holding up the document forever.
-async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> i64 {
-    sqlx::query_scalar::<_, i64>(
+/// than holding up the document forever. That default belongs to the missing
+/// row alone: a failed query is not an answer, and the caller decides what to do
+/// about not having one.
+async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
         "SELECT attempts FROM jobs WHERE stage = 'segment_window' AND target_id = ?",
     )
     .bind(unit_target(corpus_id, idx))
     .fetch_optional(&core.store.pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(MAX_ATTEMPTS)
+    .await?
+    .unwrap_or(MAX_ATTEMPTS))
 }
 
 /// Where an artifact sits in the source document.
