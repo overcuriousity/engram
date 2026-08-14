@@ -429,9 +429,10 @@ impl Store {
             }
             open.push(seed);
         }
-        let Some(seed) = open.iter().find(|p| p.id == pair_id) else {
-            return Ok(vec![]);
-        };
+        let seed = open
+            .iter()
+            .find(|p| p.id == pair_id)
+            .expect("the block above put the seed in the window or returned");
 
         // Adjacency once, then a flood fill from the seed's two artifacts. A
         // pair joins the component only once one of its artifacts is already
