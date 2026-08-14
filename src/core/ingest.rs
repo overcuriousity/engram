@@ -657,6 +657,26 @@ impl Core {
                     };
                     if self.store.restore_artifact(&restored).await? {
                         out.rows_restored += 1;
+                        // A payload records neither `source_count` nor lineage
+                        // rows, so a restored merge definitionally cannot
+                        // support its provenance claim — and
+                        // `merged_missing_a_source` (0 > 0) will never say so.
+                        // Said here instead, with the flag that pass would
+                        // have set. `roots_of` already refuses to hand such a
+                        // merge back as its own root; this is the half an
+                        // operator sees.
+                        if provenance == crate::store::artifacts::Provenance::Merged {
+                            self.store
+                                .set_artifact_flags(
+                                    &p.artifact_id,
+                                    &["orphaned_source".to_string()],
+                                    Some(
+                                        "restored from the index; the record of its \
+                                         sources was lost",
+                                    ),
+                                )
+                                .await?;
+                        }
                         self.store
                             .enqueue(Stage::Embed, "artifact", &p.artifact_id)
                             .await?;
@@ -1553,6 +1573,27 @@ mod tests {
             EmbedState::Pending,
             "a restored row must be re-embedded: the stored vector may be from \
              another model, and nothing else would ever check"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_restored_from_the_index_is_flagged_as_orphaned() {
+        // `restore_artifact` cannot recreate lineage rows and leaves
+        // `source_count` at 0, so `merged_missing_a_source` (0 > 0) never
+        // fires and nothing ever flagged the restored merge — it stood as a
+        // merge with no record of its sources, silently.
+        let core = test_core().await;
+        let mut p = point("lost-merge", "");
+        p.payload.provenance = Some("merged".into());
+        core.vectors.upsert(vec![p]).await.unwrap();
+
+        let drift = core.heal_store_drift().await.unwrap();
+
+        assert_eq!(drift.rows_restored, 1, "{drift:?}");
+        let back = core.store.get_artifact("lost-merge").await.unwrap();
+        assert!(
+            back.flags.iter().any(|f| f == "orphaned_source"),
+            "a restored merge must say it cannot support its provenance claim"
         );
     }
 
