@@ -207,6 +207,57 @@ async fn ingest(
     Ok((code, Json(out)))
 }
 
+const ORIGIN_UPLOAD: &str = "upload";
+
+/// `.txt` and nothing else, for now. PDF is a `SourceView` implementation and
+/// a later plan; refusing everything else by name is what keeps this one from
+/// quietly ingesting the bytes of a format it cannot read.
+async fn upload(
+    State(st): State<AppState>,
+    _id: Identity,
+    mut multipart: axum::extract::Multipart,
+) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().map(str::to_string);
+        let content_type = field.content_type().unwrap_or("").to_string();
+        if !content_type.is_empty() && !content_type.starts_with("text/plain") {
+            return Err(Error::Validation(format!(
+                "that file is `{content_type}` — only text/plain is accepted"
+            )));
+        }
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
+        // Refused rather than lossily converted: a corpus is quoted back
+        // verbatim, so text that arrived mangled would be a fidelity loss
+        // nothing downstream could detect.
+        let text = String::from_utf8(bytes.to_vec())
+            .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
+
+        let out = st
+            .core
+            .ingest_capture(
+                crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD).with_title(filename),
+            )
+            .await?;
+        let code = if out.duplicate {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        return Ok((code, Json(out)));
+    }
+    Err(Error::Validation("no file in the upload".into()))
+}
+
 #[derive(serde::Deserialize)]
 pub struct ListParams {
     #[serde(default = "default_limit")]
@@ -538,6 +589,7 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
+        .route("/corpora/upload", post(upload))
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
@@ -618,6 +670,88 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A minimal multipart body. Hand-rolled rather than pulling a builder in
+    /// for three tests.
+    fn post_file(uri: &str, token: &str, filename: &str, mime: &str, body: &[u8]) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+                 Content-Type: {mime}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(format!("\r\n--{B}--\r\n").as_bytes());
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_filename_becomes_the_title_hint() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "mounting-notes.txt",
+                "text/plain",
+                b"alpha para\n\nbeta para",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.title_hint.as_deref(), Some("mounting-notes.txt"));
+        assert_eq!(src.origin, "upload");
+        assert_eq!(src.source_url, None);
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_is_not_utf8_is_refused() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "notes.txt",
+                "text/plain",
+                &[0xff, 0xfe, 0x00, 0x41],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_upload_of_the_wrong_type_is_refused_with_the_reason() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "notes.pdf",
+                "application/pdf",
+                b"%PDF-1.7",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let msg = json_of(res).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(msg.contains("application/pdf"), "got {msg}");
     }
 
     #[tokio::test]
@@ -712,6 +846,7 @@ mod tests {
             ("GET", "/api/v1/resurface"),
             ("GET", "/api/v1/corpora"),
             ("POST", "/api/v1/corpora"),
+            ("POST", "/api/v1/corpora/upload"),
             ("GET", "/api/v1/corpora/abc"),
             ("DELETE", "/api/v1/corpora/abc"),
             ("POST", "/api/v1/corpora/abc/reprocess"),

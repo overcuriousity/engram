@@ -20,7 +20,7 @@ name = "eval-prepare"
 path = "src/bin/eval_prepare.rs"
 
 [dependencies]
-axum = { version = "0.8.9", features = ["macros"] }
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace"] }
