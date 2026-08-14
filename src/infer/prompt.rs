@@ -121,30 +121,81 @@ pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     )
 }
 
-pub const DEDUPE_SYSTEM: &str = r#"You compare two knowledge artifacts and answer one question: do they state some specific detail differently?
+/// What the dedupe pass decided about a group of near-duplicate artifacts.
+///
+/// Four outcomes, and the ordering between them is the design. `Replaced` is
+/// preferred over `Duplicate` wherever it applies: the survivor is then a stored
+/// original with a valid span and corpus lines to render beside it, which is
+/// strictly better than a rewrite. A merge is the answer only when *both* sides
+/// carry something the other lacks — the case where neither original is
+/// sufficient and the pre-merge state was already losing something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// Different subjects. Both stay exactly where they are.
+    Distinct,
+    /// The same subject with a different value for one detail, and no way to
+    /// tell which is current. Escalated to a person; never merged.
+    Conflict,
+    /// One artifact plainly replaces another. Superseded, with no synthetic
+    /// text written at all.
+    Replaced,
+    /// The same claim, each side carrying detail the other lacks. Merged.
+    Duplicate,
+}
 
-First decide whether the two are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
+/// The artifact a `Duplicate` verdict asks to be written.
+#[derive(Debug, Clone)]
+pub struct MergedDraft {
+    pub title: Option<String>,
+    pub text: String,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub caveats: Vec<String>,
+}
 
-If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then the artifacts are not in conflict no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer false and stop.
+/// One dedupe verdict, parsed.
+#[derive(Debug, Clone)]
+pub struct Dedupe {
+    pub relation: Relation,
+    pub detail: Option<String>,
+    /// Which artifact was named obsolete, as the letter it was shown under.
+    /// Only meaningful for `Replaced`.
+    pub supersedes: Option<char>,
+    /// `Some` if and only if `relation` is `Duplicate`.
+    pub merged: Option<MergedDraft>,
+}
 
-Only when both describe the same subject: a contradiction is a concrete disagreement about it — a different version, number, date, path, flag, default, or step order for that one subject.
+pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
-These are NOT contradictions:
+First decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
+
+If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then they are neither duplicates nor in conflict, no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer "distinct" and stop.
+
+Only when they describe the same subject, choose one of:
+
+- "replaced" — one artifact plainly supersedes another: a deprecated flag, step or default versus its current replacement. Prefer this whenever it applies. It keeps the surviving artifact's original wording, which is always better than rewriting.
+- "duplicate" — they make the same claim, and each carries some detail the others lack. Write one artifact that says everything all of them said.
+- "conflict" — they give a different value for the same detail of the same subject, and you cannot tell which is current. Do not choose a side and do not merge; a person decides this one.
+- "distinct" — different subjects, or one covers something the others simply do not.
+
+These are NOT conflicts:
 - The same fact in different words.
 - Different levels of detail about the same thing.
-- Two different subjects that happen to use similar language, or the same layout.
-- One artifact mentioning something the other simply does not cover.
-- Two values that both appear in the same artifact.
+- One artifact mentioning something the others do not cover.
+
+When you answer "duplicate", the merged text must contain every number, version, date, path, flag, command and error string that appeared in any input, and must read as one self-contained artifact rather than a list of sources. If you cannot write one that keeps all of them, the answer is "conflict", not "duplicate".
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"contradicts": true, "detail": "...", "obsolete": "a"}
+{"relation": "duplicate", "detail": "...", "supersedes": "a", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}
 
-- contradicts: true only for a concrete disagreement about one subject, as above.
-- detail: when true, one short sentence naming the two conflicting values and which artifact holds each. Omit it when false.
-- obsolete: "a" or "b" — only when you are confident one artifact plainly replaces the other (a deprecated flag, step, or default versus its current replacement), not merely that they differ. Omit this field whenever the direction is unclear, the two describe genuinely different but still-valid options, or you are not sure."#;
+- relation: one of "duplicate", "replaced", "conflict", "distinct".
+- detail: one short sentence saying why. Always.
+- supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
+- merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
 
-/// The two artifacts, each under its title.
+/// The artifacts, each under a letter and its title.
 ///
 /// The title is not decoration here, it is the subject. Synthesis writes a body
 /// that stands on its own within its segment, which is not the same as naming
@@ -152,25 +203,49 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
 /// alone, the model saw two anonymous spec lists with different numbers and
 /// called them a contradiction — correctly, on the evidence it was given.
-/// `attempt` is how many times this pair has already been asked about, and it is
-/// in the prompt for one reason: the endpoint caches by exact prompt text and
+///
+/// `differing_values` is what `facts::fact_tokens` found stated differently
+/// across the artifacts. It is a prior, not a verdict: it cannot tell a real
+/// disagreement from the same subject described at two levels of detail, which
+/// is the whole reason a model is asked. It used to be an admission gate, and
+/// as a gate it was backwards — a pair stating no differing value is the
+/// cleanest thing there is to merge, and gating on difference hid exactly those.
+///
+/// `attempt` is how many times this group has already been asked about, and it
+/// is in the prompt for one reason: the endpoint caches by exact prompt text and
 /// replays a cached reply in milliseconds. A retry of a reply the parser could
 /// not read would otherwise re-read the same unreadable bytes, five times, and
 /// call it five attempts.
 ///
-/// Zero adds nothing at all, so a first ask stays byte-identical to what it has
-/// always been — and keeps hitting the cache when it should, on a pair the sweep
-/// re-arms after a settled verdict was lost.
-pub fn dedupe_prompt(a: (&str, &str), b: (&str, &str), attempt: i64) -> String {
-    let retry = if attempt > 0 {
-        format!("(attempt {})\n", attempt + 1)
-    } else {
-        String::new()
-    };
-    format!(
-        "{retry}----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
-        a.0, a.1, b.0, b.1
-    )
+/// Zero adds nothing at all, so a first ask stays byte-identical between runs —
+/// and keeps hitting the cache when it should, on a group re-armed after a
+/// settled verdict was lost.
+pub fn dedupe_prompt(
+    members: &[(&str, &str)],
+    differing_values: &[String],
+    attempt: i64,
+) -> String {
+    let mut s = String::new();
+    if attempt > 0 {
+        s.push_str(&format!("(attempt {})\n", attempt + 1));
+    }
+    for (i, (title, text)) in members.iter().enumerate() {
+        let letter = (b'a' + i as u8) as char;
+        s.push_str(&format!(
+            "----- ARTIFACT {} -----\nTitle: {title}\n\n{text}\n",
+            letter.to_ascii_uppercase()
+        ));
+    }
+    s.push_str("----- END -----");
+    if !differing_values.is_empty() {
+        s.push_str(&format!(
+            "\n\nThese values are not stated the same way by all of them: {}. \
+             That may be a real disagreement, or the same subject described at \
+             different levels of detail. Decide which.",
+            differing_values.join(", ")
+        ));
+    }
+    s
 }
 
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
@@ -201,40 +276,108 @@ pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
     )
 }
 
-#[derive(serde::Deserialize)]
-struct Judgement {
-    contradicts: bool,
-    #[serde(default)]
-    detail: Option<String>,
-    #[serde(default)]
-    obsolete: Option<String>,
-}
-
 /// A reply that cannot be read is an error, not a verdict.
 ///
-/// Defaulting to "contradicts" would fill the review queue with noise an
-/// operator has to clear by hand; defaulting to "no" would quietly close real
-/// conflicts. Failing leaves the pair pending, and the next sweep asks again.
-///
-/// The third element is which side the judge named obsolete — `'a'` or
-/// `'b'` — when it named one with confidence. Anything else the model wrote
-/// there (a stray word, a full sentence) is treated the same as omitting it:
-/// an unreadable direction must not fail the whole reply, since the
-/// contradiction verdict itself may still be perfectly readable.
-pub fn parse_judgement(body: &str) -> Result<(bool, Option<String>, Option<char>)> {
-    let j: Judgement = serde_json::from_str(extract_json(body)).map_err(|e| {
-        Error::MalformedLlmOutput(format!("judge reply was not the expected JSON: {e}"))
+/// Defaulting to "conflict" would fill the escalation queue with noise a person
+/// has to clear by hand; defaulting to "distinct" would quietly close real
+/// duplicates. Failing leaves the group pending, and the unit retries under the
+/// queue's backoff with a prompt that differs by its attempt number.
+pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        relation: String,
+        #[serde(default)]
+        detail: Option<String>,
+        #[serde(default)]
+        supersedes: Option<String>,
+        #[serde(default)]
+        merged: Option<RawMerged>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawMerged {
+        text: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        caveats: Vec<String>,
+    }
+
+    let r: Raw = serde_json::from_str(extract_json(body)).map_err(|e| {
+        Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
-    let detail = j
-        .detail
-        .map(|d| d.trim().to_string())
-        .filter(|d| !d.is_empty() && j.contradicts);
-    let obsolete = j.obsolete.as_deref().and_then(|o| match o.trim() {
+
+    // Anything else the model wrote there — a stray word, a whole sentence — is
+    // treated the same as omitting it. An unreadable direction must not fail an
+    // otherwise perfectly readable verdict.
+    let side = r.supersedes.as_deref().and_then(|s| match s.trim() {
         "a" | "A" => Some('a'),
         "b" | "B" => Some('b'),
+        "c" | "C" => Some('c'),
+        "d" | "D" => Some('d'),
         _ => None,
     });
-    Ok((j.contradicts, detail, obsolete))
+
+    let relation = match r.relation.trim().to_ascii_lowercase().as_str() {
+        "duplicate" => Relation::Duplicate,
+        // A direction the model would not name is not a direction. Falling back
+        // to a conflict is what stops this picking a side by accident, which on
+        // a supersede means hiding an artifact for no stated reason.
+        "replaced" if side.is_some() => Relation::Replaced,
+        "replaced" | "conflict" => Relation::Conflict,
+        "distinct" => Relation::Distinct,
+        other => {
+            return Err(Error::MalformedLlmOutput(format!(
+                "dedupe reply named an unknown relation {other:?}"
+            )));
+        }
+    };
+
+    // `merged` belongs to `duplicate` and to nothing else. A conflict verdict
+    // that still handed us text to write would defeat the one outcome that
+    // verdict exists to produce — and a duplicate with no text is a merge the
+    // write path cannot carry out.
+    match (&relation, &r.merged) {
+        (Relation::Duplicate, None) => {
+            return Err(Error::MalformedLlmOutput(
+                "dedupe reply said duplicate but wrote no merged artifact".into(),
+            ));
+        }
+        (rel, Some(_)) if *rel != Relation::Duplicate => {
+            return Err(Error::MalformedLlmOutput(format!(
+                "dedupe reply carried a merged artifact on a {} verdict",
+                r.relation.trim()
+            )));
+        }
+        _ => {}
+    }
+
+    if let Some(m) = &r.merged
+        && m.text.trim().is_empty()
+    {
+        return Err(Error::MalformedLlmOutput(
+            "dedupe reply said duplicate and wrote an empty artifact".into(),
+        ));
+    }
+
+    Ok(Dedupe {
+        relation,
+        detail: r
+            .detail
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty()),
+        supersedes: side,
+        merged: r.merged.map(|m| MergedDraft {
+            title: m.title,
+            text: m.text,
+            category: m.category,
+            tags: m.tags,
+            caveats: m.caveats,
+        }),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -506,15 +649,18 @@ mod tests {
     }
 
     #[test]
-    fn the_judge_is_told_what_each_artifact_is_about() {
+    fn the_dedupe_pass_is_told_what_each_artifact_is_about() {
         // The real case this fixes: an artifact headed "FAT32 Specifications"
         // whose body opens "32 Bit Clusternummern" and never says FAT32 again.
         // Given the bodies alone, the model saw two anonymous spec lists with
         // different numbers and called them a contradiction — which was the
         // only honest answer to the question it was actually asked.
         let p = dedupe_prompt(
-            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-            ("FAT32 Specifications", "32 Bit Clusternummern."),
+            &[
+                ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+                ("FAT32 Specifications", "32 Bit Clusternummern."),
+            ],
+            &[],
             0,
         );
         assert!(p.contains("Title: FAT16 Specifications"), "{p}");
@@ -523,32 +669,60 @@ mod tests {
     }
 
     #[test]
+    fn a_component_is_lettered_so_a_direction_can_name_one() {
+        // `supersedes` answers with a letter, so the letters have to be in the
+        // prompt and in the same order the caller will read them back in.
+        let p = dedupe_prompt(&[("one", "a"), ("two", "b"), ("three", "c")], &[], 0);
+        assert!(p.contains("ARTIFACT A"), "{p}");
+        assert!(p.contains("ARTIFACT B"), "{p}");
+        assert!(p.contains("ARTIFACT C"), "{p}");
+    }
+
+    #[test]
+    fn differing_values_are_named_as_a_prior_not_a_verdict() {
+        let p = dedupe_prompt(
+            &[("t", "timeout is 30s"), ("t", "timeout is 90s")],
+            &["30s".into(), "90s".into()],
+            0,
+        );
+        assert!(p.contains("30s, 90s"), "{p}");
+        assert!(p.contains("Decide which."), "{p}");
+        // And nothing is added when there is nothing to say.
+        assert!(!dedupe_prompt(&[("t", "x"), ("t", "y")], &[], 0).contains("Decide which."));
+    }
+
+    #[test]
     fn a_retry_does_not_ask_the_endpoint_the_question_it_has_cached() {
         // The endpoint replays a cached reply for an identical prompt in
-        // milliseconds. A pair whose reply the parser could not read is retried
+        // milliseconds. A group whose reply the parser could not read is retried
         // up to `MAX_ATTEMPTS` times, and every one of those would have read the
         // same unreadable bytes back.
-        let pair = (
+        let members: &[(&str, &str)] = &[
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
-        );
-        let first = dedupe_prompt(pair.0, pair.1, 0);
-        let second = dedupe_prompt(pair.0, pair.1, 1);
+        ];
+        let first = dedupe_prompt(members, &[], 0);
+        let second = dedupe_prompt(members, &[], 1);
         assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(pair.0, pair.1, 2));
+        assert_ne!(second, dedupe_prompt(members, &[], 2));
         // A first ask stays exactly what it was, so the cache still earns its
-        // keep on a pair the sweep re-arms after a verdict was lost.
+        // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
     }
 
     #[test]
-    fn the_judge_is_told_that_different_subjects_are_not_a_conflict() {
+    fn the_dedupe_pass_is_told_that_different_subjects_are_not_a_conflict() {
         // Two sections of one reference document are near-identical in form and
         // deliberately different in content, so similarity puts them in a pair
         // and every number in them differs. Without this rule the feature fires
-        // hardest exactly where it is most wrong.
+        // hardest exactly where it is most wrong — and now it would not merely
+        // flag them, it would merge them into mush.
         assert!(DEDUPE_SYSTEM.contains("same subject"));
-        assert!(DEDUPE_SYSTEM.contains("Answer false and stop."));
+        assert!(DEDUPE_SYSTEM.contains("different things"));
+        assert!(DEDUPE_SYSTEM.contains(r#"Answer "distinct" and stop."#));
+        // And the fidelity preference, which is what keeps most groups from
+        // producing synthetic text at all.
+        assert!(DEDUPE_SYSTEM.contains("Prefer this whenever it applies"));
     }
 
     #[test]
@@ -622,55 +796,91 @@ mod tests {
     }
 
     #[test]
-    fn a_judgement_parses() {
-        let (yes, detail, obsolete) =
-            parse_judgement(r#"{"contradicts":true,"detail":"one says 1.2, the other 1.4"}"#)
-                .unwrap();
-        assert!(yes);
-        assert_eq!(detail.as_deref(), Some("one says 1.2, the other 1.4"));
-        assert!(obsolete.is_none());
-    }
-
-    #[test]
-    fn a_negative_judgement_carries_no_detail() {
-        let (yes, detail, _) = parse_judgement(r#"{"contradicts":false}"#).unwrap();
-        assert!(!yes);
-        assert!(detail.is_none());
-    }
-
-    #[test]
-    fn a_judgement_wrapped_in_prose_and_fences_still_parses() {
-        // The same models that fence the synthesis reply fence this one.
-        let (yes, ..) = parse_judgement("Sure:\n```json\n{\"contradicts\": true}\n```").unwrap();
-        assert!(yes);
-    }
-
-    #[test]
-    fn a_judgement_names_the_obsolete_side() {
-        let (yes, _, obsolete) = parse_judgement(
-            r#"{"contradicts":true,"detail":"a uses --old-flag, b uses --new-flag","obsolete":"a"}"#,
+    fn a_duplicate_verdict_carries_a_merged_draft() {
+        let d = parse_dedupe(
+            r#"{"relation":"duplicate","detail":"same command, more detail",
+                "merged":{"title":"Bind mounts","text":"Use mount --bind.",
+                          "tags":["mount"],"caveats":[],"category":"howto"}}"#,
         )
         .unwrap();
-        assert!(yes);
-        assert_eq!(obsolete, Some('a'));
+        assert_eq!(d.relation, Relation::Duplicate);
+        let m = d.merged.as_ref().unwrap();
+        assert_eq!(m.text, "Use mount --bind.");
+        assert_eq!(m.title.as_deref(), Some("Bind mounts"));
+        assert_eq!(m.tags, vec!["mount".to_string()]);
     }
 
     #[test]
-    fn an_unreadable_obsolete_value_is_treated_as_absent() {
-        // An unparsable direction must not fail the whole reply — the
-        // contradiction verdict itself is still readable.
-        let (yes, _, obsolete) =
-            parse_judgement(r#"{"contradicts":true,"obsolete":"not sure honestly"}"#).unwrap();
-        assert!(yes);
-        assert!(obsolete.is_none());
+    fn a_merged_block_on_a_non_duplicate_verdict_is_unreadable() {
+        // `merged` belongs to `duplicate` and to nothing else. Accepting it
+        // elsewhere would let a reply that classified a group as a conflict
+        // still hand us text to write — which is the one outcome the conflict
+        // verdict exists to prevent.
+        for relation in ["conflict", "replaced", "distinct"] {
+            let body = format!(
+                r#"{{"relation":"{relation}","supersedes":"a",
+                     "merged":{{"text":"x","tags":[],"caveats":[]}}}}"#
+            );
+            assert!(
+                matches!(parse_dedupe(&body), Err(Error::MalformedLlmOutput(_))),
+                "a {relation} verdict was allowed to carry a merge"
+            );
+        }
     }
 
     #[test]
-    fn an_unparsable_judgement_is_an_error_not_a_yes() {
-        // Defaulting to "contradicts" would fill the review queue with noise;
-        // defaulting to "no" would hide real conflicts. Neither: it fails, the
-        // pair stays pending, and the next sweep tries again.
-        assert!(parse_judgement("I could not decide.").is_err());
+    fn a_duplicate_verdict_with_nothing_to_write_is_unreadable() {
+        // A merge the write path cannot carry out. Failing re-asks; accepting
+        // would settle the group having done nothing.
+        assert!(matches!(
+            parse_dedupe(r#"{"relation":"duplicate","detail":"x"}"#),
+            Err(Error::MalformedLlmOutput(_))
+        ));
+        assert!(matches!(
+            parse_dedupe(
+                r#"{"relation":"duplicate","merged":{"text":"   ","tags":[],"caveats":[]}}"#
+            ),
+            Err(Error::MalformedLlmOutput(_))
+        ));
+    }
+
+    #[test]
+    fn a_replacement_names_the_obsolete_side() {
+        let d = parse_dedupe(
+            r#"{"relation":"replaced","supersedes":"B","detail":"a uses --old-flag"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.relation, Relation::Replaced);
+        assert_eq!(d.supersedes, Some('b'));
+    }
+
+    #[test]
+    fn a_replacement_naming_no_side_falls_back_to_a_conflict() {
+        // A direction the model would not name is not a direction. Treating it
+        // as one would pick a side by accident, and on a supersede that means
+        // hiding an artifact for no stated reason.
+        let d = parse_dedupe(r#"{"relation":"replaced","detail":"one of them is old"}"#).unwrap();
+        assert_eq!(d.relation, Relation::Conflict);
+        let d =
+            parse_dedupe(r#"{"relation":"replaced","supersedes":"not sure honestly"}"#).unwrap();
+        assert_eq!(d.relation, Relation::Conflict);
+    }
+
+    #[test]
+    fn a_verdict_wrapped_in_prose_and_fences_still_parses() {
+        // The same models that fence the synthesis reply fence this one.
+        let d = parse_dedupe("Sure:\n```json\n{\"relation\": \"distinct\"}\n```").unwrap();
+        assert_eq!(d.relation, Relation::Distinct);
+    }
+
+    #[test]
+    fn an_unparsable_verdict_is_an_error_not_a_default() {
+        // Defaulting to "conflict" would fill the escalation queue with noise a
+        // person has to clear by hand; defaulting to "distinct" would quietly
+        // close real duplicates. Neither: it fails, the group stays pending, and
+        // the unit asks again with a prompt the endpoint has not cached.
+        assert!(parse_dedupe("I could not decide.").is_err());
+        assert!(parse_dedupe(r#"{"relation":"maybe"}"#).is_err());
     }
 
     #[test]

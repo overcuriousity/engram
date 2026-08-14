@@ -57,8 +57,11 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .complete(
             crate::infer::prompt::DEDUPE_SYSTEM,
             &crate::infer::prompt::dedupe_prompt(
-                (a.title.as_deref().unwrap_or("untitled"), &a.text),
-                (b.title.as_deref().unwrap_or("untitled"), &b.text),
+                &[
+                    (a.title.as_deref().unwrap_or("untitled"), a.text.as_str()),
+                    (b.title.as_deref().unwrap_or("untitled"), b.text.as_str()),
+                ],
+                &crate::infer::facts::differing_values(&[&a.text, &b.text]),
                 p.judge_attempts,
             ),
         )
@@ -86,14 +89,39 @@ async fn apply(
     b: &crate::store::artifacts::Chunk,
     reply: &str,
 ) -> Result<()> {
-    match crate::infer::prompt::parse_judgement(reply) {
-        Ok((true, detail, obsolete)) => {
-            // Trust the judge's named direction only when it agrees with the
-            // sweep's own newest-wins bias (see `keeper`): a call that names the
-            // *newer* artifact obsolete is exactly the failure mode worth
-            // guarding against, since it would otherwise propose hiding the side
-            // more likely to be current.
-            let obsolete_id = obsolete.and_then(|side| {
+    use crate::infer::prompt::Relation;
+    let verdict = match crate::infer::prompt::parse_dedupe(reply) {
+        Ok(v) => v,
+        Err(e) => {
+            core.store.record_unreadable_judgement(p.id).await?;
+            tracing::warn!(
+                pair = p.id,
+                attempt = p.judge_attempts,
+                error = %e,
+                "dedupe reply unreadable; pair stays pending"
+            );
+            return Err(e);
+        }
+    };
+
+    match verdict.relation {
+        Relation::Distinct => {
+            core.store
+                .set_pair_state(p.id, PairState::NoConflict, verdict.detail.as_deref())
+                .await?;
+        }
+        Relation::Conflict => {
+            core.store
+                .set_pair_state(p.id, PairState::Contradiction, verdict.detail.as_deref())
+                .await?;
+            tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
+        }
+        Relation::Replaced => {
+            // Trust the named direction only when it agrees with the sweep's own
+            // newest-wins bias (see `keeper`): a call naming the *newer* artifact
+            // obsolete is exactly the failure mode worth guarding against, since
+            // it would otherwise hide the side more likely to be current.
+            let obsolete_id = verdict.supersedes.and_then(|side| {
                 let (named, other) = match side {
                     'a' => (a, b),
                     _ => (b, a),
@@ -102,54 +130,33 @@ async fn apply(
             });
             match obsolete_id {
                 Some(obsolete_id) => {
-                    // Proposed, not applied: an operator confirms via the pair's
-                    // "apply supersede" action before anything is hidden.
                     core.store
-                        .set_pair_superseded(p.id, &obsolete_id, detail.as_deref())
+                        .set_pair_superseded(p.id, &obsolete_id, verdict.detail.as_deref())
                         .await?;
                     tracing::info!(
                         pair = p.id,
                         obsolete = %obsolete_id,
-                        "judge proposed a supersede, pending operator confirmation"
+                        "dedupe proposed a supersede, pending operator confirmation"
                     );
                 }
                 None => {
                     core.store
-                        .set_pair_state(p.id, PairState::Contradiction, detail.as_deref())
+                        .set_pair_state(p.id, PairState::Contradiction, verdict.detail.as_deref())
                         .await?;
-                    tracing::info!(pair = p.id, a = %a.id, b = %b.id, "artifacts disagree");
                 }
             }
         }
-        Ok((false, _, _)) => {
+        // The write path lands in the next commit. Until then a duplicate is
+        // recorded rather than applied, which is what `autonomous = false` will
+        // keep doing afterwards.
+        Relation::Duplicate => {
+            let detail = verdict
+                .detail
+                .clone()
+                .unwrap_or_else(|| "would merge".into());
             core.store
-                .set_pair_state(p.id, PairState::NoConflict, None)
+                .set_pair_state(p.id, PairState::Contradiction, Some(&detail))
                 .await?;
-        }
-        // A reply that cannot be read is an error, not a verdict: the pair stays
-        // pending, and the unit retries under the queue's backoff.
-        //
-        // Retrying is only worth anything because `dedupe_prompt` carries the
-        // attempt number. `MalformedLlmOutput` is retryable, so this re-queues
-        // the unit — and against an endpoint that caches by exact prompt, an
-        // unchanged prompt would replay the same unreadable bytes for every one
-        // of `MAX_ATTEMPTS`. One varying byte is what makes the second ask a
-        // second ask.
-        //
-        // Counted here and not beside `record_judge_attempt`, because this is
-        // the only failure that says anything about the pair. A call the
-        // endpoint never answered says something about the endpoint, and
-        // letting an outage count against every pending pair would take the
-        // whole review queue out of the judge's reach on its way past.
-        Err(e) => {
-            core.store.record_unreadable_judgement(p.id).await?;
-            tracing::warn!(
-                pair = p.id,
-                attempt = p.judge_attempts,
-                error = %e,
-                "judge reply unreadable; pair stays pending"
-            );
-            return Err(e);
         }
     }
     Ok(())

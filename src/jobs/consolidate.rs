@@ -1326,7 +1326,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"contradicts":true,"detail":"1.21.4 versus 1.30.0"}"#.into(),
+            r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
         ]));
         disagreeing(&core).await;
 
@@ -1348,7 +1348,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"contradicts":true,"detail":"old flag vs new flag","obsolete":"a"}"#.into(),
+            r#"{"relation":"replaced","detail":"old flag vs new flag","supersedes":"a"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
 
@@ -1393,7 +1393,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"contradicts":true,"detail":"x","obsolete":"b"}"#.into(),
+            r#"{"relation":"replaced","detail":"x","supersedes":"b"}"#.into(),
         ]));
 
         run(&core).await.unwrap();
@@ -1452,9 +1452,9 @@ pub(crate) mod tests {
         core.consolidate.autonomous = true;
         core.consolidate.max_judgements = 1;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"contradicts":false}"#.into(),
-            r#"{"contradicts":false}"#.into(),
-            r#"{"contradicts":false}"#.into(),
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         core.completer = completer.clone();
         seed(
@@ -1625,7 +1625,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"contradicts":false}"#.into(),
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         core.completer = completer.clone();
         disagreeing(&core).await;
@@ -1696,7 +1696,7 @@ pub(crate) mod tests {
         core.consolidate.max_judgements = 1;
         core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
-            r#"{"contradicts":true,"detail":"30 versus 90"}"#.into(),
+            r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
         ]));
         seed(
             &core,

@@ -105,6 +105,33 @@ pub fn may_disagree(a: &str, b: &str) -> bool {
     !fa.is_empty() && !fb.is_empty() && fa != fb
 }
 
+/// Values that not all of these texts state.
+///
+/// This is what `may_disagree` became once deduplication replaced contradiction
+/// hunting. As a gate the predicate was backwards: it admitted a pair only when
+/// values *differed*, which discards exactly the pairs that are cleanest to
+/// merge — two artifacts saying the same thing in different words have nothing
+/// to contradict and everything to combine.
+///
+/// As a list it is useful in both directions. Handed to the model it names what
+/// to look at without deciding anything, because it cannot tell a real
+/// disagreement from the same subject described at two levels of detail. Handed
+/// to the merge verification it becomes a hard rule: whatever appears here has
+/// to survive into the merged text, or the merge dropped a value and is refused.
+///
+/// Sorted, because it goes into a prompt: the endpoint caches by exact prompt
+/// text, and a set iterating in a different order would defeat that for no gain.
+pub fn differing_values(texts: &[&str]) -> Vec<String> {
+    let sets: Vec<BTreeSet<String>> = texts.iter().map(|t| fact_tokens(t)).collect();
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    for s in &sets {
+        all.extend(s.iter().cloned());
+    }
+    all.into_iter()
+        .filter(|tok| !sets.iter().all(|s| s.contains(tok)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +221,41 @@ mod tests {
         let f = fact_tokens("Listens on 8080/tcp, tagged 2.0-rc1.");
         assert!(f.contains("8080/tcp"), "{f:?}");
         assert!(f.contains("2.0-rc1"), "{f:?}");
+    }
+
+    #[test]
+    fn differing_values_names_only_what_is_not_shared() {
+        // The prompt prior. A value every artifact states is not something to
+        // ask about; a value only some of them state is.
+        assert_eq!(
+            differing_values(&[
+                "The timeout is 30s on port 8080.",
+                "The timeout is 90s on port 8080."
+            ]),
+            vec!["30s".to_string(), "90s".to_string()],
+            "the shared port should not be named"
+        );
+    }
+
+    #[test]
+    fn texts_agreeing_on_every_value_differ_in_none() {
+        // And this is the case the old gate discarded: nothing to disagree
+        // about, everything to merge.
+        assert!(
+            differing_values(&["Needs v1.21.4 to build.", "To build it you need 1.21.4."])
+                .is_empty()
+        );
+        assert!(differing_values(&["Prose only.", "Different prose."]).is_empty());
+    }
+
+    #[test]
+    fn a_value_only_one_artifact_states_is_a_differing_value() {
+        // It is exactly what a merge must carry over, so verification has to
+        // see it even though nothing contradicts it.
+        assert_eq!(
+            differing_values(&["Mount it first.", "Mount it first. Wait 30s."]),
+            vec!["30s".to_string()]
+        );
     }
 
     #[test]
