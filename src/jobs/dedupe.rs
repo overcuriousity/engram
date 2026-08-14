@@ -374,6 +374,11 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .await;
             };
 
+            let (touching, survivors): (Vec<&ArtifactPair>, Vec<&ArtifactPair>) = s
+                .pairs
+                .iter()
+                .partition(|pr| pr.a_id == obsolete || pr.b_id == obsolete);
+
             if core.consolidate.autonomous {
                 // The side effect FIRST. A failure here leaves every pair
                 // pending, so the unit retries under the queue's backoff — the
@@ -382,64 +387,50 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 // whose seed is no longer Pending.
                 core.supersede(&obsolete, &winner).await?;
                 tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
-                for pr in &s.pairs {
-                    if pr.a_id == obsolete || pr.b_id == obsolete {
-                        // As the manual apply settles it (`apply_pair_supersede_ui`):
-                        // done, with the model's reasoning kept as the record
-                        // of why. Leaving it Superseded listed the applied
-                        // replacement as awaiting confirmation forever, behind
-                        // Keep buttons that could only return a validation
-                        // error against the already-superseded side.
-                        core.store
-                            .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
-                            .await?;
-                    } else {
-                        // Both sides survived. Writing the direction here
-                        // anyway named an artifact the pair does not contain.
-                        // Not left pending either: the roots this verdict was
-                        // drawn from are unchanged, so re-arming would build
-                        // the identical prompt and receive the identical
-                        // answer forever. An unanswered question goes where
-                        // the others go: to a person.
-                        core.store
-                            .set_pair_state(
-                                pr.id,
-                                PairState::Contradiction,
-                                Some(&format!(
-                                    "{obsolete} was superseded; these two were not separated"
-                                )),
-                            )
-                            .await?;
-                    }
+                for pr in &touching {
+                    // As the manual apply settles it (`apply_pair_supersede_ui`):
+                    // done, with the model's reasoning kept as the record of
+                    // why. Leaving it Superseded listed the applied replacement
+                    // as awaiting confirmation forever, behind Keep buttons
+                    // that could only return a validation error against the
+                    // already-superseded side.
+                    core.store
+                        .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
+                        .await?;
                 }
-                return Ok(());
-            }
-
-            // Proposal mode: nothing is hidden, the pair carries the direction
-            // and an operator confirms via "apply supersede".
-            for pr in &s.pairs {
-                if pr.a_id == obsolete || pr.b_id == obsolete {
+            } else {
+                // Proposal mode: nothing is hidden, the pair carries the
+                // direction and an operator confirms via "apply supersede".
+                for pr in &touching {
                     core.store
                         .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
                         .await?;
-                } else {
-                    // Both sides survived. Writing the direction here anyway
-                    // named an artifact the pair does not contain, and Ops
-                    // rendered an "apply supersede" button for it — a button
-                    // that would hide a third artifact on the strength of a
-                    // question about two others.
-                    core.store
-                        .set_pair_state(
-                            pr.id,
-                            PairState::Contradiction,
-                            Some(&format!(
-                                "{obsolete} was superseded; these two were not separated"
-                            )),
-                        )
-                        .await?;
                 }
+                tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
             }
-            tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
+
+            // Both sides of these pairs survived. Writing the direction on
+            // them named an artifact the pair does not contain — and Ops
+            // rendered an "apply supersede" button for it, one that would hide
+            // a third artifact on the strength of a question about two others.
+            // Not left pending either: the roots this verdict was drawn from
+            // are unchanged, so re-arming would build the identical prompt and
+            // receive the identical answer forever. An unanswered question
+            // goes where the others go: to a person.
+            //
+            // Past tense only where the supersede actually ran. In proposal
+            // mode it may yet be rejected, and a record asserting it happened
+            // would outlive the rejection.
+            let survivor_detail = if core.consolidate.autonomous {
+                format!("{obsolete} was superseded; these two were not separated")
+            } else {
+                format!("superseding {obsolete} was proposed; these two were not separated")
+            };
+            for pr in &survivors {
+                core.store
+                    .set_pair_state(pr.id, PairState::Contradiction, Some(&survivor_detail))
+                    .await?;
+            }
             Ok(())
         }
         Relation::Duplicate => {
@@ -563,6 +554,47 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_proposed_supersede_is_not_recorded_as_a_done_one() {
+        // Proposal mode: the supersede is a proposal an operator may reject.
+        // The sibling pair's record must not assert an event that has not
+        // happened.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = false;
+        core.completer = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"a is stale"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
+                ("engram needs Rust 1.30.0 to build.", [0.93, 0.37]),
+                ("engram builds with stable Rust.", [0.90, 0.44]),
+            ],
+        )
+        .await;
+        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        queue_pair(&core, &ids[1], &ids[2]).await;
+
+        run(&core, &seed_pair.to_string()).await.unwrap();
+
+        let contradictions = core
+            .store
+            .pairs_by_state(PairState::Contradiction, 10)
+            .await
+            .unwrap();
+        assert_eq!(contradictions.len(), 1, "the survivor pair escalates");
+        let detail = contradictions[0].detail.clone().unwrap_or_default();
+        assert!(
+            !detail.contains("was superseded"),
+            "the record asserts a supersession that is only proposed: {detail}"
+        );
+        // Nothing was hidden in proposal mode.
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
     }
 
     async fn disagreeing(core: &Core) -> Vec<String> {
