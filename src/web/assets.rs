@@ -19,11 +19,23 @@ fn content_type(path: &str) -> String {
     }
 }
 
+/// Embedded, but not public.
+///
+/// `build.rs` writes the browser packages under `assets/extension/`, which is
+/// the directory `rust-embed` takes wholesale. They are served by
+/// `web::extension` instead, behind the same authentication as everything else
+/// and with `no-store` — and neither of those means anything while the same
+/// bytes are reachable here anonymously with a year-long `max-age`.
+const PRIVATE: [&str; 1] = ["extension/"];
+
 async fn serve(Path(path): Path<String>) -> Response {
     // rust-embed matches on exact stored paths, so a traversal attempt simply
     // finds nothing. Reject it explicitly anyway rather than relying on that.
     if path.contains("..") {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+    if PRIVATE.iter().any(|p| path.starts_with(p)) {
+        return StatusCode::NOT_FOUND.into_response();
     }
     match Assets::get(&path) {
         Some(file) => (
@@ -139,6 +151,25 @@ mod tests {
                 .unwrap()
                 .contains("max-age")
         );
+    }
+
+    #[tokio::test]
+    async fn the_extension_packages_are_not_reachable_through_assets() {
+        // `build.rs` writes them under `assets/`, so they are embedded here
+        // whether or not they belong here. `web::extension` serves them behind
+        // authentication and with `no-store`; both are undone if the same
+        // bytes answer anonymously from this route with a year-long max-age.
+        for path in [
+            "/assets/extension/chrome.zip",
+            "/assets/extension/firefox.xpi",
+            "/assets/extension/firefox.signed",
+        ] {
+            let res = app()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path} was served");
+        }
     }
 
     #[test]

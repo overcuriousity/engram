@@ -23,9 +23,14 @@ struct InstallTemplate {
     theme: String,
     judge_pending: Option<i64>,
     origin: String,
-    /// False in a checkout that has not been through a release signing. The
-    /// page then says so rather than offering a link that 404s.
-    have_xpi: bool,
+    /// Whether the XPI on offer has been through AMO.
+    ///
+    /// Both arrive under the same name, and the difference decides what the
+    /// operator can do with it: a signed package installs in one click and
+    /// stays, an unsigned one loads through `about:debugging` and is gone at
+    /// the next restart. Saying which is on offer is the difference between an
+    /// instruction that works and one that does not.
+    xpi_signed: bool,
 }
 
 /// The download page. Authenticated like everything else, and it carries this
@@ -36,7 +41,7 @@ async fn install_page(State(st): State<AppState>, _id: Identity, headers: Header
         theme: "light".into(),
         judge_pending: judge_pending(&st).await,
         origin: request_origin(&headers).unwrap_or_default(),
-        have_xpi: Assets::get("extension/firefox.xpi").is_some(),
+        xpi_signed: Assets::get("extension/firefox.signed").is_some(),
     })
     .into_response()
 }
@@ -146,6 +151,9 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("http://engram.example"), "got: {html}");
+        // `https`, with no `X-Forwarded-Proto` to go on. A deployment on a
+        // real host name is behind TLS, and a proxy that forwards without
+        // setting the header is the ordinary case rather than the exotic one.
+        assert!(html.contains("https://engram.example"), "got: {html}");
     }
 }

@@ -8,16 +8,35 @@ box, and search from a panel beside the page.</p>
 {# Install differs by browser, and saying so plainly is better than one button
    that works for half the people who press it. #}
 <h3>Firefox</h3>
-{% if have_xpi %}
-<p><a href="/extension/firefox.xpi">Install</a> — one click.</p>
+{% if xpi_signed %}
+<p><a href="/extension/firefox.xpi">Install</a> — one click. This build carries
+an AMO-signed package.</p>
 {% else %}
-<p class="muted">Not in this build. The Firefox package is signed once per
-release and committed; a checkout that has not been through one does not carry
-it.</p>
+<p><a href="/extension/firefox.xpi">Download the .xpi</a>. It is unsigned, and
+Firefox will not install an unsigned add-on permanently, so there are three
+ways to run it — in the order most people should try them:</p>
+<ol>
+  <li><b>Load it temporarily.</b> Open
+    <code>about:debugging#/runtime/this-firefox</code>, press
+    <em>Load Temporary Add-on</em>, and pick the <code>.xpi</code>. It works
+    immediately and is gone when Firefox restarts.</li>
+  <li><b>Turn the signature check off.</b> In
+    <code>about:config</code>, set
+    <code>xpinstall.signatures.required</code> to <code>false</code>, then
+    open the file. This only works on Developer Edition, Nightly and ESR —
+    release Firefox ignores the setting.</li>
+  <li><b>Have it signed.</b> An add-on can be signed without being published:
+    an <em>unlisted</em> submission at addons.mozilla.org is not reviewed, not
+    listed and not searchable, and the signed file it returns installs in one
+    click and stays. It needs a (free) Mozilla account. The steps are in
+    <code>extension/README.md</code>; drop the result at
+    <code>extension/firefox-signed.xpi</code>, rebuild, and this page will
+    offer that instead.</li>
+</ol>
 {% endif %}
-<p class="muted">There is no auto-update: one signed artifact serves every
-deployment, and a manifest naming a single update host could not do that.
-Come back here after a deployment.</p>
+<p class="muted">There is no auto-update: one artifact serves every deployment,
+and a manifest naming a single update host could not do that. Come back here
+after a deployment.</p>
 
 <h3>Chrome</h3>
 <p><a href="/extension/chrome.zip">Download</a>, unzip it, open
@@ -28,9 +47,12 @@ is no one-click path and no auto-update. An enterprise policy allowlist is the
 alternative, and is not the default here.</p>
 
 <h3>Pairing</h3>
-<p>Open the panel and press Capture. It will ask for
-<strong>{{ origin }}</strong>, and for permission to reach that one host —
-nothing else, and no access to any other site.</p>
+<p>Open the panel and enter the address you reach engram at — most likely
+<strong>{{ origin }}</strong>, though a deployment behind a proxy can answer to
+more than one, and the one your browser uses is the one to type. Press
+<em>Pair</em>: Firefox or Chrome will ask for permission to reach that one
+host, and nothing else.</p>
 <p class="muted">The token appears under Housekeeping → API tokens as
-“browser extension”, and can be revoked there.</p>
+“browser extension”, and can be revoked there. Revoking it puts the panel back
+to asking for an address rather than leaving it stuck.</p>
 {% endblock %}
