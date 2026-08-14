@@ -310,15 +310,24 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
 
-    // Anything else the model wrote there — a stray word, a whole sentence — is
+    // Any single letter, because `dedupe_prompt` letters as many artifacts as
+    // the component has and the fan-in cap — not this parser — is what bounds
+    // that. Stopping at "d" silently downgraded every direction named in a group
+    // of five or more to a conflict, which turned the cheapest and most faithful
+    // outcome, superseding one stored original by another, into a queue entry
+    // for a person.
+    //
+    // How far the letters actually run is the caller's to know: it resolves this
+    // against the list it showed, and a letter past the end downgrades there.
+    // Anything else the model wrote — a stray word, a whole sentence — is
     // treated the same as omitting it. An unreadable direction must not fail an
     // otherwise perfectly readable verdict.
-    let side = r.supersedes.as_deref().and_then(|s| match s.trim() {
-        "a" | "A" => Some('a'),
-        "b" | "B" => Some('b'),
-        "c" | "C" => Some('c'),
-        "d" | "D" => Some('d'),
-        _ => None,
+    let side = r.supersedes.as_deref().and_then(|s| {
+        let mut chars = s.trim().chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+            _ => None,
+        }
     });
 
     let relation = match r.relation.trim().to_ascii_lowercase().as_str() {
@@ -852,6 +861,23 @@ mod tests {
         .unwrap();
         assert_eq!(d.relation, Relation::Replaced);
         assert_eq!(d.supersedes, Some('b'));
+    }
+
+    #[test]
+    fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
+        // `dedupe_prompt` letters one artifact per component member, and the
+        // fan-in cap defaults to eight — so H is a letter the model is routinely
+        // invited to answer with. A parser that stopped at D turned every one of
+        // those into a conflict, which spends a person on a group the model had
+        // already resolved the cheap way.
+        for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
+            let d = parse_dedupe(&format!(
+                r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
+            ))
+            .unwrap();
+            assert_eq!(d.relation, Relation::Replaced, "{letter} was not a direction");
+            assert_eq!(d.supersedes, Some(want));
+        }
     }
 
     #[test]
