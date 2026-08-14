@@ -40,6 +40,20 @@ pub enum PairState {
     Superseded,
     /// An operator looked and decided there is nothing here.
     Dismissed,
+    /// Scored at or above `auto_supersede`. Settled by the sweep's free
+    /// clustering pass, and never armed for a model call: that band is answered
+    /// correctly by a rule that costs nothing, and spending a call there is the
+    /// free path quietly becoming a paid one.
+    ///
+    /// Filed rather than acted on where it is found, because resolving pairs one
+    /// at a time leaves A pointing at a B that is itself hidden — which is what
+    /// the sweep's union-find exists to prevent.
+    NearIdentical,
+    /// The component this pair belongs to draws on more captured roots than
+    /// `merge_max_roots`. Not merged, and surfaced instead: a merge of forty
+    /// sources is no longer one atomic piece of knowledge, which is what an
+    /// artifact is defined to be.
+    Oversized,
 }
 
 impl PairState {
@@ -50,6 +64,8 @@ impl PairState {
             PairState::Contradiction => "contradiction",
             PairState::Superseded => "superseded",
             PairState::Dismissed => "dismissed",
+            PairState::NearIdentical => "near_identical",
+            PairState::Oversized => "oversized",
         }
     }
     pub fn parse(s: &str) -> PairState {
@@ -58,6 +74,8 @@ impl PairState {
             "contradiction" => PairState::Contradiction,
             "superseded" => PairState::Superseded,
             "dismissed" => PairState::Dismissed,
+            "near_identical" => PairState::NearIdentical,
+            "oversized" => PairState::Oversized,
             _ => PairState::Pending,
         }
     }
@@ -395,6 +413,80 @@ mod tests {
             1,
             "an endpoint outage put the pair permanently out of the judge's reach"
         );
+    }
+
+    #[tokio::test]
+    async fn a_near_identical_pair_is_never_offered_to_the_model() {
+        // The >= auto_supersede band is settled for free by clustering. A pair
+        // filed there that reached the dedupe queue would spend a model call on
+        // exactly the case where the cheap rule is already correct — the free
+        // path quietly becoming a paid one, which is the expensive regression
+        // and the silent one.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_settled_pair(&a, &b, 0.99, PairState::NearIdentical)
+            .await
+            .unwrap();
+
+        assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
+        assert_eq!(
+            s.pairs_by_state(PairState::NearIdentical, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the pair has to stay findable: the cluster pass reads these rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_pair_leaves_the_pending_queue_but_stays_visible() {
+        // Past the fan-in cap nothing is merged, and the pair must not sit on
+        // the pending queue costing a call per sweep for a decision that will
+        // always come out the same way. It still has to be listed, or the
+        // component becomes invisible rather than deferred.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(p, PairState::Oversized, Some("9 roots, cap is 8"))
+            .await
+            .unwrap();
+
+        assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
+        let found = s.pairs_by_state(PairState::Oversized, 10).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].detail.as_deref(), Some("9 roots, cap is 8"));
+    }
+
+    #[tokio::test]
+    async fn every_state_survives_a_round_trip_through_the_database() {
+        // `parse` falls back to Pending for anything it does not know, so a
+        // state whose string is missing from either half reads back as an
+        // unanswered pair — and the sweep would ask about it again forever.
+        for state in [
+            PairState::Pending,
+            PairState::NoConflict,
+            PairState::Contradiction,
+            PairState::Superseded,
+            PairState::Dismissed,
+            PairState::NearIdentical,
+            PairState::Oversized,
+        ] {
+            let s = Store::memory().await.unwrap();
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, 0.91).await.unwrap();
+            let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+            if state != PairState::Pending {
+                s.set_pair_state(p, state, None).await.unwrap();
+            }
+            assert_eq!(
+                s.get_pair(p).await.unwrap().state,
+                state,
+                "{} did not survive the round trip",
+                state.as_str()
+            );
+        }
     }
 
     #[tokio::test]
