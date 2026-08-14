@@ -63,6 +63,17 @@ max_output_tokens = 16384
 # parsing partway through wants a higher number, not a lower one: a shorter
 # segment is a shorter reply. Lower it (1.5-2.0) for a large hosted model.
 output_ratio = 8.0
+# Seconds before the client gives up on one call. Defaults to 900. A timeout
+# looks exactly like a dead endpoint to the job runner: the job retries and
+# fails at the same wall, so this must exceed the model's real worst case.
+# timeout_secs = 900
+# Sent as `reasoning_effort` when set. On a reasoning model the thinking comes
+# out of max_output_tokens, so suppressing it is what stops the artifact list
+# from being cut off. Unset by default: models that do not reason reject the field.
+# reasoning_effort = "none"
+# Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
+# is ignored, and engram says so at startup rather than letting the setting
+# quietly stop happening.
 # Tokens of the document's verbatim opening prepended to every window, so an
 # artifact from deep in a long document still knows what product, version and
 # platform it belongs to — which is what the caveats field asks for and what a
