@@ -13,7 +13,7 @@
 //! this design exists to avoid.
 
 use crate::core::Core;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::store::artifacts::{ArtifactStatus, Chunk};
 use crate::store::jobs::Stage;
 use std::collections::{HashMap, HashSet};
@@ -441,12 +441,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     Ok(out)
 }
 
-/// Ask the model about pending pairs, but only the ones that could possibly
-/// disagree, and only up to the sweep's budget.
-///
-/// Returns how many calls were made and how many found a contradiction. A
-/// failed call leaves its pair pending on purpose: a dead endpoint must never
-/// look like a clean bill of health.
 /// Decide which pending pairs are worth a model call, and arm one unit each.
 ///
 /// Every filter here is local — an artifact's status, and the fact-token
@@ -456,9 +450,15 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// talks to a model any more, which is what stops one consolidation run
 /// blocking every capture behind it for as long as twenty calls take.
 ///
-/// Returns how many were armed. `max_judgements` is a cap on that rather than a
-/// loop bound, so the meaning of the setting is unchanged: the most model calls
-/// one sweep can be responsible for.
+/// Returns how many were armed. `max_judgements` bounds what one sweep arms,
+/// and deliberately not judge units in flight: a pair whose unit an earlier
+/// sweep queued is skipped without spending the budget, so a sweep still reaches
+/// pairs recorded since. Counting those in flight instead would let one unit the
+/// queue cannot get through — an open breaker, a dead endpoint — stop every other
+/// pair from ever being judged, which is the head-of-line blocking that splitting
+/// the sweep into units was for. Nothing runs away: `live_job` arms a pair at
+/// most once, so the depth is bounded by the pairs that exist, and the call rate
+/// is the gate's job rather than this number's.
 async fn arm_judgements(core: &Core) -> Result<usize> {
     let pending = core.store.pairs_to_judge(200).await?;
 
@@ -471,15 +471,26 @@ async fn arm_judgements(core: &Core) -> Result<usize> {
             );
             break;
         }
-        // Reported, not skipped. Skipping treated a store that was briefly
-        // unwell as a pair not worth arming, and since nothing recorded an
-        // attempt it led the next sweep's ordering all over again. There is no
-        // deletion to skip for: the pair rows are `ON DELETE CASCADE` on both
-        // members, so a pair naming an artifact that is gone cannot exist.
-        let (a, b) = (
-            core.store.get_artifact(&p.a_id).await?,
-            core.store.get_artifact(&p.b_id).await?,
-        );
+        // Reported, not skipped, with one exception. Skipping treated a store
+        // that was briefly unwell as a pair not worth arming, and since nothing
+        // recorded an attempt it led the next sweep's ordering all over again.
+        //
+        // A pair naming an artifact that is gone is the exception. The pair rows
+        // are `ON DELETE CASCADE` on both members, so the state does not persist
+        // — but `pairs_to_judge` handed us a snapshot, and this loop is full of
+        // awaits, so a re-segmentation or an operator's delete lands inside it
+        // and cascades a pair away between the read and here. Propagating that
+        // `NotFound` reaches `run_one`, which reads it as the sweep's own target
+        // being gone: it completes the job, and every pair behind this one waits
+        // for the next tick — up to `interval_hours` away.
+        let (a, b) = match (
+            core.store.get_artifact(&p.a_id).await,
+            core.store.get_artifact(&p.b_id).await,
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(Error::NotFound), _) | (_, Err(Error::NotFound)) => continue,
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        };
 
         // A pair queued in the review band can have a member retired after the
         // fact: superseded by a later sweep once a re-embed moves the score
@@ -1580,6 +1591,76 @@ mod tests {
             1,
             "the second sweep never reached an unjudged pair"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_artifact_vanished_does_not_abandon_the_rest_of_the_sweep() {
+        // `pairs_to_judge` hands back a snapshot, and the arming loop is full of
+        // awaits: a re-segmentation of a window, or an operator deleting an
+        // artifact, lands inside it and cascades one of these pairs away between
+        // the read and the read of its members.
+        //
+        // Propagating that `NotFound` reached `run_one`, which reads it as the
+        // sweep's own target being gone — it logs the job as dropped and
+        // completes it. One pair that lost a race therefore cost every pair
+        // behind it a wait of up to `interval_hours`.
+        let mut core = test_core().await;
+        core.consolidate.judge = true;
+        core.consolidate.max_judgements = 5;
+        let ids = seed(
+            &core,
+            &[
+                ("timeout is 30 seconds", [1.0, 0.0]),
+                ("timeout is 60 seconds", [0.0, 1.0]),
+                ("retry is 3 times", [-1.0, 0.0]),
+                ("retry is 9 times", [0.0, -1.0]),
+            ],
+        )
+        .await;
+        // The higher score leads the snapshot, so the surviving pair is only
+        // reached if the missing one did not end the loop.
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.95)
+            .await
+            .unwrap();
+        core.store
+            .record_pair(&ids[2], &ids[3], 0.90)
+            .await
+            .unwrap();
+
+        // The state the sweep observes mid-loop, held still. The cascade would
+        // normally take the pair row along with the artifact, which is exactly
+        // why the pragma is needed to reproduce it: what the loop is holding is a
+        // pair it read *before* the delete.
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM artifacts WHERE id = ?")
+            .bind(&ids[0])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let armed = arm_judgements(&core).await.unwrap();
+
+        assert_eq!(
+            armed, 1,
+            "the pair that lost the race took the whole sweep down with it"
+        );
+        let target: String = sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'judge'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        let surviving = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.a_id == ids[2])
+            .expect("the untouched pair is still pending");
+        assert_eq!(target, surviving.id.to_string());
     }
 
     #[tokio::test]
