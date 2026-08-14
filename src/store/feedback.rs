@@ -25,6 +25,12 @@ pub enum Door {
     /// captured: those queries are composed in full knowledge of the answer,
     /// which is exactly the contamination this whole feature exists to avoid.
     Judge,
+    /// A search made from the browser extension, usually over a selection on
+    /// the page being read. Recorded like `Ui` and `Api`, and distinguished
+    /// from them because it is the strongest uncontaminated query there is:
+    /// composed before anything came back, about text the operator is looking
+    /// at rather than text engram showed them.
+    Extension,
     /// The retrieval behind `ask`. Never captured either, for a different
     /// reason: its right answer is a synthesis across several artifacts, so
     /// "which one was it" has no well-defined meaning to judge.
@@ -37,13 +43,27 @@ impl Door {
             Door::Ui => "ui",
             Door::Api => "api",
             Door::Mcp => "mcp",
+            Door::Extension => "extension",
             Door::Judge => "judge",
             Door::Ask => "ask",
         }
     }
 
     pub fn captured(&self) -> bool {
-        matches!(self, Door::Ui | Door::Api | Door::Mcp)
+        matches!(self, Door::Ui | Door::Api | Door::Mcp | Door::Extension)
+    }
+
+    /// The door a client is allowed to claim for itself.
+    ///
+    /// Only `extension`. Everything else falls back to `Api`, because a client
+    /// that could name `Ask` or `Judge` could mark a contaminated query as a
+    /// clean one — or have a real one silently dropped — which is the exact
+    /// thing the judging loop exists to prevent.
+    pub fn from_client(raw: &str) -> Door {
+        match raw {
+            "extension" => Door::Extension,
+            _ => Door::Api,
+        }
     }
 }
 
@@ -648,6 +668,26 @@ mod tests {
 
     fn ev(query: &str, door: Door) -> NewEvent {
         scoped(query, door, None)
+    }
+
+    #[test]
+    fn only_the_extension_may_name_its_own_door() {
+        // The door is how a search is weighted later, so a client that could
+        // name any of them could label an `ask` retrieval as a deliberate
+        // query and quietly poison the eval set.
+        assert!(matches!(Door::from_client("extension"), Door::Extension));
+        for other in ["ui", "judge", "ask", "mcp", "", "nonsense"] {
+            assert!(
+                matches!(Door::from_client(other), Door::Api),
+                "client named {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extension_search_is_captured_like_a_ui_one() {
+        assert!(Door::Extension.captured());
+        assert_eq!(Door::Extension.as_str(), "extension");
     }
 
     fn scoped(query: &str, door: Door, scope: Option<&str>) -> NewEvent {

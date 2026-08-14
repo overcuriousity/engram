@@ -382,6 +382,9 @@ pub struct SearchParams {
     pub include_deprecated: bool,
     #[serde(default)]
     pub include_superseded: bool,
+    /// Which client is asking. Only `extension` is honoured; see
+    /// `Door::from_client`.
+    pub door: Option<String>,
 }
 
 async fn search(
@@ -389,6 +392,11 @@ async fn search(
     _id: Identity,
     Query(q): Query<SearchParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+    let door = q
+        .door
+        .as_deref()
+        .map(crate::store::feedback::Door::from_client)
+        .unwrap_or(crate::store::feedback::Door::Api);
     let query = SearchQuery {
         q: q.q,
         limit: q.limit.unwrap_or(0),
@@ -409,11 +417,7 @@ async fn search(
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
     };
-    Ok(Json(
-        st.core
-            .search(&query, crate::store::feedback::Door::Api)
-            .await?,
-    ))
+    Ok(Json(st.core.search(&query, door).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -619,7 +623,15 @@ mod tests {
     }
 
     pub async fn app_token_and_core() -> (axum::Router, String, crate::core::Core) {
-        let core = crate::core::test_support::test_core().await;
+        app_from_core(crate::core::test_support::test_core().await).await
+    }
+
+    /// Wrap a core a test has already adjusted — feedback switched on, say —
+    /// in the real router. Factored out rather than duplicated so there stays
+    /// one way to build a test app, and it is the one the binary builds.
+    pub async fn app_from_core(
+        core: crate::core::Core,
+    ) -> (axum::Router, String, crate::core::Core) {
         let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1")
             .await
             .unwrap();
@@ -693,6 +705,55 @@ mod tests {
             .header("content-type", format!("multipart/form-data; boundary={B}"))
             .body(Body::from(buf))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_extension_search_records_its_own_door() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+
+        let res = app
+            .oneshot(get(
+                "/api/v1/search?q=loop+device&door=extension",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        // A search from the panel is the least contaminated query there is:
+        // composed while reading, before anything came back. The judging page
+        // can only weigh it that way if the door says which it was.
+        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(doors, vec!["extension".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_client_cannot_claim_a_door_that_would_launder_its_query() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+
+        // `ask` and `judge` are never captured, so naming one would be a way
+        // to have a contaminated query recorded as a clean one — or to have a
+        // real one silently dropped.
+        let res = app
+            .oneshot(get("/api/v1/search?q=loop+device&door=judge", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        core.background.wait_idle().await;
+
+        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(doors, vec!["api".to_string()]);
     }
 
     #[tokio::test]
