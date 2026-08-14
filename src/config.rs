@@ -182,6 +182,19 @@ pub struct ConsolidateConfig {
     /// to the candidate list — it never feeds search scoring, or a frequently
     /// shown result would keep boosting its own visibility.
     pub stale_max_hits: i64,
+
+    /// Retired. Read only so that `judge = false` can be carried across rather
+    /// than ignored, and so an operator is told where the setting went.
+    ///
+    /// It gated whether the model was asked at all, which is now
+    /// `max_dedupe_per_tick = 0`. Left unread it would parse without complaint,
+    /// and the operator who had switched the only inference-costing stage off
+    /// would be given an autonomous one instead — a setting that hides
+    /// artifacts, arriving by upgrade, from a file that says the opposite.
+    pub judge: Option<bool>,
+    /// Retired. A number per 24-hour tick was a budget only while the sweep was
+    /// the only producer of pairs; see `max_dedupe_per_tick`, which is a rate.
+    pub max_judgements: Option<usize>,
 }
 
 impl Default for ConsolidateConfig {
@@ -200,6 +213,8 @@ impl Default for ConsolidateConfig {
             merge_max_roots: 8,
             stale_after_days: 365,
             stale_max_hits: 0,
+            judge: None,
+            max_judgements: None,
         }
     }
 }
@@ -461,11 +476,52 @@ impl Config {
             )
             .build()?;
         let mut cfg: Config = raw.try_deserialize()?;
+        cfg.carry_retired_keys();
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_moved_keys();
         Ok(cfg)
+    }
+
+    /// A retired key still says what its operator wanted, and is honoured where
+    /// something current can carry it.
+    ///
+    /// `judge` gated whether the dedupe pass was asked anything at all. Ignoring
+    /// it would have been the worst possible reading of `judge = false`: that
+    /// file is the record of an operator declining the one stage that spends
+    /// inference and hides artifacts, and an upgrade that dropped the key would
+    /// have handed them `autonomous = true` on the strength of it. So it is
+    /// carried to the setting that means the same thing now.
+    ///
+    /// `max_judgements` has no successor to carry to — a count per tick and a
+    /// rate are not the same quantity — so it is only named.
+    fn carry_retired_keys(&mut self) {
+        match self.consolidate.judge {
+            Some(false) => {
+                self.consolidate.max_dedupe_per_tick = 0;
+                tracing::warn!(
+                    "consolidate.judge has been retired; reading judge = false as \
+                     max_dedupe_per_tick = 0, which is what stops the dedupe pass \
+                     asking anything now. consolidate.autonomous, separately, decides \
+                     whether an answer is acted on."
+                );
+            }
+            Some(true) => tracing::warn!(
+                "consolidate.judge has been retired and is being ignored; \
+                 max_dedupe_per_tick decides how many groups are asked about per tick"
+            ),
+            None => {}
+        }
+        if let Some(n) = self.consolidate.max_judgements {
+            tracing::warn!(
+                was = n,
+                interval_mins = self.consolidate.dedupe_interval_mins,
+                per_tick = self.consolidate.max_dedupe_per_tick,
+                "consolidate.max_judgements has been retired and is being ignored; \
+                 the budget is a rate now — see dedupe_interval_mins and max_dedupe_per_tick"
+            );
+        }
     }
 
     /// Values that would make a feature quietly useless, put back rather than
@@ -744,6 +800,41 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             let cfg = Config::load(Some(&p)).unwrap();
             assert_eq!(cfg.infer.embed.dim, 768);
         });
+    }
+
+    #[test]
+    fn an_operator_who_switched_the_judge_off_does_not_get_autonomy_instead() {
+        // `judge = false` is the record of someone declining the one stage that
+        // spends inference and hides artifacts. The key was retired and the
+        // struct takes its defaults, so ignoring it would read that file as
+        // consent to `autonomous = true` — arriving by upgrade, from a config
+        // that says the opposite. It is carried to the key that stops the asking.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[consolidate]\njudge = false\n"));
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.consolidate.max_dedupe_per_tick, 0,
+            "a config declining the model call was asked anyway"
+        );
+    }
+
+    #[test]
+    fn a_retired_key_does_not_stop_a_config_that_otherwise_works() {
+        // Named in the log, not refused. `max_judgements` has no successor to
+        // carry it to, and a server that will not start is a worse answer than
+        // one that says where the setting went.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nmax_judgements = 20\njudge = true\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(
+            cfg.consolidate.max_dedupe_per_tick,
+            ConsolidateConfig::default().max_dedupe_per_tick
+        );
     }
 
     #[test]
