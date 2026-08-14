@@ -32,7 +32,7 @@ Confirmed findings fixed by this plan (task number in parentheses):
 9. The liveness predicate `status == Active && superseded_by.is_none()` is hand-spelled at 12 production sites (Task 1).
 10. `ops()` and `build_artifact_detail()` duplicate the source-rows loop verbatim, and `ops()` is an N+1 over a batch API (Task 10).
 11. `open_component`'s `let Some(seed) ... else` arm is unreachable (Task 11).
-12. `arm_dedupe` pays two full-row `get_artifact` fetches per pair before the cheap already-queued skip, re-checking the same in-flight pairs every tick (Task 12).
+12. `arm_dedupe` pays two full-row `get_artifact` fetches per pair before the cheap already-queued skip, re-checking the same in-flight pairs every tick (Task 12). **Outcome: invalid — reverted.** The order is load-bearing: the retired-member dismissal must run even for pairs whose unit is still queued, which `a_pair_whose_member_was_deprecated_never_reaches_the_dedupe_pass` and `a_pair_whose_member_was_since_hidden_never_reaches_the_model` pin. The reorder landed as 603b4ef and was reverted in the next commit.
 
 Declined by the user (2026-08-14, "prototype, only used by me — legacy doesn't exist"):
 
