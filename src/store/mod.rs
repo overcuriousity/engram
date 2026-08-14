@@ -99,6 +99,10 @@ impl Store {
             ),
             ("artifacts", "source_count", "INTEGER NOT NULL DEFAULT 0"),
             ("artifacts", "lifecycle_dirty", "INTEGER NOT NULL DEFAULT 0"),
+            // Arrived with the stranded-merge reap. NULL on every pair
+            // predating it, which is correct: those settlements predate the
+            // column and are not reopenable by merge id.
+            ("artifact_pairs", "merged_into", "TEXT"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,

@@ -65,6 +65,13 @@ pub enum PairState {
     /// sources is no longer one atomic piece of knowledge, which is what an
     /// artifact is defined to be.
     Oversized,
+    /// The model answered "duplicate" while autonomy is off. Recorded so an
+    /// operator can read the verdicts before letting the system act on them;
+    /// the merged draft is not kept, and flipping autonomy on lets a later
+    /// unit re-judge and merge. Its own state rather than `Contradiction`,
+    /// because filing a mergeable pair among genuine conflicts made the UI
+    /// claim a disagreement the model did not find.
+    WouldMerge,
 }
 
 impl PairState {
@@ -77,6 +84,7 @@ impl PairState {
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
+            PairState::WouldMerge => "would_merge",
         }
     }
     pub fn parse(s: &str) -> PairState {
@@ -87,6 +95,7 @@ impl PairState {
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
+            "would_merge" => PairState::WouldMerge,
             _ => PairState::Pending,
         }
     }
@@ -112,6 +121,10 @@ pub struct ArtifactPair {
     /// Lets the review UI offer "apply supersede" without asking the model
     /// again.
     pub obsolete_id: Option<String>,
+    /// Which merged artifact answered this pair, when the settlement was an
+    /// applied merge. What the stranded-merge reap uses to reopen exactly the
+    /// pairs a merge that never embedded had closed.
+    pub merged_into: Option<String>,
 }
 
 pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
@@ -126,6 +139,7 @@ pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         judge_attempts: r.get("judge_attempts"),
         judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
+        merged_into: r.get("merged_into"),
     }
 }
 
@@ -223,7 +237,8 @@ impl Store {
     /// only path that writes it. A pair the judge proposed a winner for and an
     /// operator then dismissed would otherwise keep naming a supersede that was
     /// explicitly rejected, and any later listing of dismissed pairs would offer
-    /// to apply it.
+    /// to apply it. `merged_into` is cleared for the same reason: it belongs to
+    /// the merged settlement `set_pair_merged` writes, and to nothing else.
     pub async fn set_pair_state(
         &self,
         id: i64,
@@ -231,7 +246,9 @@ impl Store {
         detail: Option<&str>,
     ) -> Result<()> {
         let res = sqlx::query(
-            "UPDATE artifact_pairs SET state = ?, detail = ?, obsolete_id = NULL WHERE id = ?",
+            "UPDATE artifact_pairs
+                SET state = ?, detail = ?, obsolete_id = NULL, merged_into = NULL
+              WHERE id = ?",
         )
         .bind(state.as_str())
         .bind(detail)
@@ -260,7 +277,9 @@ impl Store {
         detail: Option<&str>,
     ) -> Result<()> {
         let res = sqlx::query(
-            "UPDATE artifact_pairs SET state = 'superseded', detail = ?, obsolete_id = ? WHERE id = ?",
+            "UPDATE artifact_pairs
+                SET state = 'superseded', detail = ?, obsolete_id = ?, merged_into = NULL
+              WHERE id = ?",
         )
         .bind(detail)
         .bind(obsolete_id)
@@ -271,6 +290,48 @@ impl Store {
             return Err(crate::error::Error::NotFound);
         }
         Ok(())
+    }
+
+    /// Settle a pair as answered by an applied merge. `merged_into` names the
+    /// merged artifact, which is what lets the stranded-merge reap reopen
+    /// exactly the pairs a merge that never embedded had closed.
+    pub async fn set_pair_merged(
+        &self,
+        id: i64,
+        merged_into: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs
+                SET state = 'no_conflict', detail = ?, merged_into = ?, obsolete_id = NULL
+              WHERE id = ?",
+        )
+        .bind(detail)
+        .bind(merged_into)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Reopen every pair a now-dead merge had settled, handing them to a
+    /// person. Contradiction rather than Pending on purpose: re-arming the
+    /// model would regenerate the same unembeddable draft, at full price,
+    /// forever.
+    pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs
+                SET state = 'contradiction', detail = ?, merged_into = NULL
+              WHERE merged_into = ?",
+        )
+        .bind(detail)
+        .bind(merged_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Pending pairs in the order the judge should spend its budget on them.
@@ -933,5 +994,72 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn a_merged_settlement_records_which_merge_answered_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        s.set_pair_merged(id, "merge-1", Some("same claim"))
+            .await
+            .unwrap();
+
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::NoConflict);
+        assert_eq!(p.merged_into.as_deref(), Some("merge-1"));
+
+        // Leaving the settlement drops the record, exactly as obsolete_id does.
+        s.set_pair_state(id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+        assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
+    }
+
+    #[tokio::test]
+    async fn reopening_a_stranded_merge_s_pairs_touches_only_its_own() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_merged(id, "merge-1", None).await.unwrap();
+
+        assert_eq!(
+            s.reopen_pairs_merged_into("merge-other", "unrelated")
+                .await
+                .unwrap(),
+            0,
+            "another merge's undo reopened this pair"
+        );
+        assert_eq!(
+            s.reopen_pairs_merged_into("merge-1", "the merged text could not be indexed")
+                .await
+                .unwrap(),
+            1
+        );
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::Contradiction);
+        assert_eq!(p.merged_into, None);
+    }
+
+    #[tokio::test]
+    async fn would_merge_is_a_state_of_its_own() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::WouldMerge, Some("same claim"))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.pairs_by_state(PairState::WouldMerge, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(PairState::parse("would_merge"), PairState::WouldMerge);
     }
 }

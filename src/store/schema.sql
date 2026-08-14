@@ -221,6 +221,9 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- time the model is down.
   judge_unreadable INTEGER NOT NULL DEFAULT 0,
   obsolete_id    TEXT REFERENCES artifacts(id),
+  -- Which merged artifact answered this pair, when the settlement was an
+  -- applied merge. The stranded-merge reap reopens pairs by it.
+  merged_into    TEXT,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);
