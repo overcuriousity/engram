@@ -75,6 +75,12 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // sweep decides again whether it is worth asking about. Holding
                 // a unit at the six-hour ceiling for it would keep re-asking a
                 // question the sweep may no longer want answered.
+                //
+                // That later decision is `pairs_to_judge`'s
+                // `MAX_UNREADABLE_JUDGEMENTS` test. Without one, closing the
+                // unit here is not a hand-off but a loop: the next sweep finds
+                // the pair pending with no live job and arms it for another
+                // `MAX_ATTEMPTS`, forever.
                 (Stage::Judge, _) if exhausted => {
                     tracing::warn!(error = %e, "could not judge this pair; leaving it for a later sweep");
                     core.store.complete_job(job.id).await?;

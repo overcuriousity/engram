@@ -164,6 +164,12 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   detail         TEXT,
   created_at     INTEGER NOT NULL,
   judge_attempts INTEGER NOT NULL DEFAULT 0,
+  -- Of those attempts, the ones the endpoint answered and the answer could not
+  -- be read. Counted apart from `judge_attempts` because only this half says
+  -- anything about the pair: a call an outage ate says something about the
+  -- endpoint, and shelving a pair for that would empty the review queue every
+  -- time the model is down.
+  judge_unreadable INTEGER NOT NULL DEFAULT 0,
   obsolete_id    TEXT REFERENCES artifacts(id),
   UNIQUE(a_id, b_id)
 );

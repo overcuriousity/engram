@@ -135,7 +135,14 @@ async fn apply(
         // unchanged prompt would replay the same unreadable bytes for every one
         // of `MAX_ATTEMPTS`. One varying byte is what makes the second ask a
         // second ask.
+        //
+        // Counted here and not beside `record_judge_attempt`, because this is
+        // the only failure that says anything about the pair. A call the
+        // endpoint never answered says something about the endpoint, and
+        // letting an outage count against every pending pair would take the
+        // whole review queue out of the judge's reach on its way past.
         Err(e) => {
+            core.store.record_unreadable_judgement(p.id).await?;
             tracing::warn!(
                 pair = p.id,
                 attempt = p.judge_attempts,

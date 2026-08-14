@@ -78,8 +78,14 @@ impl Store {
         // every entry this list is allowed to hold. Adding one is safe; changing
         // or reordering one is not. A column needing more than an append does
         // not belong here — it belongs in a recreate.
-        const ADDED_COLUMNS: &[(&str, &str, &str)] =
-            &[("jobs", "seq", "INTEGER NOT NULL DEFAULT 0")];
+        const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+            ("jobs", "seq", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "artifact_pairs",
+                "judge_unreadable",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+        ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
         // and an index cannot name a column that is not there yet — applying the

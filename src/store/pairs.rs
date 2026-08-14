@@ -9,6 +9,21 @@ use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
 
+/// How many unreadable replies a pair is worth before the judge stops being
+/// offered it.
+///
+/// One unit's full retry lifetime, which is already the most varied asking the
+/// prompt can do: `judge_prompt` carries the attempt number precisely so those
+/// retries are not the same question replayed out of the endpoint's cache. If
+/// five differently-phrased asks about the same two artifacts all come back
+/// unreadable, a sixth is not a better bet than the one after it, and the
+/// close-out in `run_one` hands the pair to the next sweep — which without this
+/// ceiling would arm it for five more, every sweep, forever.
+///
+/// The pair stays `pending`, so nothing is lost: it is still on the review
+/// queue, and an operator settles it by hand.
+pub const MAX_UNREADABLE_JUDGEMENTS: i64 = super::jobs::MAX_ATTEMPTS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairState {
@@ -60,6 +75,10 @@ pub struct ArtifactPair {
     /// Model calls this pair has already cost, successful or not. Orders the
     /// judge's queue so a pair it cannot read does not starve the rest.
     pub judge_attempts: i64,
+    /// How many of those calls came back with something that could not be
+    /// parsed as a verdict. The ceiling that stops asking is on this and not on
+    /// `judge_attempts` — see `MAX_UNREADABLE_JUDGEMENTS`.
+    pub judge_unreadable: i64,
     /// Which artifact the judge named obsolete, when `state` is `Superseded`.
     /// Lets the review UI offer "apply supersede" without asking the model
     /// again.
@@ -76,6 +95,7 @@ fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         detail: r.get("detail"),
         created_at: r.get("created_at"),
         judge_attempts: r.get("judge_attempts"),
+        judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
     }
 }
@@ -230,11 +250,19 @@ impl Store {
     /// parsed stays pending on purpose, and under a plain `score DESC` the same
     /// top-scoring handful would absorb every sweep's budget forever while the
     /// rest of the queue is never reached.
+    ///
+    /// Pairs past `MAX_UNREADABLE_JUDGEMENTS` are held back. Staying pending is
+    /// what keeps them on an operator's review queue; being handed to the judge
+    /// again is what would make them cost model calls forever, since a unit that
+    /// exhausts its retries is closed rather than parked and the next sweep
+    /// would find the pair pending, idle, and first in line all over again.
     pub async fn pairs_to_judge(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query(
-            "SELECT * FROM artifact_pairs WHERE state = 'pending'
+            "SELECT * FROM artifact_pairs
+              WHERE state = 'pending' AND judge_unreadable < ?
               ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
         )
+        .bind(MAX_UNREADABLE_JUDGEMENTS)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -249,6 +277,20 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Count one reply that came back unreadable. Only this counter gates
+    /// whether the pair is ever asked about again, so it is stepped where the
+    /// parse fails and nowhere else — an endpoint that is down must not shelve
+    /// the whole review queue on its way past.
+    pub async fn record_unreadable_judgement(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE artifact_pairs SET judge_unreadable = judge_unreadable + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -290,6 +332,69 @@ mod tests {
             .await
             .unwrap();
         (made[0].id.clone(), made[1].id.clone())
+    }
+
+    #[tokio::test]
+    async fn a_pair_the_judge_can_never_read_stops_costing_calls() {
+        // The unit closes itself at `MAX_ATTEMPTS` so a later sweep can decide
+        // again whether the pair is worth asking about. Nothing implemented that
+        // decision: the pair was still pending with no live job, so every sweep
+        // armed it for another five calls — and the attempt counter in the
+        // prompt means all five are full-cost generations rather than replays
+        // out of the endpoint's cache. This is the decision.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_to_judge(10).await.unwrap()[0].id;
+
+        for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
+            s.record_judge_attempt(id).await.unwrap();
+            s.record_unreadable_judgement(id).await.unwrap();
+        }
+        assert_eq!(
+            s.pairs_to_judge(10).await.unwrap().len(),
+            1,
+            "a pair short of the ceiling was already being held back"
+        );
+
+        s.record_judge_attempt(id).await.unwrap();
+        s.record_unreadable_judgement(id).await.unwrap();
+        assert!(
+            s.pairs_to_judge(10).await.unwrap().is_empty(),
+            "a pair the judge has never once been able to read is still being asked about"
+        );
+        // Held back from the judge, not settled: it is still on the queue an
+        // operator works through by hand.
+        assert_eq!(
+            s.pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "holding a pair back from the judge took it off the review queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_outage_does_not_shelve_the_review_queue() {
+        // Attempts are counted before the call, so a run of failures against a
+        // dead endpoint walks `judge_attempts` to the ceiling for every pending
+        // pair at once. Gating on that counter would mean one outage emptied the
+        // judge's queue permanently, which is why the ceiling is on replies that
+        // came back and could not be read.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_to_judge(10).await.unwrap()[0].id;
+
+        for _ in 0..MAX_UNREADABLE_JUDGEMENTS * 3 {
+            s.record_judge_attempt(id).await.unwrap();
+        }
+        assert_eq!(
+            s.pairs_to_judge(10).await.unwrap().len(),
+            1,
+            "an endpoint outage put the pair permanently out of the judge's reach"
+        );
     }
 
     #[tokio::test]
