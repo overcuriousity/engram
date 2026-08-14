@@ -123,7 +123,15 @@ async fn evaluate_retrieval() {
         let expect = translated
             .get(&pair.expect)
             .expect("every pair was checked against artifacts.json above");
-        let rank = results.iter().position(|r| &r.artifact_id == expect);
+        // Anything that superseded it counts too. A merge moves the knowledge
+        // into a new artifact and search correctly returns that one instead, so
+        // scoring only the original would report a retrieval regression that is
+        // really a bookkeeping change — and the one number that says whether
+        // merging helps would be unreadable exactly when it matters.
+        let satisfies = resolve_expected(&core, expect).await;
+        let rank = results
+            .iter()
+            .position(|r| satisfies.iter().any(|id| id == &r.artifact_id));
         if rank.is_none_or(|i| i >= LIMIT) {
             misses.push((pair, rank));
         }
@@ -132,6 +140,36 @@ async fn evaluate_retrieval() {
 
     report(&cfg, &artifacts, &pairs, &ranks, &misses, cap);
     vectors.drop_collection().await.unwrap();
+}
+
+/// The artifact ids that satisfy a grade naming `expected`: itself, plus
+/// whatever superseded it.
+///
+/// A graded pair names the artifact that answered the query. When consolidation
+/// merges it into another, or supersedes it in favour of one that plainly
+/// replaced it, the knowledge is in the survivor and search returns that. The
+/// grade is still satisfied; only the id changed.
+///
+/// Bounded rather than trusted to terminate. Chains should not exist — a merge
+/// re-points what it hides, precisely so no reader lands on a hidden winner —
+/// but a harness that hangs on a cycle in the data is worse than one that stops
+/// looking after a few hops.
+async fn resolve_expected(core: &Core, expected: &str) -> Vec<String> {
+    let mut out = vec![expected.to_string()];
+    let mut cursor = expected.to_string();
+    for _ in 0..8 {
+        match core.store.get_artifact(&cursor).await {
+            Ok(c) => match c.superseded_by {
+                Some(next) => {
+                    out.push(next.clone());
+                    cursor = next;
+                }
+                None => break,
+            },
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 /// Load the frozen artifacts and embed them, reporting the id each one was
@@ -318,5 +356,36 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         results.iter().position(|r| &r.artifact_id == expect),
         Some(0),
         "the frozen id was never translated to the one the store minted"
+    );
+
+    // And a grade against an artifact that has since been merged away is still
+    // satisfied by the artifact the knowledge moved into. Without this the
+    // score collapses for a bookkeeping reason and the one number that says
+    // whether merging helps becomes unreadable exactly when it matters.
+    let other = translated.get("frozen-1").unwrap();
+    let merged = core
+        .store
+        .insert_merged_artifact(
+            &engram::store::artifacts::NewMerged {
+                text: "a journal records intent before the write, in clusters".into(),
+                title: Some("journal and cluster".into()),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &[expect.clone(), other.clone()],
+        )
+        .await
+        .unwrap();
+    core.supersede(expect, &merged.id).await.unwrap();
+
+    let satisfies = resolve_expected(&core, expect).await;
+    assert!(
+        satisfies.contains(&merged.id),
+        "a grade against a merged-away artifact no longer resolves: {satisfies:?}"
+    );
+    assert!(
+        satisfies.contains(expect),
+        "the original must still satisfy its own grade"
     );
 }
