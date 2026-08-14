@@ -85,7 +85,7 @@ pub struct ArtifactPair {
     pub obsolete_id: Option<String>,
 }
 
-fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
+pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
     ArtifactPair {
         id: r.get("id"),
         a_id: r.get("a_id"),

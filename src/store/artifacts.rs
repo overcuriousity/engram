@@ -143,6 +143,21 @@ pub struct Chunk {
     pub last_verified_at: Option<i64>,
 }
 
+/// A merged artifact being created.
+///
+/// Deliberately not `NewArtifact`. There is no corpus, no span, no segment and
+/// no position within a document, and a struct carrying those as `None` invites
+/// a caller to fill one in — which is exactly the claim a merged artifact must
+/// not make.
+#[derive(Debug, Clone)]
+pub struct NewMerged {
+    pub text: String,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub caveats: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewArtifact {
     pub ordinal: i64,
@@ -216,6 +231,91 @@ fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
 }
 
 impl Store {
+    /// Write a merged artifact and its lineage in one transaction.
+    ///
+    /// One transaction, not two writes. A merged artifact with no lineage rows
+    /// is one whose detail pane can render nothing and whose sources nobody can
+    /// recover — and the re-merge rule reads exactly those rows to avoid ever
+    /// rewriting from text a model produced. Splitting the writes makes that
+    /// state reachable by a crash, and nothing afterwards could tell it from an
+    /// artifact whose sources were all deleted.
+    ///
+    /// `sources` may name merged artifacts. They are flattened to their own
+    /// captured roots here, so `artifact_sources.root_id` only ever names a
+    /// `captured` artifact — the invariant the whole anti-drift rule rests on.
+    pub async fn insert_merged_artifact(
+        &self,
+        new: &NewMerged,
+        sources: &[String],
+    ) -> Result<Chunk> {
+        // Resolved before the transaction opens: this is a read, and holding a
+        // write transaction across it buys nothing.
+        let resolved = self.roots_of(sources).await?;
+
+        let mut tx = self.pool.begin().await?;
+        let created_at = now();
+        let c = Chunk {
+            id: new_id(),
+            corpus_id: None,
+            provenance: Provenance::Merged,
+            source_count: sources.len() as i64,
+            ordinal: 0,
+            text: new.text.clone(),
+            corpus_span: None,
+            title: new.title.clone(),
+            category: new.category.clone(),
+            tags: new.tags.clone(),
+            embed_state: EmbedState::Pending,
+            embed_model: None,
+            created_at,
+            embed_rev: 0,
+            segment_idx: None,
+            flags: vec![],
+            flag_detail: None,
+            superseded_by: None,
+            caveats: new.caveats.clone(),
+            status: ArtifactStatus::Active,
+            last_verified_at: Some(created_at),
+        };
+        sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
+             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)",
+        )
+        .bind(&c.id)
+        .bind(c.source_count)
+        .bind(&c.text)
+        .bind(&c.title)
+        .bind(&c.category)
+        .bind(serde_json::to_string(&c.tags).unwrap())
+        .bind(c.embed_state.as_str())
+        .bind(c.created_at)
+        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
+        .bind(c.status.as_str())
+        .bind(c.last_verified_at)
+        .execute(&mut *tx)
+        .await?;
+
+        for (via, roots) in &resolved {
+            for root in roots {
+                // OR IGNORE because two sources can share a root: merging M(a,b)
+                // with a itself is a component the sweep can legitimately build,
+                // and it names `a` twice.
+                sqlx::query(
+                    "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(&c.id)
+                .bind(root)
+                .bind(via)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(c)
+    }
+
     pub async fn insert_artifacts(
         &self,
         corpus_id: &str,

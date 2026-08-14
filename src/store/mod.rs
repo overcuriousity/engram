@@ -3,6 +3,7 @@ pub mod auth;
 pub mod corpora;
 pub mod feedback;
 pub mod jobs;
+pub mod lineage;
 pub mod pairs;
 pub mod segments;
 pub mod shingle;
