@@ -130,7 +130,14 @@ impl Core {
 
         let src = match self
             .store
-            .insert_corpus_with_signature(text, origin, title_hint, sig, c.source_url.as_deref())
+            .insert_corpus_with_signature(
+                text,
+                origin,
+                title_hint,
+                sig,
+                c.source_url.as_deref(),
+                &serde_json::json!({}),
+            )
             .await?
         {
             Insertion::Created(src) => src,
@@ -893,6 +900,13 @@ impl Core {
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"
                         .into(),
+                ));
+            }
+            // Re-reading a stored image with a different model is a later
+            // feature; the original is kept so it stays possible.
+            Stage::Describe => {
+                return Err(Error::Validation(
+                    "re-reading an image is not supported yet; capture it again".into(),
                 ));
             }
         }

@@ -27,6 +27,8 @@ impl Insertion {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
+    /// An image whose text has not been read yet. Only image corpora hold it.
+    Describing,
     Raw,
     /// Captured, stored, and deliberately not queued for synthesis: something
     /// near-identical is already in the base, and segmenting it would pay a
@@ -44,6 +46,7 @@ pub enum CorpusStatus {
 impl CorpusStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            CorpusStatus::Describing => "describing",
             CorpusStatus::Raw => "raw",
             CorpusStatus::NeedsReview => "needs_review",
             CorpusStatus::Segmenting => "segmenting",
@@ -56,6 +59,7 @@ impl CorpusStatus {
     }
     pub fn parse(s: &str) -> CorpusStatus {
         match s {
+            "describing" => CorpusStatus::Describing,
             "needs_review" => CorpusStatus::NeedsReview,
             "segmenting" => CorpusStatus::Segmenting,
             "segmented" => CorpusStatus::Segmented,
@@ -98,6 +102,9 @@ pub struct Corpus {
     /// document, so nothing that reasons about the original text should trust
     /// it. `None` for every ordinary capture.
     pub restored_at: Option<i64>,
+    /// What the door knew about the capture beyond the text: a `note`, `file`
+    /// facts, `exif`. Namespaced JSON; `{}` when nothing was recorded.
+    pub metadata: serde_json::Value,
 }
 
 /// A stored corpus that a new capture looks like.
@@ -131,6 +138,10 @@ fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
         near_dupe_score: r.get("near_dupe_score"),
         source_url: r.get("source_url"),
         restored_at: r.get("restored_at"),
+        metadata: r
+            .get::<Option<String>, _>("metadata")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({})),
     }
 }
 
@@ -143,7 +154,14 @@ impl Store {
     ) -> Result<Corpus> {
         let sig = super::shingle::signature(raw_text);
         Ok(self
-            .insert_corpus_with_signature(raw_text, origin, title_hint, sig, None)
+            .insert_corpus_with_signature(
+                raw_text,
+                origin,
+                title_hint,
+                sig,
+                None,
+                &serde_json::json!({}),
+            )
             .await?
             .into_corpus())
     }
@@ -168,6 +186,7 @@ impl Store {
         title_hint: Option<&str>,
         shingles: Vec<u64>,
         source_url: Option<&str>,
+        metadata: &serde_json::Value,
     ) -> Result<Insertion> {
         let src = Corpus {
             id: new_id(),
@@ -185,10 +204,11 @@ impl Store {
             source_url: source_url.map(str::to_string),
             // A capture, not a placeholder. See `ensure_restored_corpus`.
             restored_at: None,
+            metadata: metadata.clone(),
         };
         let res = sqlx::query(
-            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, source_url)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, source_url, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(content_hash) DO NOTHING",
         )
         .bind(&src.id)
@@ -201,6 +221,7 @@ impl Store {
         .bind(src.updated_at)
         .bind(super::shingle::encode(&src.shingles))
         .bind(&src.source_url)
+        .bind(src.metadata.to_string())
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
@@ -436,6 +457,76 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// The row for a captured image. There is no text yet — the vision stage
+    /// writes it — so the hash is the caller's, over the image bytes, and the
+    /// row starts in `describing`. Same conflict handling as a text capture:
+    /// the same photo twice is one row.
+    pub async fn insert_image_corpus(
+        &self,
+        content_hash: &str,
+        origin: &str,
+        title_hint: Option<&str>,
+        metadata: &serde_json::Value,
+    ) -> Result<Insertion> {
+        let at = now();
+        let id = new_id();
+        let res = sqlx::query(
+            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, metadata)
+             VALUES (?, '', ?, ?, ?, ?, ?, ?, '', ?)
+             ON CONFLICT(content_hash) DO NOTHING",
+        )
+        .bind(&id)
+        .bind(origin)
+        .bind(title_hint)
+        .bind(content_hash)
+        .bind(CorpusStatus::Describing.as_str())
+        .bind(at)
+        .bind(at)
+        .bind(metadata.to_string())
+        .execute(&self.pool)
+        .await?;
+        let existing = self.find_by_hash(content_hash).await?.ok_or_else(|| {
+            Error::Store("image capture conflicted with a corpus that then vanished".into())
+        })?;
+        Ok(if res.rows_affected() == 0 {
+            Insertion::Existing(existing)
+        } else {
+            Insertion::Created(existing)
+        })
+    }
+
+    /// What the vision stage read. Text and signature together, so the row is
+    /// never comparable-by-shingle to something it does not say. Status is
+    /// left to the caller, who knows whether this parks or proceeds.
+    pub async fn set_described_text(&self, id: &str, text: &str, shingles: Vec<u64>) -> Result<()> {
+        let res = sqlx::query(
+            "UPDATE corpora SET raw_text = ?, shingles = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(text)
+        .bind(super::shingle::encode(&shingles))
+        .bind(now())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn set_corpus_metadata(&self, id: &str, metadata: &serde_json::Value) -> Result<()> {
+        let res = sqlx::query("UPDATE corpora SET metadata = ?, updated_at = ? WHERE id = ?")
+            .bind(metadata.to_string())
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     pub async fn delete_corpus(&self, id: &str) -> Result<()> {
         let res = sqlx::query("DELETE FROM corpora WHERE id = ?")
             .bind(id)
@@ -477,11 +568,25 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let sig = super::super::shingle::signature("the same text");
         let first = s
-            .insert_corpus_with_signature("the same text", "web", None, sig.clone(), None)
+            .insert_corpus_with_signature(
+                "the same text",
+                "web",
+                None,
+                sig.clone(),
+                None,
+                &serde_json::json!({}),
+            )
             .await
             .unwrap();
         let second = s
-            .insert_corpus_with_signature("the same text", "mcp", Some("later"), sig, None)
+            .insert_corpus_with_signature(
+                "the same text",
+                "mcp",
+                Some("later"),
+                sig,
+                None,
+                &serde_json::json!({}),
+            )
             .await
             .unwrap();
 
@@ -723,5 +828,59 @@ mod tests {
         // Clearing it is what "keep both" does, and it must actually clear.
         s.set_near_dupe(&src.id, None, None).await.unwrap();
         assert!(s.get_corpus(&src.id).await.unwrap().near_dupe_of.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_image_corpus_starts_describing_with_no_text_and_its_metadata() {
+        let s = Store::memory().await.unwrap();
+        let meta = serde_json::json!({"file": {"name": "a.jpg"}, "note": "whiteboard"});
+        let ins = s
+            .insert_image_corpus("hash-1", "image", Some("a.jpg"), &meta)
+            .await
+            .unwrap();
+        let src = ins.into_corpus();
+        assert_eq!(src.status, CorpusStatus::Describing);
+        assert_eq!(src.raw_text, "");
+        assert_eq!(src.content_hash, "hash-1");
+        let back = s.get_corpus(&src.id).await.unwrap();
+        assert_eq!(back.metadata["note"], "whiteboard");
+        assert_eq!(back.status, CorpusStatus::Describing);
+
+        // The same photo again is the same row.
+        assert!(matches!(
+            s.insert_image_corpus("hash-1", "image", None, &meta).await.unwrap(),
+            Insertion::Existing(e) if e.id == src.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn describing_writes_the_text_and_signature_but_keeps_the_hash() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_image_corpus("hash-2", "image", None, &serde_json::json!({}))
+            .await
+            .unwrap()
+            .into_corpus();
+        let sig = crate::store::shingle::signature("hello world");
+        s.set_described_text(&src.id, "hello world", sig.clone())
+            .await
+            .unwrap();
+        let back = s.get_corpus(&src.id).await.unwrap();
+        assert_eq!(back.raw_text, "hello world");
+        assert_eq!(back.shingles, sig);
+        assert_eq!(back.content_hash, "hash-2");
+        // Status is the caller's decision, not this write's.
+        assert_eq!(back.status, CorpusStatus::Describing);
+    }
+
+    #[tokio::test]
+    async fn metadata_defaults_to_an_empty_object_and_can_be_replaced() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("plain", "web", None).await.unwrap();
+        assert_eq!(src.metadata, serde_json::json!({}));
+        s.set_corpus_metadata(&src.id, &serde_json::json!({"note": "n"}))
+            .await
+            .unwrap();
+        assert_eq!(s.get_corpus(&src.id).await.unwrap().metadata["note"], "n");
     }
 }

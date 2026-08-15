@@ -35,6 +35,9 @@ pub enum Stage {
     /// which decays quadratically and leaves a given pair waiting years on a
     /// large base.
     Relate,
+    /// One image, one vision call: reads a captured image into the markdown
+    /// that becomes its `raw_text`, then hands off to `Synthesize`.
+    Describe,
 }
 
 impl Stage {
@@ -48,6 +51,7 @@ impl Stage {
             Stage::Consolidate => "consolidate",
             Stage::Dedupe => "dedupe",
             Stage::Relate => "relate",
+            Stage::Describe => "describe",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -60,6 +64,7 @@ impl Stage {
             "consolidate" => Some(Stage::Consolidate),
             "dedupe" => Some(Stage::Dedupe),
             "relate" => Some(Stage::Relate),
+            "describe" => Some(Stage::Describe),
             _ => None,
         }
     }
@@ -867,5 +872,11 @@ mod tests {
             s.claim_job().await.unwrap().is_none(),
             "a legacy judge row survived migration and was claimed"
         );
+    }
+
+    #[test]
+    fn describe_is_a_stage_that_round_trips_its_name() {
+        assert_eq!(Stage::Describe.as_str(), "describe");
+        assert_eq!(Stage::parse("describe"), Some(Stage::Describe));
     }
 }

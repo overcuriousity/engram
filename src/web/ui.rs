@@ -227,7 +227,7 @@ pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static st
         // A parked capture is waiting on a person, not on a worker. It reads as
         // a warning because nothing will advance it on its own.
         NeedsReview => "badge-warning",
-        Raw | Segmenting | Segmented | Embedding => "badge-accent",
+        Describing | Raw | Segmenting | Segmented | Embedding => "badge-accent",
     }
 }
 

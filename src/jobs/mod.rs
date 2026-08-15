@@ -52,6 +52,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
+        (Stage::Describe, _) => Err(Error::Internal("describe stage not wired yet".into())),
     };
 
     match result {
