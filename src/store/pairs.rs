@@ -65,13 +65,6 @@ pub enum PairState {
     /// sources is no longer one atomic piece of knowledge, which is what an
     /// artifact is defined to be.
     Oversized,
-    /// The model answered "duplicate" while autonomy is off. Recorded so an
-    /// operator can read the verdicts before letting the system act on them;
-    /// the merged draft is not kept, and flipping autonomy on lets a later
-    /// unit re-judge and merge. Its own state rather than `Contradiction`,
-    /// because filing a mergeable pair among genuine conflicts made the UI
-    /// claim a disagreement the model did not find.
-    WouldMerge,
 }
 
 impl PairState {
@@ -84,7 +77,6 @@ impl PairState {
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
-            PairState::WouldMerge => "would_merge",
         }
     }
     pub fn parse(s: &str) -> PairState {
@@ -95,7 +87,6 @@ impl PairState {
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
-            "would_merge" => PairState::WouldMerge,
             _ => PairState::Pending,
         }
     }
@@ -349,20 +340,6 @@ impl Store {
         .bind(merged_id)
         .execute(&self.pool)
         .await?;
-        Ok(res.rows_affected())
-    }
-
-    /// Hand every recorded would-merge verdict back to the judge queue.
-    ///
-    /// `would_merge` exists only as a note taken while autonomy is off — the
-    /// draft was discarded, so there is nothing to apply directly; the unit
-    /// re-judges and merges at the queue's own pace. The detail is kept: it is
-    /// the model's recorded reasoning, and `pending` reads it never.
-    pub async fn reopen_would_merge_pairs(&self) -> Result<u64> {
-        let res =
-            sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
-                .execute(&self.pool)
-                .await?;
         Ok(res.rows_affected())
     }
 
@@ -1094,24 +1071,5 @@ mod tests {
         let p = s.get_pair(id).await.unwrap();
         assert_eq!(p.state, PairState::Contradiction);
         assert_eq!(p.merged_into, None);
-    }
-
-    #[tokio::test]
-    async fn would_merge_is_a_state_of_its_own() {
-        let s = Store::memory().await.unwrap();
-        let (a, b) = two_artifacts(&s).await;
-        s.record_pair(&a, &b, 0.91).await.unwrap();
-        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::WouldMerge, Some("same claim"))
-            .await
-            .unwrap();
-        assert_eq!(
-            s.pairs_by_state(PairState::WouldMerge, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(PairState::parse("would_merge"), PairState::WouldMerge);
     }
 }

@@ -296,7 +296,7 @@ renamed to match what it does.
 |---|---|
 | `src/jobs/judge.rs` | `src/jobs/dedupe.rs` |
 | `Stage::Judge` | `Stage::Dedupe` |
-| `consolidate.judge` | `consolidate.autonomous` |
+| `consolidate.judge` | retired; `max_dedupe_per_tick = 0` stops the asking |
 | `JUDGE_SYSTEM` | `DEDUPE_SYSTEM` |
 
 ### 6.1 Four outcomes
@@ -421,23 +421,15 @@ gen 2:  component {M1, c}
 Information loss stays exactly one generation deep, permanently. This is the
 whole reason lineage is stored as a closure.
 
-### 6.7 The configuration switch
+### 6.7 Acting on a verdict
 
-`consolidate.autonomous`, **default `true`**:
-
-- **false** — verdicts are recorded only, which is today's behaviour. `replaced`
-  is filed as a proposal for an operator. No merge is written.
-- **true** — `replaced` and `duplicate` are applied directly. `conflict` and
-  `Oversized` go to Ops. The operator keeps undo and the conflict queue, and
-  nothing else.
-
-The switch changes **who presses the button**, never what the model is asked.
-That makes the transition observable: an operator can run with `false`, read the
-recorded verdicts, and then let the system act.
-
-Defaulting to `true` means a fresh installation merges without being asked. The
-verification in §6.4 and the recovery paths in §8 are what carry that default;
-they are not optional refinements.
+Every verdict is acted on: `replaced` and `duplicate` are applied directly,
+`conflict` and `Oversized` go to a person. The operator keeps undo and the
+conflict queue. The verification in §6.4 and the recovery paths in §8 are what
+carry that; they are not optional refinements. (An `autonomous` switch existed
+during the roll-out — verdicts recorded, nothing applied — and was retired once
+the contract had been observed on real data; a base carrying `would_merge`
+rows from that period has them re-opened on upgrade.)
 
 ## 7. Ops surface
 
@@ -554,7 +546,6 @@ The fixed quantity in this system is neither the base nor the sweep — it is
 
 ```toml
 [consolidate]
-autonomous            = true
 dedupe_interval_mins  = 15   # own ticker, independent of the 24h sweep
 max_dedupe_per_tick   = 5    # => ceiling of 20 calls/hour
 merge_max_roots       = 8
@@ -586,10 +577,8 @@ enabled               = true
 near_dupe_min         = 0.90
 review_min            = 0.88
 auto_supersede        = 0.95
-sample                = 2000
 per_point             = 5
 interval_hours        = 24
-autonomous            = true   # replaces `judge`
 dedupe_interval_mins  = 15
 max_dedupe_per_tick   = 5      # replaces `max_judgements`
 merge_max_roots       = 8

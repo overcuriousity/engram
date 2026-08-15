@@ -183,9 +183,6 @@ pub struct PairRow {
     pub b_title: String,
     pub detail: Option<String>,
     pub contradiction: bool,
-    /// The model would merge these. Rendered with its own header so the page
-    /// never claims a disagreement the model did not find.
-    pub would_merge: bool,
     /// Set when the judge named a direction with enough confidence to propose
     /// a supersede. A recommendation only: nothing here has hidden anything,
     /// and either side can still be kept.
@@ -971,16 +968,13 @@ fn title_of(c: &crate::store::artifacts::Chunk) -> String {
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 5] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
     // A group past `merge_max_roots` was not merged and will not be: it needs a
     // person, so it belongs on the page a person opens rather than on
     // Housekeeping beside the things that resolve themselves.
     crate::store::pairs::PairState::Oversized,
-    // A merge verdict recorded in observation mode: worth a person's read,
-    // less urgent than something the base states differently.
-    crate::store::pairs::PairState::WouldMerge,
     crate::store::pairs::PairState::Pending,
 ];
 
@@ -1030,7 +1024,6 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 b_id: p.b_id,
                 detail: p.detail,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
-                would_merge: state == crate::store::pairs::PairState::WouldMerge,
                 obsolete_title,
                 keeps_a,
                 keeps_b,

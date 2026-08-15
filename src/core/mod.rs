@@ -319,7 +319,6 @@ mod tests {
         //
         // What stays bounded here is the *spend*. A rate rather than a
         // per-sweep count, so it does not grow with the base.
-        assert!(cfg.consolidate.autonomous);
         assert!(
             cfg.consolidate.max_dedupe_per_tick > 0 && cfg.consolidate.dedupe_interval_mins > 0,
             "the pass must have a rate, or it either never runs or is unbounded"

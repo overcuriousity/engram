@@ -147,14 +147,6 @@ pub struct ConsolidateConfig {
     pub per_point: usize,
     /// How often the sweep is queued.
     pub interval_hours: u64,
-    /// Whether the dedupe pass may act on what it decides: superseding where
-    /// one artifact plainly replaces another, and writing a merged artifact
-    /// where each side carries something the other lacks.
-    ///
-    /// With this off the verdicts are still recorded, so the queue can be read
-    /// before the system is allowed to act on it. A value conflict is escalated
-    /// to a person either way.
-    pub autonomous: bool,
     /// How often the dedupe ticker arms units, in minutes.
     ///
     /// Its own ticker rather than a passenger on the sweep. `max_judgements`
@@ -203,6 +195,8 @@ pub struct ConsolidateConfig {
     pub max_judgements: Option<usize>,
     /// Retired. Detection is per artifact now, not a sampled sweep.
     pub sample: Option<usize>,
+    /// Retired. Every verdict is acted on; every merge and supersede has undo.
+    pub autonomous: Option<bool>,
 }
 
 impl Default for ConsolidateConfig {
@@ -214,7 +208,6 @@ impl Default for ConsolidateConfig {
             auto_supersede: 0.95,
             per_point: 5,
             interval_hours: 24,
-            autonomous: true,
             dedupe_interval_mins: 15,
             max_dedupe_per_tick: 5,
             merge_max_roots: 8,
@@ -223,6 +216,7 @@ impl Default for ConsolidateConfig {
             judge: None,
             max_judgements: None,
             sample: None,
+            autonomous: None,
         }
     }
 }
@@ -546,12 +540,10 @@ impl Config {
     /// A retired key still says what its operator wanted, and is honoured where
     /// something current can carry it.
     ///
-    /// `judge` gated whether the dedupe pass was asked anything at all. Ignoring
-    /// it would have been the worst possible reading of `judge = false`: that
+    /// `judge` gated whether the dedupe pass was asked anything at all. That
     /// file is the record of an operator declining the one stage that spends
-    /// inference and hides artifacts, and an upgrade that dropped the key would
-    /// have handed them `autonomous = true` on the strength of it. So it is
-    /// carried to the setting that means the same thing now.
+    /// inference and hides artifacts, so it is carried to the setting that
+    /// means the same thing now.
     ///
     /// `max_judgements` has no successor to carry to — a count per tick and a
     /// rate are not the same quantity — so it is only named.
@@ -562,8 +554,7 @@ impl Config {
                 tracing::warn!(
                     "consolidate.judge has been retired; reading judge = false as \
                      max_dedupe_per_tick = 0, which is what stops the dedupe pass \
-                     asking anything now. consolidate.autonomous, separately, decides \
-                     whether an answer is acted on."
+                     asking anything now."
                 );
             }
             Some(true) => tracing::warn!(
@@ -585,6 +576,13 @@ impl Config {
             tracing::warn!(
                 "consolidate.sample has been retired and is being ignored; every artifact \
                  looks for its own duplicates when it is indexed"
+            );
+        }
+        if self.consolidate.autonomous.is_some() {
+            tracing::warn!(
+                "consolidate.autonomous has been retired and is being ignored; every verdict \
+                 is acted on, and every merge and supersede has an undo. \
+                 max_dedupe_per_tick = 0 is what stops the pass asking"
             );
         }
     }
@@ -902,12 +900,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     }
 
     #[test]
-    fn an_operator_who_switched_the_judge_off_does_not_get_autonomy_instead() {
+    fn an_operator_who_switched_the_judge_off_is_still_not_asked() {
         // `judge = false` is the record of someone declining the one stage that
-        // spends inference and hides artifacts. The key was retired and the
-        // struct takes its defaults, so ignoring it would read that file as
-        // consent to `autonomous = true` — arriving by upgrade, from a config
-        // that says the opposite. It is carried to the key that stops the asking.
+        // spends inference and hides artifacts. It is carried to the key that
+        // stops the asking.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[consolidate]\njudge = false\n"));

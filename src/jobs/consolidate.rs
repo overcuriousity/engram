@@ -387,18 +387,6 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // Verdicts recorded while autonomy was off go back into the queue now
-    // that it is on. Idempotent and normally free: with autonomy on, no unit
-    // writes would_merge, so this touches rows exactly once per flip.
-    if core.consolidate.autonomous {
-        let reopened = core.store.reopen_would_merge_pairs().await?;
-        if reopened > 0 {
-            tracing::info!(
-                reopened,
-                "re-armed would-merge verdicts recorded before autonomy"
-            );
-        }
-    }
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
@@ -845,7 +833,6 @@ pub(crate) mod tests {
         // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
-        core.consolidate.autonomous = true;
         assert_eq!(
             core.store
                 .pairs_by_state(PairState::Pending, 10)
@@ -889,7 +876,6 @@ pub(crate) mod tests {
         core.judge = completer.clone();
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
-        core.consolidate.autonomous = true;
 
         core.deprecate(&ids[0]).await.unwrap();
 
@@ -1102,43 +1088,6 @@ pub(crate) mod tests {
             first.stage,
             Stage::SegmentWindow,
             "a dedupe unit was claimed ahead of capture work"
-        );
-    }
-
-    #[tokio::test]
-    async fn would_merge_verdicts_are_re_armed_once_autonomy_is_on() {
-        // Recorded while autonomy was off, the verdict's whole point is to be
-        // acted on once the switch flips — the variant's own doc says so. The
-        // ticker's arming pass is where the flip becomes visible.
-        let mut core = test_core().await;
-        core.consolidate.autonomous = true;
-        core.consolidate.max_dedupe_per_tick = 5;
-        let ids = disagreeing(&core).await;
-        core.store
-            .record_pair(&ids[0], &ids[1], 0.91)
-            .await
-            .unwrap();
-        let pair = core
-            .store
-            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
-            .await
-            .unwrap()[0]
-            .id;
-        core.store
-            .set_pair_state(
-                pair,
-                crate::store::pairs::PairState::WouldMerge,
-                Some("same claim"),
-            )
-            .await
-            .unwrap();
-
-        arm_dedupe(&core).await.unwrap();
-
-        assert_eq!(
-            core.store.get_pair(pair).await.unwrap().state,
-            crate::store::pairs::PairState::Pending,
-            "a would_merge verdict stayed stranded after autonomy came on"
         );
     }
 
@@ -1385,8 +1334,7 @@ pub(crate) mod tests {
         // The old rule filed them as settled and left both in every result set,
         // so the single best merge candidate was the one case the model was
         // never shown.
-        let mut core = test_core().await;
-        core.consolidate.autonomous = true;
+        let core = test_core().await;
         seed_related(
             &core,
             &[
@@ -1421,7 +1369,6 @@ pub(crate) mod tests {
     async fn the_dedupe_pass_stops_at_its_budget() {
         // One sweep must not be able to occupy the GPU for an hour.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 1;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -1635,7 +1582,6 @@ pub(crate) mod tests {
         // it for as long as twenty calls took. The sweep now decides which
         // pairs are worth asking about — all of it local — and arms a unit each.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
@@ -1665,7 +1611,6 @@ pub(crate) mod tests {
         // score alone, the same top-scoring pair would then absorb every
         // sweep's budget forever and the rest would never be judged at all.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 1;
         core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
@@ -1712,7 +1657,6 @@ pub(crate) mod tests {
         // completes it. One pair that lost a race therefore cost every pair
         // behind it a wait of up to `interval_hours`.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 5;
         let ids = seed_related(
             &core,
@@ -1781,7 +1725,6 @@ pub(crate) mod tests {
         // pair still waiting for its first call leads every sweep: the budget
         // went on re-arming it while pairs recorded since never got a turn.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 1;
         // Two pairs in the review band and nothing near enough to cluster, so
         // the sweep has a second pair to reach once the first is spoken for.
