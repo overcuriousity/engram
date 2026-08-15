@@ -40,18 +40,9 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let text = read?;
 
     if text.trim().is_empty() {
-        let mut meta = src.metadata.clone();
-        meta["describe"] = serde_json::json!({
-            "error": "the model returned no text for this image"
-        });
-        core.store.set_corpus_metadata(corpus_id, &meta).await?;
-        core.store
-            .set_corpus_status(corpus_id, CorpusStatus::NeedsReview)
-            .await?;
-        tracing::warn!(
-            corpus_id,
-            "vision model returned nothing; parked for review"
-        );
+        // Not a near-duplicate, so not the review queue: that page offers
+        // "keep" and "discard" against another corpus, and there is none.
+        park_failed(core, corpus_id, "the model returned no text for this image").await?;
         return Ok(());
     }
 
@@ -63,35 +54,13 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         .find_near_duplicate(&sig, core.consolidate.near_dupe_min)
         .await?;
     core.store.set_described_text(corpus_id, &text, sig).await?;
-    match near {
-        Some(n) => {
-            core.store
-                .set_near_dupe(corpus_id, Some(&n.corpus_id), Some(n.similarity))
-                .await?;
-            core.store
-                .set_corpus_status(corpus_id, CorpusStatus::NeedsReview)
-                .await?;
-            tracing::info!(
-                corpus_id,
-                near = %n.corpus_id,
-                similarity = n.similarity,
-                "reading looks like an existing corpus; parked for review"
-            );
-        }
-        None => {
-            core.store
-                .set_corpus_status(corpus_id, CorpusStatus::Raw)
-                .await?;
-            core.store
-                .enqueue(Stage::Synthesize, "corpus", corpus_id)
-                .await?;
-            tracing::info!(
-                corpus_id,
-                chars = text.len(),
-                "image read; queued for synthesis"
-            );
-        }
-    }
+    core.park_or_queue(corpus_id, near.as_ref()).await?;
+    tracing::info!(
+        corpus_id,
+        chars = text.len(),
+        parked = near.is_some(),
+        "image read"
+    );
     Ok(())
 }
 
@@ -202,19 +171,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_reading_parks_the_corpus_with_the_reason() {
+    async fn an_empty_reading_parks_the_corpus_as_failed_with_the_reason() {
         let core = test_core_with_describer(Arc::new(FakeDescriber::saying("  \n"))).await;
         let id = captured(&core, 4, None).await;
         core.store.claim_job().await.unwrap();
         run(&core, &id).await.unwrap();
         let src = core.store.get_corpus(&id).await.unwrap();
-        assert_eq!(src.status, CorpusStatus::NeedsReview);
+        assert_eq!(src.status, CorpusStatus::Failed);
         assert!(
             src.metadata["describe"]["error"]
                 .as_str()
                 .unwrap()
                 .contains("no text")
         );
+        assert!(
+            src.near_dupe_of.is_none(),
+            "not a near-duplicate; not on the review queue"
+        );
+        assert!(core.store.parked_corpora(10).await.unwrap().is_empty());
         assert!(
             core.store.claim_job().await.unwrap().is_none(),
             "nothing further queued"

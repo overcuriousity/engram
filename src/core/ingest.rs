@@ -244,6 +244,41 @@ impl Core {
         })
     }
 
+    /// The fork every capture reaches once its text is known: parked next to
+    /// what it resembles, or queued for synthesis. The status write is here so
+    /// no caller can park without saying what it parked beside.
+    pub(crate) async fn park_or_queue(
+        &self,
+        corpus_id: &str,
+        near: Option<&crate::store::corpora::NearDuplicate>,
+    ) -> Result<()> {
+        match near {
+            Some(n) => {
+                self.store
+                    .set_near_dupe(corpus_id, Some(&n.corpus_id), Some(n.similarity))
+                    .await?;
+                self.store
+                    .set_corpus_status(corpus_id, CorpusStatus::NeedsReview)
+                    .await?;
+                tracing::info!(
+                    corpus_id,
+                    near = %n.corpus_id,
+                    similarity = n.similarity,
+                    "looks like an existing corpus; parked for review"
+                );
+            }
+            None => {
+                self.store
+                    .set_corpus_status(corpus_id, CorpusStatus::Raw)
+                    .await?;
+                self.store
+                    .enqueue(Stage::Synthesize, "corpus", corpus_id)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Store the image and queue the vision stage. Like `ingest_capture`, this
     /// makes no inference call: the phone gets its answer the moment the bytes
     /// are safe, and a dead vision endpoint costs a wait, not a photo.
