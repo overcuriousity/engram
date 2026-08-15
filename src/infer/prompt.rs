@@ -409,6 +409,81 @@ struct RawArtifact {
     caveats: Vec<String>,
 }
 
+/// The shape `parse_response` will accept, as a JSON Schema for the endpoint to
+/// constrain generation with.
+///
+/// Lives beside `RawArtifact` so the two are read together: a schema that has
+/// drifted from the struct it describes constrains the model into output the
+/// parser then rejects, which is worse than not constraining it at all.
+///
+/// Every field is required. The optional ones are optional to *serde*, so an
+/// older reply still parses, but there is no reason to let a model that is
+/// being told the shape anyway omit the line range or the tags.
+pub fn artifacts_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "artifacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "title": {"type": "string"},
+                        "category": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "corpus_lines": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "minItems": 2,
+                            "maxItems": 2
+                        },
+                        "caveats": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["text", "title", "category", "tags", "corpus_lines", "caveats"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["artifacts"],
+        "additionalProperties": false
+    })
+}
+
+/// The shape `parse_dedupe` will accept. Lives beside `Raw` for the same reason
+/// `artifacts_schema` lives beside `RawArtifact`.
+///
+/// Only `relation` is required, and `merged` is not: a schema cannot say "the
+/// merged artifact is required exactly when the relation is duplicate", and
+/// requiring it unconditionally would make the model write a merged artifact
+/// for every pair it was asked to keep apart. That one conditional stays where
+/// it already is, in `parse_dedupe`.
+pub fn dedupe_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "relation": {
+                "type": "string",
+                "enum": ["duplicate", "distinct", "conflict", "replaced"]
+            },
+            "detail": {"type": "string"},
+            "supersedes": {"type": "string"},
+            "merged": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "title": {"type": "string"},
+                    "category": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "caveats": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["text"]
+            }
+        },
+        "required": ["relation"]
+    })
+}
+
 /// Models wrap JSON in fences and preface it with prose no matter what the
 /// prompt says, so slice from the first `{` to the last `}` before parsing.
 fn extract_json(body: &str) -> &str {
@@ -695,6 +770,56 @@ mod tests {
     fn the_system_prompt_forbids_extracting_from_context() {
         assert!(SYNTHESIZER_SYSTEM.contains("context only"));
         assert!(SYNTHESIZER_SYSTEM.contains("INPUT"));
+    }
+
+    /// The schemas are sent to the endpoint to constrain decoding, so a schema
+    /// that has drifted from its parser constrains the model into output the
+    /// parser then rejects — a failure that looks exactly like a bad model and
+    /// cannot be fixed by retrying.
+    #[test]
+    fn a_reply_that_satisfies_the_artifact_schema_parses() {
+        let required = artifacts_schema()["properties"]["artifacts"]["items"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let reply = r#"{"artifacts":[{"text":"body","title":"A","category":"note",
+            "tags":["t"],"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
+        // The literal above is the model's side of the bargain: every field the
+        // schema makes mandatory has to be one this parser reads.
+        for field in &required {
+            assert!(
+                reply.contains(&format!("\"{field}\"")),
+                "the schema requires {field}, which this test never proves parsable"
+            );
+        }
+        let out = parse_response(reply).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].corpus_lines, Some((1, 4)));
+        assert_eq!(out[0].caveats, vec!["only on linux".to_string()]);
+    }
+
+    #[test]
+    fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
+        for relation in dedupe_schema()["properties"]["relation"]["enum"]
+            .as_array()
+            .unwrap()
+        {
+            let r = relation.as_str().unwrap();
+            // `duplicate` is the one verdict that needs a merged artifact, and
+            // the schema deliberately does not require it — the parser is what
+            // enforces that pairing.
+            let body = if r == "duplicate" {
+                format!(r#"{{"relation":"{r}","merged":{{"text":"merged body"}}}}"#)
+            } else {
+                format!(r#"{{"relation":"{r}"}}"#)
+            };
+            assert!(
+                parse_dedupe(&body).is_ok(),
+                "the schema lets the model answer {r:?}, which the parser rejects"
+            );
+        }
     }
 
     #[test]

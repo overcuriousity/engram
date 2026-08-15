@@ -71,6 +71,15 @@ output_ratio = 8.0
 # out of max_output_tokens, so suppressing it is what stops the artifact list
 # from being cut off. Unset by default: models that do not reason reject the field.
 # reasoning_effort = "none"
+
+# Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
+# the endpoint constrains decoding to the shape the parser expects. On by
+# default. A 9B model asked for JSON will otherwise close an array with a brace
+# or omit a required field often enough that windows fail permanently, and the
+# parse error it produces is indistinguishable from a truncated reply. Honoured
+# by llama.cpp, vLLM and the hosted APIs; set false for an endpoint that rejects
+# the field. Governs the dedupe judge too, which runs on this endpoint.
+# structured_output = true
 # Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
 # is ignored, and engram says so at startup rather than letting the setting
 # quietly stop happening.

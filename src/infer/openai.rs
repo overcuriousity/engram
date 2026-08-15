@@ -97,6 +97,7 @@ pub struct HttpSynthesizer {
     budget: SynthesisBudget,
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
+    structured_output: bool,
 }
 
 impl HttpSynthesizer {
@@ -117,6 +118,7 @@ impl HttpSynthesizer {
             },
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
+            structured_output: cfg.structured_output,
         }
     }
 
@@ -127,7 +129,12 @@ impl HttpSynthesizer {
         self
     }
 
-    async fn chat(&self, messages: serde_json::Value) -> Result<String> {
+    /// `schema`, when given, is sent as an OpenAI `json_schema` response format.
+    /// An endpoint that honours it compiles the schema into a decoding
+    /// constraint, which is the only thing that reliably stops a small local
+    /// model closing an array with a brace or dropping a required field. The
+    /// calls that want prose rather than JSON — titles — pass `None`.
+    async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
         let mut body = json!({
             "model": self.model,
             "messages": messages,
@@ -136,6 +143,9 @@ impl HttpSynthesizer {
         });
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
+        }
+        if let Some(name) = schema.filter(|_| self.structured_output) {
+            body["response_format"] = response_format(name, prompt::artifacts_schema());
         }
         // Segmentation is the slow half of ingest on local hardware — minutes
         // per window, not seconds. Logging the cost of each call is what makes
@@ -169,10 +179,13 @@ impl Synthesizer for HttpSynthesizer {
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         let user = prompt::user_prompt(input.core, 1, self.max_artifact_tokens, input.context);
         let first = self
-            .chat(json!([
-                {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
-                {"role":"user","content": user}
-            ]))
+            .chat(
+                json!([
+                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"user","content": user}
+                ]),
+                Some("artifacts"),
+            )
             .await?;
 
         match prompt::parse_response(&first) {
@@ -183,12 +196,15 @@ impl Synthesizer for HttpSynthesizer {
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let second = self
-                    .chat(json!([
-                        {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
-                        {"role":"user","content": user},
-                        {"role":"assistant","content": first},
-                        {"role":"user","content": repair}
-                    ]))
+                    .chat(
+                        json!([
+                            {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                            {"role":"user","content": user},
+                            {"role":"assistant","content": first},
+                            {"role":"user","content": repair}
+                        ]),
+                        Some("artifacts"),
+                    )
                     .await?;
                 prompt::parse_response(&second)
             }
@@ -201,10 +217,13 @@ impl Synthesizer for HttpSynthesizer {
 
     async fn title(&self, text: &str, artifact_titles: &[String]) -> Result<Option<String>> {
         let out = self
-            .chat(json!([
-                {"role":"system","content": prompt::TITLE_SYSTEM},
-                {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
-            ]))
+            .chat(
+                json!([
+                    {"role":"system","content": prompt::TITLE_SYSTEM},
+                    {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
+                ]),
+                None,
+            )
             .await?;
         // A model that ignores "no quotes" should not put them on the screen,
         // and a model that answers with an essay should not become a title.
@@ -398,6 +417,17 @@ impl Reranker for HttpReranker {
     }
 }
 
+/// An OpenAI `json_schema` response format.
+///
+/// `strict` is what makes the difference between a schema the endpoint treats
+/// as a hint and one it compiles into a grammar the decoder cannot leave.
+fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": true, "schema": schema}
+    })
+}
+
 // ── Completer ────────────────────────────────────────────────────────────────
 
 pub struct HttpCompleter {
@@ -407,6 +437,10 @@ pub struct HttpCompleter {
     api_key: Option<String>,
     context_tokens: usize,
     reasoning_effort: Option<String>,
+    /// The JSON Schema this role's replies must satisfy, sent as a response
+    /// format so the endpoint constrains decoding. `None` for the ask role,
+    /// whose answer is prose for a person to read.
+    response_schema: Option<(&'static str, serde_json::Value)>,
     /// Which configured role this completer speaks for, so a failure names the
     /// endpoint the operator has to go and look at.
     role: &'static str,
@@ -421,6 +455,7 @@ impl HttpCompleter {
             api_key: cfg.api_key.clone(),
             context_tokens: cfg.context_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
+            response_schema: None,
             role: "ask",
         }
     }
@@ -440,6 +475,9 @@ impl HttpCompleter {
             api_key: cfg.api_key.clone(),
             context_tokens: cfg.context_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
+            response_schema: cfg
+                .structured_output
+                .then(|| ("verdict", prompt::dedupe_schema())),
             role: "judge",
         }
     }
@@ -458,6 +496,9 @@ impl Completer for HttpCompleter {
         });
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
+        }
+        if let Some((name, schema)) = &self.response_schema {
+            body["response_format"] = response_format(name, schema.clone());
         }
         let started = std::time::Instant::now();
         let v = post_json(
@@ -634,6 +675,7 @@ mod tests {
             tokenizer_path: None,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
+            structured_output: true,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
             cooldown_secs: None,
@@ -670,6 +712,131 @@ mod tests {
         let out = c.segment(window("anything")).await.unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("A"));
+    }
+
+    /// The captured request body of a single call, so a test can assert on what
+    /// was sent rather than only on what came back.
+    async fn sent_body(server: &MockServer) -> serde_json::Value {
+        let reqs = server.received_requests().await.expect("recording is on");
+        assert_eq!(reqs.len(), 1, "expected exactly one call");
+        serde_json::from_slice(&reqs[0].body).expect("the request body is JSON")
+    }
+
+    async fn echoing_server(content: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"content": content}}]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn segmentation_constrains_the_reply_to_the_schema_the_parser_wants() {
+        // A 9B model asked for JSON closes an array with a brace and drops
+        // required fields, and the parse error that follows is indistinguishable
+        // from a truncated reply. The schema is the only thing that makes the
+        // malformed reply ungeneratable rather than merely unwanted.
+        let server = echoing_server(
+            r#"{"artifacts":[{"text":"body","title":"A","category":"n","tags":[]}]}"#,
+        )
+        .await;
+        HttpSynthesizer::new(&synthesize_cfg(server.uri()))
+            .segment(window("anything"))
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            body["response_format"]["json_schema"]["strict"], true,
+            "without strict the schema is a hint, not a decoding constraint"
+        );
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"],
+            prompt::artifacts_schema(),
+            "the schema sent is not the one the parser was written against"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_title_is_asked_for_as_prose_not_as_json() {
+        // `chat` is shared with segmentation, and a schema leaking onto this
+        // call would constrain a one-line title into a JSON object.
+        let server = echoing_server("A Good Title").await;
+        let t = HttpSynthesizer::new(&synthesize_cfg(server.uri()))
+            .title("some text", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(t.as_deref(), Some("A Good Title"));
+        assert!(
+            sent_body(&server).await.get("response_format").is_none(),
+            "a title was asked for as JSON"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_output_can_be_switched_off_for_an_endpoint_that_rejects_it() {
+        let mut cfg = synthesize_cfg(String::new());
+        cfg.structured_output = false;
+        let server = echoing_server(
+            r#"{"artifacts":[{"text":"body","title":"A","category":"n","tags":[]}]}"#,
+        )
+        .await;
+        cfg.base_url = server.uri();
+
+        HttpSynthesizer::new(&cfg)
+            .segment(window("x"))
+            .await
+            .unwrap();
+
+        assert!(
+            sent_body(&server).await.get("response_format").is_none(),
+            "the opt-out did not reach the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_judge_constrains_its_verdict_and_the_ask_path_does_not() {
+        // Same struct, two roles: the judge's reply is parsed as a verdict and
+        // must be constrained, while the ask reply is prose for a person and
+        // would be ruined by a schema.
+        let judge_server = echoing_server(r#"{"relation":"distinct"}"#).await;
+        let mut cfg = synthesize_cfg(judge_server.uri());
+        cfg.api_key = None;
+        HttpCompleter::for_judging(&cfg)
+            .complete("s", "u")
+            .await
+            .unwrap();
+        let body = sent_body(&judge_server).await;
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"],
+            prompt::dedupe_schema()
+        );
+
+        let ask_server = echoing_server("a prose answer").await;
+        HttpCompleter::new(&AskRole {
+            base_url: ask_server.uri(),
+            model: "m".into(),
+            api_key: None,
+            context_tokens: 4096,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            reasoning_effort: None,
+        })
+        .complete("s", "u")
+        .await
+        .unwrap();
+        assert!(
+            sent_body(&ask_server)
+                .await
+                .get("response_format")
+                .is_none(),
+            "the answer to a question was constrained to a verdict schema"
+        );
     }
 
     #[tokio::test]

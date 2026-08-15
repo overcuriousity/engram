@@ -340,6 +340,19 @@ pub struct SynthesizeRole {
     /// Seconds to wait on one call before giving up on it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Whether to send the reply's JSON Schema as an OpenAI `json_schema`
+    /// response format, so the endpoint constrains decoding to it.
+    ///
+    /// On by default, because unconstrained is not a safe default here: a 9B
+    /// model asked for JSON will close an array with a brace, or omit a
+    /// required field, often enough that windows fail permanently — and the
+    /// only symptom is a parse error that reads exactly like a truncated reply.
+    /// llama.cpp, vLLM and the hosted APIs all honour it. Turn it off for an
+    /// endpoint that rejects the field outright.
+    ///
+    /// Governs the dedupe judge as well, which runs on this endpoint.
+    #[serde(default = "default_true")]
+    pub structured_output: bool,
     /// Moved to `[pacing]`, and kept here only to be complained about.
     ///
     /// Pacing is one queue in front of one endpoint now, so a cooldown per role
@@ -360,6 +373,10 @@ pub struct SynthesizeRole {
     /// Zero disables it.
     #[serde(default = "default_context_overlap_tokens")]
     pub context_overlap_tokens: usize,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_context_opening_tokens() -> usize {
