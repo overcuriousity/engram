@@ -33,27 +33,62 @@ pub struct NewAttachment<'a> {
     pub height: Option<i64>,
 }
 
+/// An attachment for a corpus that does not exist yet: `NewAttachment` minus
+/// the id, for the door that writes row and attachment in one transaction.
+pub struct NewImage<'a> {
+    pub kind: &'a str,
+    pub mime: &'a str,
+    pub filename: Option<&'a str>,
+    pub bytes: &'a [u8],
+    pub preview: &'a [u8],
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+}
+
+impl<'a> NewImage<'a> {
+    pub fn for_corpus(&self, corpus_id: &'a str) -> NewAttachment<'a> {
+        NewAttachment {
+            corpus_id,
+            kind: self.kind,
+            mime: self.mime,
+            filename: self.filename,
+            bytes: self.bytes,
+            preview: self.preview,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// `insert_attachment` on whatever executor the caller is inside.
+pub(crate) async fn insert_attachment_with<'e>(
+    exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    a: &NewAttachment<'_>,
+) -> Result<i64> {
+    let res = sqlx::query(
+        "INSERT INTO attachments (corpus_id, kind, mime, filename, bytes, preview, width, height, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(a.corpus_id)
+    .bind(a.kind)
+    .bind(a.mime)
+    .bind(a.filename)
+    .bind(a.bytes)
+    .bind(a.preview)
+    .bind(a.width)
+    .bind(a.height)
+    .bind(now())
+    .execute(exec)
+    .await?;
+    Ok(res.last_insert_rowid())
+}
+
 /// What every preview is encoded as. See `core::image::prepare`.
 pub const PREVIEW_MIME: &str = "image/jpeg";
 
 impl Store {
     pub async fn insert_attachment(&self, a: &NewAttachment<'_>) -> Result<i64> {
-        let res = sqlx::query(
-            "INSERT INTO attachments (corpus_id, kind, mime, filename, bytes, preview, width, height, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(a.corpus_id)
-        .bind(a.kind)
-        .bind(a.mime)
-        .bind(a.filename)
-        .bind(a.bytes)
-        .bind(a.preview)
-        .bind(a.width)
-        .bind(a.height)
-        .bind(now())
-        .execute(&self.pool)
-        .await?;
-        Ok(res.last_insert_rowid())
+        insert_attachment_with(&self.pool, a).await
     }
 
     pub async fn attachment_for_corpus(&self, corpus_id: &str) -> Result<Option<Attachment>> {
@@ -107,11 +142,7 @@ mod tests {
     #[tokio::test]
     async fn an_attachment_round_trips_and_goes_with_its_corpus() {
         let s = Store::memory().await.unwrap();
-        let src = s
-            .insert_image_corpus("h", "image", None, &serde_json::json!({}))
-            .await
-            .unwrap()
-            .into_corpus();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.insert_attachment(&NewAttachment {
             corpus_id: &src.id,
             kind: "image",

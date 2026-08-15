@@ -2053,6 +2053,15 @@ mod tests {
                     "exif": {"taken_at": "2026-08-09T14:12:03", "camera": "Pixel",
                              "gps": {"lat": 1.5, "lon": 2.5}}
                 }),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: Some("IMG.png"),
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(4),
+                    height: Some(2),
+                },
             )
             .await
             .unwrap()

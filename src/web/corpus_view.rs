@@ -162,7 +162,21 @@ mod tests {
     async fn an_image_corpus_labels_its_lines_as_transcription() {
         let s = crate::store::Store::memory().await.unwrap();
         let src = s
-            .insert_image_corpus("h", "image", None, &serde_json::json!({}))
+            .insert_image_corpus(
+                "h",
+                "image",
+                None,
+                &serde_json::json!({}),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: None,
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(1),
+                    height: Some(1),
+                },
+            )
             .await
             .unwrap()
             .into_corpus();

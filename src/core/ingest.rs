@@ -1,7 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::corpora::{CorpusStatus, Insertion, NearDuplicate, content_hash};
+use crate::store::corpora::{CorpusStatus, Followup, Insertion, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
 use crate::store::now;
 
@@ -174,6 +174,17 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
+        // Parked, or queued. Synthesis is the expensive stage and text that
+        // resembles something stored may not deserve it; an operator decides
+        // on Ops. Nothing is lost either way — the corpus is stored verbatim
+        // like any other. Written with the row, not after it.
+        let followup = match &near {
+            Some(n) => Followup::Park {
+                of: n.corpus_id.clone(),
+                similarity: n.similarity,
+            },
+            None => Followup::Queue(Stage::Synthesize),
+        };
         let src = match self
             .store
             .insert_corpus_with_signature(
@@ -183,6 +194,7 @@ impl Core {
                 sig,
                 c.source_url.as_deref(),
                 &c.metadata,
+                followup,
             )
             .await?
         {
@@ -206,38 +218,18 @@ impl Core {
         };
 
         match &near {
-            // Parked. Synthesis is the expensive stage and this text may not
-            // deserve it; an operator decides on Ops. Nothing is lost either
-            // way — the corpus is stored verbatim like any other.
-            Some(n) => {
-                self.store
-                    .set_near_dupe(&src.id, Some(&n.corpus_id), Some(n.similarity))
-                    .await?;
-                self.store
-                    .set_corpus_status(&src.id, CorpusStatus::NeedsReview)
-                    .await?;
-                tracing::info!(
-                    corpus_id = %src.id,
-                    near = %n.corpus_id,
-                    similarity = n.similarity,
-                    "capture looks like an existing corpus; parked for review"
-                );
-            }
-            None => {
-                self.store
-                    .enqueue(Stage::Synthesize, "corpus", &src.id)
-                    .await?;
-                tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested");
-            }
+            Some(n) => tracing::info!(
+                corpus_id = %src.id,
+                near = %n.corpus_id,
+                similarity = n.similarity,
+                "capture looks like an existing corpus; parked for review"
+            ),
+            None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
         }
 
         Ok(IngestOutcome {
             id: src.id,
-            status: if near.is_some() {
-                CorpusStatus::NeedsReview
-            } else {
-                CorpusStatus::Raw
-            },
+            status: src.status,
             duplicate: false,
             near_duplicate: near,
         })
@@ -330,9 +322,24 @@ impl Core {
         // are what a camera and a clipboard call everything. Seeding the title
         // from it would disarm the one stage that can name the capture.
 
+        let attachment = crate::store::attachments::NewImage {
+            kind: "image",
+            mime: prepared.mime,
+            filename: filename.as_deref(),
+            bytes: &bytes,
+            preview: &prepared.preview_jpeg,
+            width: Some(prepared.width as i64),
+            height: Some(prepared.height as i64),
+        };
         let src = match self
             .store
-            .insert_image_corpus(&hash, ORIGIN_IMAGE, title_hint.as_deref(), &metadata)
+            .insert_image_corpus(
+                &hash,
+                ORIGIN_IMAGE,
+                title_hint.as_deref(),
+                &metadata,
+                &attachment,
+            )
             .await?
         {
             Insertion::Created(src) => src,
@@ -345,21 +352,6 @@ impl Core {
                 });
             }
         };
-        self.store
-            .insert_attachment(&crate::store::attachments::NewAttachment {
-                corpus_id: &src.id,
-                kind: "image",
-                mime: prepared.mime,
-                filename: filename.as_deref(),
-                bytes: &bytes,
-                preview: &prepared.preview_jpeg,
-                width: Some(prepared.width as i64),
-                height: Some(prepared.height as i64),
-            })
-            .await?;
-        self.store
-            .enqueue(Stage::Describe, "corpus", &src.id)
-            .await?;
         tracing::info!(
             corpus_id = %src.id,
             bytes = bytes.len(),

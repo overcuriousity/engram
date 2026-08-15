@@ -321,6 +321,7 @@ mod tests {
                 vec![],
                 None,
                 &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
             )
             .await
             .unwrap()
@@ -423,6 +424,7 @@ mod tests {
                 vec![],
                 None,
                 &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
             )
             .await
             .unwrap()

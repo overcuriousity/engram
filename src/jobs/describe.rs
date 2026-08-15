@@ -263,7 +263,21 @@ mod tests {
         let core = test_core_without_vision().await;
         let src = core
             .store
-            .insert_image_corpus("h", "image", None, &serde_json::json!({}))
+            .insert_image_corpus(
+                "h",
+                "image",
+                None,
+                &serde_json::json!({}),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: None,
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(1),
+                    height: Some(1),
+                },
+            )
             .await
             .unwrap()
             .into_corpus();
@@ -298,7 +312,21 @@ mod tests {
         let core = test_core_without_vision().await;
         let src = core
             .store
-            .insert_image_corpus("h", "image", None, &serde_json::json!({}))
+            .insert_image_corpus(
+                "h",
+                "image",
+                None,
+                &serde_json::json!({}),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: None,
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(1),
+                    height: Some(1),
+                },
+            )
             .await
             .unwrap()
             .into_corpus();
