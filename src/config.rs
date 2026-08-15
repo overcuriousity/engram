@@ -75,7 +75,6 @@ pub struct PacingConfig {
     pub breaker_probe_secs: Option<u64>,
 }
 
-
 /// Recording real searches so they can be judged later.
 ///
 /// The queries a benchmark needs cannot be written from memory: phrased while
