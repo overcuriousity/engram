@@ -1,4 +1,3 @@
-pub mod classify;
 pub mod consolidate;
 pub mod dedupe;
 pub mod describe;
