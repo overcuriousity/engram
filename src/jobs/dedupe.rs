@@ -231,6 +231,11 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             tracing::warn!(
                 pair = id,
                 attempt = p.judge_attempts,
+                // A parse error names the column it gave up at; without the
+                // length there is no way to tell whether that was the end of
+                // the reply — a cut-off answer — or a break in the middle of
+                // one the endpoint finished writing.
+                reply_len = reply.len(),
                 error = %e,
                 "dedupe reply unreadable; component stays pending"
             );

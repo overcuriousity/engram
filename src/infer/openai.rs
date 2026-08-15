@@ -459,6 +459,7 @@ impl Completer for HttpCompleter {
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
+        let started = std::time::Instant::now();
         let v = post_json(
             self.role,
             &self.client,
@@ -467,6 +468,18 @@ impl Completer for HttpCompleter {
             body,
         )
         .await?;
+        // `finish_reason` is the only thing that tells a truncated reply from a
+        // model that wrote bad JSON of its own accord: both arrive here as
+        // unparsable text, and the two have opposite fixes. Logged for every
+        // call rather than only the failures, so the normal shape of a reply is
+        // on the record to compare a failure against.
+        tracing::info!(
+            role = self.role,
+            ms = started.elapsed().as_millis(),
+            tokens = v["usage"]["completion_tokens"].as_u64(),
+            finish_reason = v["choices"][0]["finish_reason"].as_str(),
+            "completer call finished"
+        );
         v["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
