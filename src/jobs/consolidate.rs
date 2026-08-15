@@ -302,18 +302,16 @@ pub(crate) async fn full_lifecycle_reconcile_scanning(core: &Core, scan: usize) 
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
-    // Retention used to ride along here. It has its own ticker now
-    // (`spawn_retention_ticker`): riding along meant that switching duplicate
-    // hygiene off silently switched off the operator's instruction about how
-    // long their query log is kept, which is not consolidation's call to make.
+    // Finish what was started before looking for duplicates: a sweep over a
+    // half-ingested corpus is judging a base that is not there yet. This is
+    // capture-pipeline repair, not duplicate hygiene, so it is not behind
+    // `enabled` — the same reason retention has its own ticker.
+    crate::jobs::reconcile::run(core).await?;
+
     let cfg = &core.consolidate;
     if !cfg.enabled {
         return Ok(Outcome::default());
     }
-
-    // Finish what was started before looking for duplicates: a sweep over a
-    // half-ingested corpus is judging a base that is not there yet.
-    crate::jobs::reconcile::run(core).await?;
 
     // Deletions clear these as they happen; the sweep repeats it because a
     // hidden artifact pointing at nothing is invisible to search and to every
@@ -2440,6 +2438,45 @@ pub(crate) mod tests {
         seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.examined, out.superseded, out.queued), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_repair_sweep_runs_even_when_duplicate_hygiene_is_off() {
+        let mut core = test_core().await;
+        core.consolidate.enabled = false;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    crate::store::segments::NewSegment {
+                        start_line: 1,
+                        end_line: 10,
+                        text: "first window",
+                        carry_lines: 0,
+                    },
+                    crate::store::segments::NewSegment {
+                        start_line: 11,
+                        end_line: 20,
+                        text: "second window",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("reconcile armed the unfinished window");
+        assert_eq!(job.stage, crate::store::jobs::Stage::SegmentWindow);
     }
 
     #[tokio::test]
