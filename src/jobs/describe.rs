@@ -4,7 +4,6 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
-use crate::store::jobs::Stage;
 
 pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
@@ -86,6 +85,7 @@ pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::jobs::Stage;
     use crate::core::ingest::ImageCapture;
     use crate::core::test_support::{test_core_with_describer, test_core_without_vision};
     use crate::infer::fake::FakeDescriber;
