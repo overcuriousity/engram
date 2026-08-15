@@ -348,32 +348,13 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
         let keep = keeper(group);
         for c in group.iter().filter(|c| c.id != keep.id) {
-            // SQLite first: it is the source of truth, and a payload flag with
-            // no row behind it is a hidden artifact nothing can explain. See
-            // `Core::supersede`.
-            //
-            // One failure does not abandon the rest, as in
-            // `heal_dangling_supersessions`. `supersede` refuses a side that is
-            // no longer active, and these statuses were read earlier in this
-            // same sweep — so an operator deprecating one of them from Ops in
-            // the meantime is an ordinary race, not a reason to abandon the
-            // remaining clusters, the judge pass, and every pair below.
-            if let Err(e) = core.supersede(&c.id, &keep.id).await {
-                tracing::warn!(
-                    superseded = %c.id,
-                    by = %keep.id,
-                    error = %e,
-                    "could not hide a near-identical artifact; it stays active"
-                );
-                continue;
+            // One failure does not abandon the remaining clusters, the judge
+            // pass, and every pair below.
+            if crate::jobs::try_supersede(core, &c.id, &keep.id, "a near-identical artifact").await
+            {
+                hidden.insert(c.id.clone());
+                out.superseded += 1;
             }
-            hidden.insert(c.id.clone());
-            out.superseded += 1;
-            tracing::info!(
-                superseded = %c.id,
-                by = %keep.id,
-                "hid a near-identical artifact"
-            );
         }
     }
 
@@ -1589,6 +1570,48 @@ pub(crate) mod tests {
                 .superseded_by
                 .as_deref(),
             Some(ids[0].as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restored_passage_is_not_hidden_again_by_the_next_sweep() {
+        // The containment rule is deterministic: the same two texts satisfy it
+        // on every sweep. Without a record of the first decision, an operator
+        // pressing Restore was overruled by the next tick, every tick.
+        let core = test_core().await;
+        let ids = seed_related(
+            &core,
+            &[
+                (
+                    "Bind mounts attach a directory elsewhere. Use mount --bind for it.",
+                    [1.0, 0.0],
+                ),
+                ("Bind mounts attach a directory elsewhere.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+
+        run(&core).await.unwrap();
+        assert!(
+            core.store
+                .get_artifact(&ids[1])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some(),
+            "the passage was not hidden the first time"
+        );
+        core.unsupersede(&ids[1]).await.unwrap();
+
+        run(&core).await.unwrap();
+        assert!(
+            core.store
+                .get_artifact(&ids[1])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "the sweep overruled an operator's restore"
         );
     }
 

@@ -251,7 +251,10 @@ mod tests {
         // A corpus that got as far as embedding has been through `finish`, and
         // `finish` measures it. Without this the fixture is indistinguishable
         // from a document whose `finish` never ran, which is a different repair.
-        core.store.set_corpus_coverage(&src.id, 0.9).await.unwrap();
+        core.store
+            .set_corpus_coverage(&src.id, Some(0.9))
+            .await
+            .unwrap();
 
         assert_eq!(run(&core).await.unwrap(), 1);
         let job = core.store.claim_job().await.unwrap().expect("a job");

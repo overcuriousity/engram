@@ -114,8 +114,8 @@ async fn evaluate_retrieval() {
             include_deprecated: false,
             include_superseded: false,
         };
-        let results = core
-            .search_capped(&q, cap, engram::store::feedback::Door::Ui)
+        let (results, _) = core
+            .search_with(&q, cap, engram::store::feedback::Door::Ui)
             .await
             .expect("search failed");
         // `pair.expect` names a frozen id; the store being searched knows that
@@ -351,8 +351,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         include_deprecated: false,
         include_superseded: false,
     };
-    let results = core
-        .search_capped(&q, None, engram::store::feedback::Door::Judge)
+    let (results, _) = core
+        .search_with(&q, None, engram::store::feedback::Door::Judge)
         .await
         .unwrap();
 

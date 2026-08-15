@@ -369,24 +369,12 @@ impl Store {
 
     /// How much of this source ended up inside a chunk. Written once every
     /// window has resolved; a low number means the segmenter dropped part of
-    /// the document, which nothing used to notice.
-    pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: f64) -> Result<()> {
+    /// the document. `None` forgets what the last run measured, so the next
+    /// one is measured against its own windows — and is what the
+    /// reconciliation sweep reads as "this document never finished".
+    pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: Option<f64>) -> Result<()> {
         sqlx::query("UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?")
             .bind(coverage)
-            .bind(now())
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Forget what the last run measured, so the next one is measured against
-    /// its own windows. Also what the reconciliation sweep reads as "this
-    /// document never finished": a stale value there is indistinguishable from a
-    /// document that finished cleanly, which is the wrong answer for a source
-    /// whose windows are being thrown away and re-cut.
-    pub async fn clear_corpus_coverage(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET coverage = NULL, updated_at = ? WHERE id = ?")
             .bind(now())
             .bind(corpus_id)
             .execute(&self.pool)

@@ -123,7 +123,7 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
     };
 
     let cov = crate::infer::verify::content_coverage(&src.raw_text, &made);
-    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    core.store.set_corpus_coverage(corpus_id, Some(cov)).await?;
     Ok(cov)
 }
 

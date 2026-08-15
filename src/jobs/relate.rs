@@ -135,24 +135,13 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             (b, a)
         };
         if contains_normalized(&long.text, &short.text) {
-            // Warn and carry on. `supersede` refuses a side that is no longer
-            // active, and these statuses were read a moment ago, so an operator
-            // deprecating one in between is an ordinary race rather than a
-            // reason to fail the caller's whole sweep.
-            if let Err(e) = core.supersede(&short.id, &long.id).await {
-                tracing::warn!(
-                    superseded = %short.id,
-                    by = %long.id,
-                    error = %e,
-                    "could not hide a duplicated passage; it stays active"
-                );
-                return Ok(());
-            }
-            tracing::info!(
-                superseded = %short.id,
-                by = %long.id,
-                "hid a passage one synthesis call emitted twice"
-            );
+            crate::jobs::try_supersede(
+                core,
+                &short.id,
+                &long.id,
+                "a passage one synthesis call emitted twice",
+            )
+            .await;
             return Ok(());
         }
     }

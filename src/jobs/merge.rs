@@ -77,10 +77,7 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // active, and an operator deprecating a root between the read and here
         // is an ordinary race rather than a reason to abandon the other roots —
         // the sweep's repair reaches whatever is left.
-        if let Err(e) = core.supersede(&root, &m.id).await {
-            tracing::warn!(root = %root, merged = %m.id, error = %e,
-                "could not hide a merged artifact's root; it stays active");
-        }
+        crate::jobs::try_supersede(core, &root, &m.id, "a merged artifact's root").await;
     }
 
     // And any earlier merge this one subsumes. Superseding only the roots would
@@ -101,10 +98,7 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
                     "could not re-point a supersession; it still names a hidden winner");
             }
         }
-        if let Err(e) = core.supersede(&older, &m.id).await {
-            tracing::warn!(subsumed = %older, by = %m.id, error = %e,
-                "could not hide a merge this one subsumes; it stays active");
-        }
+        crate::jobs::try_supersede(core, &older, &m.id, "a merge this one subsumes").await;
     }
     Ok(())
 }

@@ -1,7 +1,9 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::corpora::{CorpusStatus, Followup, Insertion, NearDuplicate, content_hash};
+use crate::store::corpora::{
+    Corpus, CorpusStatus, Followup, Insertion, NearDuplicate, content_hash,
+};
 use crate::store::jobs::Stage;
 use crate::store::now;
 
@@ -34,6 +36,18 @@ pub struct IngestOutcome {
     /// that already exist. The capture is stored and parked, never dropped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
+}
+
+impl IngestOutcome {
+    /// The answer for text or bytes already stored: the corpus that has them.
+    fn existing(c: &Corpus) -> Self {
+        IngestOutcome {
+            id: c.id.clone(),
+            status: c.status.clone(),
+            duplicate: true,
+            near_duplicate: None,
+        }
+    }
 }
 
 /// What an operator decided about a parked capture.
@@ -140,12 +154,7 @@ impl Core {
 
         if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
-            return Ok(IngestOutcome {
-                id: existing.id,
-                status: existing.status,
-                duplicate: true,
-                near_duplicate: None,
-            });
+            return Ok(IngestOutcome::existing(&existing));
         }
 
         // Computed once, before the insert, so the same signature answers "is
@@ -190,12 +199,7 @@ impl Core {
             // moment earlier.
             Insertion::Existing(existing) => {
                 tracing::info!(corpus_id = %existing.id, "concurrent duplicate ingest, returning the stored source");
-                return Ok(IngestOutcome {
-                    id: existing.id,
-                    status: existing.status,
-                    duplicate: true,
-                    near_duplicate: None,
-                });
+                return Ok(IngestOutcome::existing(&existing));
             }
         };
 
@@ -266,12 +270,7 @@ impl Core {
         let hash = content_hash(&bytes);
         if let Some(existing) = self.store.find_by_hash(&hash).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate image, returning existing source");
-            return Ok(IngestOutcome {
-                id: existing.id,
-                status: existing.status,
-                duplicate: true,
-                near_duplicate: None,
-            });
+            return Ok(IngestOutcome::existing(&existing));
         }
         // Decoding, EXIF, the preview and its re-encode are a synchronous walk
         // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
@@ -332,12 +331,7 @@ impl Core {
         {
             Insertion::Created(src) => src,
             Insertion::Existing(existing) => {
-                return Ok(IngestOutcome {
-                    id: existing.id,
-                    status: existing.status,
-                    duplicate: true,
-                    near_duplicate: None,
-                });
+                return Ok(IngestOutcome::existing(&existing));
             }
         };
         tracing::info!(
@@ -888,7 +882,7 @@ impl Core {
         // stuck in `segmenting` for good — nothing resolves again to trigger
         // `settle`, and the one sweep that repairs it has been told there is
         // nothing to repair.
-        self.store.clear_corpus_coverage(id).await?;
+        self.store.set_corpus_coverage(id, None).await?;
         // And the units that name those windows, which outlive them. Planning
         // arms idle-only, so a unit still queued from the run being replaced
         // would carry its attempts into the rerun — the person who asked for
@@ -1316,7 +1310,10 @@ mod tests {
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
-        core.store.set_corpus_coverage(&out.id, 0.87).await.unwrap();
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.87))
+            .await
+            .unwrap();
 
         core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
 

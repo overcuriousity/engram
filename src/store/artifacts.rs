@@ -1063,7 +1063,7 @@ mod tests {
     async fn coverage_is_stored_on_the_source() {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        s.set_corpus_coverage(&src.id, 0.42).await.unwrap();
+        s.set_corpus_coverage(&src.id, Some(0.42)).await.unwrap();
         let got = s.get_corpus(&src.id).await.unwrap();
         assert!((got.coverage.unwrap() - 0.42).abs() < 1e-6);
     }

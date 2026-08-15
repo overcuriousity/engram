@@ -2,7 +2,7 @@ use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::Origin;
-use crate::vector::SearchFilter;
+use crate::vector::{SearchFilter, SearchHit};
 use std::collections::HashMap;
 
 pub const DEFAULT_LIMIT: usize = 10;
@@ -79,6 +79,24 @@ pub struct SearchResult {
     /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
+}
+
+impl From<SearchHit> for SearchResult {
+    fn from(h: SearchHit) -> Self {
+        SearchResult {
+            artifact_id: h.payload.artifact_id,
+            corpus_id: h.payload.corpus_id,
+            title: h.payload.title,
+            text: h.payload.text,
+            category: h.payload.category,
+            tags: h.payload.tags,
+            score: h.score,
+            status: h.payload.status,
+            superseded_by: h.payload.superseded_by,
+            last_verified_at: h.payload.last_verified_at,
+            weak: false,
+        }
+    }
 }
 
 fn now_secs() -> i64 {
@@ -220,21 +238,9 @@ impl Core {
         let hit_counts = counts_of(&hits);
         let results: Vec<SearchResult> = hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
-                // Not an answer to a query, so there is no query to be far
-                // from. These lists are drawn, not matched.
-                weak: false,
-            })
+            // Not an answer to a query, so there is no query to be far from:
+            // these lists are drawn, not matched, and nothing here is weak.
+            .map(SearchResult::from)
             .collect();
         // Surfacing counts as seeing, or the same chunks come back tomorrow —
         // but not as a retrieval: nobody asked for these.
@@ -259,21 +265,9 @@ impl Core {
             .await?;
         Ok(hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
-                // Not an answer to a query, so there is no query to be far
-                // from. These lists are drawn, not matched.
-                weak: false,
-            })
+            // Not an answer to a query, so there is no query to be far from:
+            // these lists are drawn, not matched, and nothing here is weak.
+            .map(SearchResult::from)
             .collect())
     }
 
@@ -287,41 +281,23 @@ impl Core {
         origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
         Ok(self
-            .search_inner(query, Some(MAX_PER_CORPUS), origin.into())
+            .search_with(query, Some(MAX_PER_CORPUS), origin.into())
             .await?
             .0)
     }
 
-    /// The same search, plus what it cost. The UI shows these faintly, so a
-    /// sluggish box points at the embedder or the vector store without anyone
-    /// opening a log.
-    pub async fn search_timed(
-        &self,
-        query: &SearchQuery,
-        origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        self.search_inner(query, Some(MAX_PER_CORPUS), origin.into())
-            .await
-    }
-
-    /// `cap` of `None` lets a single source supply every result. `ask` wants
-    /// that: a question is often answered by one document, and starving it of
-    /// its own paragraphs to make the list look varied helps nobody.
-    pub async fn search_capped(
+    /// `search`, with the per-source cap chosen by the caller and what the
+    /// search cost. `cap` of `None` lets a single source supply every result:
+    /// `ask` wants that, since a question is often answered by one document.
+    /// The UI shows the timing faintly, so a sluggish box points at the
+    /// embedder or the vector store without anyone opening a log.
+    pub async fn search_with(
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
         origin: impl Into<Origin>,
-    ) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, cap, origin.into()).await?.0)
-    }
-
-    async fn search_inner(
-        &self,
-        query: &SearchQuery,
-        cap: Option<usize>,
-        origin: Origin,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        let origin = origin.into();
         let door = origin.door;
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -426,20 +402,14 @@ impl Core {
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
+            .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
-                weak: h.similarity.is_some_and(|s| s < self.weak_below),
+                let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                SearchResult {
+                    weak,
+                    ..SearchResult::from(h)
+                }
             })
             .collect();
 
@@ -952,8 +922,8 @@ mod tests {
         seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
         let capped = core.search(&q("t0\nalpha 0"), Door::Ui).await.unwrap();
-        let uncapped = core
-            .search_capped(&q("t0\nalpha 0"), None, Door::Ui)
+        let (uncapped, _) = core
+            .search_with(&q("t0\nalpha 0"), None, Door::Ui)
             .await
             .unwrap();
         assert!(

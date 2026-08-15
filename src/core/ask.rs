@@ -47,8 +47,8 @@ impl Core {
         // No per-source cap: an answer often lives in one document, and
         // withholding its paragraphs to keep the citation list varied would
         // make the answer worse, not fairer.
-        let hits = self
-            .search_capped(
+        let (hits, _) = self
+            .search_with(
                 &SearchQuery {
                     q: req.q.clone(),
                     limit: req.limit.unwrap_or(8),

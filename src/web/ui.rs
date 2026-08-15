@@ -658,7 +658,7 @@ async fn search_results(
     let terms = highlightable_terms(p.q.trim());
     let (hits, t) = st
         .core
-        .search_timed(
+        .search_with(
             &SearchQuery {
                 q: p.q,
                 limit: 0,
@@ -669,6 +669,7 @@ async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
             },
+            Some(crate::core::search::MAX_PER_CORPUS),
             // Scoped to the operator, because coalescing folds a keystroke into
             // the query it was an early spelling of, and two people typing at
             // once are not spelling the same thing.
@@ -1475,7 +1476,7 @@ pub(crate) async fn build_artifact_detail(
         None => None,
     };
     let slice = match &src {
-        Some(s) => crate::web::corpus_view::for_corpus(s).slice(s, c.corpus_span.as_ref(), 3),
+        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
     // Only a merged artifact has these. The template branches on `merged`, not
