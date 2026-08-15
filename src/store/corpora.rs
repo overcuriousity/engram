@@ -272,7 +272,7 @@ impl Store {
         .bind(id)
         .bind(raw_text)
         .bind("restored:vector-store")
-        .bind(content_hash(&format!("restored:{id}")))
+        .bind(content_hash(format!("restored:{id}")))
         .bind(CorpusStatus::Partial.as_str())
         .bind(at)
         .bind(at)
