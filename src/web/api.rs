@@ -273,47 +273,91 @@ fn named_txt(filename: Option<&str>) -> bool {
     })
 }
 
+/// One file part of a multipart upload.
+struct FilePart {
+    filename: Option<String>,
+    /// The part's `Content-Type`, or "" when it carried none.
+    declared: String,
+    bytes: axum::body::Bytes,
+}
+
+struct UploadParts {
+    file: Option<FilePart>,
+    /// The text fields asked for, by name; only non-blank values are kept.
+    fields: std::collections::HashMap<&'static str, String>,
+}
+
+/// Drain a multipart body: one file part under `file_field`, any of
+/// `text_fields` as text. Order-independent, because a browser sends `note`
+/// before or after the file depending on the form. A second part under
+/// `file_field` is refused rather than silently winning or losing: two files
+/// in one request is a client bug, and whichever we picked would be wrong for
+/// half of them.
+async fn read_upload(
+    mut multipart: axum::extract::Multipart,
+    file_field: &'static str,
+    text_fields: &[&'static str],
+) -> Result<UploadParts> {
+    let mut out = UploadParts {
+        file: None,
+        fields: Default::default(),
+    };
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
+    {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+        if name == file_field {
+            if out.file.is_some() {
+                return Err(Error::Validation(format!(
+                    "more than one `{file_field}` part — send one file per request"
+                )));
+            }
+            let filename = field.file_name().map(str::to_string);
+            let declared = field.content_type().unwrap_or("").to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
+            out.file = Some(FilePart {
+                filename,
+                declared,
+                bytes,
+            });
+        } else if let Some(key) = text_fields.iter().copied().find(|k| *k == name) {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?;
+            if !text.trim().is_empty() {
+                out.fields.insert(key, text);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `.txt` and nothing else, for now. PDF is a `SourceView` implementation and
 /// a later plan; refusing everything else by name is what keeps this one from
 /// quietly ingesting the bytes of a format it cannot read.
 async fn upload(
     State(st): State<AppState>,
     _id: Identity,
-    mut multipart: axum::extract::Multipart,
+    multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
-    let mut note: Option<String> = None;
-    // (filename, declared type, bytes). Collected rather than acted on in the
-    // loop, because a `note` part may come before or after the file.
-    let mut file: Option<(Option<String>, String, axum::body::Bytes)> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
-    {
-        match field.name() {
-            Some("note") => {
-                note = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?,
-                )
-            }
-            Some("file") => {
-                let filename = field.file_name().map(str::to_string);
-                let declared = field.content_type().unwrap_or("").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
-                file = Some((filename, declared, bytes));
-            }
-            _ => {}
-        }
-    }
-    let Some((filename, declared, bytes)) = file else {
+    let parts = read_upload(multipart, "file", &["note"]).await?;
+    let Some(FilePart {
+        filename,
+        declared,
+        bytes,
+    }) = parts.file
+    else {
         return Err(Error::Validation("no file in the upload".into()));
     };
+    let note = parts.fields.get("note").cloned();
     // A part may legally carry no `Content-Type` at all, and letting that
     // skip the check turns "`.txt` and nothing else" into "anything whose
     // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
@@ -360,46 +404,13 @@ async fn upload(
 async fn upload_image(
     State(st): State<AppState>,
     _id: Identity,
-    mut multipart: axum::extract::Multipart,
+    multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
-    let mut note = None;
-    let mut title_hint = None;
-    let mut image: Option<(Option<String>, axum::body::Bytes)> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
-    {
-        match field.name() {
-            Some("note") => {
-                note = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?,
-                )
-            }
-            Some("title_hint") => {
-                title_hint = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?,
-                )
-                .filter(|t: &String| !t.trim().is_empty())
-            }
-            Some("image") => {
-                let filename = field.file_name().map(str::to_string);
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
-                image = Some((filename, bytes));
-            }
-            _ => {}
-        }
-    }
-    let Some((filename, bytes)) = image else {
+    let mut parts = read_upload(multipart, "image", &["note", "title_hint"]).await?;
+    let Some(FilePart {
+        filename, bytes, ..
+    }) = parts.file
+    else {
         return Err(Error::Validation("no image in the upload".into()));
     };
     let out = st
@@ -407,8 +418,8 @@ async fn upload_image(
         .ingest_image(crate::core::ingest::ImageCapture {
             bytes: bytes.to_vec(),
             filename,
-            title_hint,
-            note,
+            title_hint: parts.fields.remove("title_hint"),
+            note: parts.fields.remove("note"),
         })
         .await?;
     // 202, not 201: stored, but the reading — the part that makes it a corpus
@@ -992,6 +1003,45 @@ pub(crate) mod tests {
             .header("content-type", format!("multipart/form-data; boundary={B}"))
             .body(Body::from(buf))
             .unwrap()
+    }
+
+    /// Two parts under the same file field, which no browser form sends and
+    /// no handler should guess about.
+    fn post_two_files(uri: &str, token: &str, field_name: &str, mime: &str) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let mut buf = String::new();
+        for (name, body) in [("a", "first"), ("b", "second")] {
+            buf.push_str(&format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{name}.txt\"\r\nContent-Type: {mime}\r\n\r\n{body}\r\n"
+            ));
+        }
+        buf.push_str(&format!("--{B}--\r\n"));
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_with_two_file_parts_is_refused() {
+        let (app, token, core) = app_token_and_core().await;
+        for (uri, field, mime) in [
+            ("/api/v1/corpora/upload", "file", "text/plain"),
+            ("/api/v1/corpora/image", "image", "image/png"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_two_files(uri, &token, field, mime))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let err = json_of(res).await["error"].as_str().unwrap().to_string();
+            assert!(err.contains("one file"), "{uri}: {err}");
+        }
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
     fn a_png() -> Vec<u8> {
