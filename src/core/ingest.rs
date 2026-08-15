@@ -1029,6 +1029,18 @@ impl Core {
         let src = self.store.get_corpus(id).await?;
         match stage {
             Stage::Synthesize | Stage::Enrich => {
+                // Re-segmenting starts from `raw_text`, and an image whose read
+                // has not landed has none. Flipping it to `raw` would have
+                // synthesis fail on empty text and the pending read then find
+                // a corpus that is no longer `describing` — a photo never
+                // read, by way of a button that promised to process it.
+                if src.status == CorpusStatus::Describing
+                    || (src.origin == ORIGIN_IMAGE && src.raw_text.trim().is_empty())
+                {
+                    return Err(Error::Validation(
+                        "this image has not been read yet — re-read it instead".into(),
+                    ));
+                }
                 self.forget_derived_work(&src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
@@ -1185,6 +1197,31 @@ mod tests {
         assert_eq!(
             core.store.get_corpus(&id).await.unwrap().status,
             CorpusStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn re_segmenting_an_image_that_has_not_been_read_is_refused() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(3)).await.unwrap().id;
+        // Still describing.
+        assert!(matches!(
+            core.reprocess(&id, Stage::Synthesize).await,
+            Err(Error::Validation(_))
+        ));
+        // Failed before any text was read.
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        assert!(matches!(
+            core.reprocess(&id, Stage::Synthesize).await,
+            Err(Error::Validation(_))
+        ));
+        // The describe job and the status are untouched either way.
+        assert!(core.store.live_job(Stage::Describe, &id).await.unwrap());
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Failed
         );
     }
 

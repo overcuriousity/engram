@@ -85,10 +85,10 @@ pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::jobs::Stage;
     use crate::core::ingest::ImageCapture;
     use crate::core::test_support::{test_core_with_describer, test_core_without_vision};
     use crate::infer::fake::FakeDescriber;
+    use crate::store::jobs::Stage;
     use std::sync::Arc;
 
     fn a_png(seed: u8) -> Vec<u8> {
