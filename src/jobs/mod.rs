@@ -18,9 +18,6 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A job still marked `running` after this long belonged to a process that died.
 pub const STUCK_AFTER_SECS: i64 = 600;
 
-/// Claim and run at most one job. Returns false when the queue is empty, which
-/// is the loop's signal to sleep.
-
 /// Supersede `loser` by `winner`, and carry on if it cannot be done.
 ///
 /// `supersede` refuses a side that is no longer active, and every caller here
@@ -40,6 +37,8 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
     }
 }
 
+/// Claim and run at most one job. Returns false when the queue is empty, which
+/// is the loop's signal to sleep.
 pub async fn run_one(core: &Core) -> Result<bool> {
     let Some(job) = core.store.claim_job().await? else {
         return Ok(false);

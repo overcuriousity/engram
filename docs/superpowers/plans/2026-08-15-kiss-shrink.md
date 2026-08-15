@@ -283,11 +283,11 @@ pub(crate) struct Endpoint { client: reqwest::Client, base_url: String, model: S
 impl Endpoint { fn new(cfg: &RoleLike, role:&'static str, timeout: Duration) -> Self; fn url(&self, path:&str) -> String; async fn post_json(&self, path:&str, body:&serde_json::Value) -> Result<serde_json::Value> }
 async fn chat(ep:&Endpoint, body: serde_json::Value) -> Result<ChatReply>  // ChatReply { content: String, finish_reason: Option<String>, prompt_tokens: Option<u64>, completion_tokens: Option<u64> }
 ```
-- [ ] **Step 1: Read the five structs and the three chat bodies; note every field of the log lines** (ms, tokens, finish_reason).
-- [ ] **Step 2: Add `Endpoint` and `chat()`.** `chat` posts to `chat/completions`, logs `tracing::info!(role, ms, prompt_tokens, completion_tokens, finish_reason)`, returns `choices[0].message.content` or `Error::Inference{role, "no message content"}`. Keep the existing 4xx-is-rejection / retryable classification exactly where it is today.
-- [ ] **Step 3: Replace each struct's four fields with `ep: Endpoint`; make `HttpSynthesizer::chat`, `HttpCompleter::complete`, `HttpDescriber::describe` call `chat(&self.ep, body)`.** Fold `HttpCompleter::for_judging` into `new(cfg, role, schema)`; update the two callers in `src/core/mod.rs`/`main.rs`.
-- [ ] **Step 4: `cargo test infer::openai`** — the wiremock tests are the behaviour lock; green.
-- [ ] **Step 5: Commit** — `chore(kiss): one HTTP endpoint struct and one chat call under five roles`
+- [x] **Step 1: Read the five structs and the three chat bodies; note every field of the log lines** (ms, tokens, finish_reason).
+- [x] **Step 2: Add `Endpoint` and `chat()`.** `chat` posts to `chat/completions`, logs `tracing::info!(role, ms, prompt_tokens, completion_tokens, finish_reason)`, returns `choices[0].message.content` or `Error::Inference{role, "no message content"}`. Keep the existing 4xx-is-rejection / retryable classification exactly where it is today.
+- [x] **Step 3: Replace each struct's four fields with `ep: Endpoint`; make `HttpSynthesizer::chat`, `HttpCompleter::complete`, `HttpDescriber::describe` call `chat(&self.ep, body)`.** Fold `HttpCompleter::for_judging` into `new(cfg, role, schema)`; update the two callers in `src/core/mod.rs`/`main.rs`.
+- [x] **Step 4: `cargo test infer::openai`** — the wiremock tests are the behaviour lock; green.
+- [x] **Step 5: Commit** — `chore(kiss): one HTTP endpoint struct and one chat call under five roles`
 
 ### Task 15: `infer/fake.rs` — fewer doubles; `prompt.rs` salvage; `split` cleanups
 
@@ -296,10 +296,10 @@ async fn chat(ep:&Endpoint, body: serde_json::Value) -> Result<ChatReply>  // Ch
 - Modify: `src/infer/prompt.rs` (`salvage_truncated` ~L498-537, `parse_response` ~L607-640)
 - Callers: `src/jobs/synthesize.rs:~1112,1139`, `src/core/ask.rs:~267`
 
-- [ ] **Step 1: fake.rs** — `const FAKE_BUDGET: SynthesisBudget = …` used by all four; `LyingSpanSynthesizer`+`HallucinatingSynthesizer` → `struct MisreportingSynthesizer { echo_text: bool }`; `EchoCompleter`+`FakeCompleter` → `ScriptedCompleter` gains `ScriptedCompleter::echo()` and `ScriptedCompleter::fixed(s)`; `ParaphrasingSynthesizer::new(recovers: bool)`. Update the callers.
-- [ ] **Step 2: prompt.rs** — delete `salvage_truncated`; `parse_response` tries `serde_json::from_str::<Envelope>` then `salvage_objects`. Run `cargo test infer::prompt` — `a_truncated_list_keeps_the_artifacts_that_finished` and `a_response_cut_before_any_chunk_closed_is_still_an_error` must still pass.
-- [ ] **Step 3: `cargo test`** — green.
-- [ ] **Step 4: Commit** — `chore(kiss): fewer fakes; one salvage path for a cut-off reply`
+- [x] **Step 1: fake.rs** — `const FAKE_BUDGET: SynthesisBudget = …` used by all four; `LyingSpanSynthesizer`+`HallucinatingSynthesizer` → `struct MisreportingSynthesizer { echo_text: bool }`; `EchoCompleter`+`FakeCompleter` → `ScriptedCompleter` gains `ScriptedCompleter::echo()` and `ScriptedCompleter::fixed(s)`; `ParaphrasingSynthesizer::new(recovers: bool)`. Update the callers.
+- [x] **Step 2: prompt.rs** — delete `salvage_truncated`; `parse_response` tries `serde_json::from_str::<Envelope>` then `salvage_objects`. Run `cargo test infer::prompt` — `a_truncated_list_keeps_the_artifacts_that_finished` and `a_response_cut_before_any_chunk_closed_is_still_an_error` must still pass.
+- [x] **Step 3: `cargo test`** — green.
+- [x] **Step 4: Commit** — `chore(kiss): fewer fakes; one salvage path for a cut-off reply`
 
 ### Task 16: Fold `jobs/classify.rs` into `jobs/relate.rs`
 
@@ -307,10 +307,10 @@ async fn chat(ep:&Endpoint, body: serde_json::Value) -> Result<ChatReply>  // Ch
 - Delete: `src/jobs/classify.rs`
 - Modify: `src/jobs/relate.rs`, `src/jobs/mod.rs` (`mod classify;`), `src/jobs/consolidate.rs:~565` (second caller — leave a compiling call now; Task 19 removes it)
 
-- [ ] **Step 1: Move `classify_pair` and `contains_normalized` into `relate.rs` as `pub(super) async fn classify_pair(core:&Core, a:&Chunk, b:&Chunk, score:f32) -> Result<()>` (drop the `Verdict` return; callers ignore it or matched two variants — for the consolidate caller, replace the `Ok(Verdict::Queued|Contained)` bookkeeping with the equivalent side-effect check it needs, or simply call and continue if the outcome only fed the sampled scan's `Outcome.examined`).**
-- [ ] **Step 2: Move classify's tests into `relate.rs`; delete `one_synthesis_call_emitting_a_passage_twice_resolves_itself` and `containment_across_two_corpora_is_left_alone` (identical to consolidate `~L2060-2124`).**
-- [ ] **Step 3: `cargo test jobs::`** — green.
-- [ ] **Step 4: Commit** — `chore(kiss): pair classification lives with its one producer`
+- [x] **Step 1: Move `classify_pair` and `contains_normalized` into `relate.rs` as `pub(super) async fn classify_pair(core:&Core, a:&Chunk, b:&Chunk, score:f32) -> Result<()>` (drop the `Verdict` return; callers ignore it or matched two variants — for the consolidate caller, replace the `Ok(Verdict::Queued|Contained)` bookkeeping with the equivalent side-effect check it needs, or simply call and continue if the outcome only fed the sampled scan's `Outcome.examined`).**
+- [x] **Step 2: Move classify's tests into `relate.rs`; delete `one_synthesis_call_emitting_a_passage_twice_resolves_itself` and `containment_across_two_corpora_is_left_alone` (identical to consolidate `~L2060-2124`).**
+- [x] **Step 3: `cargo test jobs::`** — green.
+- [x] **Step 4: Commit** — `chore(kiss): pair classification lives with its one producer`
 
 ### Task 17: Store setter helpers; dedupe attempt counter; small core/web folds
 
@@ -319,7 +319,7 @@ async fn chat(ep:&Endpoint, body: serde_json::Value) -> Result<ChatReply>  // Ch
 - Modify: `src/core/search.rs` (~L218-236, 259-277, 424-442 `SearchResult` mapping; ~L284-317 wrappers), `src/core/ingest.rs` (~L98-135 `Capture` builder; ~L159-167,200-210,297-305,358-365 duplicate outcome), `src/web/ui.rs` (`ArtifactDetail` ~L82-139, ~L1545-1568; `ArtifactView` ~L70-79), `src/web/corpus_view.rs` (~L33-101), templates `_artifact_detail.html`, `_artifact.html`
 - Modify: `src/jobs/{classify→relate,merge,consolidate}.rs` — `try_supersede`
 
-- [ ] **Step 1: Store — add in `src/store/mod.rs`:**
+- [x] **Step 1: Store — add in `src/store/mod.rs`:**
 ```rust
 impl Store {
     /// One-column UPDATE, touching updated_at when the table has one.
@@ -327,30 +327,30 @@ impl Store {
 }
 ```
 Rewrite the 8-14-line setters as 1-3 lines calling it; collapse `set_x`/`clear_x` pairs (`corpus_coverage`, `described_text`, `artifact_flags`) into one fn taking `Option<_>`. Public method names that callers use stay unless a pair merges (update callers).
-- [ ] **Step 2: Dedupe counters — stop incrementing/reading `unreadable_judgements` and `MAX_UNREADABLE_JUDGEMENTS`; the pending-pairs query orders and gates on `judge_attempts` only; the prompt nonce keeps using `judge_attempts`. Column stays in `schema.sql`.** Merge the two identical `Stage::Dedupe if exhausted` / `Stage::Title if exhausted` arms in `jobs/mod.rs` into one pattern.
-- [ ] **Step 3: `try_supersede`** in `src/jobs/mod.rs`:
+- [x] **Step 2: Dedupe counters — stop incrementing/reading `unreadable_judgements` and `MAX_UNREADABLE_JUDGEMENTS`; the pending-pairs query orders and gates on `judge_attempts` only; the prompt nonce keeps using `judge_attempts`. Column stays in `schema.sql`.** Merge the two identical `Stage::Dedupe if exhausted` / `Stage::Title if exhausted` arms in `jobs/mod.rs` into one pattern.
+- [x] **Step 3: `try_supersede`** in `src/jobs/mod.rs`:
 ```rust
 /// Supersede `loser` by `winner`; a failure is logged and swallowed because every caller carries on regardless.
 pub(crate) async fn try_supersede(core:&Core, loser:&str, winner:&str, why:&str) -> bool
 ```
 Replace the four copies (relate/former classify ~L93-101, merge ~L80-83 & ~L104-107, consolidate ~L488-496).
-- [ ] **Step 4: search.rs** — `impl From<SearchHit> for SearchResult` (with `weak: false`); `search_inner` sets `weak` after; delete `search_timed`/`search_capped`, keep `pub async fn search(&self, q:&SearchQuery, cap:Option<usize>) -> Result<(Vec<SearchResult>, SearchTiming)>`; update `web/api.rs`, `web/ui.rs`, `mcp/mod.rs`, `core/ask.rs`, `tests/eval.rs`.
-- [ ] **Step 5: ingest.rs** — `impl IngestOutcome { fn existing(c:&Corpus) -> Self }`; `Capture` becomes `#[derive(Default)]` plain struct, callers in `web/api.rs` use a literal with `..Default::default()`; delete the `with_*` methods.
-- [ ] **Step 6: ui.rs** — `struct ArtifactDetail { pub c: Chunk, html, sources, merged, orphaned_source, corpus_restored, source_at_lines, slice_label, slice_lines, terms, related }` (adjust field list to what the template uses); templates read `d.c.title` etc. Same for `ArtifactView` if it copies from `Chunk`. `corpus_view.rs`: replace trait + two impls with `pub fn slice(source:&CorpusSource, span:&Span, context:usize) -> CorpusSlice` and a `match source.origin { Origin::Image => "transcript lines", _ => "lines" }` for the label.
-- [ ] **Step 7: `cargo test`** — green (askama build catches template mismatches).
-- [ ] **Step 8: Commit** — `chore(kiss): one setter helper, one attempt counter, one shape per value`
+- [x] **Step 4: search.rs** — `impl From<SearchHit> for SearchResult` (with `weak: false`); `search_inner` sets `weak` after; delete `search_timed`/`search_capped`, keep `pub async fn search(&self, q:&SearchQuery, cap:Option<usize>) -> Result<(Vec<SearchResult>, SearchTiming)>`; update `web/api.rs`, `web/ui.rs`, `mcp/mod.rs`, `core/ask.rs`, `tests/eval.rs`.
+- [x] **Step 5: ingest.rs** — `impl IngestOutcome { fn existing(c:&Corpus) -> Self }`; `Capture` becomes `#[derive(Default)]` plain struct, callers in `web/api.rs` use a literal with `..Default::default()`; delete the `with_*` methods.
+- [x] **Step 6: ui.rs** — `struct ArtifactDetail { pub c: Chunk, html, sources, merged, orphaned_source, corpus_restored, source_at_lines, slice_label, slice_lines, terms, related }` (adjust field list to what the template uses); templates read `d.c.title` etc. Same for `ArtifactView` if it copies from `Chunk`. `corpus_view.rs`: replace trait + two impls with `pub fn slice(source:&CorpusSource, span:&Span, context:usize) -> CorpusSlice` and a `match source.origin { Origin::Image => "transcript lines", _ => "lines" }` for the label.
+- [x] **Step 7: `cargo test`** — green (askama build catches template mismatches).
+- [x] **Step 8: Commit** — `chore(kiss): one setter helper, one attempt counter, one shape per value`
 
 ### Task 18: Comment prose trim
 
 **Files:**
 - Modify: `src/jobs/consolidate.rs` (~L1-35, 124-138, 604-621, 642-735), `src/jobs/merge.rs`, `src/jobs/relate.rs`, `src/jobs/reconcile.rs`, `src/jobs/embed.rs` (~L600-656 `payload_of`), `src/jobs/synthesize.rs` (~L158-197), `src/jobs/mod.rs` (~L79-155)
 
-- [ ] **Step 1: Rule.** A comment survives if it states an invariant a reader could violate without noticing (why, not what) — keep verbatim: rearm-vs-enqueue (`consolidate`), "complete after, never before" (`jobs/mod.rs:~63-66`), merge write ordering (`merge.rs:~20-33`), prompt-cache prefix order (`prompt.rs`). Delete: incident narration ("used to X, which broke Y"), restatements of ROADMAP.md, paragraphs restating the next five lines of code. Module headers ≤ 6 lines.
-- [ ] **Step 2: Apply file by file; `cargo build` (doc comments on pub items must still parse).**
-- [ ] **Step 3: Commit** — `chore(kiss): comments state invariants, not history`
+- [x] **Step 1: Rule.** A comment survives if it states an invariant a reader could violate without noticing (why, not what) — keep verbatim: rearm-vs-enqueue (`consolidate`), "complete after, never before" (`jobs/mod.rs:~63-66`), merge write ordering (`merge.rs:~20-33`), prompt-cache prefix order (`prompt.rs`). Delete: incident narration ("used to X, which broke Y"), restatements of ROADMAP.md, paragraphs restating the next five lines of code. Module headers ≤ 6 lines.
+- [x] **Step 2: Apply file by file; `cargo build` (doc comments on pub items must still parse).**
+- [x] **Step 3: Commit** — `chore(kiss): comments state invariants, not history`
 
 ### Task 19: Tier 3 report
-- [ ] `git diff --stat master..HEAD | tail -1`; `cargo clippy` warnings vs baseline; `cargo test` green.
+- [x] Tier 3 done (plus Tasks 20–22 pulled forward): −25,300 vs master; clippy 0; 830 unit + 55 integration green. Deviations: dedupe attempt counters kept (they encode different facts — see `an_endpoint_outage_does_not_shelve_the_review_queue`); ArtifactDetail wrap and generic `set_field` skipped (churn > payoff; setters differ in what else they touch); Capture builder kept (it shapes data, not just fields); restored badges kept (deployed DB may hold placeholders).
 
 ---
 
@@ -367,7 +367,7 @@ Replace the four copies (relate/former classify ~L93-101, merge ~L80-83 & ~L104-
 /// Active artifacts that have no row in artifact_pairs and no live Relate job — the backstop for a Relate that never got armed.
 pub async fn list_unrelated_artifact_ids(&self, limit: usize) -> Result<Vec<String>>
 ```
-- [ ] **Step 1: Write the failing test** in `consolidate.rs`:
+- [x] **Step 1: Write the failing test** in `consolidate.rs`:
 ```rust
 #[tokio::test]
 async fn the_sweep_arms_relate_for_an_indexed_artifact_that_was_never_related() {
@@ -377,28 +377,28 @@ async fn the_sweep_arms_relate_for_an_indexed_artifact_that_was_never_related() 
     assert!(core.store.has_live_job(Stage::Relate, &ids[0]).await.unwrap()); // use whatever "is a job queued for this target" query exists
 }
 ```
-- [ ] **Step 2: Run** — fails.
-- [ ] **Step 3: Implement `list_unrelated_artifact_ids`** (SQL: `SELECT a.id FROM artifacts a WHERE a.status='active' AND NOT EXISTS (SELECT 1 FROM artifact_pairs p WHERE p.a_id=a.id OR p.b_id=a.id) AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.stage='relate' AND j.target_id=a.id AND j.completed_at IS NULL) LIMIT ?` — adapt column names to `schema.sql`), and in `consolidate::run` replace the `near_pairs` call + `from_sweep` clustering + review-band loop with: for each id → `core.store.enqueue(Stage::Relate, id)`. Union-find input is now only `pairs_by_state(NearIdentical, …)`.
-- [ ] **Step 4: Delete `VectorStore::near_pairs`, `NearPair`, both impls, their tests (memory + integration_qdrant), `consolidate.sample` (+ example.toml lines), `Outcome.examined`; add `consolidate.sample` to the retired-key warning.**
-- [ ] **Step 5: Re-point remaining consolidate tests that relied on the sample scan at `relate::run` (call `relate::run(&core, id)` explicitly before `run(&core)`).**
-- [ ] **Step 6: `cargo test` + `cargo test --test integration_qdrant`** — green.
-- [ ] **Step 7: Commit** — `chore(kiss): relate is the one duplicate detector; the sweep only backstops its arming`
+- [x] **Step 2: Run** — fails.
+- [x] **Step 3: Implement `list_unrelated_artifact_ids`** (SQL: `SELECT a.id FROM artifacts a WHERE a.status='active' AND NOT EXISTS (SELECT 1 FROM artifact_pairs p WHERE p.a_id=a.id OR p.b_id=a.id) AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.stage='relate' AND j.target_id=a.id AND j.completed_at IS NULL) LIMIT ?` — adapt column names to `schema.sql`), and in `consolidate::run` replace the `near_pairs` call + `from_sweep` clustering + review-band loop with: for each id → `core.store.enqueue(Stage::Relate, id)`. Union-find input is now only `pairs_by_state(NearIdentical, …)`.
+- [x] **Step 4: Delete `VectorStore::near_pairs`, `NearPair`, both impls, their tests (memory + integration_qdrant), `consolidate.sample` (+ example.toml lines), `Outcome.examined`; add `consolidate.sample` to the retired-key warning.**
+- [x] **Step 5: Re-point remaining consolidate tests that relied on the sample scan at `relate::run` (call `relate::run(&core, id)` explicitly before `run(&core)`).**
+- [x] **Step 6: `cargo test` + `cargo test --test integration_qdrant`** — green.
+- [x] **Step 7: Commit** — `chore(kiss): relate is the one duplicate detector; the sweep only backstops its arming`
 
 ### Task 21: Delete `full_lifecycle_reconcile` scan (spec 4b)
 
 **Files:**
 - Modify: `src/jobs/consolidate.rs` (~L203-302, call ~L346-351, `DRIFT_SCAN`, tests ~L1287-1321, 1402-1482), `src/core/ingest.rs:~714` (caller), `src/store/artifacts.rs:~821` (`list_non_active_artifacts`), `src/vector/mod.rs:~323`, `src/vector/qdrant.rs:~1281`, `src/vector/memory.rs:~194` (`non_active_ids`), `tests/integration_qdrant.rs`
 
-- [ ] **Step 1: grep** `full_lifecycle_reconcile\|non_active_ids\|list_non_active_artifacts\|DRIFT_SCAN` — delete every hit. `repair_lifecycle_drift` (marker pass, ~L180-201) stays.
-- [ ] **Step 2: `cargo test` + integration** — green.
-- [ ] **Step 3: Commit** — `chore(kiss): lifecycle drift is repaired from the marker alone`
+- [x] **Step 1: grep** `full_lifecycle_reconcile\|non_active_ids\|list_non_active_artifacts\|DRIFT_SCAN` — delete every hit. `repair_lifecycle_drift` (marker pass, ~L180-201) stays.
+- [x] **Step 2: `cargo test` + integration** — green.
+- [x] **Step 3: Commit** — `chore(kiss): lifecycle drift is repaired from the marker alone`
 
 ### Task 22: `heal_store_drift` → warn (spec 4c)
 
 **Files:**
 - Modify: `src/core/ingest.rs` (~L760-905), `src/store/artifacts.rs` (`RestoredArtifact` ~L190-210, `restore_artifact` ~L418-439, `list_all_artifact_ids`/`list_embedded_artifact_ids` ~L833-868 — keep any with another caller), `src/store/corpora.rs` (`ensure_restored_corpus` ~L312-331), `src/vector/mod.rs` (`payloads_of`, `all_artifact_ids`, `VectorPayload.provenance` ~L64), `src/vector/qdrant.rs` (~L1312-1350, ~L1398-1451), `src/vector/memory.rs`, `src/web/ui.rs:~831,1563` (restored badge) + template, `src/main.rs`, `src/jobs/consolidate.rs`, tests in `ingest.rs` (~L2018-2150) and `integration_qdrant.rs` (~L1930-2044)
 
-- [ ] **Step 1: New body:**
+- [x] **Step 1: New body:**
 ```rust
 /// Counts artifacts that Qdrant knows and SQLite does not, and warns. Repair is a restore of both stores together (see ROADMAP).
 pub async fn report_store_drift(&self) -> Result<()> {
@@ -409,8 +409,8 @@ pub async fn report_store_drift(&self) -> Result<()> {
 }
 ```
 Prefer keeping *one* trait method (`all_artifact_ids`) over adding a new one; delete `payloads_of`, `restore_artifact`, `RestoredArtifact`, `ensure_restored_corpus`, `VectorPayload.provenance` (stop writing it; existing points keep it harmlessly), the badge, and the restore tests. Add one test: seeded point without a row → no row is created and the call returns Ok.
-- [ ] **Step 2: `cargo test` + integration** — green.
-- [ ] **Step 3: Commit** — `chore(kiss): store drift is reported, not repaired from payloads`
+- [x] **Step 2: `cargo test` + integration** — green.
+- [x] **Step 3: Commit** — `chore(kiss): store drift is reported, not repaired from payloads`
 
 ### Task 23: Remove `consolidate.autonomous` and `WouldMerge` (spec 4d)
 

@@ -911,7 +911,8 @@ mod tests {
         // {index, relevance_score} in `results`. Either way the caller gets
         // (index, score) best first, and an index outside the batch is dropped
         // rather than panicking on `results.get(idx)`.
-        let cases: [(RerankStyle, serde_json::Value, usize, Vec<(usize, f32)>); 3] = [
+        type Case = (RerankStyle, serde_json::Value, usize, Vec<(usize, f32)>);
+        let cases: [Case; 3] = [
             (
                 RerankStyle::Tei,
                 serde_json::json!([{"index":2,"score":0.9},{"index":0,"score":0.4}]),
