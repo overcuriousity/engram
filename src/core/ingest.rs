@@ -243,29 +243,23 @@ impl Core {
         corpus_id: &str,
         near: Option<&crate::store::corpora::NearDuplicate>,
     ) -> Result<()> {
-        match near {
-            Some(n) => {
-                self.store
-                    .set_near_dupe(corpus_id, Some(&n.corpus_id), Some(n.similarity))
-                    .await?;
-                self.store
-                    .set_corpus_status(corpus_id, CorpusStatus::NeedsReview)
-                    .await?;
-                tracing::info!(
-                    corpus_id,
-                    near = %n.corpus_id,
-                    similarity = n.similarity,
-                    "looks like an existing corpus; parked for review"
-                );
-            }
-            None => {
-                self.store
-                    .set_corpus_status(corpus_id, CorpusStatus::Raw)
-                    .await?;
-                self.store
-                    .enqueue(Stage::Synthesize, "corpus", corpus_id)
-                    .await?;
-            }
+        let followup = match near {
+            Some(n) => crate::store::corpora::Followup::Park {
+                of: n.corpus_id.clone(),
+                similarity: n.similarity,
+            },
+            None => crate::store::corpora::Followup::Queue(Stage::Synthesize),
+        };
+        // One transaction, the same one a text capture's insert uses: the
+        // status and the job it implies cannot be written apart.
+        self.store.apply_followup(corpus_id, followup).await?;
+        if let Some(n) = near {
+            tracing::info!(
+                corpus_id,
+                near = %n.corpus_id,
+                similarity = n.similarity,
+                "looks like an existing corpus; parked for review"
+            );
         }
         Ok(())
     }

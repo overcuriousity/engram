@@ -346,6 +346,46 @@ impl Store {
         Ok(row.as_ref().map(row_to_corpus))
     }
 
+    /// Write a follow-up onto a corpus that already has a row — the same three
+    /// outcomes `insert_corpus_with_signature` writes beside a new one, and for
+    /// the same reason: status and job in one transaction.
+    ///
+    /// The path here is the one an image takes. Its row is written at capture
+    /// and its text only exists once the vision stage has read it, so the fork
+    /// between "queue this for synthesis" and "park it beside what it looks
+    /// like" happens long after the insert. Left as two statements, a process
+    /// that died between them left the corpus `raw` with no job: the reclaimed
+    /// Describe unit sees a status it is done with and returns, and `reconcile`
+    /// passes over a corpus that has no windows. The read had been paid for and
+    /// nothing would ever pick it up again.
+    pub async fn apply_followup(&self, corpus_id: &str, followup: Followup) -> Result<()> {
+        let (status, near_dupe_of, near_dupe_score) = match &followup {
+            Followup::Park { of, similarity } => (
+                CorpusStatus::NeedsReview,
+                Some(of.clone()),
+                Some(*similarity),
+            ),
+            Followup::Queue(_) | Followup::Nothing => (CorpusStatus::Raw, None, None),
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE corpora SET status = ?, near_dupe_of = ?, near_dupe_score = ?, updated_at = ?
+              WHERE id = ?",
+        )
+        .bind(status.as_str())
+        .bind(&near_dupe_of)
+        .bind(near_dupe_score)
+        .bind(now())
+        .bind(corpus_id)
+        .execute(&mut *tx)
+        .await?;
+        if let Followup::Queue(stage) = followup {
+            super::jobs::enqueue_with(&mut *tx, stage, "corpus", corpus_id).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn set_corpus_status(&self, id: &str, status: CorpusStatus) -> Result<()> {
         sqlx::query("UPDATE corpora SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status.as_str())
@@ -743,6 +783,54 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_followup_writes_the_status_and_the_job_it_implies_together() {
+        // An image reaches this fork after its read, long after its row. Two
+        // statements left a window where the corpus was `raw` with nothing
+        // queued, and nothing in the system looks for that state.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("x", "image", None).await.unwrap();
+        s.set_corpus_status(&src.id, CorpusStatus::Describing)
+            .await
+            .unwrap();
+
+        s.apply_followup(&src.id, Followup::Queue(Stage::Synthesize))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.get_corpus(&src.id).await.unwrap().status,
+            CorpusStatus::Raw
+        );
+        assert!(
+            s.live_job(Stage::Synthesize, &src.id).await.unwrap(),
+            "a raw corpus with no job is a corpus nothing will pick up"
+        );
+    }
+
+    #[tokio::test]
+    async fn parking_a_followup_names_what_it_parked_beside_and_queues_nothing() {
+        let s = Store::memory().await.unwrap();
+        let other = s.insert_corpus("older", "web", None).await.unwrap();
+        let src = s.insert_corpus("x", "image", None).await.unwrap();
+
+        s.apply_followup(
+            &src.id,
+            Followup::Park {
+                of: other.id.clone(),
+                similarity: 0.94,
+            },
+        )
+        .await
+        .unwrap();
+
+        let got = s.get_corpus(&src.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::NeedsReview);
+        assert_eq!(got.near_dupe_of.as_deref(), Some(other.id.as_str()));
+        assert_eq!(got.near_dupe_score, Some(0.94));
+        assert!(!s.live_job(Stage::Synthesize, &src.id).await.unwrap());
     }
 
     #[tokio::test]
