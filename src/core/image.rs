@@ -30,6 +30,20 @@ pub const MAX_IMAGE_EDGE: u32 = 10_000;
 /// Ceiling on what the decoder may allocate for one image.
 pub const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// How many uploads may be decoded at once, across the whole process.
+///
+/// The two ceilings above bound one image and say nothing about ten. Decoding
+/// runs on `spawn_blocking`, whose pool is 512 threads deep and which — unlike
+/// every inference call — passes through no gate, so the arithmetic that ends
+/// at `MAX_DECODE_BYTES` for one photo ends at the OOM killer for a handful of
+/// concurrent uploads, each holding its source plus the RGB copy the preview
+/// is composited into.
+///
+/// Not configurable: this is the floor that keeps the process alive rather
+/// than a throughput setting, and a base whose owner has raised it has no way
+/// to find out except by losing the process.
+pub const MAX_CONCURRENT_DECODES: usize = 2;
+
 pub fn prepare(bytes: &[u8], preview_edge: u32) -> Result<PreparedImage> {
     let format = image::guess_format(bytes).map_err(|_| {
         Error::Validation("that upload is not a supported image (JPEG, PNG or WebP)".into())

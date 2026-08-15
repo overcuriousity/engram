@@ -106,6 +106,10 @@ pub struct Core {
     /// hidden, and nothing left that would ever notice. Shared by every
     /// clone, like the background queue.
     pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    /// How many uploads may be decoded at once. See
+    /// `image::MAX_CONCURRENT_DECODES`; shared by every clone, because a
+    /// per-clone permit would bound nothing.
+    pub decodes: Arc<tokio::sync::Semaphore>,
 }
 
 impl Core {
@@ -161,6 +165,9 @@ impl Core {
             ),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
         }
     }
 
@@ -221,7 +228,9 @@ pub mod test_support {
     /// take, which the worker classifies as permanent.
     pub async fn test_core_with_rejecting_synthesizer() -> Core {
         build(
-            Arc::new(FakeSynthesizer::rejecting("HTTP 400: context length exceeded")),
+            Arc::new(FakeSynthesizer::rejecting(
+                "HTTP 400: context length exceeded",
+            )),
             None,
         )
         .await
@@ -300,6 +309,9 @@ pub mod test_support {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
         }
     }
 }

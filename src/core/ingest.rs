@@ -295,13 +295,25 @@ impl Core {
         // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
         // is seconds during which search, health and the queue poll on that
         // thread all wait; see `web::api::extract` for the same move.
+        //
+        // Held across the whole decode, and taken before it rather than inside
+        // it: the blocking pool is 512 threads deep, so without a permit the
+        // only bound on how much of this runs at once is how fast clients can
+        // post. See `image::MAX_CONCURRENT_DECODES`.
         let edge = self.capture.image_preview_edge;
-        let (bytes, prepared) = tokio::task::spawn_blocking(move || {
+        let permit = self
+            .decodes
+            .acquire()
+            .await
+            .expect("the decode permit is never closed");
+        let decoded = tokio::task::spawn_blocking(move || {
             let prepared = super::image::prepare(&bytes, edge)?;
             Ok::<_, Error>((bytes, prepared))
         })
         .await
-        .map_err(|e| Error::Internal(format!("image preparation did not finish: {e}")))??;
+        .map_err(|e| Error::Internal(format!("image preparation did not finish: {e}")))?;
+        drop(permit);
+        let (bytes, prepared) = decoded?;
 
         let mut metadata = serde_json::json!({
             "file": super::image::file_facts(filename.as_deref(), bytes.len(), &prepared),
@@ -1146,6 +1158,46 @@ mod tests {
             title_hint: None,
             note: None,
         }
+    }
+
+    /// `MAX_IMAGE_EDGE` and `MAX_DECODE_BYTES` bound one image and say nothing
+    /// about ten at once. Decoding runs on a 512-thread blocking pool through
+    /// no gate at all, so without a permit the ceiling on resident pixels is
+    /// however many uploads a client cares to have in flight.
+    #[tokio::test]
+    async fn only_so_many_uploads_are_decoded_at_once() {
+        let core = test_core().await;
+        // Stand in for the decodes already running: hold every permit, and the
+        // next capture must wait rather than start a decode of its own.
+        let held = core
+            .decodes
+            .clone()
+            .acquire_many_owned(crate::core::image::MAX_CONCURRENT_DECODES as u32)
+            .await
+            .unwrap();
+
+        let mut waiting = tokio::spawn({
+            let core = core.clone();
+            async move { core.ingest_image(an_image(11)).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiting)
+                .await
+                .is_err(),
+            "a capture must not decode while the permits are all taken"
+        );
+        waiting.abort();
+
+        drop(held);
+        // And once they are free again it goes through as usual.
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            core.ingest_image(an_image(12)),
+        )
+        .await
+        .expect("released permits let the next capture through")
+        .unwrap();
+        assert!(!out.duplicate);
     }
 
     #[tokio::test]
