@@ -611,41 +611,19 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // chunk look forgotten.
         last_seen_at: None,
         hit_count: None,
-        // Retired state is written; active state is deferred. The asymmetry is
-        // the point.
-        //
-        // Deferring unconditionally loses the state outright on a *first*
-        // embed: there is no stored value to carry forward, so an artifact
-        // deprecated while its embed job was still pending — the detail page
-        // offers the button whatever the embed state — lands as a point with no
-        // `status` at all and is back in ordinary results. Nothing notices until
-        // the next sweep's `repair_lifecycle_drift`, and nothing ever does if
-        // consolidation is disabled.
-        //
-        // Writing unconditionally has the opposite failure: `false`/`active` on
-        // every re-embed would revive an artifact the sweep hid, because the row
-        // is read here before the embedding call and an operator can retire the
-        // artifact while that call is in flight.
-        //
-        // Writing only the retired values takes neither. SQLite is the source of
-        // truth (`set_superseded_by` maintains `status` alongside
-        // `superseded_by`), so a row that says retired is a fact worth writing;
-        // a row that says active cannot distinguish "still active" from "stale
-        // read", so it defers to the stored value as before.
+        // Retired state is written; active state is deferred. Deferring both
+        // loses a deprecation made while the first embed was pending; writing
+        // both would revive an artifact the sweep hid while the embedding call
+        // was in flight, since the row is read before it. A row that says
+        // retired is a fact; a row that says active cannot tell "still active"
+        // from "stale read", so it defers to the stored value.
         superseded: (chunk.superseded_by.is_some()).then_some(true),
         status: (chunk.status != ArtifactStatus::Active).then_some(chunk.status),
-        // Written, not deferred: a brand-new point has no stored stamp to carry
-        // forward, and the scoring formula reads a missing `last_verified_at`
-        // as epoch — so leaving it unset would rank every freshly ingested
-        // artifact as maximally stale and put it straight on the
-        // deprecation-review list. SQLite is the source of truth here (set at
-        // insert, updated by `Core::verify`), so this is the current value.
-        // The `created_at` fallback covers any row written before the column
-        // existed.
+        // Written, not deferred: a new point has no stored stamp, and the
+        // scoring formula reads a missing stamp as epoch — maximally stale.
         last_verified_at: chunk.last_verified_at.or(Some(chunk.created_at)),
-        // Same rule as `status` directly above, and it has to be the same rule:
-        // a point that says superseded while naming no winner is a hidden
-        // artifact whose replacement the UI cannot show.
+        // The same rule as `status`: a point that says superseded while naming
+        // no winner is a hidden artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
     }
 }

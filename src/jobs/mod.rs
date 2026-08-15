@@ -146,14 +146,10 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     park_failed_if_still_there(core, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
-                // Kept armed like every other failed unit, but at the *unit's*
-                // own attempt count rather than at the constant. Passing
-                // `MAX_ATTEMPTS` pinned the delay at its value for ever, so a
-                // window the endpoint refuses outright would poll it every 32
-                // seconds until someone noticed — far harder than a window it
-                // merely could not reach, which backs off to six hours. The
-                // floor stays, so the first refusal still waits out the whole
-                // ordinary budget rather than retrying in two seconds.
+                // Kept armed at the unit's own attempt count, floored at
+                // `MAX_ATTEMPTS`: the first refusal waits out the ordinary
+                // budget, and later ones keep backing off rather than pinning
+                // the delay at one value for ever.
                 _ => {
                     core.store
                         .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())

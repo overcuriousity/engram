@@ -197,6 +197,24 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
+    /// The state of the pair between two artifacts, whichever way round they
+    /// were filed, or `None` if it was never filed.
+    ///
+    /// For a producer that is about to act on a pair without asking anyone:
+    /// a row that is no longer `pending` carries a decision — the judge's, a
+    /// person's, or an earlier automatic hide that a person then undid — and a
+    /// local rule that re-derives the same answer must not overrule it.
+    pub async fn pair_state_between(&self, a: &str, b: &str) -> Result<Option<PairState>> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM artifact_pairs WHERE a_id = ? AND b_id = ?")
+                .bind(a)
+                .bind(b)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(state.as_deref().map(PairState::parse))
+    }
+
     pub async fn get_pair(&self, id: i64) -> Result<ArtifactPair> {
         let row = sqlx::query("SELECT * FROM artifact_pairs WHERE id = ?")
             .bind(id)

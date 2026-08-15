@@ -154,44 +154,21 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         );
     }
 
-    // Armed rather than called. Naming is a model call like any other, and
-    // making it here would put it inside whichever window happened to finish
-    // last — uncounted, unpaced, and in front of work the queue had ordered.
-    //
-    // Named at all only now: the artifact titles are the cheapest description
-    // of what the document turned out to be about, and they only exist once its
-    // windows have run. A name given at capture is left alone — someone chose it.
-    //
-    // Armed once, and never again. Settling runs afresh every time a window
-    // resolves, so a document with one window the model will not read settles
-    // on every failed retry of it — and re-arming here would reset the title
-    // unit's attempts each time and spend another `MAX_ATTEMPTS` calls on a name
-    // that has already been given up on, forever. That is the exact opposite of
-    // what makes this the one unit allowed to stop asking.
-    //
-    // The one way back is an operator's reprocess, which deletes the row — the
-    // rule is about repeated settles of one document, not about refusing a
-    // person who asked for another try.
+    // Naming is armed, not called, and armed once: settling runs afresh every
+    // time a window resolves, and re-arming would reset the title unit's
+    // attempts and spend another `MAX_ATTEMPTS` on a name already given up
+    // on. An operator's reprocess deletes the row and is the one way back. A
+    // name given at capture is left alone — someone chose it.
     if src.title_hint.is_none() && !core.store.has_job(Stage::Title, corpus_id).await? {
         core.store
             .enqueue(Stage::Title, "corpus", corpus_id)
             .await?;
     }
 
-    // One job for the whole source: every chunk was just written, and embedding
-    // them together is one inference call instead of `chunks.len()`.
-    //
-    // Idle-only, because settling runs afresh every time a window resolves and
-    // this is reached on every one of them. Re-arming a *running* embed job puts
-    // it back in the queue for a second worker while the first is still inside
-    // the embedder — two workers embedding the same batch, and whichever
-    // finishes second closing the row the other's `rearm_if_more` had just
-    // re-armed, leaving the corpus half-embedded. Re-arming a *pending* one is
-    // quieter and no better: it winds `attempts` and `run_after` back every
-    // thirty seconds, so a dead embedder is hammered with no backoff, and resets
-    // the `seq` that `rearm_if_more` climbs. A job already queued will pick up
-    // the chunks this settle just wrote; only one that already finished needs
-    // arming again.
+    // One job for the whole source, idle-only. Re-arming a *running* embed
+    // puts a second worker inside the same batch; re-arming a *pending* one
+    // winds `attempts`, `run_after` and `seq` back on every settle. A job
+    // already queued picks up the chunks this settle wrote.
     core.store
         .rearm_idle_seq(Stage::Embed, "corpus", corpus_id, 0)
         .await?;

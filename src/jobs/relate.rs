@@ -135,13 +135,39 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             (b, a)
         };
         if contains_normalized(&long.text, &short.text) {
-            crate::jobs::try_supersede(
+            // The rule is deterministic: these two texts satisfy it every time
+            // either artifact is related again. A row that is already settled
+            // is a decision this rule must not re-derive — most importantly a
+            // person's Restore after an earlier hide, which without this check
+            // was undone by the next relate unit, and on the sweep-driven build
+            // by the next tick, every tick.
+            match core.store.pair_state_between(&a.id, &b.id).await? {
+                None | Some(PairState::Pending) => {}
+                Some(state) => {
+                    tracing::debug!(
+                        a = %a.id,
+                        b = %b.id,
+                        state = state.as_str(),
+                        "a duplicated passage is already settled; leaving it"
+                    );
+                    return Ok(());
+                }
+            }
+            if crate::jobs::try_supersede(
                 core,
                 &short.id,
                 &long.id,
                 "a passage one synthesis call emitted twice",
             )
-            .await;
+            .await
+            {
+                // Closed as the cluster pass closes its rows: settled, nothing
+                // here for a person, and the record that keeps a later relate
+                // unit from hiding it again once someone has restored it.
+                core.store
+                    .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
+                    .await?;
+            }
             return Ok(());
         }
     }

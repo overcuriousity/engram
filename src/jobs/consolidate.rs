@@ -116,15 +116,10 @@ fn close_filed_pair(
     }
 }
 
-/// Where dedupe units sort in the queue.
-///
-/// `claim_job` orders by `(state, attempts, seq, id)`, and a segmentation
-/// window's seq is its index within a document — a few hundred at most. Starting
-/// dedupe far above that puts it behind every piece of capture work of equal
-/// attempt count, so hygiene consumes what capture leaves over.
-///
-/// The asymmetry is deliberate: a large ingest may delay tidying up, and tidying
-/// up may not delay an ingest. Nothing is lost by a dedupe unit waiting.
+/// Where dedupe units sort in the queue: `claim_job` orders by
+/// `(state, attempts, seq, id)` and a window's seq is its index within a
+/// document, so this puts hygiene behind every piece of capture work. A large
+/// ingest may delay tidying up; tidying up may not delay an ingest.
 const DEDUPE_SEQ_BASE: i64 = 1_000_000;
 
 fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
@@ -201,16 +196,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         return Ok(Outcome::default());
     }
 
-    // Deletions clear these as they happen; the sweep repeats it because a
-    // hidden artifact pointing at nothing is invisible to search and to every
-    // page that could put it back, and nothing else would ever notice.
-    // Neither repair is allowed to take the sweep with it. Both are maintenance
-    // over state the rest of the sweep does not read, both are retried on every
-    // sweep, and both are most likely to fail on exactly the base that needs
-    // them most — the one that drifted far enough to make the repair large.
-    // Propagating the error stopped consolidation *permanently*: the next sweep
-    // reached the same call and failed the same way, so near-duplicate
-    // detection and judging never ran again.
+    // Repairs. None may take the sweep with it: each is retried every sweep,
+    // and each is most likely to fail on exactly the base that needs it most.
+    // A hidden artifact pointing at nothing is invisible to search and to
+    // every page that could put it back, and nothing else would notice.
     if let Err(e) = core.heal_dangling_supersessions().await {
         tracing::warn!(
             error = %e,
@@ -257,9 +246,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     if let Err(e) = crate::jobs::merge::flag_orphans(core).await {
         tracing::warn!(error = %e, "could not flag merged artifacts that lost a source");
     }
-    // Startup heals too, but a process that stays up for weeks is exactly the
-    // one whose stores drift: every interrupted write between the two happens
-    // while it is running, not while it is starting.
     if let Err(e) = core.heal_store_drift().await {
         tracing::warn!(
             error = %e,
@@ -303,17 +289,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     }
 
     let mut members: HashMap<String, Vec<Chunk>> = HashMap::new();
-    // Which of the clustered ids this sweep found active. Read once here because
-    // the filed rows are closed against it below, and re-reading every pair's two
-    // artifacts would be the same lookups a second time.
+    // Which clustered ids are active, and which could not be read at all.
+    // Unreadable is not gone: the closing pass must not settle a pair on the
+    // strength of a store that was briefly unwell.
     let mut live: HashSet<String> = HashSet::new();
-    // Ids whose row could not be read this sweep. Unreadable is not gone: the
-    // closing pass must not settle a pair on the strength of a store that was
-    // briefly unwell.
     let mut unknown: HashSet<String> = HashSet::new();
     for id in &in_a_cluster {
-        // An artifact the vector store still lists but SQLite has dropped is
-        // ordinary: a delete can lag a sweep. It is not an error.
         let c = match core.store.get_artifact(id).await {
             Ok(c) => c,
             Err(Error::NotFound) => {
@@ -327,12 +308,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
             }
         };
         if !c.in_results() {
-            // The row says hidden but the vector store still offered this point
-            // as a pair candidate, so its payload never caught up — the write
-            // was interrupted, and `repair_lifecycle_drift` at the top of this
-            // sweep has already re-issued it. Either way the artifact takes no
-            // part in this run: a retired artifact must not win a cluster and
-            // hide a live one, and a resolved pair has nothing left to decide.
+            // A retired artifact must not win a cluster and hide a live one.
             tracing::debug!(artifact_id = %id, status = c.status.as_str(), "skipping a hidden artifact");
             continue;
         }
@@ -358,19 +334,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    // Close the rows the clustering just answered.
-    //
-    // `NearIdentical` is where a pair is filed, not where it ends, and nothing
-    // used to move it out again. That is not merely untidy: the read above is
-    // `pairs_by_state(NearIdentical, 500)`, ordered by score, so once five
-    // hundred already-acted-on rows have accumulated a newly filed pair with a
-    // lower score never enters the window. Its cluster is never formed and its
-    // duplicate is never hidden — silently, and permanently on a growing base.
-    //
-    // `NoConflict` with a detail, as the merge path does: the question is
-    // settled and there is nothing here for a person. `Superseded` would put it
-    // on the Capture page behind an "apply" button for something already applied.
-    // A pair with an unreadable member stays filed for the next sweep.
+    // Close the rows the clustering just answered, or the 500-row window
+    // above fills with acted-on rows and a newly filed pair never enters it.
+    // `NoConflict` with a detail: settled, nothing here for a person. A pair
+    // with an unreadable member stays filed for the next sweep.
     for p in &filed {
         let alive = |id: &String| live.contains(id) && !hidden.contains(id);
         let Some(detail) = close_filed_pair(
@@ -396,18 +363,8 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    // Armed, not asked. `judged` counts the calls this sweep is responsible for
-    // rather than the calls it made, since it makes none. There is deliberately
-    // no verdict count beside it: the answers arrive one unit at a time long
-    // after the sweep has returned, and a zero logged here would read as "the
-    // pass found nothing" rather than "the pass has not been asked yet".
-    // `pairs_by_state(Contradiction, ..)` is where that number actually lives.
-    //
-    // Not gated on `autonomous`. That flag decides whether a verdict is *acted
-    // on*, and gating the asking on it too would mean the observation window it
-    // exists to provide had nothing in it: an operator switching autonomy on
-    // would be doing so having read no verdicts at all. `max_dedupe_per_tick =
-    // 0` is what switches the model off.
+    // Armed, not asked: the answers arrive one unit at a time after the sweep
+    // has returned. `pairs_by_state(Contradiction, ..)` is where verdicts live.
     out.judged = arm_dedupe(core).await?;
 
     if out.superseded > 0 || out.judged > 0 {
@@ -421,27 +378,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 }
 
 /// Decide which pending pairs are worth a model call, and arm one unit each.
-///
-/// Every filter here is local — an artifact's status, and the fact-token
-/// prefilter that is the whole economic argument for this feature: most near
-/// pairs have no value in common to disagree about, and a call is minutes on
-/// this hardware. What survives becomes a `Judge` unit. Nothing in this sweep
-/// talks to a model any more, which is what stops one consolidation run
-/// blocking every capture behind it for as long as twenty calls take.
-///
-/// Returns how many were armed. `max_judgements` bounds what one sweep arms,
-/// and deliberately not judge units in flight: a pair whose unit an earlier
-/// sweep queued is skipped without spending the budget, so a sweep still reaches
-/// pairs recorded since. Counting those in flight instead would let one unit the
-/// queue cannot get through — an open breaker, a dead endpoint — stop every other
-/// pair from ever being judged, which is the head-of-line blocking that splitting
-/// the sweep into units was for. Nothing runs away: `live_job` arms a pair at
-/// most once, so the depth is bounded by the pairs that exist, and the call rate
-/// is the gate's job rather than this number's.
+/// Nothing here talks to a model. Returns how many were armed:
+/// `max_dedupe_per_tick` bounds what one tick arms, not units in flight, so a
+/// unit the queue cannot get through does not stop every other pair from
+/// being judged. `live_job` arms a pair at most once.
 pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
-    // `max_dedupe_per_tick = 0` is the off switch for the model (see `run`'s
-    // comment on the `autonomous` flag). Off means off: no 200-row read per
-    // tick, and no "budget spent" log line implying a budget was spent.
+    // Zero is the off switch for the model: no read, no log line.
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
@@ -468,24 +410,10 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
             );
             break;
         }
-        // Reported, not skipped, with one exception. Skipping treated a store
-        // that was briefly unwell as a pair not worth arming, and since nothing
-        // recorded an attempt it led the next sweep's ordering all over again.
-        //
-        // A pair naming an artifact that is gone is the exception. The pair rows
-        // are `ON DELETE CASCADE` on both members, so the state does not persist
-        // — but `pairs_to_judge` handed us a snapshot, and this loop is full of
-        // awaits, so a re-segmentation or an operator's delete lands inside it
-        // and cascades a pair away between the read and here. Propagating that
-        // `NotFound` reaches `run_one`, which reads it as the sweep's own target
-        // being gone: it completes the job, and every pair behind this one waits
-        // for the next tick — up to `interval_hours` away.
-        //
-        // The status query, not `get_artifact`: this loop triages up to 200
-        // pairs per tick and arms at most a handful, and in-flight pairs lead
-        // the ordering — so most iterations used to pay two full-row fetches,
-        // text included, for a pair they went on to skip. The unit re-reads
-        // the full rows itself; nothing here needs more than liveness.
+        // A store error propagates; a pair whose member is gone (cascaded
+        // away between the read and here) is skipped, since propagating that
+        // `NotFound` would read as the sweep's own target being gone. Liveness
+        // only: this triages 200 pairs to arm a handful.
         let (a_live, b_live) = match (
             core.store.artifact_in_results(&p.a_id).await?,
             core.store.artifact_in_results(&p.b_id).await?,
@@ -494,18 +422,10 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
             _ => continue,
         };
 
-        // A pair queued in the review band can have a member retired after the
-        // fact: superseded by a later sweep once a re-embed moves the score
-        // above `auto_supersede`, or deprecated by an operator. Judging it would
-        // spend the scarcest thing here to post a contradiction about an
-        // artifact that is no longer in results.
-        //
-        // The status half matters beyond the wasted call. A judgement can
-        // propose a supersede, which Ops renders as an "apply supersede" button
-        // — and `Core::supersede` refuses a deprecated side, so pressing it
-        // returns a validation error and the pair stays pending forever. The
-        // same guard runs in `run`'s cluster pass and review band, and again in
-        // the unit itself, because a pair can be retired while it waits.
+        // A member retired after the pair was filed: judging it would spend a
+        // call to post a verdict about an artifact no longer in results, and
+        // `Core::supersede` would refuse to apply it. The unit checks again,
+        // because a pair can be retired while it waits.
         if !a_live || !b_live {
             core.store
                 .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
@@ -513,37 +433,17 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
             continue;
         }
 
-        // `may_disagree` used to close the pair here, and it was the second
-        // copy of the gate `classify_pair` just lost. Both were right for the
-        // old question — "do these two contradict each other?" — and both are
-        // backwards for deduplication, where a pair stating no differing value
-        // is the cleanest thing there is to merge. Keeping this one would have
-        // meant the queue filed such a pair and the arming step closed it
-        // again, which reads as the sweep disagreeing with itself.
-        //
-        // The tokeniser under it survives: `dedupe_prompt` is given the values
-        // that differ as a prior, and the merge verification refuses any merge
-        // that drops one.
-
-        // A pair whose unit is still queued from an earlier sweep is already
-        // going to be judged. `pairs_to_judge` orders by `judge_attempts`, and a
-        // pair that has not run yet still has none, so it leads every sweep
-        // until it does — spending the budget on itself over and over while
-        // pairs recorded since never get a turn.
+        // A pair whose unit is still queued from an earlier tick is already
+        // going to be judged; it has no attempts yet, so it would otherwise
+        // lead every tick and spend the budget on itself.
         let target = p.id.to_string();
         if core.store.live_job(Stage::Dedupe, &target).await? {
             continue;
         }
 
-        // `seq` is the pair's position in this sweep. Left at zero, twenty
-        // judge units would all sort ahead of every document's second window.
-        //
-        // Idle-only for the same reason the reconciliation sweep is: re-arming
-        // a queued unit winds its `attempts` back to zero, and a pair the model
-        // will not judge would then never reach `MAX_ATTEMPTS` — never reaching
-        // the close-out in `run_one` that hands it back to a later sweep. The
-        // guard above already skips those; this is what keeps it true if the
-        // two ever drift.
+        // Idle-only: re-arming a queued unit winds its `attempts` back to
+        // zero, and a pair the model will not judge would never reach
+        // `MAX_ATTEMPTS` and the close-out that hands it to a later tick.
         core.store
             .rearm_idle_seq(
                 Stage::Dedupe,
@@ -1576,8 +1476,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_restored_passage_is_not_hidden_again_by_the_next_sweep() {
         // The containment rule is deterministic: the same two texts satisfy it
-        // on every sweep. Without a record of the first decision, an operator
-        // pressing Restore was overruled by the next tick, every tick.
+        // every time either artifact is related again — a re-embed after an
+        // edit, or the sweep's arming backstop. Without a record of the first
+        // decision, an operator pressing Restore was overruled by the next
+        // relate unit, and on the sweep-driven build by the next tick.
         let core = test_core().await;
         let ids = seed_related(
             &core,
@@ -1603,6 +1505,8 @@ pub(crate) mod tests {
         );
         core.unsupersede(&ids[1]).await.unwrap();
 
+        crate::jobs::relate::run(&core, &ids[1]).await.unwrap();
+        crate::jobs::relate::run(&core, &ids[0]).await.unwrap();
         run(&core).await.unwrap();
         assert!(
             core.store
