@@ -95,6 +95,25 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The read is not going to happen — the model said no, or said nothing for
+/// as long as we were willing to ask. The photo stays; the corpus says why it
+/// stopped, on its page and on Ops, and `reprocess(Describe)` is the way back.
+pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<()> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    let mut meta = src.metadata.clone();
+    meta["describe"] = serde_json::json!({ "error": reason });
+    core.store.set_corpus_metadata(corpus_id, &meta).await?;
+    core.store
+        .set_corpus_status(corpus_id, CorpusStatus::Failed)
+        .await?;
+    tracing::warn!(
+        corpus_id,
+        reason,
+        "image could not be read; parked as failed"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +234,78 @@ mod tests {
         assert_eq!(src.status, CorpusStatus::NeedsReview);
         assert_eq!(src.near_dupe_of.as_deref(), Some(first.id.as_str()));
         assert_eq!(src.raw_text, text, "the reading is kept even when parked");
+    }
+
+    async fn clear_backoff(core: &Core) {
+        sqlx::query("UPDATE jobs SET run_after = 0")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_reading_parks_the_corpus_as_failed_with_the_reason() {
+        let core = test_core_with_describer(Arc::new(FakeDescriber::rejecting(
+            "HTTP 400: this model does not accept images",
+        )))
+        .await;
+        let id = captured(&core, 6, None).await;
+        assert!(crate::jobs::run_one(&core).await.unwrap());
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Failed);
+        assert!(
+            src.metadata["describe"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("does not accept images")
+        );
+        assert!(
+            !core.store.live_job(Stage::Describe, &id).await.unwrap(),
+            "the job is closed, not re-armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reading_that_keeps_failing_parks_the_corpus_after_its_attempts() {
+        let core = test_core_with_describer(Arc::new(FakeDescriber::failing("gpu on fire"))).await;
+        let id = captured(&core, 7, None).await;
+        for _ in 0..crate::store::jobs::MAX_ATTEMPTS {
+            clear_backoff(&core).await;
+            assert!(crate::jobs::run_one(&core).await.unwrap());
+        }
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Failed);
+        assert!(
+            src.metadata["describe"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("gpu on fire")
+        );
+        assert!(!core.store.live_job(Stage::Describe, &id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn without_a_vision_role_an_exhausted_job_keeps_waiting() {
+        let core = test_core_without_vision().await;
+        let src = core
+            .store
+            .insert_image_corpus("h", "image", None, &serde_json::json!({}))
+            .await
+            .unwrap()
+            .into_corpus();
+        core.store
+            .enqueue(Stage::Describe, "corpus", &src.id)
+            .await
+            .unwrap();
+        for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 1 {
+            clear_backoff(&core).await;
+            assert!(crate::jobs::run_one(&core).await.unwrap());
+        }
+        assert_eq!(
+            core.store.get_corpus(&src.id).await.unwrap().status,
+            CorpusStatus::Describing
+        );
+        assert!(core.store.live_job(Stage::Describe, &src.id).await.unwrap());
     }
 
     #[tokio::test]

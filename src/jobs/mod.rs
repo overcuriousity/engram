@@ -99,36 +99,29 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     tracing::warn!(error = %e, "could not name this corpus; leaving it unnamed");
                     core.store.complete_job(job.id).await?;
                 }
+                // The photo is stored, so nothing is lost by stopping — but a
+                // corpus shown as in flight forever is a lie. Unless the role
+                // is simply not configured, which is a wait, not a failure.
+                (Stage::Describe, _) if exhausted && core.describer.is_some() => {
+                    tracing::warn!(error = %e, "could not read this image; parking it");
+                    describe::park_failed(core, &job.target_id, &e.to_string()).await?;
+                    core.store.complete_job(job.id).await?;
+                }
                 // A whole source failing together usually means the endpoint is
                 // down, but it can also be one chunk the embedder rejects.
                 // Retrying chunk by chunk isolates the culprit either way.
                 (Stage::Embed, "corpus") if exhausted => {
                     tracing::warn!(error = %e, "batch embedding exhausted retries; retrying chunk by chunk");
-                    match embed::split_into_artifact_jobs(core, &job.target_id).await {
-                        Ok(()) => {
-                            core.store.complete_job(job.id).await?;
-                        }
-                        Err(fe) => {
-                            core.store
-                                .fail_job(job.id, job.attempts, &fe.to_string())
-                                .await?;
-                        }
-                    }
+                    split_or_fail(core, &job, &e).await?;
                 }
                 _ => {
                     tracing::warn!(error = %e, "job failed; will retry");
-                    core.store
-                        .fail_job(job.id, job.attempts, &e.to_string())
-                        .await?;
                     if job.stage == Stage::Embed && exhausted {
-                        core.store.mark_embed_failed(&job.target_id).await?;
-                        // A merged artifact belongs to no corpus, so there is
-                        // no document whose coverage its failure completes.
-                        if let Ok(c) = core.store.get_artifact(&job.target_id).await
-                            && let Some(corpus_id) = c.corpus_id.as_deref()
-                        {
-                            embed::settle_corpus(core, corpus_id).await?;
-                        }
+                        settle_failed_artifact(core, &job, &e).await?;
+                    } else {
+                        core.store
+                            .fail_job(job.id, job.attempts, &e.to_string())
+                            .await?;
                     }
                 }
             }
@@ -136,12 +129,58 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         }
         Err(e) => {
             tracing::error!(error = %e, "job failed permanently");
-            core.store
-                .fail_job(job.id, MAX_ATTEMPTS, &e.to_string())
-                .await?;
+            match (job.stage, job.target_kind.as_str()) {
+                // Refused as a batch does not mean refused as chunks; the same
+                // isolation the exhausted path buys is worth buying here.
+                (Stage::Embed, "corpus") => split_or_fail(core, &job, &e).await?,
+                (Stage::Embed, _) => settle_failed_artifact(core, &job, &e).await?,
+                (Stage::Describe, _) => {
+                    describe::park_failed(core, &job.target_id, &e.to_string()).await?;
+                    core.store.complete_job(job.id).await?;
+                }
+                _ => {
+                    core.store
+                        .fail_job(job.id, MAX_ATTEMPTS, &e.to_string())
+                        .await?;
+                }
+            }
             Ok(true)
         }
     }
+}
+
+/// Hand a batch embed that will not go through as a batch to per-chunk units.
+/// The batch unit closes only once the split is queued; if even that fails,
+/// the batch stays armed so the work is not lost.
+async fn split_or_fail(core: &Core, job: &Job, e: &Error) -> Result<()> {
+    match embed::split_into_artifact_jobs(core, &job.target_id).await {
+        Ok(()) => core.store.complete_job(job.id).await,
+        Err(fe) => {
+            tracing::warn!(error = %fe, original = %e, "could not split the batch; keeping it queued");
+            core.store
+                .fail_job(job.id, job.attempts, &fe.to_string())
+                .await
+        }
+    }
+}
+
+/// One chunk the embedder will not take: mark it, and let the corpus settle to
+/// `partial` if this was the last one outstanding.
+async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()> {
+    // Kept armed at the backoff ceiling like every failed unit: no terminal
+    // state, see `fail_job`.
+    core.store
+        .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())
+        .await?;
+    core.store.mark_embed_failed(&job.target_id).await?;
+    // A merged artifact belongs to no corpus, so there is no document whose
+    // coverage its failure completes.
+    if let Ok(c) = core.store.get_artifact(&job.target_id).await
+        && let Some(corpus_id) = c.corpus_id.as_deref()
+    {
+        embed::settle_corpus(core, corpus_id).await?;
+    }
+    Ok(())
 }
 
 pub struct Worker;
@@ -185,9 +224,49 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::core::test_support::{
+        test_core, test_core_with_embedder, test_core_with_failing_synthesizer,
+    };
+    use crate::infer::fake::FakeEmbedder;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::MAX_ATTEMPTS;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_batch_embed_the_endpoint_rejects_is_retried_chunk_by_chunk() {
+        let core = test_core_with_embedder(Arc::new(FakeEmbedder::rejecting("HTTP 413"))).await;
+        let src = core
+            .ingest("alpha para\n\nbeta para", "web", None)
+            .await
+            .unwrap();
+        // Run the queue up to and including the batch embed of this corpus.
+        let mut guard = 0;
+        while let Some(job) = core.store.claim_job().await.unwrap() {
+            guard += 1;
+            assert!(guard < 50, "queue did not reach the batch embed");
+            let is_batch = job.stage == Stage::Embed && job.target_kind == "corpus";
+            run_claimed(&core, job).await.unwrap();
+            if is_batch {
+                break;
+            }
+        }
+        let per_chunk = core
+            .store
+            .pending_artifacts_for_corpus(&src.id)
+            .await
+            .unwrap();
+        assert!(!per_chunk.is_empty());
+        for c in per_chunk {
+            assert!(
+                core.store.live_job(Stage::Embed, &c.id).await.unwrap(),
+                "per-chunk unit armed"
+            );
+        }
+        assert!(
+            !core.store.live_job(Stage::Embed, &src.id).await.unwrap(),
+            "the batch unit is closed"
+        );
+    }
 
     #[tokio::test]
     async fn run_one_reports_when_the_queue_is_empty() {

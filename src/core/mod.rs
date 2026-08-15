@@ -237,6 +237,14 @@ pub mod test_support {
         (core, embedder)
     }
 
+    /// A core whose embedder is the given fake, for driving the embed stage
+    /// into a refusal.
+    pub async fn test_core_with_embedder(e: Arc<FakeEmbedder>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.embedder = e;
+        core
+    }
+
     /// A core whose vision model is the given fake, for asserting what it was
     /// asked and answering what a test needs.
     pub async fn test_core_with_describer(d: Arc<FakeDescriber>) -> Core {

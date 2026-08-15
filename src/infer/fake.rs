@@ -14,6 +14,9 @@ pub struct FakeEmbedder {
     /// How many times the endpoint was called. Batching is invisible in the
     /// output — only the call count shows whether it happened.
     calls: std::sync::atomic::AtomicUsize,
+    /// When set, every call is refused with this reason — the endpoint's "no",
+    /// which a worker must not retry.
+    reject_with: Option<String>,
 }
 
 impl FakeEmbedder {
@@ -21,7 +24,14 @@ impl FakeEmbedder {
         Self {
             dim,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            reject_with: None,
         }
+    }
+
+    pub fn rejecting(msg: &str) -> Self {
+        let mut e = Self::new(8);
+        e.reject_with = Some(msg.to_string());
+        e
     }
 
     pub fn calls(&self) -> usize {
@@ -34,6 +44,12 @@ impl Embedder for FakeEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(m) = &self.reject_with {
+            return Err(Error::InferenceRejected {
+                role: "embed",
+                detail: m.clone(),
+            });
+        }
         Ok(texts
             .iter()
             .map(|t| {
