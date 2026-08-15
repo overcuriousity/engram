@@ -210,10 +210,7 @@ impl Store {
         Ok(())
     }
 
-    /// Fresh in-memory database with the schema applied. For the tests, and
-    /// for tooling whose output is a file rather than a running instance —
-    /// `eval-prepare` segments a corpus and writes JSON, and has no reason to
-    /// leave a database behind.
+    /// Fresh in-memory database with the schema applied, for the tests.
     pub async fn memory() -> Result<Store> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?

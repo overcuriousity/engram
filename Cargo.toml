@@ -12,13 +12,6 @@ path = "src/lib.rs"
 name = "engram"
 path = "src/main.rs"
 
-# Freezes the evaluation corpus into chunks.json by running the real segmenter
-# once. Not part of the server; it exists so a benchmark run costs no
-# completions and two runs rank exactly the same text.
-[[bin]]
-name = "eval-prepare"
-path = "src/bin/eval_prepare.rs"
-
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }

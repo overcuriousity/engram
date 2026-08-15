@@ -58,8 +58,8 @@ async fn evaluate_retrieval() {
             let why = c.err().map(|e| e.to_string()).unwrap_or_default()
                 + &p.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
-                "no evaluation corpus at {} ({}). Set ENGRAM_EVAL_DIR and run \
-                 `cargo run --bin eval-prepare` first.",
+                "no evaluation corpus at {} ({}). Run `engram --export-eval <dir>` \
+                 and set ENGRAM_EVAL_DIR to it.",
                 dir.display(),
                 why.trim()
             );
@@ -71,13 +71,13 @@ async fn evaluate_retrieval() {
 
     let known: std::collections::HashSet<&str> = artifacts.iter().map(|c| c.id.as_str()).collect();
     // A pair naming an id no artifact has is not a hard case, it is a stale pair
-    // left behind by a re-run of eval-prepare. Scored as a miss it would look
+    // left behind by an artifact deleted since the export. Scored as a miss it would look
     // like a ranking problem forever.
     for p in &pairs {
         assert!(
             known.contains(p.expect.as_str()),
             "pair {:?} expects artifact {} which is not in artifacts.json; \
-             re-check the pairs after re-running eval-prepare",
+             re-export with `engram --export-eval`",
             p.query,
             p.expect
         );
