@@ -80,11 +80,8 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 pub struct FakeSynthesizer {
     fail_with: Option<String>,
-    /// Fail only on windows containing this marker. Lets a test model the
-    /// realistic case — some windows succeed, one does not.
-    fail_on_marker: Option<String>,
-    /// Answer, but with something the parser cannot read. Distinct from the
-    /// two above, which model an endpoint that never answered at all.
+    /// Answer, but with something the parser cannot read. Distinct from
+    /// `fail_with`, which models an endpoint that never answered at all.
     unparsable_on_marker: Option<String>,
     /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
     reject: bool,
@@ -94,7 +91,6 @@ impl FakeSynthesizer {
     pub fn failing(msg: &str) -> Self {
         Self {
             fail_with: Some(msg.to_string()),
-            fail_on_marker: None,
             unparsable_on_marker: None,
             reject: false,
         }
@@ -108,15 +104,6 @@ impl FakeSynthesizer {
         s
     }
 
-    pub fn failing_on(marker: &str) -> Self {
-        Self {
-            fail_with: None,
-            fail_on_marker: Some(marker.to_string()),
-            unparsable_on_marker: None,
-            reject: false,
-        }
-    }
-
     /// The model replies to every window and its reply for the marked one
     /// cannot be parsed however often it is asked. This is what a duplicate
     /// JSON key looks like from the caller's side, and it is a property of the
@@ -124,7 +111,6 @@ impl FakeSynthesizer {
     pub fn unparsable_on(marker: &str) -> Self {
         Self {
             fail_with: None,
-            fail_on_marker: None,
             unparsable_on_marker: Some(marker.to_string()),
             reject: false,
         }
@@ -143,14 +129,6 @@ impl FakeSynthesizer {
 impl Synthesizer for FakeSynthesizer {
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         let text = input.core;
-        if let Some(marker) = &self.fail_on_marker
-            && text.contains(marker.as_str())
-        {
-            return Err(Error::Inference {
-                role: "chunk",
-                detail: format!("refusing window containing {marker}"),
-            });
-        }
         if let Some(marker) = &self.unparsable_on_marker
             && text.contains(marker.as_str())
         {

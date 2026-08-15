@@ -246,25 +246,6 @@ fn distinctive_tokens(s: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// Does the chunk plausibly describe the lines it claims?
-///
-/// The synthesizer rewrites prose, so this cannot demand equality — only that a
-/// third of the chunk's distinctive tokens appear in the claimed range.
-///
-/// Synthesis no longer calls this: it derives spans rather than checking the
-/// model's, so there is no claim left to doubt. It stays because
-/// `content_coverage` measures the same relationship — is this text in those
-/// lines — and the two want to keep answering it the same way.
-pub fn span_is_plausible(artifact_text: &str, claimed_text: &str) -> bool {
-    let chunk = distinctive_tokens(artifact_text);
-    if chunk.is_empty() {
-        return true;
-    }
-    let claimed = distinctive_tokens(claimed_text);
-    let shared = chunk.iter().filter(|t| claimed.contains(*t)).count();
-    shared * 3 >= chunk.len()
-}
-
 /// A source line counts as covered when this share of its distinctive tokens
 /// appears in the artifacts made from the segment it belongs to.
 ///
@@ -456,20 +437,6 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     #[test]
     fn prose_alone_has_no_literals_to_check() {
         assert!(extract_literals("Just some ordinary prose about disks.").is_empty());
-    }
-
-    #[test]
-    fn a_span_over_the_lines_the_chunk_rewrote_is_plausible() {
-        let claimed = "    dd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress";
-        let chunk = "Write the image:\n\n```\ndd if=archlinux.iso of=/dev/sdX bs=4M oflag=sync status=progress\n```";
-        assert!(span_is_plausible(chunk, claimed));
-    }
-
-    #[test]
-    fn a_span_pointing_at_unrelated_lines_is_not_plausible() {
-        let claimed = "The kernel keeps a page cache of recently read blocks.";
-        let chunk = "```\nmkfs.ext4 /dev/sdX1\n```\nFormat the partition with mkfs.";
-        assert!(!span_is_plausible(chunk, claimed));
     }
 
     #[test]

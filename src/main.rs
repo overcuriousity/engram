@@ -141,27 +141,10 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         }
     }
 
-    engram::infer::openai::probe(
-        "chunk",
-        &cfg.infer.synthesize.base_url,
-        cfg.infer.synthesize.api_key.as_deref(),
-    )
-    .await;
-    engram::infer::openai::probe(
-        "embed",
-        &cfg.infer.embed.base_url,
-        cfg.infer.embed.api_key.as_deref(),
-    )
-    .await;
-    if let Some(r) = &cfg.infer.rerank {
-        engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
-    } else {
+    if cfg.infer.rerank.is_none() {
         tracing::info!("rerank not configured; search returns vector order");
     }
-    if let Some(v) = &cfg.infer.vision {
-        let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
-        engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
-    } else {
+    if cfg.infer.vision.is_none() {
         tracing::info!("vision not configured; the image door is closed");
     }
     Ok(())

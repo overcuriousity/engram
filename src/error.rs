@@ -11,8 +11,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("not found")]
     NotFound,
-    #[error("duplicate of {existing_id}")]
-    Duplicate { existing_id: String },
     #[error("validation: {0}")]
     Validation(String),
     #[error("unauthorized")]
@@ -59,7 +57,6 @@ impl Error {
     pub fn status(&self) -> StatusCode {
         match self {
             Error::NotFound => StatusCode::NOT_FOUND,
-            Error::Duplicate { .. } => StatusCode::OK,
             Error::Validation(_) => StatusCode::BAD_REQUEST,
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Forbidden => StatusCode::FORBIDDEN,

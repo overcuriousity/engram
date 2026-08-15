@@ -17,13 +17,6 @@ fn is_heading(line: &str) -> bool {
     t.starts_with('#') && t.trim_start_matches('#').starts_with(' ')
 }
 
-/// The splitter's own heading rule, for tests elsewhere that must assert
-/// against it rather than against a second copy of it that can drift.
-#[cfg(test)]
-pub fn is_heading_for_test(line: &str) -> bool {
-    is_heading(line)
-}
-
 /// Split `text` into windows that each fit `segment_tokens`.
 ///
 /// Boundary preference is headings, then blank lines, then a hard cut. Each
