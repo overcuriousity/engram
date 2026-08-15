@@ -104,7 +104,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // is simply not configured, which is a wait, not a failure.
                 (Stage::Describe, _) if exhausted && core.describer.is_some() => {
                     tracing::warn!(error = %e, "could not read this image; parking it");
-                    describe::park_failed(core, &job.target_id, &e.to_string()).await?;
+                    park_failed_if_still_there(core, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
                 // A whole source failing together usually means the endpoint is
@@ -135,7 +135,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 (Stage::Embed, "corpus") => split_or_fail(core, &job, &e).await?,
                 (Stage::Embed, _) => settle_failed_artifact(core, &job, &e).await?,
                 (Stage::Describe, _) => {
-                    describe::park_failed(core, &job.target_id, &e.to_string()).await?;
+                    park_failed_if_still_there(core, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
                 _ => {
@@ -146,6 +146,24 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             }
             Ok(true)
         }
+    }
+}
+
+/// Park an image that could not be read, tolerating its corpus having been
+/// deleted in the meantime.
+///
+/// A corpus deleted before the job ran is caught far above, by the `NotFound`
+/// arm that simply closes the unit. This is the narrower race: deleted between
+/// the failed read and this write. Letting that `NotFound` out of `run_claimed`
+/// would leave the job `running` until `reclaim_stuck` picks it up ten minutes
+/// later, only to lose the same race again.
+async fn park_failed_if_still_there(core: &Core, corpus_id: &str, e: &Error) -> Result<()> {
+    match describe::park_failed(core, corpus_id, &e.to_string()).await {
+        Err(Error::NotFound) => {
+            tracing::info!(corpus_id, "corpus went away before it could be parked");
+            Ok(())
+        }
+        other => other,
     }
 }
 

@@ -69,6 +69,13 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
 pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let mut meta = src.metadata.clone();
+    // Indexing a `Value` that is not an object panics, and this one comes
+    // straight out of a column. The reason is the whole point of the write —
+    // it is what the corpus page and Ops show — so a column holding something
+    // else is started over rather than left to take the worker down.
+    if !meta.is_object() {
+        meta = serde_json::json!({});
+    }
     meta["describe"] = serde_json::json!({ "error": reason });
     core.store.set_corpus_metadata(corpus_id, &meta).await?;
     core.store
@@ -256,6 +263,44 @@ mod tests {
                 .contains("gpu on fire")
         );
         assert!(!core.store.live_job(Stage::Describe, &id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn parking_survives_a_metadata_column_that_is_not_an_object() {
+        // `meta["describe"] = ...` panics on anything but an object or null,
+        // and the value comes out of a column. A worker is the wrong place to
+        // find that out.
+        let core = test_core_without_vision().await;
+        let src = core
+            .store
+            .insert_image_corpus(
+                "h",
+                "image",
+                None,
+                &serde_json::json!("not an object"),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: None,
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(1),
+                    height: Some(1),
+                },
+            )
+            .await
+            .unwrap()
+            .into_corpus();
+
+        park_failed(&core, &src.id, "gpu on fire").await.unwrap();
+
+        let got = core.store.get_corpus(&src.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Failed);
+        assert_eq!(
+            got.metadata["describe"]["error"].as_str(),
+            Some("gpu on fire"),
+            "the reason is what the corpus page shows; it cannot be lost"
+        );
     }
 
     #[tokio::test]
