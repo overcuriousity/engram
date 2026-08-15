@@ -138,9 +138,17 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     park_failed_if_still_there(core, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
+                // Kept armed like every other failed unit, but at the *unit's*
+                // own attempt count rather than at the constant. Passing
+                // `MAX_ATTEMPTS` pinned the delay at its value for ever, so a
+                // window the endpoint refuses outright would poll it every 32
+                // seconds until someone noticed — far harder than a window it
+                // merely could not reach, which backs off to six hours. The
+                // floor stays, so the first refusal still waits out the whole
+                // ordinary budget rather than retrying in two seconds.
                 _ => {
                     core.store
-                        .fail_job(job.id, MAX_ATTEMPTS, &e.to_string())
+                        .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())
                         .await?;
                 }
             }
@@ -244,10 +252,11 @@ mod tests {
     use super::*;
     use crate::core::test_support::{
         test_core, test_core_with_embedder, test_core_with_failing_synthesizer,
+        test_core_with_rejecting_synthesizer,
     };
     use crate::infer::fake::FakeEmbedder;
     use crate::store::corpora::CorpusStatus;
-    use crate::store::jobs::MAX_ATTEMPTS;
+    use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -283,6 +292,67 @@ mod tests {
         assert!(
             !core.store.live_job(Stage::Embed, &src.id).await.unwrap(),
             "the batch unit is closed"
+        );
+    }
+
+    /// A window the endpoint *refuses* used to be requeued at a fixed 32
+    /// seconds forever, because the permanent arm passed the `MAX_ATTEMPTS`
+    /// constant rather than the unit's own attempt count. Work the endpoint
+    /// said no to would then poll it 675 times more often than work that
+    /// merely failed to reach it — the wrong way round.
+    #[tokio::test]
+    async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
+        let core = test_core_with_rejecting_synthesizer().await;
+        let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
+
+        let delay = |core: &Core| {
+            let pool = core.store.pool.clone();
+            let id = out.id.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT run_after - ? FROM jobs
+                      WHERE stage = 'segment_window' AND target_id LIKE ? || '%'",
+                )
+                .bind(crate::store::now())
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Wind each refusal's delay back so the attempt budget is spent
+        // without sleeping, and record how long the unit asked to wait.
+        let mut gaps = Vec::new();
+        for _ in 0..MAX_ATTEMPTS + 3 {
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            let _ = run_one(&core).await;
+            // Before the window's own unit is first claimed its `run_after` is
+            // the zero this loop just wrote, which is not a refusal's delay.
+            match delay(&core).await {
+                g if g > 0 => gaps.push(g),
+                _ => {}
+            }
+        }
+
+        assert!(
+            gaps.last() > gaps.first(),
+            "a refusal must back off further each time, not poll a dead endpoint \
+             at a fixed interval forever; gaps were {gaps:?}"
+        );
+        // The floor is still the ceiling of the ordinary budget, so a refusal
+        // is never *cheaper* to retry than a failure to connect.
+        assert!(
+            gaps.iter().all(|g| *g >= backoff_secs(MAX_ATTEMPTS)),
+            "gaps were {gaps:?}"
+        );
+        // And the document does not hang waiting on a window nobody will take.
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Failed
         );
     }
 

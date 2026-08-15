@@ -86,6 +86,8 @@ pub struct FakeSynthesizer {
     /// Answer, but with something the parser cannot read. Distinct from the
     /// two above, which model an endpoint that never answered at all.
     unparsable_on_marker: Option<String>,
+    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    reject: bool,
 }
 
 impl FakeSynthesizer {
@@ -94,7 +96,16 @@ impl FakeSynthesizer {
             fail_with: Some(msg.to_string()),
             fail_on_marker: None,
             unparsable_on_marker: None,
+            reject: false,
         }
+    }
+
+    /// The same refusal, arriving the way a 400 does: the request itself is
+    /// wrong, and asking again sends the same request.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut s = Self::failing(msg);
+        s.reject = true;
+        s
     }
 
     pub fn failing_on(marker: &str) -> Self {
@@ -102,6 +113,7 @@ impl FakeSynthesizer {
             fail_with: None,
             fail_on_marker: Some(marker.to_string()),
             unparsable_on_marker: None,
+            reject: false,
         }
     }
 
@@ -114,6 +126,15 @@ impl FakeSynthesizer {
             fail_with: None,
             fail_on_marker: None,
             unparsable_on_marker: Some(marker.to_string()),
+            reject: false,
+        }
+    }
+
+    fn refusal(&self, role: &'static str, detail: String) -> Error {
+        if self.reject {
+            Error::InferenceRejected { role, detail }
+        } else {
+            Error::Inference { role, detail }
         }
     }
 }
@@ -138,10 +159,7 @@ impl Synthesizer for FakeSynthesizer {
             ));
         }
         if let Some(m) = &self.fail_with {
-            return Err(Error::Inference {
-                role: "chunk",
-                detail: m.clone(),
-            });
+            return Err(self.refusal("chunk", m.clone()));
         }
         Ok(text
             .split("\n\n")
@@ -174,10 +192,7 @@ impl Synthesizer for FakeSynthesizer {
     /// other, and the caller has to survive it failing.
     async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
         if let Some(m) = &self.fail_with {
-            return Err(Error::Inference {
-                role: "title",
-                detail: m.clone(),
-            });
+            return Err(self.refusal("title", m.clone()));
         }
         let first: String = text
             .lines()
