@@ -175,7 +175,7 @@ pub fn spawn_retention_ticker(
 /// hardware can actually sustain.
 ///
 /// What it does not do is cap units in flight. A unit the queue cannot get
-/// through — an open breaker, a dead endpoint — would then block every other
+/// through — a dead endpoint — would then block every other
 /// pair permanently, which is the head-of-line blocking the per-pair units were
 /// introduced to remove. `live_job` skips a pair whose unit is already queued,
 /// and the ordering in `pairs_to_judge` keeps a pair that keeps failing from

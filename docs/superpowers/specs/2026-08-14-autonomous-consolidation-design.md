@@ -530,7 +530,7 @@ Unchanged — the existing mechanism fits without adaptation.
   return the same unreadable bytes five times.
 - At `MAX_UNREADABLE_JUDGEMENTS` the asking stops, the component stays `pending`
   and therefore on the Ops list. No merge is left half-applied.
-- Endpoint down → `gate.background()`, breaker, no merges. Because the write path
+- Endpoint down → `gate.background()`, the queue's backoff, no merges. Because the write path
   begins only **after** a successful and verified reply, an outage cannot produce
   a partial merge.
 
@@ -559,7 +559,7 @@ with the rhythm of duplicate discovery.
 Two existing rules are explicitly **not** touched:
 
 - **No cap on in-flight units.** `src/jobs/consolidate.rs:455–461` explains why:
-  a unit the queue cannot get through — open breaker, dead endpoint — would under
+  a unit the queue cannot get through — a dead endpoint — would under
   an in-flight cap block every other pair permanently. That is exactly the
   head-of-line blocking the units were introduced to remove. The protection stays
   `live_job` plus the ordering in `pairs_to_judge`.

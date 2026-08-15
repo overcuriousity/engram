@@ -151,24 +151,16 @@ impl Core {
                     v.timeout_secs,
                 )) as Arc<dyn Describer>
             }),
-            counter: Arc::new(TokenCounter::load(
-                cfg.infer.synthesize.tokenizer_path.as_deref(),
-            )),
+            counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
             weak_below: cfg.vector.weak_below,
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
-            gate: Arc::new(
-                crate::infer::gate::InferenceGate::new(std::time::Duration::from_secs(
-                    cfg.pacing.cooldown_secs,
-                ))
-                .with_breaker(
-                    cfg.pacing.breaker_after,
-                    std::time::Duration::from_secs(cfg.pacing.breaker_probe_secs),
-                ),
-            ),
+            gate: Arc::new(crate::infer::gate::InferenceGate::new(
+                std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
+            )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
             decodes: Arc::new(tokio::sync::Semaphore::new(
@@ -268,7 +260,7 @@ pub mod test_support {
             completer: Arc::new(FakeCompleter::default()),
             judge: Arc::new(FakeCompleter::default()),
             describer: Some(Arc::new(FakeDescriber::default())),
-            counter: Arc::new(TokenCounter::Estimate),
+            counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
@@ -280,7 +272,7 @@ pub mod test_support {
             // Off, like the shipped default. The capture tests switch it on.
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
-            // No cooldown and no breaker: a test that wants pacing builds its
+            // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,

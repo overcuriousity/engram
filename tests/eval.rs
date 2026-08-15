@@ -319,7 +319,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         completer: Arc::new(engram::infer::fake::FakeCompleter::default()),
         judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
         describer: None,
-        counter: Arc::new(engram::infer::budget::TokenCounter::Estimate),
+        counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
             engram::core::QUERY_CACHE_CAPACITY,

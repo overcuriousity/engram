@@ -94,9 +94,6 @@ output_ratio = 8.0
 # prompt, so a smaller window and proportionally more calls per corpus. Set
 # either to 0 to turn that half off.
 # context_overlap_tokens = 150
-# Optional path to a tokenizer.json for exact token counting. Without it,
-# budgets fall back to a conservative characters/3.5 estimate.
-# tokenizer_path = "/models/qwen/tokenizer.json"
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
@@ -261,14 +258,6 @@ sweep_hours = 6
 # disables pacing. A question asked through `ask` ignores it: someone is
 # waiting, and the pacer is there to protect the GPU from batch work.
 cooldown_secs = 0
-# Consecutive transport failures before background calls are held back, and how
-# long to hold them for before letting one through to probe. Output the parser
-# cannot read does not count: the endpoint answered, and the window's own text
-# is the problem. Zero disables the breaker. Once it has tripped, the single
-# call let through after the probe window re-trips it immediately if it fails
-# too; a call that succeeds closes it.
-breaker_after = 3
-breaker_probe_secs = 60
 
 [capture]
 # The upload, paste-a-link and extension doors.

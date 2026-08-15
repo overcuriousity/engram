@@ -32,10 +32,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
 
     let permit = core.gate.background().await;
     let read = describer.describe(&preview, &context).await;
-    match &read {
-        Ok(_) => permit.succeeded(),
-        Err(e) => permit.failed(e),
-    }
+    permit.finished();
     let text = read?;
 
     if text.trim().is_empty() {

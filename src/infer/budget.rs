@@ -5,47 +5,14 @@ use super::SynthesisBudget;
 /// rather than producing single-word chunks.
 pub const MIN_SEGMENT_TOKENS: usize = 256;
 
-pub enum TokenCounter {
-    Exact(Box<tokenizers::Tokenizer>),
-    /// Deliberately pessimistic: 3.5 characters per token undercounts nothing
-    /// for English prose and code, so budgets stay conservative.
-    Estimate,
-}
+/// Token counts for budgets. A character estimate, deliberately pessimistic:
+/// 3.5 characters per token undercounts nothing for English prose and code,
+/// so budgets stay conservative.
+pub struct TokenCounter;
 
 impl TokenCounter {
-    pub fn load(path: Option<&str>) -> TokenCounter {
-        match path {
-            Some(p) => match tokenizers::Tokenizer::from_file(p) {
-                Ok(t) => {
-                    tracing::info!(tokenizer = p, "exact token counting enabled");
-                    TokenCounter::Exact(Box::new(t))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tokenizer = p,
-                        error = %e,
-                        "tokenizer failed to load; falling back to character estimate"
-                    );
-                    TokenCounter::Estimate
-                }
-            },
-            None => {
-                tracing::info!(
-                    "no tokenizer configured; using character estimate for token budgets"
-                );
-                TokenCounter::Estimate
-            }
-        }
-    }
-
     pub fn count(&self, text: &str) -> usize {
-        match self {
-            TokenCounter::Exact(t) => t
-                .encode(text, false)
-                .map(|e| e.len())
-                .unwrap_or_else(|_| estimate(text)),
-            TokenCounter::Estimate => estimate(text),
-        }
+        estimate(text)
     }
 }
 
@@ -157,7 +124,7 @@ mod tests {
 
     #[test]
     fn estimate_counter_is_conservative() {
-        let c = TokenCounter::Estimate;
+        let c = TokenCounter;
         // 35 characters / 3.5 = 10 tokens.
         assert_eq!(c.count(&"a".repeat(35)), 10);
         assert_eq!(c.count(""), 0);
@@ -167,13 +134,13 @@ mod tests {
     fn estimate_counts_characters_not_bytes() {
         // Multi-byte text must not be counted as if every byte were a char,
         // or every German or Japanese source would be split far too small.
-        let c = TokenCounter::Estimate;
+        let c = TokenCounter;
         assert_eq!(c.count(&"ä".repeat(35)), 10);
     }
 
     #[test]
     fn pack_stops_at_the_budget() {
-        let c = TokenCounter::Estimate;
+        let c = TokenCounter;
         let items: Vec<String> = (0..5).map(|_| "x".repeat(35)).collect(); // 10 tokens each
         assert_eq!(pack_by_budget(&items, &c, 25), 2);
         assert_eq!(pack_by_budget(&items, &c, 1000), 5);

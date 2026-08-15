@@ -97,10 +97,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             context: &ctx,
         })
         .await;
-    match &first {
-        Ok(_) => permit.succeeded(),
-        Err(e) => permit.failed(e),
-    }
+    permit.finished();
     let mut chunks = match first {
         Ok(c) => c,
         Err(e) => {
@@ -131,23 +128,20 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             "literals missing; re-segmenting once"
         );
         let permit = core.gate.background().await;
-        match core
+        let second = core
             .synthesizer
             .segment(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
             })
-            .await
-        {
-            Ok(second) => {
-                permit.succeeded();
-                chunks = second;
-            }
+            .await;
+        permit.finished();
+        match second {
+            Ok(second) => chunks = second,
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
             // window we can already read.
             Err(e) => {
-                permit.failed(&e);
                 tracing::warn!(
                     corpus_id,
                     window = idx,

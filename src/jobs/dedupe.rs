@@ -191,23 +191,15 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let differing = crate::infer::facts::differing_values(&texts);
 
     let permit = core.gate.background().await;
-    let reply = match core
+    let reply = core
         .judge
         .complete(
             crate::infer::prompt::DEDUPE_SYSTEM,
             &crate::infer::prompt::dedupe_prompt(&shown, &differing, p.judge_attempts),
         )
-        .await
-    {
-        Ok(r) => {
-            permit.succeeded();
-            r
-        }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
-    };
+        .await;
+    permit.finished();
+    let reply = reply?;
 
     let verdict = match crate::infer::prompt::parse_dedupe(&reply) {
         Ok(v) => v,

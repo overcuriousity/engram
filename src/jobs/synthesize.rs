@@ -204,22 +204,17 @@ pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
         .collect();
 
     let permit = core.gate.background().await;
-    match core.synthesizer.title(&src.raw_text, &titles).await {
+    let named = core.synthesizer.title(&src.raw_text, &titles).await;
+    permit.finished();
+    match named {
         Ok(Some(t)) => {
-            permit.succeeded();
             core.store.set_title_hint(corpus_id, &t).await?;
             Ok(())
         }
         // The synthesizer has no opinion about titles. Not a failure, and not
         // worth another call.
-        Ok(None) => {
-            permit.succeeded();
-            Ok(())
-        }
-        Err(e) => {
-            permit.failed(&e);
-            Err(e)
-        }
+        Ok(None) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 

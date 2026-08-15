@@ -69,20 +69,18 @@ pub struct PacingConfig {
     /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
     /// and the pacer exists to protect the GPU from batch work, not from them.
     pub cooldown_secs: u64,
-    /// Consecutive transport failures before background calls are held.
-    /// Unreadable model output does not count — the endpoint answered. Zero
-    /// disables the breaker, as zero disables the cooldown above.
-    pub breaker_after: usize,
-    /// How long to hold them for before letting one through to probe.
-    pub breaker_probe_secs: u64,
+    /// Retired. The turn serialises calls and the job queue backs off.
+    pub breaker_after: Option<usize>,
+    /// Retired.
+    pub breaker_probe_secs: Option<u64>,
 }
 
 impl Default for PacingConfig {
     fn default() -> Self {
         Self {
             cooldown_secs: 0,
-            breaker_after: 3,
-            breaker_probe_secs: 60,
+            breaker_after: None,
+            breaker_probe_secs: None,
         }
     }
 }
@@ -323,6 +321,7 @@ pub struct SynthesizeRole {
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub output_ratio: f32,
+    /// Retired: budgets use the character estimate.
     #[serde(default)]
     pub tokenizer_path: Option<String>,
     /// Sent as `reasoning_effort` when set. A reasoning model spends output
@@ -666,6 +665,18 @@ impl Config {
     /// an operator discover the pacing they configured has been off since the
     /// upgrade.
     fn warn_on_moved_keys(&self) {
+        if self.pacing.breaker_after.is_some() || self.pacing.breaker_probe_secs.is_some() {
+            tracing::warn!(
+                "pacing.breaker_after / breaker_probe_secs have been retired and are being \
+                 ignored; one background call runs at a time and a failing unit backs off"
+            );
+        }
+        if self.infer.synthesize.tokenizer_path.is_some() {
+            tracing::warn!(
+                "infer.synthesize.tokenizer_path has been retired and is being ignored; \
+                 token budgets use the character estimate"
+            );
+        }
         if self.infer.synthesize.cooldown_secs.is_some() {
             tracing::warn!(
                 "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \

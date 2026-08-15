@@ -75,17 +75,13 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     }
 
     // Paced like every other inference call. `split_into_artifact_jobs` can
-    // leave hundreds of these behind for one document, and against a dead
-    // endpoint an ungated path spends a timeout apiece without any of those
-    // failures ever reaching the breaker.
+    // leave hundreds of these behind for one document.
     let permit = core.gate.background().await;
-    match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
-        Ok(()) => permit.succeeded(),
+    let outcome = embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await;
+    permit.finished();
+    match outcome {
+        Ok(()) => {}
         Err(e) if input_too_large(&e) => {
-            // Refused, not failed: the endpoint answered. Counting this toward
-            // the breaker let a handful of oversize chunks stop every
-            // background call in the system.
-            permit.refused();
             // The endpoint's real ceiling is lower than the configured one, so
             // halving the configured limit would change nothing. Halve what the
             // chunk actually measures instead: that shrinks on every refusal
@@ -103,10 +99,7 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
             // this split has to succeed whatever the text looks like.
             return split_oversize(core, &chunk, smaller, true).await;
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     }
     match &chunk.corpus_id {
         Some(corpus_id) => settle_corpus(core, corpus_id).await,
@@ -166,21 +159,17 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     }
 
     let permit = core.gate.background().await;
-    match embed_batch(core, &batch[..take], texts[..take].to_vec()).await {
-        Ok(()) => permit.succeeded(),
+    let outcome = embed_batch(core, &batch[..take], texts[..take].to_vec()).await;
+    permit.finished();
+    match outcome {
+        Ok(()) => {}
         // One oversize chunk fails the whole batch, and the batch cannot say
         // which. Per-chunk jobs isolate it, and that path splits it.
         Err(e) if input_too_large(&e) => {
-            // Refused, not failed: the endpoint answered, and what it answered
-            // is about one chunk in this batch rather than about the endpoint.
-            permit.refused();
             tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
             return split_into_artifact_jobs(core, corpus_id).await;
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     }
 
     // Settling only once nothing is left. Whether to come back for another
@@ -401,17 +390,13 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         "oversize chunk has nothing left to cut on; embedding as-is"
     );
     let permit = core.gate.background().await;
-    let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
-        Ok(v) => {
-            permit.succeeded();
-            v
-        }
-        // Refused, not failed: the endpoint answered. This arm no longer tests
-        // `budget`, because a refusal we cannot act on is still a refusal —
-        // reporting it as a sick endpoint was how a single untouchable chunk
-        // could hold the breaker open on every retry of it.
+    let embedded = core.embedder.embed(std::slice::from_ref(&chunk.text)).await;
+    permit.finished();
+    let vectors = match embedded {
+        Ok(v) => v,
+        // Refused, not failed: the endpoint answered. This arm does not test
+        // `budget`, because a refusal we cannot act on is still a refusal.
         Err(e) if input_too_large(&e) => {
-            permit.refused();
             // Still nothing to cut with when the title alone fills the limit:
             // `split_by_lines` at a budget of zero puts every line in a part of
             // its own and then falls to the 64-character floor, which shreds the
@@ -426,10 +411,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
             }
             return Err(e);
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
     core.vectors
         .upsert(vec![VectorPoint {
@@ -1094,68 +1076,9 @@ mod tests {
         assert!(chunks.len() > 1, "got {} chunks", chunks.len());
     }
 
-    #[tokio::test]
-    async fn a_size_refusal_does_not_hold_the_rest_of_the_queue() {
-        // Three unsplittable oversize chunks — code blocks, tables, the exact
-        // thing `split_oversize`'s hard path exists for — used to be three
-        // consecutive transport failures. At the default `breaker_after` that
-        // opened the breaker and stopped synthesis, judging and embedding alike
-        // for the whole probe window, against an endpoint that was answering
-        // every request it was given.
-        let mut core = crate::core::test_support::test_core().await;
-        core.gate = std::sync::Arc::new(
-            crate::infer::gate::InferenceGate::new(std::time::Duration::ZERO)
-                .with_breaker(1, std::time::Duration::from_secs(60)),
-        );
-        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
-            crate::core::test_support::TEST_DIM,
-            200,
-        ));
-
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let body = (0..40)
-            .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let made = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[NewArtifact {
-                    ordinal: 0,
-                    text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: Some(0),
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap();
-
-        // The configured limit is the lie; the endpoint's is what bites.
-        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
-
-        // Asked in real time rather than on a paused clock: building a `Core`
-        // opens a pool, and a pool acquired under `start_paused` waits on a
-        // timer that never fires. An open breaker would hold this for the whole
-        // probe window, so a short timeout tells the two apart.
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                core.gate.background()
-            )
-            .await
-            .is_ok(),
-            "a chunk the endpoint refused opened the breaker"
-        );
-    }
-
     #[test]
     fn splitting_by_lines_always_returns_something_smaller() {
-        let counter = crate::infer::budget::TokenCounter::Estimate;
+        let counter = crate::infer::budget::TokenCounter;
         // A single line far over the limit, with no whitespace to cut on.
         let blob = "x".repeat(4000);
         let parts = split_by_lines(&blob, 100, &counter);
@@ -1250,9 +1173,7 @@ mod tests {
     #[tokio::test]
     async fn the_per_chunk_path_is_paced_like_every_other_call() {
         // `split_into_artifact_jobs` can leave hundreds of these behind for one
-        // document. Ungated they ran back to back at the endpoint, and against a
-        // dead one they each spent a timeout without a single failure ever
-        // reaching the breaker that exists to stop exactly that.
+        // document. Ungated they ran back to back at the endpoint.
         let core = test_core().await;
         let (_src, ids) = seed(&core, &["one"]).await;
 
@@ -1266,7 +1187,7 @@ mod tests {
             "the per-chunk embed path went straight to the endpoint"
         );
 
-        permit.succeeded();
+        permit.finished();
         run(&core, &ids[0]).await.unwrap();
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().embed_state,

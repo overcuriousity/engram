@@ -1,17 +1,16 @@
 //! One pacer in front of every inference call.
 //!
-//! Four jobs that all answer the same question — may a background call start
+//! Three jobs that all answer the same question — may a background call start
 //! now? The cooldown protects a desktop GPU from unbroken load. The turn keeps
 //! that answer true for the whole system rather than per worker. The
 //! interactive lease keeps the worker from piling work onto the endpoint while
-//! a person is waiting on `ask`. The breaker stops thirty-four units from each
-//! spending a fifteen-minute timeout discovering the same dead endpoint.
+//! a person is waiting on `ask`. A dead endpoint is the job queue's backoff to
+//! handle: the turn already serialises the discovery to one call at a time.
 //!
 //! It sits around calls rather than around jobs, so the two stages that make no
 //! inference call — planning a corpus into windows, and the consolidation sweep
 //! — never wait for a cooldown they did not earn.
 
-use crate::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
@@ -24,8 +23,6 @@ struct GateState {
     /// and the UI can have two queries open.
     interactive: usize,
     last_finished: Option<Instant>,
-    consecutive_transport_failures: usize,
-    breaker_open_until: Option<Instant>,
 }
 
 pub struct InferenceGate {
@@ -41,8 +38,6 @@ pub struct InferenceGate {
     /// worker's calls.
     turn: Semaphore,
     cooldown: Duration,
-    breaker_after: usize,
-    probe_after: Duration,
 }
 
 impl InferenceGate {
@@ -52,21 +47,7 @@ impl InferenceGate {
             resumed: Notify::new(),
             turn: Semaphore::new(1),
             cooldown,
-            // Off unless configured, so a test that did not ask for a breaker
-            // cannot be surprised by one.
-            breaker_after: usize::MAX,
-            probe_after: Duration::ZERO,
         }
-    }
-
-    /// `after = 0` turns the breaker off, the way `cooldown_secs = 0` turns the
-    /// cooldown off. Clamping it up to 1 instead would read the operator's
-    /// "don't do this" as the most aggressive setting there is — one failed call
-    /// holding every background call for the whole probe window.
-    pub fn with_breaker(mut self, after: usize, probe: Duration) -> Self {
-        self.breaker_after = if after == 0 { usize::MAX } else { after };
-        self.probe_after = probe;
-        self
     }
 
     /// Returns the right to make one background inference call, once one may
@@ -101,14 +82,7 @@ impl InferenceGate {
                     None
                 } else {
                     let now = Instant::now();
-                    let ready_at = [
-                        st.last_finished.map(|t| t + self.cooldown),
-                        st.breaker_open_until,
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .max();
-                    match ready_at {
+                    match st.last_finished.map(|t| t + self.cooldown) {
                         Some(t) if t > now => Some(t - now),
                         _ => break,
                     }
@@ -135,75 +109,27 @@ impl InferenceGate {
         }
     }
 
-    pub fn call_succeeded(&self) {
-        let mut st = self.state.lock().expect("gate state");
-        st.last_finished = Some(Instant::now());
-        st.consecutive_transport_failures = 0;
-        st.breaker_open_until = None;
-    }
-
-    /// A failed call still occupied the GPU, so it still starts the cooldown.
-    /// Only a transport failure counts toward the breaker: `MalformedLlmOutput`
-    /// means the endpoint answered and this window's text is the problem.
-    pub fn call_failed(&self, e: &Error) {
-        let mut st = self.state.lock().expect("gate state");
-        st.last_finished = Some(Instant::now());
-        if !matches!(e, Error::Inference { .. }) {
-            return;
-        }
-        st.consecutive_transport_failures += 1;
-        if st.consecutive_transport_failures >= self.breaker_after {
-            st.breaker_open_until = Some(Instant::now() + self.probe_after);
-            // The count is left where it is rather than reset, so the one call
-            // let through after the probe window re-opens the breaker the moment
-            // it fails. Resetting cost `breaker_after` full timeouts — three
-            // quarters of an hour at the default `timeout_secs` — to rediscover
-            // the same dead endpoint on every probe cycle, which is the exact
-            // cost this exists to avoid. `call_succeeded` is what clears it.
-            tracing::warn!(
-                probe_secs = self.probe_after.as_secs(),
-                "inference endpoint failed repeatedly; holding background calls"
-            );
-        }
-    }
-
-    /// A call the endpoint answered by refusing the input.
-    ///
-    /// It occupied the GPU, so it starts the cooldown like any other call. It
-    /// says nothing about whether the endpoint is well, so it must not count
-    /// toward the breaker — the same distinction `MalformedLlmOutput` gets, and
-    /// it has to be made by the caller because a size refusal arrives as an
-    /// `Error::Inference` and is indistinguishable here from a dead server.
-    pub fn call_refused(&self) {
-        let mut st = self.state.lock().expect("gate state");
-        st.last_finished = Some(Instant::now());
+    /// A call ended — well, badly, or refused. It occupied the GPU either way,
+    /// so it starts the cooldown.
+    pub fn call_finished(&self) {
+        self.state.lock().expect("gate state").last_finished = Some(Instant::now());
     }
 }
 
 /// The right to make one background inference call, held for as long as the
 /// call runs.
 ///
-/// Report the outcome through it — both methods consume the permit, so the
-/// cooldown starts and the turn passes on at the moment the call ended rather
-/// than whenever the caller got around to saying so.
 pub struct BackgroundPermit<'a> {
     gate: &'a InferenceGate,
     _turn: SemaphorePermit<'a>,
 }
 
 impl BackgroundPermit<'_> {
-    pub fn succeeded(self) {
-        self.gate.call_succeeded();
-    }
-
-    pub fn failed(self, e: &Error) {
-        self.gate.call_failed(e);
-    }
-
-    /// The endpoint answered, refusing the input. Starts the cooldown and hands
-    /// the turn on, without counting against the endpoint.
-    pub fn refused(self) {
-        self.gate.call_refused();
+    /// The call ended, however it ended: the cooldown starts and the turn
+    /// passes on at the moment the call ended rather than whenever the caller
+    /// got around to saying so.
+    pub fn finished(self) {
+        self.gate.call_finished();
     }
 }
 
@@ -249,7 +175,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_cooldown_is_measured_from_when_the_last_call_ended() {
         let g = gate(5);
-        g.call_succeeded();
+        g.call_finished();
         let started = tokio::time::Instant::now();
         g.background().await;
         assert_eq!(started.elapsed(), Duration::from_secs(5));
@@ -279,7 +205,7 @@ mod tests {
         // The point of the lane: a person is waiting, and the pacer exists to
         // protect the GPU from batch work, not from them.
         let g = gate(600);
-        g.call_succeeded();
+        g.call_finished();
         let started = tokio::time::Instant::now();
         let _lease = g.interactive();
         assert_eq!(started.elapsed(), Duration::ZERO);
@@ -295,7 +221,7 @@ mod tests {
         let g = gate(600);
         // A background call has just ended, so the cooldown is what the waiter
         // below is waiting on.
-        g.call_succeeded();
+        g.call_finished();
         let t0 = tokio::time::Instant::now();
         let g2 = Arc::clone(&g);
         let waiter = tokio::spawn(async move {
@@ -341,7 +267,7 @@ mod tests {
 
         // And the waiter serves out the cooldown from when that call *ended*,
         // rather than from a stamp it read before it started.
-        first.succeeded();
+        first.finished();
         let released = tokio::time::Instant::now();
         let acquired = second.await.unwrap();
         assert_eq!(acquired - released, Duration::from_secs(5));
@@ -353,130 +279,9 @@ mod tests {
         // hold the endpoint shut behind it.
         let g = gate(0);
         let permit = g.background().await;
-        permit.failed(&Error::Inference {
-            role: "chunk",
-            detail: "502".into(),
-        });
+        permit.finished();
         tokio::time::timeout(Duration::from_secs(1), g.background())
             .await
             .expect("the turn was never handed on");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn three_transport_failures_in_a_row_open_the_breaker() {
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
-        for _ in 0..3 {
-            g.call_failed(&Error::Inference {
-                role: "chunk",
-                detail: "502".into(),
-            });
-        }
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(started.elapsed(), Duration::from_secs(60));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_success_closes_the_breaker_again() {
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
-        for _ in 0..2 {
-            g.call_failed(&Error::Inference {
-                role: "chunk",
-                detail: "502".into(),
-            });
-        }
-        g.call_succeeded();
-        g.call_failed(&Error::Inference {
-            role: "chunk",
-            detail: "502".into(),
-        });
-
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(started.elapsed(), Duration::ZERO, "the run was not reset");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn one_failure_after_the_probe_window_re_opens_the_breaker() {
-        // The probe is one call let through to ask whether the endpoint is back.
-        // If it is not, the answer is already in — making the queue earn the
-        // whole run again spends `breaker_after` full timeouts, three quarters
-        // of an hour at the default, rediscovering it on every cycle.
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
-        for _ in 0..3 {
-            g.call_failed(&Error::Inference {
-                role: "chunk",
-                detail: "502".into(),
-            });
-        }
-        tokio::time::advance(Duration::from_secs(61)).await;
-
-        // The probe goes out, and the endpoint is still down.
-        g.background().await.failed(&Error::Inference {
-            role: "chunk",
-            detail: "502".into(),
-        });
-
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(
-            started.elapsed(),
-            Duration::from_secs(60),
-            "the queue was let back onto a dead endpoint"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_input_is_not_an_endpoint_failure() {
-        // The endpoint answered: this input is too big for it. That is a fact
-        // about the input, not about the endpoint's health — the same
-        // distinction `MalformedLlmOutput` gets, arriving here as an
-        // `Error::Inference` only because a size refusal is transport-shaped.
-        // Counted, three unsplittable oversize chunks in one document would
-        // hold every background call in the system — synthesis and judging
-        // included — against a server that is working perfectly.
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
-        for _ in 0..5 {
-            g.background().await.refused();
-        }
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(started.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_breaker_configured_to_zero_is_off() {
-        // Zero reads as "don't do this", the way `cooldown_secs = 0` does.
-        // Clamping it up to one made it the most aggressive setting there is.
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(0, Duration::from_secs(60)));
-        for _ in 0..10 {
-            g.call_failed(&Error::Inference {
-                role: "chunk",
-                detail: "502".into(),
-            });
-        }
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(started.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn unreadable_output_is_not_an_endpoint_failure() {
-        // The distinction the whole design rests on: the model answered, so the
-        // endpoint is fine. Tripping the breaker here would stop the queue over
-        // one document's punctuation.
-        let g =
-            Arc::new(InferenceGate::new(Duration::ZERO).with_breaker(3, Duration::from_secs(60)));
-        for _ in 0..5 {
-            g.call_failed(&Error::MalformedLlmOutput("duplicate field `tags`".into()));
-        }
-        let started = tokio::time::Instant::now();
-        g.background().await;
-        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }
