@@ -140,17 +140,6 @@ pub struct Facets {
     pub tags: Vec<FacetCount>,
 }
 
-/// Two artifacts the index says are close, and how close.
-///
-/// `a` sorts before `b` so the same pair found from either end is one value —
-/// the sweep would otherwise queue it twice and supersede the loser twice.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NearPair {
-    pub a: String,
-    pub b: String,
-    pub score: f32,
-}
-
 /// One artifact to stamp as shown, and the `hit_count` the caller already read
 /// for it.
 ///
@@ -218,17 +207,6 @@ pub struct LifecycleRow {
     pub status: ArtifactStatus,
     pub superseded_by: Option<String>,
     pub last_verified_at: i64,
-}
-
-impl NearPair {
-    pub fn new(x: &str, y: &str, score: f32) -> NearPair {
-        let (a, b) = if x <= y { (x, y) } else { (y, x) };
-        NearPair {
-            a: a.to_string(),
-            b: b.to_string(),
-            score,
-        }
-    }
 }
 
 #[async_trait]
@@ -367,21 +345,6 @@ pub trait VectorStore: Send + Sync {
     /// no embedding call, because the query is a point that is already in the
     /// index. The artifact itself is never among its own neighbours.
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>>;
-    /// Pairs of artifacts closer than `min_score`, best first, over a sample of
-    /// the collection. Anything not active is excluded — a resolved pair
-    /// re-found every sweep is a review queue that never empties, and a
-    /// deprecated artifact must never win a supersession and hide a live one.
-    ///
-    /// This is one round trip, not one query per point: `sample` points are
-    /// drawn and each contributes at most `per_point` neighbours. A sweep over
-    /// a base of any size therefore costs a bounded amount rather than growing
-    /// with the collection.
-    async fn near_pairs(
-        &self,
-        sample: usize,
-        per_point: usize,
-        min_score: f32,
-    ) -> Result<Vec<NearPair>>;
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
     async fn count(&self) -> Result<u64>;

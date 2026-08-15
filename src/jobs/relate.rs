@@ -1,18 +1,9 @@
 //! What else is this artifact already saying?
 //!
-//! Duplicate detection used to be a sampled sweep: `consolidate.sample` points
-//! drawn per run, pairs computed only *within* that draw, so both members of a
-//! pair had to land in the same sample. The probability of that is (sample/N)²
-//! and it decays quadratically — at five thousand artifacts a given pair waits
-//! about a week, at a hundred thousand it waits years. No amount of judging
-//! fixes a pair the detector never hands over.
-//!
-//! This asks the opposite question. One artifact, its own neighbours, one
-//! query. `VectorStore::neighbours` addresses the point by id, so the vector is
-//! looked up in the index and no embedding call is paid, and it already
-//! excludes superseded and deprecated points. Coverage becomes 1, independent
-//! of N, at the cost of one round trip per artifact — which under this
-//! project's economics is free.
+//! One artifact, its own neighbours, one query. `VectorStore::neighbours`
+//! addresses the point by id, so the vector is looked up in the index and no
+//! embedding call is paid, and it already excludes superseded and deprecated
+//! points. Coverage is 1, independent of N, at one round trip per artifact.
 //!
 //! Completeness argument: for a pair (X, Y), the member embedded **second**
 //! finds the other. When X's unit runs, Y is either already indexed — X finds
@@ -99,10 +90,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_finds_its_duplicate_the_moment_it_is_embedded() {
-        // The sweep samples `sample` points and needs both members of a pair in
-        // the same draw, so coverage decays as (sample/N)² — at 100k artifacts
-        // a given pair waits years. Asking one artifact for its own neighbours
-        // costs one Qdrant query, no embedding call, and is exact.
+        // Asking one artifact for its own neighbours costs one Qdrant query,
+        // no embedding call, and is exact.
         let core = test_core().await;
         let ids = seed(
             &core,

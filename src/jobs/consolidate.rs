@@ -1,11 +1,8 @@
 //! Consolidation: what to do about artifacts the index says are the same.
 //!
-//! This sweep is no longer where duplicates are found. `jobs::relate` asks each
-//! artifact for its own neighbours when it is embedded, which is exact and
-//! costs no inference, where a sampled sweep needed both members of a pair in
-//! one draw — a probability that decays as (sample/N)² and leaves a given pair
-//! waiting years on a large base. What remains here is the backlog, the
-//! backstop, the clustering that spans many pairs at once, and the repairs.
+//! Duplicates are found by `jobs::relate`, per artifact, as it is embedded.
+//! This sweep is the backstop for that arming, the clustering that spans many
+//! pairs at once, the pacing of the dedupe units, and the repairs.
 //!
 //! Two thresholds still divide the work. At or above `auto_supersede` a group
 //! collapses onto its newest member for free: no call, no rewrite, and the
@@ -42,9 +39,7 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct Outcome {
-    pub examined: usize,
     pub superseded: usize,
-    pub queued: usize,
     /// Pairs this sweep armed a judge unit for. The calls happen later, one
     /// unit at a time, so this counts what was asked for rather than answered.
     pub judged: usize,
@@ -389,42 +384,39 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         );
     }
 
-    let pairs = core
-        .vectors
-        .near_pairs(cfg.sample, cfg.per_point, cfg.review_min)
-        .await?;
-    let mut out = Outcome {
-        examined: pairs.len(),
-        ..Default::default()
-    };
+    // Detection is the per-artifact `Relate` unit, armed when an artifact is
+    // indexed. The sweep only backstops that arming: an artifact whose unit
+    // never got a row — the arm failed after the embed committed — is asked
+    // for once here, and the row that leaves is what stops it being asked again.
+    match core.store.list_unrelated_artifact_ids(500).await {
+        Ok(ids) => {
+            for id in ids {
+                if let Err(e) = crate::jobs::relate::arm(core, &id, 0).await {
+                    tracing::warn!(artifact_id = %id, error = %e, "could not arm a relate unit");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for artifacts that were never related")
+        }
+    }
+    let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
     //
-    // Two inputs, and the second is the one that matters now. `near_pairs` is
-    // one sampled round trip, which was all this had while the sweep was the
-    // only detector. The stored `NearIdentical` rows are what the per-artifact
-    // relate units have filed since — exact rather than sampled, and filed
-    // rather than acted on because resolving a pair where it is found leaves A
-    // pointing at a B that is itself hidden.
-    //
-    // Reading only the sample would leave every such pair unsettled forever:
-    // nothing else acts on that band, and the odds of the sample redrawing both
-    // members together are the (s/N)² the relate unit exists to escape.
+    // The stored `NearIdentical` rows are what the relate units have filed —
+    // filed rather than acted on because resolving a pair where it is found
+    // leaves A pointing at a B that is itself hidden.
     let filed = core
         .store
         .pairs_by_state(crate::store::pairs::PairState::NearIdentical, 500)
         .await?;
     let mut clusters = Clusters::default();
     let mut in_a_cluster: HashSet<String> = HashSet::new();
-    let from_sweep = pairs
-        .iter()
-        .filter(|p| p.score >= cfg.auto_supersede)
-        .map(|p| (p.a.as_str(), p.b.as_str()));
-    let from_store = filed.iter().map(|p| (p.a_id.as_str(), p.b_id.as_str()));
-    for (a, b) in from_sweep.chain(from_store) {
-        clusters.union(a, b);
-        in_a_cluster.insert(a.to_string());
-        in_a_cluster.insert(b.to_string());
+    for p in &filed {
+        clusters.union(&p.a_id, &p.b_id);
+        in_a_cluster.insert(p.a_id.clone());
+        in_a_cluster.insert(p.b_id.clone());
     }
 
     let mut members: HashMap<String, Vec<Chunk>> = HashMap::new();
@@ -540,39 +532,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         }
     }
 
-    // The review band. A pair whose members were just hidden has already been
-    // answered, and queueing it would ask an operator to rule on an artifact
-    // that is no longer in results.
-    //
-    // The rules themselves live in `classify_pair`, because the per-artifact
-    // relate unit applies the same ones and two copies would diverge silently.
-    for p in pairs.iter().filter(|p| p.score < cfg.auto_supersede) {
-        if hidden.contains(&p.a) || hidden.contains(&p.b) {
-            continue;
-        }
-        let (Ok(a), Ok(b)) = (
-            core.store.get_artifact(&p.a).await,
-            core.store.get_artifact(&p.b).await,
-        ) else {
-            continue;
-        };
-        // Warn and carry on. A pair is one row about two artifacts, and a
-        // transient BUSY on it is no reason to abandon the rest of the band,
-        // the dedupe pass, and the sweep's tally — the sweep re-finds the pair
-        // next run either way.
-        match crate::jobs::classify::classify_pair(core, &a, &b, p.score).await {
-            Ok(crate::jobs::classify::Verdict::Queued) => {
-                out.queued += 1;
-                tracing::info!(a = %p.a, b = %p.b, score = p.score, "queued a pair for review");
-            }
-            Ok(crate::jobs::classify::Verdict::Contained) => out.superseded += 1,
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(a = %p.a, b = %p.b, error = %e, "could not classify a pair; it will be re-examined next sweep");
-            }
-        }
-    }
-
     // Armed, not asked. `judged` counts the calls this sweep is responsible for
     // rather than the calls it made, since it makes none. There is deliberately
     // no verdict count beside it: the answers arrive one unit at a time long
@@ -587,11 +546,9 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // 0` is what switches the model off.
     out.judged = arm_dedupe(core).await?;
 
-    if out.superseded > 0 || out.queued > 0 || out.judged > 0 {
+    if out.superseded > 0 || out.judged > 0 {
         tracing::info!(
-            examined = out.examined,
             superseded = out.superseded,
-            queued = out.queued,
             judged = out.judged,
             "consolidation sweep finished"
         );
@@ -816,6 +773,16 @@ pub(crate) mod tests {
         made.into_iter().map(|c| c.id).collect()
     }
 
+    /// `seed`, then what indexing does live: each artifact asks after its
+    /// neighbours, and the pairs that files are what the sweep reads.
+    async fn seed_related(core: &crate::core::Core, vectors: &[(&str, [f32; 2])]) -> Vec<String> {
+        let ids = seed(core, vectors).await;
+        for id in &ids {
+            crate::jobs::relate::run(core, id).await.unwrap();
+        }
+        ids
+    }
+
     pub(crate) async fn seed_titled(
         core: &crate::core::Core,
         rows: &[(&str, &str, [f32; 2])],
@@ -847,7 +814,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_near_identical_pair_supersedes_the_older_artifact() {
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
 
         let out = run(&core).await.unwrap();
         assert_eq!(out.superseded, 1, "{out:?}");
@@ -878,7 +845,7 @@ pub(crate) mod tests {
         // supersession is an applied judge proposal, which is the case an
         // operator would reverse.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("the timeout is 30 seconds", [1.0, 0.0]),
@@ -917,7 +884,7 @@ pub(crate) mod tests {
         // artifact stayed listed as hidden on Ops while every search returned
         // it, forever.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.store
             .set_superseded_by(&ids[0], Some(&ids[1]))
             .await
@@ -949,7 +916,7 @@ pub(crate) mod tests {
         // knowledge left search entirely. It also overwrote the operator's
         // `deprecated` status with `superseded` on the way past.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.deprecate(&ids[1]).await.unwrap();
 
         let out = run(&core).await.unwrap();
@@ -985,7 +952,7 @@ pub(crate) mod tests {
         // erasing what an operator decided, with nothing left to tell the two
         // apart afterwards.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
 
         assert!(core.supersede(&ids[0], &ids[1]).await.is_err());
@@ -1006,7 +973,7 @@ pub(crate) mod tests {
         // "Reactivate". Nothing used to notice — the old self-heal branch fired
         // only on `superseded_by`.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.store
             .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
             .await
@@ -1032,7 +999,7 @@ pub(crate) mod tests {
         // deprecated list, and out of reach of every button — invisible and
         // unrecoverable until something reconciles the two stores.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.vectors
             .set_lifecycle(&ids[0], ArtifactStatus::Deprecated, None)
             .await
@@ -1059,7 +1026,7 @@ pub(crate) mod tests {
         // announced; and without the lock, the sweep's repair can interleave
         // and write the stale hidden state back with nothing left to notice.
         let core = test_core().await;
-        let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("a text", [1.0, 0.0]), ("b text", [0.0, 1.0])]).await;
         core.supersede(&ids[0], &ids[1]).await.unwrap();
 
         core.delete_artifact(&ids[1]).await.unwrap(); // runs the heal
@@ -1086,7 +1053,7 @@ pub(crate) mod tests {
         // copy that no longer exists — the surviving text becomes invisible,
         // which is the loss this whole feature exists to prevent.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         run(&core).await.unwrap();
         let mut hidden = None;
         for id in &ids {
@@ -1215,7 +1182,7 @@ pub(crate) mod tests {
         // permanent false alarm with write amplification behind it. Only a real
         // disagreement counts.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("first", [1.0, 0.0]),
@@ -1250,7 +1217,7 @@ pub(crate) mod tests {
         // way. The marker's work list is the writes that did not finish, which
         // is almost always empty and never grows with the base.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
 
         // Row written, payload not — exactly what a crash between the two
         // leaves behind.
@@ -1295,7 +1262,7 @@ pub(crate) mod tests {
         // payload they ever touched, on every sweep, forever — write
         // amplification behind a permanently correct end state.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("first", [1.0, 0.0]),
@@ -1330,7 +1297,7 @@ pub(crate) mod tests {
         // broken on every sweep and rewrites every payload in them. Two hidden
         // artifacts and a cap of one reproduces exactly that.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
         core.deprecate(&ids[1]).await.unwrap();
 
@@ -1350,7 +1317,7 @@ pub(crate) mod tests {
         // standing afterwards would have the next marker pass rewrite a
         // payload that is already correct.
         let core = test_core().await;
-        let ids = seed(&core, &[("a text", [1.0, 0.0])]).await;
+        let ids = seed_related(&core, &[("a text", [1.0, 0.0])]).await;
         // Drift no SQLite write produced: the payload hides what the row
         // shows.
         core.vectors
@@ -1380,7 +1347,7 @@ pub(crate) mod tests {
         // so no SQLite write happened and nothing was marked. The marker covers
         // what this system does to itself; the scan covers everything else.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         core.deprecate(&ids[0]).await.unwrap();
         core.vectors
             .set_lifecycle(&ids[0], ArtifactStatus::Superseded, Some(&ids[1]))
@@ -1410,7 +1377,7 @@ pub(crate) mod tests {
         // The two state a value differently, which is what keeps them on the
         // queue at all: a pair with nothing to disagree about closes itself.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("the timeout is 30 seconds", [1.0, 0.0]),
@@ -1421,7 +1388,6 @@ pub(crate) mod tests {
 
         let out = run(&core).await.unwrap();
         assert_eq!(out.superseded, 0, "{out:?}");
-        assert_eq!(out.queued, 1);
         for id in &ids {
             assert!(
                 core.store
@@ -1445,9 +1411,17 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_unrelated_pair_is_left_entirely_alone() {
         let core = test_core().await;
-        seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         let out = run(&core).await.unwrap();
-        assert_eq!((out.superseded, out.queued), (0, 0), "{out:?}");
+        assert_eq!(out.superseded, 0, "{out:?}");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1526,18 +1500,18 @@ pub(crate) mod tests {
         // applies it.
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
                 ("timeout is 60 seconds", [0.0, 1.0]),
-                ("timeout is 90 seconds", [0.5, 0.5]),
-                ("timeout is 120 seconds", [0.3, 0.7]),
+                ("timeout is 90 seconds", [-1.0, 0.0]),
+                ("timeout is 120 seconds", [0.0, -1.0]),
             ],
         )
         .await;
         // Two independent pairs, so neither is swallowed by the other's
-        // component.
+        // component. The vectors are orthogonal so nothing else is paired.
         core.store
             .record_pair(&ids[0], &ids[1], 0.91)
             .await
@@ -1572,7 +1546,15 @@ pub(crate) mod tests {
 
         let out = run(&core).await.unwrap();
 
-        assert_eq!(out.queued, 1, "the pair was not recorded");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the pair was not recorded"
+        );
         assert_eq!(out.judged, 0, "a call was armed on a zero budget");
     }
 
@@ -1585,13 +1567,12 @@ pub(crate) mod tests {
         // and the whole reason the relate unit exists is that the sample is
         // unlikely to redraw both members together.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.store
             .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
             .await
             .unwrap();
-        // Empty the vector store's view, so `near_pairs` cannot supply the pair
-        // and only the stored row can.
+        // Empty the vector store's view, so only the stored row can supply the pair.
         core.vectors.delete_artifacts(&ids).await.unwrap();
 
         let out = run(&core).await.unwrap();
@@ -1619,7 +1600,7 @@ pub(crate) mod tests {
         // and the duplicate it names is never hidden. On a growing base that is
         // permanent and silent.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.store
             .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
             .await
@@ -1655,7 +1636,7 @@ pub(crate) mod tests {
         // answered; a cluster whose members are all still in results answered
         // nothing, and closing it anyway would lose the duplicate for good.
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         core.store
             .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
             .await
@@ -1687,10 +1668,10 @@ pub(crate) mod tests {
         // The sweep runs on a timer. If it were not idempotent it would churn
         // the queue and the payload flags on every tick.
         let core = test_core().await;
-        seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         run(&core).await.unwrap();
         let second = run(&core).await.unwrap();
-        assert_eq!((second.superseded, second.queued), (0, 0), "{second:?}");
+        assert_eq!(second.superseded, 0, "{second:?}");
     }
 
     #[tokio::test]
@@ -1699,7 +1680,7 @@ pub(crate) mod tests {
         // and no artifact may point at one that is itself superseded — that is
         // a chain the UI cannot resolve and the reader cannot follow.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("first", [1.0, 0.0]),
@@ -1730,7 +1711,7 @@ pub(crate) mod tests {
 
     /// Two artifacts about the same thing that give a different version.
     async fn disagreeing(core: &crate::core::Core) -> Vec<String> {
-        seed(
+        seed_related(
             core,
             &[
                 ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
@@ -1755,7 +1736,7 @@ pub(crate) mod tests {
         // never shown.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        seed(
+        seed_related(
             &core,
             &[
                 ("Mount the filesystem before writing.", [1.0, 0.0]),
@@ -1765,7 +1746,15 @@ pub(crate) mod tests {
         .await;
 
         let out = run(&core).await.unwrap();
-        assert_eq!(out.queued, 1, "{out:?}");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{out:?}"
+        );
         assert_eq!(out.judged, 1, "the pair was never armed for a decision");
         assert!(
             core.store
@@ -1789,7 +1778,7 @@ pub(crate) mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         core.judge = completer.clone();
-        seed(
+        seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -1809,7 +1798,7 @@ pub(crate) mod tests {
         // defect in one artifact rather than two sources disagreeing, and it
         // sat on the review queue because it scores below auto_supersede.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 (
@@ -1821,8 +1810,7 @@ pub(crate) mod tests {
         )
         .await;
 
-        let out = run(&core).await.unwrap();
-        assert_eq!(out.superseded, 1, "{out:?}");
+        run(&core).await.unwrap();
         assert_eq!(
             core.store
                 .get_artifact(&ids[1])
@@ -1839,7 +1827,7 @@ pub(crate) mod tests {
         // Two documents that happen to share a sentence are two sources, and
         // this is exactly the case auto_supersede refuses to act on below 0.95.
         let core = test_core().await;
-        let a = seed(
+        let a = seed_related(
             &core,
             &[(
                 "Bind mounts attach a directory elsewhere. Use mount --bind for it.",
@@ -1880,7 +1868,7 @@ pub(crate) mod tests {
         // nobody asked. Queued is not hidden: nothing about either artifact
         // changes until a dedupe unit has ruled.
         let core = test_core().await;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("Mount the filesystem before writing.", [1.0, 0.0]),
@@ -1890,7 +1878,15 @@ pub(crate) mod tests {
         .await;
 
         let out = run(&core).await.unwrap();
-        assert_eq!(out.queued, 1, "{out:?}");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{out:?}"
+        );
         assert_eq!(
             core.store
                 .pairs_by_state(PairState::Pending, 10)
@@ -1915,7 +1911,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_pair_stating_different_values_still_waits_for_a_person() {
         let core = test_core().await;
-        seed(
+        seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -1924,7 +1920,15 @@ pub(crate) mod tests {
         )
         .await;
         let out = run(&core).await.unwrap();
-        assert_eq!(out.queued, 1, "{out:?}");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{out:?}"
+        );
     }
 
     #[tokio::test]
@@ -1970,7 +1974,7 @@ pub(crate) mod tests {
             "not json".into(),
             r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
         ]));
-        seed(
+        seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -2013,7 +2017,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 5;
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -2084,7 +2088,7 @@ pub(crate) mod tests {
         core.consolidate.max_dedupe_per_tick = 1;
         // Two pairs in the review band and nothing near enough to cluster, so
         // the sweep has a second pair to reach once the first is spoken for.
-        let ids = seed(
+        let ids = seed_related(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -2145,9 +2149,9 @@ pub(crate) mod tests {
     async fn the_sweep_is_off_when_configuration_says_so() {
         let mut core = test_core().await;
         core.consolidate.enabled = false;
-        seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
-        assert_eq!((out.examined, out.superseded, out.queued), (0, 0, 0));
+        assert_eq!((out.superseded, out.judged), (0, 0));
     }
 
     #[tokio::test]
@@ -2187,6 +2191,24 @@ pub(crate) mod tests {
             .unwrap()
             .expect("reconcile armed the unfinished window");
         assert_eq!(job.stage, crate::store::jobs::Stage::SegmentWindow);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_arms_relate_for_an_indexed_artifact_that_was_never_related() {
+        let core = test_core().await;
+        let ids = seed_related(&core, &[("alpha", [1.0, 0.0])]).await;
+        core.store.mark_embedded(&ids[0], "fake", 0).await.unwrap();
+        run(&core).await.unwrap();
+        assert!(
+            core.store.live_job(Stage::Relate, &ids[0]).await.unwrap(),
+            "the backstop did not arm a relate unit"
+        );
+        // A second sweep does not arm it again: the row now exists.
+        let first = core.store.claim_job().await.unwrap().expect("the unit");
+        assert_eq!(first.stage, Stage::Relate);
+        core.store.complete_job(first.id).await.unwrap();
+        run(&core).await.unwrap();
+        assert!(!core.store.live_job(Stage::Relate, &ids[0]).await.unwrap());
     }
 
     #[tokio::test]
@@ -2245,7 +2267,7 @@ pub(crate) mod tests {
         use crate::store::artifacts::NewMerged;
         use crate::store::pairs::PairState;
         let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
         let m = core
             .store
             .insert_merged_artifact(

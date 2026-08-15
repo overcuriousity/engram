@@ -427,51 +427,6 @@ impl VectorStore for MemoryVectors {
         Ok(hits)
     }
 
-    async fn near_pairs(
-        &self,
-        sample: usize,
-        per_point: usize,
-        min_score: f32,
-    ) -> Result<Vec<super::NearPair>> {
-        let r = self.points.read().unwrap();
-        // Active only, matching the Qdrant backend: a deprecated artifact must
-        // not enter the sweep, where being newer would let it win a cluster and
-        // hide a live one.
-        let live: Vec<&VectorPoint> = r
-            .values()
-            .filter(|p| status_of(&p.payload) == ArtifactStatus::Active)
-            .take(sample)
-            .collect();
-
-        let mut out: Vec<super::NearPair> = Vec::new();
-        for (i, a) in live.iter().enumerate() {
-            let mut mine: Vec<super::NearPair> = live
-                .iter()
-                .skip(i + 1)
-                .map(|b| {
-                    super::NearPair::new(
-                        &a.payload.artifact_id,
-                        &b.payload.artifact_id,
-                        cosine(&a.vector, &b.vector),
-                    )
-                })
-                .filter(|p| p.score >= min_score)
-                .collect();
-            mine.sort_by(|x, y| y.score.total_cmp(&x.score));
-            mine.truncate(per_point);
-            out.extend(mine);
-        }
-        // Deterministic order, so a test never depends on HashMap iteration.
-        out.sort_by(|x, y| {
-            y.score
-                .total_cmp(&x.score)
-                .then_with(|| x.a.cmp(&y.a))
-                .then_with(|| x.b.cmp(&y.b))
-        });
-        out.dedup_by(|x, y| x.a == y.a && x.b == y.b);
-        Ok(out)
-    }
-
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
         let mut w = self.points.write().unwrap();
         for id in artifact_ids {

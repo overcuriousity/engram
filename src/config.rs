@@ -143,9 +143,7 @@ pub struct ConsolidateConfig {
     /// artifacts about one subsystem sit around 0.88 routinely, and superseding
     /// at that score destroys knowledge rather than duplication.
     pub auto_supersede: f32,
-    /// Points sampled from the collection per sweep by the matrix API.
-    pub sample: usize,
-    /// Neighbours considered per sampled point.
+    /// Neighbours considered per artifact when it looks for duplicates.
     pub per_point: usize,
     /// How often the sweep is queued.
     pub interval_hours: u64,
@@ -203,6 +201,8 @@ pub struct ConsolidateConfig {
     /// Retired. A number per 24-hour tick was a budget only while the sweep was
     /// the only producer of pairs; see `max_dedupe_per_tick`, which is a rate.
     pub max_judgements: Option<usize>,
+    /// Retired. Detection is per artifact now, not a sampled sweep.
+    pub sample: Option<usize>,
 }
 
 impl Default for ConsolidateConfig {
@@ -212,7 +212,6 @@ impl Default for ConsolidateConfig {
             near_dupe_min: 0.90,
             review_min: 0.88,
             auto_supersede: 0.95,
-            sample: 2000,
             per_point: 5,
             interval_hours: 24,
             autonomous: true,
@@ -223,6 +222,7 @@ impl Default for ConsolidateConfig {
             stale_max_hits: 0,
             judge: None,
             max_judgements: None,
+            sample: None,
         }
     }
 }
@@ -579,6 +579,12 @@ impl Config {
                 per_tick = self.consolidate.max_dedupe_per_tick,
                 "consolidate.max_judgements has been retired and is being ignored; \
                  the budget is a rate now — see dedupe_interval_mins and max_dedupe_per_tick"
+            );
+        }
+        if self.consolidate.sample.is_some() {
+            tracing::warn!(
+                "consolidate.sample has been retired and is being ignored; every artifact \
+                 looks for its own duplicates when it is indexed"
             );
         }
     }

@@ -853,6 +853,25 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
+    /// Live, embedded artifacts whose `Relate` unit was never armed — the
+    /// backstop for an arming that failed after the embed committed. A row
+    /// survives its completion, so "no job at all" is exactly "never asked".
+    pub async fn list_unrelated_artifact_ids(&self, limit: usize) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT a.id FROM artifacts a
+              WHERE a.status = 'active' AND a.superseded_by IS NULL
+                AND a.embed_state = 'embedded'
+                AND NOT EXISTS (SELECT 1 FROM jobs j
+                                 WHERE j.stage = 'relate' AND j.target_id = a.id)
+              ORDER BY a.created_at
+              LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
     /// Artifacts hidden in favour of a keeper that no longer exists.
     ///
     /// `superseded_by` is a plain column with no foreign key, so deleting a

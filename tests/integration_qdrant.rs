@@ -1495,32 +1495,8 @@ async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
 
 // ── Consolidation ───────────────────────────────────────────────────────────
 //
-// The distance-matrix API and the payload flag it feeds. Both are Qdrant-side
-// behaviour that the in-memory store can only approximate: `near_pairs` speaks
-// to `/points/search/matrix/pairs` (Qdrant 1.12+) and has to map point ids back
-// to artifact ids through a payload lookup, and the superseded filter has to
-// keep matching points written before the key existed at all.
-
-#[tokio::test]
-#[ignore]
-async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
-    let v = fresh("engram_it_near_pairs", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-        point("c", "s1", vec![0.0, 0.0, 1.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-
-    let pairs = v.near_pairs(100, 5, 0.9).await.unwrap();
-    assert_eq!(pairs.len(), 1, "expected one close pair, got {pairs:?}");
-    // Artifact ids, not point uuids: the mapping back through the payload is
-    // the part of this that cannot be unit-tested.
-    assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("a", "b"));
-    assert!(pairs[0].score >= 0.9, "{pairs:?}");
-    v.drop_collection().await.unwrap();
-}
+// The superseded filter has to keep matching points written before the key
+// existed at all.
 
 #[tokio::test]
 #[ignore]
@@ -1557,31 +1533,6 @@ async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
         .collect();
     assert!(near.is_empty(), "a hidden artifact was related: {near:?}");
 
-    v.drop_collection().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn near_pairs_skips_a_deprecated_point() {
-    // A deprecated artifact in the sweep can win its cluster on being newer and
-    // hide a live one — and `set_superseded_by` would overwrite the operator's
-    // deprecation with `superseded` while doing it.
-    let v = fresh("engram_it_near_pairs_deprecated", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
-
-    v.set_lifecycle("b", ArtifactStatus::Deprecated, None)
-        .await
-        .unwrap();
-    assert!(
-        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
-        "a deprecated artifact is still a consolidation candidate"
-    );
     v.drop_collection().await.unwrap();
 }
 
@@ -1670,28 +1621,6 @@ async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
     assert!(
         indexed().await,
         "an existing collection never got the index this release filters on"
-    );
-    v.drop_collection().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn near_pairs_skips_what_has_already_been_superseded() {
-    // Otherwise every sweep re-finds the pair it resolved last time, and the
-    // review queue never empties.
-    let v = fresh("engram_it_near_pairs_skip", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
-
-    v.set_superseded("b", true).await.unwrap();
-    assert!(
-        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
-        "a resolved pair came back"
     );
     v.drop_collection().await.unwrap();
 }

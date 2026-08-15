@@ -309,12 +309,9 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // artifact that is already indexed, and returning their errors from here
     // would have failed the embed job for exactly the reason the arming exists
     // to avoid — buying the same embedding twice to retry a step that costs
-    // nothing. Both have a backstop: the sweep re-finds an unarmed artifact's
-    // pairs through `near_pairs`, and an unfinished merge through
+    // nothing. Both have a backstop in the sweep: an artifact with no relate
+    // row is armed there, and an unfinished merge is found through
     // `merged_with_active_roots`.
-    //
-    // This is what makes duplicate detection complete rather than sampled; see
-    // the module header of `jobs::relate`.
     if let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await {
         tracing::warn!(
             artifact_id = %chunk.id,

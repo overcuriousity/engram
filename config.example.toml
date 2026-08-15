@@ -186,9 +186,7 @@ review_min = 0.88
 # subsystem sit around 0.88 routinely, and hiding at that score costs knowledge
 # rather than duplication. Ops lists what was hidden, with an undo.
 auto_supersede = 0.95
-# Points drawn per sweep, and neighbours considered per point. The sweep is one
-# round trip whose cost these two numbers bound, rather than a query per point.
-sample = 2000
+# Neighbours considered per artifact when it looks for duplicates.
 per_point = 5
 interval_hours = 24
 # Let the dedupe pass act on what it decides: superseding where one stored
