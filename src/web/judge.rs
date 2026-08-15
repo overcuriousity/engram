@@ -57,7 +57,6 @@ pub struct Card {
 #[template(path = "judge.html")]
 struct JudgeTemplate {
     /// The layout stamps this on `<html>`; every full page carries it.
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`. Counted on
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
@@ -213,7 +212,6 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     };
     let progress_pct = (stats.judged * 100 / FIRST_SWEEP_AT.max(1)).min(100);
     Ok(HtmlTemplate(JudgeTemplate {
-        theme: "light".into(),
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.feedback.enabled.then_some(stats.pending),
         recall: format!("{:.2}", stats.recall_at_10),

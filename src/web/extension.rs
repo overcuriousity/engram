@@ -20,7 +20,6 @@ use axum::routing::get;
 #[derive(Template)]
 #[template(path = "extension.html")]
 struct InstallTemplate {
-    theme: String,
     judge_pending: Option<i64>,
     origin: String,
     /// Whether the XPI on offer has been through AMO.
@@ -38,7 +37,6 @@ struct InstallTemplate {
 /// cannot know it, so the page is where it is learned.
 async fn install_page(State(st): State<AppState>, _id: Identity, headers: HeaderMap) -> Response {
     HtmlTemplate(InstallTemplate {
-        theme: "light".into(),
         judge_pending: judge_pending(&st).await,
         origin: request_origin(&headers).unwrap_or_default(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),

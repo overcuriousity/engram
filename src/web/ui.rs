@@ -295,7 +295,6 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[derive(Template)]
 #[template(path = "capture.html")]
 struct CaptureTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     /// Decisions waiting on a person, shown where the work arrives rather than
@@ -324,7 +323,6 @@ struct CapturedTemplate {
 #[derive(Template)]
 #[template(path = "search.html")]
 struct SearchTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     /// Kept so a reload or a deep link restores the box with its results.
@@ -363,7 +361,6 @@ struct QueueTemplate {
 #[derive(Template)]
 #[template(path = "corpus.html")]
 struct CorpusTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     id: String,
@@ -408,7 +405,6 @@ struct ArtifactDetailFragment {
 #[derive(Template)]
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     d: ArtifactDetail,
@@ -417,7 +413,6 @@ struct ArtifactDetailPage {
 #[derive(Template)]
 #[template(path = "ops.html")]
 struct OpsTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     job_counts: Vec<(String, i64)>,
@@ -495,7 +490,6 @@ struct TokenCreatedTemplate {
 #[derive(Template)]
 #[template(path = "ask.html")]
 struct AskTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
 }
@@ -513,7 +507,6 @@ struct AnswerTemplate {
 async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
     Ok(HtmlTemplate(CaptureTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
@@ -581,7 +574,6 @@ async fn search_page(
     ensure_facet(&mut facets.categories, &category);
     ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
@@ -822,7 +814,6 @@ async fn corpus_detail(
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
         lines,
@@ -1190,7 +1181,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(OpsTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         retrying,
         parked,
@@ -1427,7 +1417,6 @@ async fn verify_ui(
 
 async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
     })
 }
@@ -1590,7 +1579,6 @@ async fn artifact_detail(
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         d,
     })

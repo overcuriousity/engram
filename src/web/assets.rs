@@ -360,7 +360,7 @@ mod tests {
         assert!(css.contains("#0e1015"), "dark base colour missing");
         assert!(css.contains("#3b6e91"), "light accent missing");
         assert!(css.contains("#5aa8b0"), "dark accent missing");
-        assert!(css.contains("[data-theme=\"dark\"]"));
+        assert!(css.contains("prefers-color-scheme: dark"));
         assert!(css.contains("--radius-sm: 3px"));
     }
 
