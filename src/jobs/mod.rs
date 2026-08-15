@@ -250,10 +250,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{
-        test_core, test_core_with_embedder, test_core_with_failing_synthesizer,
-        test_core_with_rejecting_synthesizer,
-    };
+    use crate::core::test_support::test_core;
     use crate::infer::fake::FakeEmbedder;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
@@ -261,7 +258,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_embed_the_endpoint_rejects_is_retried_chunk_by_chunk() {
-        let core = test_core_with_embedder(Arc::new(FakeEmbedder::rejecting("HTTP 413"))).await;
+        let mut core = test_core().await;
+        core.embedder = Arc::new(FakeEmbedder::rejecting("HTTP 413"));
         let src = core
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
@@ -302,7 +300,10 @@ mod tests {
     /// merely failed to reach it — the wrong way round.
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
-        let core = test_core_with_rejecting_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
+            "HTTP 400: context length exceeded",
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -383,7 +384,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
-        let core = test_core_with_failing_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to

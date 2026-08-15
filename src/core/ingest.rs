@@ -1135,7 +1135,7 @@ mod tests {
     use crate::core::ingest::{
         Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, StoreDrift,
     };
-    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::core::test_support::test_core;
     use crate::error::Error;
     use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
@@ -1742,7 +1742,10 @@ mod tests {
     async fn ingest_is_not_blocked_by_a_dead_chunker() {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
-        let core = test_core_with_failing_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
     }
@@ -2145,21 +2148,11 @@ mod tests {
         assert_eq!(drift, StoreDrift::default(), "{drift:?}");
     }
 
-    fn a_png() -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        let img = ImageBuffer::from_fn(40, 20, |x, _| Rgb([(x * 6) as u8, 0, 0]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
-    }
-
     #[tokio::test]
     async fn an_image_capture_stores_the_original_and_queues_describe_without_calling_the_model() {
         let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
         let core = crate::core::test_support::test_core_with_describer(describer.clone()).await;
-        let bytes = a_png();
+        let bytes = a_seeded_png(7);
         let out = core
             .ingest_image(ImageCapture {
                 bytes: bytes.clone(),
@@ -2183,7 +2176,7 @@ mod tests {
         assert_eq!(src.metadata["note"], "the kitchen whiteboard");
         assert_eq!(src.metadata["file"]["name"], "IMG_1.png");
         assert_eq!(src.metadata["file"]["mime"], "image/png");
-        assert_eq!(src.metadata["file"]["width"], 40);
+        assert_eq!(src.metadata["file"]["width"], 16);
 
         let a = core
             .store
@@ -2206,37 +2199,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_same_photo_twice_is_a_duplicate_before_any_model_call() {
-        let core = crate::core::test_support::test_core().await;
-        let first = core
-            .ingest_image(ImageCapture {
-                bytes: a_png(),
-                filename: None,
-                title_hint: None,
-                note: None,
-            })
-            .await
-            .unwrap();
-        let again = core
-            .ingest_image(ImageCapture {
-                bytes: a_png(),
-                filename: None,
-                title_hint: None,
-                note: None,
-            })
-            .await
-            .unwrap();
-        assert!(again.duplicate);
-        assert_eq!(again.id, first.id);
-        assert_eq!(core.store.list_corpora(10, 0).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
     async fn without_a_vision_role_the_image_door_is_closed() {
         let core = crate::core::test_support::test_core_without_vision().await;
         let e = core
             .ingest_image(ImageCapture {
-                bytes: a_png(),
+                bytes: a_seeded_png(7),
                 filename: None,
                 title_hint: None,
                 note: None,

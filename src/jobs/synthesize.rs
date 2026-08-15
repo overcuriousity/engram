@@ -308,7 +308,7 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::core::test_support::test_core;
     use crate::store::corpora::CorpusStatus;
 
     #[tokio::test]
@@ -656,7 +656,10 @@ mod tests {
         // A synthesizer that fails every call cannot produce artifacts either,
         // so naming is exercised through `finish` on a corpus that already has
         // them: the state a real failure leaves behind.
-        let failing = test_core_with_failing_synthesizer().await;
+        let mut failing = test_core().await;
+        failing.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let hurt = failing
             .ingest("alpha line\n\nbravo line", "web", None)
             .await

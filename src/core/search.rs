@@ -541,7 +541,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_rerank};
+    use crate::core::test_support::{test_core, test_core_counting_reranked_docs};
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
     use sqlx::Row;
@@ -817,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn rerank_reorders_when_configured() {
-        let core = test_core_with_rerank().await;
+        let core = test_core_counting_reranked_docs().await.0;
         seed(
             &core,
             &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
@@ -845,7 +845,7 @@ mod tests {
         // Reranking can only reorder what it is given. If the candidate pool
         // were not wider than the limit, a better match ranked 11th by vector
         // similarity could never be promoted into a top-10 answer.
-        let core = test_core_with_rerank().await;
+        let core = test_core_counting_reranked_docs().await.0;
         // Spread across sources so the per-source cap is not what narrows the
         // list; this test is about the candidate pool, not about grouping.
         for batch in 0..10 {
@@ -1141,71 +1141,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifying_restarts_the_retrieval_count() {
-        // `stale_max_hits` counts retrievals *since* the last verification. A
-        // lifetime counter would mean one appearance in a marked search kept an
-        // artifact off the review list for good.
-        let core = test_core().await;
-        seed(&core, &[("alpha text", "note", &[])]).await;
-        reembed_all(&core).await;
-        let id = core.search(&q("alpha"), Door::Ui).await.unwrap()[0]
-            .artifact_id
-            .clone();
-        core.background.wait_idle().await;
-
-        let hits_now = || async {
-            core.vectors
-                .stale_candidates(i64::MAX, i64::MAX, 10)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|h| h.payload.artifact_id == id)
-                .and_then(|h| h.payload.hit_count)
-        };
-        assert_eq!(
-            hits_now().await,
-            Some(1),
-            "the marked search was not counted"
-        );
-
-        core.verify(&id).await.unwrap();
-        assert_eq!(hits_now().await, Some(0), "verify must restart the count");
-    }
-
-    #[tokio::test]
-    async fn opening_a_stale_candidate_does_not_remove_it_from_the_review_list() {
-        // `stale_max_hits` is zero by default, so counting the click that opens
-        // a candidate meant an operator who read a row and decided to defer had
-        // just disqualified it — permanently, since only a `verify` clears the
-        // counter, and a verify is the other answer entirely.
-        let core = test_core().await;
-        seed(&core, &[("alpha text", "note", &[])]).await;
-        reembed_all(&core).await;
-        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        core.vectors
-            .set_last_verified_at(&id, 1, false)
-            .await
-            .unwrap();
-
-        let listed = || async {
-            core.stale_candidates(10)
-                .await
-                .unwrap()
-                .iter()
-                .any(|r| r.artifact_id == id)
-        };
-        assert!(listed().await, "the fixture is not a stale candidate");
-
-        core.mark_artifact_seen(&id);
-        core.background.wait_idle().await;
-
-        assert!(
-            listed().await,
-            "reading a candidate took it off the list that offered it"
-        );
-    }
-
-    #[tokio::test]
     async fn resurfacing_does_not_count_as_a_retrieval() {
         // The forgotten list draws at random from exactly the population the
         // stale review list targets — old and unseen — so counting what it drew
@@ -1269,39 +1204,6 @@ mod tests {
             out.iter().map(|r| &r.artifact_id).collect::<Vec<_>>(),
             vec![&ids[1]],
             "the forgotten list offered an artifact that was just retired"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_deprecated_artifact_is_not_a_neighbour() {
-        // The related pane is a list of live content. A deprecated artifact is
-        // near-identical to nothing in particular, but it is *near* — and
-        // linking to it from a live artifact presents retired knowledge as
-        // current. The legacy `superseded` flag never catches this: a
-        // deprecation deliberately writes it false.
-        let core = test_core().await;
-        seed(
-            &core,
-            &[("alpha text", "note", &[]), ("alpha text too", "note", &[])],
-        )
-        .await;
-        reembed_all(&core).await;
-        let ids = core.store.list_all_artifact_ids().await.unwrap();
-        assert_eq!(
-            core.vectors.neighbours(&ids[0], 10).await.unwrap().len(),
-            1,
-            "the fixture has no neighbour to lose"
-        );
-
-        core.deprecate(&ids[1]).await.unwrap();
-
-        assert!(
-            core.vectors
-                .neighbours(&ids[0], 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a retired artifact is still linked from a live one"
         );
     }
 

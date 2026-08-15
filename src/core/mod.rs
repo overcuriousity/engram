@@ -225,27 +225,6 @@ pub mod test_support {
         build(Arc::new(FakeSynthesizer::default()), None).await
     }
 
-    pub async fn test_core_with_failing_synthesizer() -> Core {
-        build(Arc::new(FakeSynthesizer::failing("endpoint down")), None).await
-    }
-
-    /// A synthesizer whose every call comes back refused rather than
-    /// unanswered — the 400 an endpoint returns for a window it will never
-    /// take, which the worker classifies as permanent.
-    pub async fn test_core_with_rejecting_synthesizer() -> Core {
-        build(
-            Arc::new(FakeSynthesizer::rejecting(
-                "HTTP 400: context length exceeded",
-            )),
-            None,
-        )
-        .await
-    }
-
-    pub async fn test_core_with_rerank() -> Core {
-        test_core_counting_reranked_docs().await.0
-    }
-
     /// A core plus a handle on its reranker, for asserting how wide the
     /// candidate pool it was handed actually was.
     pub async fn test_core_counting_reranked_docs() -> (Core, Arc<FakeReranker>) {
@@ -261,14 +240,6 @@ pub mod test_support {
         let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
         core.embedder = embedder.clone();
         (core, embedder)
-    }
-
-    /// A core whose embedder is the given fake, for driving the embed stage
-    /// into a refusal.
-    pub async fn test_core_with_embedder(e: Arc<FakeEmbedder>) -> Core {
-        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
-        core.embedder = e;
-        core
     }
 
     /// A core whose vision model is the given fake, for asserting what it was
