@@ -6,6 +6,19 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+/// The budget every fake synthesizer reports. Context is zero on purpose: a
+/// fake reproduces today's windowing exactly, so a test that did not ask for
+/// context cannot be moved by it.
+pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
+    context_tokens: 4096,
+    max_output_tokens: 1024,
+    output_ratio: 1.4,
+    context: crate::infer::context::ContextBudget {
+        opening: 0,
+        overlap: 0,
+    },
+};
+
 /// Hashes text into a fixed-dimension unit vector. Identical text gives an
 /// identical vector and different text gives a different one, which is all the
 /// retrieval tests need from an embedding model.
@@ -155,14 +168,7 @@ impl Synthesizer for FakeSynthesizer {
             .collect())
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 
     /// Deterministic and obviously synthetic, so a test can assert on it. A
@@ -194,19 +200,12 @@ pub struct ParaphrasingSynthesizer {
 }
 
 impl ParaphrasingSynthesizer {
-    pub fn recovering(drop_token: &str) -> Self {
+    /// `persistent`: keep paraphrasing forever rather than recovering on the retry.
+    pub fn new(drop_token: &str, persistent: bool) -> Self {
         Self {
             drop_token: drop_token.to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
-            persistent: false,
-        }
-    }
-
-    pub fn persistent(drop_token: &str) -> Self {
-        Self {
-            drop_token: drop_token.to_string(),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            persistent: true,
+            persistent,
         }
     }
 
@@ -237,14 +236,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
         }])
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 }
 
@@ -316,47 +308,28 @@ impl Synthesizer for RecordingSynthesizer {
     }
 }
 
-/// Claims every chunk came from lines far outside its window. The span check
-/// exists because the model's line numbers are taken on trust.
-#[derive(Default)]
-pub struct LyingSpanSynthesizer;
-
-#[async_trait]
-impl Synthesizer for LyingSpanSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        let text = input.core;
-        Ok(vec![ProposedArtifact {
-            text: text.to_string(),
-            title: Some("mislabelled".into()),
-            category: None,
-            tags: vec![],
-            corpus_lines: Some((9_000, 9_100)),
-            caveats: vec![],
-        }])
-    }
-    fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
-    }
+/// Claims every chunk came from lines far outside its window — the span check
+/// exists because the model's line numbers are taken on trust. With
+/// `echo_text` the body is the window itself and can be recovered; without it
+/// the text appears nowhere in the window and the reader has to be told.
+pub struct MisreportingSynthesizer {
+    pub echo_text: bool,
 }
 
-/// Returns text that appears nowhere in its window, with a bogus span. The
-/// case where nothing can be recovered and the reader has to be told.
-#[derive(Default)]
-pub struct HallucinatingSynthesizer;
-
 #[async_trait]
-impl Synthesizer for HallucinatingSynthesizer {
-    async fn segment(&self, _input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+impl Synthesizer for MisreportingSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let (text, title) = if self.echo_text {
+            (input.core.to_string(), "mislabelled")
+        } else {
+            (
+                "Entirely invented material about unrelated subjects".to_string(),
+                "invented",
+            )
+        };
         Ok(vec![ProposedArtifact {
-            text: "Entirely invented material about unrelated subjects".into(),
-            title: Some("invented".into()),
+            text,
+            title: Some(title.into()),
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
@@ -364,14 +337,7 @@ impl Synthesizer for HallucinatingSynthesizer {
         }])
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 }
 
@@ -487,41 +453,25 @@ impl Reranker for FakeReranker {
     }
 }
 
+/// Answers with `reply`, or — with `None` — with the user prompt it was
+/// handed. What `ask` puts in front of the model is the whole of what the
+/// model can use, and echoing it makes the prompt the thing under test.
 pub struct FakeCompleter {
-    pub reply: String,
+    pub reply: Option<String>,
 }
 
 impl Default for FakeCompleter {
     fn default() -> Self {
         Self {
-            reply: "fake answer".into(),
+            reply: Some("fake answer".into()),
         }
     }
 }
 
 #[async_trait]
 impl Completer for FakeCompleter {
-    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
-        Ok(self.reply.clone())
-    }
-    fn context_tokens(&self) -> usize {
-        4096
-    }
-}
-
-/// A completer that answers with the prompt it was handed.
-///
-/// What `ask` puts in front of the model is the whole of what the model can
-/// use, and it is otherwise invisible: the reply is a fake, so a test asserting
-/// on it proves nothing about the excerpts. This makes the prompt the thing
-/// under test.
-#[derive(Default)]
-pub struct EchoCompleter;
-
-#[async_trait]
-impl Completer for EchoCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
-        Ok(user.to_string())
+        Ok(self.reply.clone().unwrap_or_else(|| user.to_string()))
     }
     fn context_tokens(&self) -> usize {
         4096

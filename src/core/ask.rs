@@ -264,7 +264,7 @@ mod tests {
         // no answer. Caveats are not in the vector payload, so this asserts the
         // store lookup that puts them back.
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::EchoCompleter);
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter { reply: None });
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
             .store

@@ -1059,9 +1059,10 @@ Then run sync.";
     #[tokio::test]
     async fn a_paraphrased_literal_is_re_segmented_once_and_then_accepted() {
         let mut core = test_core().await;
-        let synthesizer = std::sync::Arc::new(
-            crate::infer::fake::ParaphrasingSynthesizer::recovering("oflag=sync "),
-        );
+        let synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
+            "oflag=sync ",
+            false,
+        ));
         core.synthesizer = synthesizer.clone();
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
@@ -1078,9 +1079,10 @@ Then run sync.";
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::ParaphrasingSynthesizer::persistent("oflag=sync "),
-        );
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
+            "oflag=sync ",
+            true,
+        ));
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         segment_all(&core, &out.id).await;
@@ -1112,7 +1114,8 @@ Then run sync.";
         // Where the chunk still reproduces its source, the real span can be
         // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::LyingSpanSynthesizer);
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: true });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -1139,7 +1142,8 @@ Then run sync.";
         // model call on a whole segment. The span falls back to the window and
         // the reader is none the wiser.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: false });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
