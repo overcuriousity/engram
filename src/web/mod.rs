@@ -60,7 +60,10 @@ pub fn router(state: AppState) -> Router {
         .merge(extension::extension_router())
         .merge(judge::judge_router())
         .merge(crate::mcp::mcp_router(state.clone()))
-        .nest("/api/v1", api::api_router())
+        .nest(
+            "/api/v1",
+            api::api_router(state.core.capture.image_max_bytes),
+        )
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::trace::TraceLayer::new_for_http())
