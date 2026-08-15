@@ -4,7 +4,6 @@ use crate::store::artifacts::ArtifactStatus;
 use crate::store::corpora::{CorpusStatus, Insertion, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
 use crate::store::now;
-use sha2::Digest;
 
 /// The channel an image arrives through. Its own value, like `upload`, so
 /// the queue and the detail page can tell a photo from a paste.
@@ -288,8 +287,15 @@ impl Core {
                 "image capture is not configured — set [infer.vision] to enable it".into(),
             ));
         }
-        let prepared = super::image::prepare(&c.bytes, self.capture.image_preview_edge)?;
-        let hash = hex::encode(sha2::Sha256::digest(&c.bytes));
+        let ImageCapture {
+            bytes,
+            filename,
+            title_hint,
+            note,
+        } = c;
+        // Hashed and looked up before it is decoded: a photo sent twice costs
+        // one SHA-256 the second time, not a full decode and re-encode.
+        let hash = content_hash(&bytes);
         if let Some(existing) = self.store.find_by_hash(&hash).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate image, returning existing source");
             return Ok(IngestOutcome {
@@ -299,17 +305,28 @@ impl Core {
                 near_duplicate: None,
             });
         }
+        // Decoding, EXIF, the preview and its re-encode are a synchronous walk
+        // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
+        // is seconds during which search, health and the queue poll on that
+        // thread all wait; see `web::api::extract` for the same move.
+        let edge = self.capture.image_preview_edge;
+        let (bytes, prepared) = tokio::task::spawn_blocking(move || {
+            let prepared = super::image::prepare(&bytes, edge)?;
+            Ok::<_, Error>((bytes, prepared))
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("image preparation did not finish: {e}")))??;
 
         let mut metadata = serde_json::json!({
-            "file": super::image::file_facts(c.filename.as_deref(), c.bytes.len(), &prepared),
+            "file": super::image::file_facts(filename.as_deref(), bytes.len(), &prepared),
         });
         if prepared.exif.as_object().is_some_and(|o| !o.is_empty()) {
             metadata["exif"] = prepared.exif.clone();
         }
-        if let Some(n) = clean_note(c.note) {
+        if let Some(n) = clean_note(note) {
             metadata["note"] = serde_json::Value::String(n);
         }
-        let title_hint = c.title_hint.or_else(|| c.filename.clone());
+        let title_hint = title_hint.or_else(|| filename.clone());
 
         let src = match self
             .store
@@ -331,8 +348,8 @@ impl Core {
                 corpus_id: &src.id,
                 kind: "image",
                 mime: prepared.mime,
-                filename: c.filename.as_deref(),
-                bytes: &c.bytes,
+                filename: filename.as_deref(),
+                bytes: &bytes,
                 preview: &prepared.preview_jpeg,
                 width: Some(prepared.width as i64),
                 height: Some(prepared.height as i64),
@@ -343,7 +360,7 @@ impl Core {
             .await?;
         tracing::info!(
             corpus_id = %src.id,
-            bytes = c.bytes.len(),
+            bytes = bytes.len(),
             mime = prepared.mime,
             "image captured; queued for reading"
         );
@@ -1223,6 +1240,37 @@ mod tests {
             core.store.get_corpus(&id).await.unwrap().status,
             CorpusStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_image_is_recognised_by_the_shared_hash() {
+        let core = test_core().await;
+        let bytes = a_seeded_png(4);
+        let first = core
+            .ingest_image(ImageCapture {
+                bytes: bytes.clone(),
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        let src = core.store.get_corpus(&first.id).await.unwrap();
+        assert_eq!(
+            src.content_hash,
+            crate::store::corpora::content_hash(&bytes)
+        );
+        let again = core
+            .ingest_image(ImageCapture {
+                bytes,
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
     }
 
     #[tokio::test]

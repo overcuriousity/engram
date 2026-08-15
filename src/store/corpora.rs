@@ -115,8 +115,11 @@ pub struct NearDuplicate {
     pub similarity: f64,
 }
 
-pub fn content_hash(text: &str) -> String {
-    hex::encode(Sha256::digest(text.as_bytes()))
+/// The dedupe key of a corpus: text for a capture, the file's bytes for an
+/// image. One function, so the two doors can never drift onto different keys
+/// for the same column.
+pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
 fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
@@ -662,6 +665,12 @@ mod tests {
             got.title_hint.as_deref(),
             Some("Unattended Upgrades on Debian")
         );
+    }
+
+    #[test]
+    fn content_hash_is_one_function_for_text_and_bytes() {
+        assert_eq!(content_hash("abc"), content_hash(b"abc"));
+        assert_eq!(content_hash("abc"), hex::encode(Sha256::digest(b"abc")));
     }
 
     #[tokio::test]
