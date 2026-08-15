@@ -764,19 +764,15 @@ pub(crate) mod tests {
         out
     }
 
-    /// Seed artifacts with hand-placed vectors, so the test controls the exact
-    /// similarity rather than depending on what the fake embedder produces.
-    /// The same, with a title on each artifact.
-    ///
-    /// The title is the subject, and the dedupe prompt is built around that:
-    /// synthesis writes a body that stands alone within its segment, which is
-    /// not the same as naming what it is about. Anything testing the
-    /// same-subject rule needs titles or it is testing something else.
-    pub(crate) async fn seed_titled(
+    /// Artifacts with vectors, one row each, under `corpus` (a fresh corpus
+    /// with that raw text). `title` is the subject: the dedupe prompt is
+    /// built around it, so anything testing the same-subject rule needs one.
+    pub(crate) async fn seed_rows(
         core: &crate::core::Core,
-        rows: &[(&str, &str, [f32; 2])],
+        corpus: &str,
+        rows: &[(Option<&str>, &str, [f32; 2])],
     ) -> Vec<String> {
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
         let new: Vec<NewArtifact> = rows
             .iter()
             .enumerate()
@@ -784,7 +780,7 @@ pub(crate) mod tests {
                 ordinal: i as i64,
                 text: (*text).to_string(),
                 corpus_span: None,
-                title: Some((*title).to_string()),
+                title: title.map(str::to_string),
                 category: None,
                 tags: vec![],
                 segment_idx: None,
@@ -802,7 +798,7 @@ pub(crate) mod tests {
                     artifact_id: c.id.clone(),
                     corpus_id: c.corpus_id.clone().unwrap_or_default(),
                     text: (*text).to_string(),
-                    title: Some((*title).to_string()),
+                    title: title.map(str::to_string),
                     category: None,
                     tags: vec![],
                     created_at: c.created_at,
@@ -820,52 +816,20 @@ pub(crate) mod tests {
         made.into_iter().map(|c| c.id).collect()
     }
 
+    pub(crate) async fn seed_titled(
+        core: &crate::core::Core,
+        rows: &[(&str, &str, [f32; 2])],
+    ) -> Vec<String> {
+        let rows: Vec<_> = rows.iter().map(|(t, x, v)| (Some(*t), *x, *v)).collect();
+        seed_rows(core, "raw", &rows).await
+    }
+
     pub(crate) async fn seed(
         core: &crate::core::Core,
         vectors: &[(&str, [f32; 2])],
     ) -> Vec<String> {
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let new: Vec<NewArtifact> = vectors
-            .iter()
-            .enumerate()
-            .map(|(i, (text, _))| NewArtifact {
-                ordinal: i as i64,
-                text: (*text).to_string(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
-            })
-            .collect();
-        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
-        let points: Vec<VectorPoint> = made
-            .iter()
-            .zip(vectors)
-            .map(|(c, (text, v))| VectorPoint {
-                vector: v.to_vec(),
-                sparse: Default::default(),
-                payload: VectorPayload {
-                    artifact_id: c.id.clone(),
-                    corpus_id: c.corpus_id.clone().unwrap_or_default(),
-                    text: (*text).to_string(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: c.created_at,
-                    last_seen_at: None,
-                    hit_count: None,
-                    superseded: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    provenance: None,
-                },
-            })
-            .collect();
-        core.vectors.upsert(points).await.unwrap();
-        made.into_iter().map(|c| c.id).collect()
+        let rows: Vec<_> = vectors.iter().map(|(x, v)| (None, *x, *v)).collect();
+        seed_rows(core, "raw", &rows).await
     }
 
     /// One artifact under a corpus of its own, for the cases where "same
@@ -875,48 +839,9 @@ pub(crate) mod tests {
         text: &str,
         vector: [f32; 2],
     ) -> String {
-        let src = core.store.insert_corpus(text, "web", None).await.unwrap();
-        let made = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[NewArtifact {
-                    ordinal: 0,
-                    text: text.to_string(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
-                }],
-            )
+        seed_rows(core, text, &[(None, text, vector)])
             .await
-            .unwrap();
-        core.vectors
-            .upsert(vec![VectorPoint {
-                vector: vector.to_vec(),
-                sparse: Default::default(),
-                payload: VectorPayload {
-                    artifact_id: made[0].id.clone(),
-                    corpus_id: made[0].corpus_id.clone().unwrap_or_default(),
-                    text: text.to_string(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: made[0].created_at,
-                    last_seen_at: None,
-                    hit_count: None,
-                    superseded: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    provenance: None,
-                },
-            }])
-            .await
-            .unwrap();
-        made[0].id.clone()
+            .remove(0)
     }
 
     #[tokio::test]

@@ -892,42 +892,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedder_asks_for_float_encoding_explicitly() {
-        // A litellm proxy in front of a llama.cpp-style server forwards the
-        // absent field as null, and the backend answers 500 with
-        // "type must be string, but is null". Every embed call fails against
-        // such an endpoint unless the field is sent.
+    async fn embedder_sends_float_encoding_and_orders_results_by_index() {
+        // `encoding_format` is sent explicitly: a litellm proxy in front of a
+        // llama.cpp-style server forwards the absent field as null and the
+        // backend answers 500. And `index` is authoritative over array position.
         use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .and(body_partial_json(
-                serde_json::json!({"encoding_format": "float"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]}),
-            ))
-            .mount(&server)
-            .await;
-
-        let out = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["x".into()])
-            .await
-            .unwrap();
-        assert_eq!(out[0], vec![1.0, 0.0, 0.0, 0.0]);
-    }
-
-    #[tokio::test]
-    async fn embedder_sends_a_batch_and_orders_results_by_index() {
-        let server = MockServer::start().await;
-        // Deliberately out of order: the API contract is that `index` is
-        // authoritative, not array position.
         let reply = serde_json::json!({"data":[
             {"index":1,"embedding":[1.0,0.0,0.0,0.0]},
             {"index":0,"embedding":[0.0,1.0,0.0,0.0]}
         ]});
         Mock::given(method("POST"))
             .and(path("/embeddings"))
+            .and(body_partial_json(
+                serde_json::json!({"encoding_format": "float"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(reply))
             .mount(&server)
             .await;
@@ -975,114 +954,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reranker_tei_style_returns_sorted_index_score_pairs() {
-        let server = MockServer::start().await;
-        let reply = serde_json::json!([{"index":2,"score":0.9},{"index":0,"score":0.4}]);
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Tei,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into(), "b".into(), "c".into()], 2)
-            .await
-            .unwrap();
-        assert_eq!(out[0].0, 2);
-        assert_eq!(out.len(), 2);
+    async fn the_reranker_reads_both_wire_shapes_and_drops_bad_indexes() {
+        // TEI answers a bare list of {index, score}; Cohere wraps
+        // {index, relevance_score} in `results`. Either way the caller gets
+        // (index, score) best first, and an index outside the batch is dropped
+        // rather than panicking on `results.get(idx)`.
+        let cases: [(RerankStyle, serde_json::Value, usize, Vec<(usize, f32)>); 3] = [
+            (
+                RerankStyle::Tei,
+                serde_json::json!([{"index":2,"score":0.9},{"index":0,"score":0.4}]),
+                3,
+                vec![(2, 0.9), (0, 0.4)],
+            ),
+            (
+                RerankStyle::Cohere,
+                serde_json::json!({"results":[
+                    {"index":1,"relevance_score":0.8},
+                    {"index":0,"relevance_score":0.95}
+                ]}),
+                2,
+                vec![(0, 0.95), (1, 0.8)],
+            ),
+            (
+                RerankStyle::Tei,
+                serde_json::json!([{"index":99,"score":0.9},{"index":0,"score":0.4}]),
+                1,
+                vec![(0, 0.4)],
+            ),
+        ];
+        for (style, reply, docs, want) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/rerank"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+                .mount(&server)
+                .await;
+            let cfg = RerankRole {
+                base_url: server.uri(),
+                model: "r".into(),
+                api_key: None,
+                style,
+                timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            };
+            let batch: Vec<String> = (0..docs).map(|i| format!("d{i}")).collect();
+            let out = HttpReranker::new(&cfg)
+                .rerank("q", &batch, 5)
+                .await
+                .unwrap();
+            assert_eq!(out, want);
+        }
     }
 
     #[tokio::test]
-    async fn reranker_cohere_style_reads_relevance_score_and_results_wrapper() {
-        let server = MockServer::start().await;
-        let reply = serde_json::json!({"results":[
-            {"index":1,"relevance_score":0.8},
-            {"index":0,"relevance_score":0.95}
-        ]});
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Cohere,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into(), "b".into()], 5)
-            .await
-            .unwrap();
-        assert_eq!(out[0].0, 0, "highest relevance_score must come first");
-        assert_eq!(out.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn reranker_drops_out_of_range_indexes() {
-        let server = MockServer::start().await;
-        // A malformed index must not panic on the caller's `results.get(idx)`.
-        let reply = serde_json::json!([{"index":99,"score":0.9},{"index":0,"score":0.4}]);
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Tei,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into()], 5)
-            .await
-            .unwrap();
-        assert_eq!(out, vec![(0, 0.4)]);
-    }
-
-    #[tokio::test]
-    async fn completer_returns_message_content() {
+    async fn completer_returns_message_content_and_tolerates_a_trailing_slash() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "choices":[{"message":{"content":"the answer"}}]
-            })))
-            .mount(&server)
-            .await;
-        let cfg = AskRole {
-            base_url: server.uri(),
-            model: "m".into(),
-            api_key: None,
-            context_tokens: 4096,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-            reasoning_effort: None,
-        };
-        assert_eq!(
-            HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
-            "the answer"
-        );
-    }
-
-    #[tokio::test]
-    async fn base_url_with_a_trailing_slash_does_not_double_up() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices":[{"message":{"content":"ok"}}]
             })))
             .mount(&server)
             .await;
@@ -1096,7 +1025,7 @@ mod tests {
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
-            "ok"
+            "the answer"
         );
     }
 

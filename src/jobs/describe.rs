@@ -265,19 +265,17 @@ mod tests {
         assert!(!core.store.live_job(Stage::Describe, &id).await.unwrap());
     }
 
-    #[tokio::test]
-    async fn parking_survives_a_metadata_column_that_is_not_an_object() {
-        // `meta["describe"] = ...` panics on anything but an object or null,
-        // and the value comes out of a column. A worker is the wrong place to
-        // find that out.
-        let core = test_core_without_vision().await;
-        let src = core
-            .store
+    /// A stored image corpus with `metadata`, one pixel big, no reading yet.
+    async fn image_corpus(
+        core: &Core,
+        metadata: serde_json::Value,
+    ) -> crate::store::corpora::Corpus {
+        core.store
             .insert_image_corpus(
                 "h",
                 "image",
                 None,
-                &serde_json::json!("not an object"),
+                &metadata,
                 &crate::store::attachments::NewImage {
                     kind: "image",
                     mime: "image/png",
@@ -290,7 +288,16 @@ mod tests {
             )
             .await
             .unwrap()
-            .into_corpus();
+            .into_corpus()
+    }
+
+    #[tokio::test]
+    async fn parking_survives_a_metadata_column_that_is_not_an_object() {
+        // `meta["describe"] = ...` panics on anything but an object or null,
+        // and the value comes out of a column. A worker is the wrong place to
+        // find that out.
+        let core = test_core_without_vision().await;
+        let src = image_corpus(&core, serde_json::json!("not an object")).await;
 
         park_failed(&core, &src.id, "gpu on fire").await.unwrap();
 
@@ -306,26 +313,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_vision_role_an_exhausted_job_keeps_waiting() {
         let core = test_core_without_vision().await;
-        let src = core
-            .store
-            .insert_image_corpus(
-                "h",
-                "image",
-                None,
-                &serde_json::json!({}),
-                &crate::store::attachments::NewImage {
-                    kind: "image",
-                    mime: "image/png",
-                    filename: None,
-                    bytes: b"orig",
-                    preview: b"prev",
-                    width: Some(1),
-                    height: Some(1),
-                },
-            )
-            .await
-            .unwrap()
-            .into_corpus();
+        let src = image_corpus(&core, serde_json::json!({})).await;
         core.store
             .enqueue(Stage::Describe, "corpus", &src.id)
             .await
@@ -348,34 +336,5 @@ mod tests {
             run(&core, "nope").await,
             Err(crate::error::Error::NotFound)
         ));
-    }
-
-    #[tokio::test]
-    async fn without_a_vision_role_the_job_waits_rather_than_failing_the_corpus() {
-        // Configured when the photo was taken, removed before it was read: the
-        // job stays queued at the backoff ceiling until the role comes back.
-        let core = test_core_without_vision().await;
-        let src = core
-            .store
-            .insert_image_corpus(
-                "h",
-                "image",
-                None,
-                &serde_json::json!({}),
-                &crate::store::attachments::NewImage {
-                    kind: "image",
-                    mime: "image/png",
-                    filename: None,
-                    bytes: b"orig",
-                    preview: b"prev",
-                    width: Some(1),
-                    height: Some(1),
-                },
-            )
-            .await
-            .unwrap()
-            .into_corpus();
-        let e = run(&core, &src.id).await.unwrap_err();
-        assert!(e.retryable(), "{e}");
     }
 }
