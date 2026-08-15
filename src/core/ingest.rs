@@ -326,7 +326,9 @@ impl Core {
         if let Some(n) = clean_note(note) {
             metadata["note"] = serde_json::Value::String(n);
         }
-        let title_hint = title_hint.or_else(|| filename.clone());
+        // A filename is a file fact, not a name: `photo.jpg` and `image.png`
+        // are what a camera and a clipboard call everything. Seeding the title
+        // from it would disarm the one stage that can name the capture.
 
         let src = match self
             .store
@@ -1274,6 +1276,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_image_filename_is_kept_as_a_file_fact_and_not_used_as_its_title() {
+        let core = test_core().await;
+        let id = core
+            .ingest_image(ImageCapture {
+                bytes: a_seeded_png(5),
+                filename: Some("photo.jpg".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.title_hint, None);
+        assert_eq!(src.metadata["file"]["name"], "photo.jpg");
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert!(
+            core.store
+                .get_corpus(&id)
+                .await
+                .unwrap()
+                .title_hint
+                .is_some(),
+            "the Title stage named it"
+        );
+    }
+
+    #[tokio::test]
     async fn a_text_corpus_cannot_be_re_read() {
         let core = test_core().await;
         let src = core.ingest("some text", "web", None).await.unwrap();
@@ -2108,7 +2138,10 @@ mod tests {
         let src = core.store.get_corpus(&out.id).await.unwrap();
         assert_eq!(src.origin, ORIGIN_IMAGE);
         assert_eq!(src.raw_text, "");
-        assert_eq!(src.title_hint.as_deref(), Some("IMG_1.png"));
+        assert_eq!(
+            src.title_hint, None,
+            "a filename is a file fact; the Title stage names the capture"
+        );
         assert_eq!(src.metadata["note"], "the kitchen whiteboard");
         assert_eq!(src.metadata["file"]["name"], "IMG_1.png");
         assert_eq!(src.metadata["file"]["mime"], "image/png");

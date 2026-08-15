@@ -343,7 +343,6 @@ async fn upload(
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
-                .with_title(filename.clone())
                 .with_note(note)
                 .with_file(filename.as_deref(), size, "text/plain"),
         )
@@ -1392,7 +1391,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_uploaded_filename_becomes_the_title_hint() {
+    async fn an_uploaded_filename_is_a_file_fact_not_a_title() {
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .oneshot(post_file(
@@ -1407,7 +1406,11 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
         let src = core.store.get_corpus(&id).await.unwrap();
-        assert_eq!(src.title_hint.as_deref(), Some("mounting-notes.txt"));
+        assert_eq!(
+            src.title_hint, None,
+            "the Title stage names it; the filename is not a name"
+        );
+        assert_eq!(src.metadata["file"]["name"], "mounting-notes.txt");
         assert_eq!(src.origin, "upload");
         assert_eq!(src.source_url, None);
     }
