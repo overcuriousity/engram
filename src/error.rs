@@ -21,6 +21,13 @@ pub enum Error {
     Forbidden,
     #[error("inference[{role}]: {detail}")]
     Inference { role: &'static str, detail: String },
+    /// The endpoint understood the request and refused it — a model that does
+    /// not take images, a body over its limit, a name it does not serve. Kept
+    /// apart from `Inference` because the two ask opposite things of a worker:
+    /// one is a wait, the other is the same answer for as long as the same
+    /// request is sent.
+    #[error("inference[{role}] rejected: {detail}")]
+    InferenceRejected { role: &'static str, detail: String },
     #[error("vector store: {0}")]
     Vector(String),
     #[error("store: {0}")]
@@ -56,7 +63,9 @@ impl Error {
             Error::Validation(_) => StatusCode::BAD_REQUEST,
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Forbidden => StatusCode::FORBIDDEN,
-            Error::Inference { .. } | Error::Vector(_) => StatusCode::BAD_GATEWAY,
+            Error::Inference { .. } | Error::InferenceRejected { .. } | Error::Vector(_) => {
+                StatusCode::BAD_GATEWAY
+            }
             Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -117,6 +126,15 @@ mod tests {
         assert!(Error::Vector("connection refused".into()).retryable());
         assert!(Error::Store("database is locked".into()).retryable());
         assert!(Error::MalformedLlmOutput("expected `{`".into()).retryable());
+        // The endpoint answered and said no: another attempt sends the same
+        // request and gets the same answer.
+        assert!(
+            !Error::InferenceRejected {
+                role: "vision",
+                detail: "HTTP 400: model does not accept images".into()
+            }
+            .retryable()
+        );
 
         // Retrying these burns inference calls and never succeeds.
         assert!(!Error::Validation("empty text".into()).retryable());

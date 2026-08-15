@@ -28,6 +28,14 @@ fn url(base: &str, path: &str) -> String {
     )
 }
 
+/// A 4xx that says the request itself is wrong. 408 and 429 are 4xx by number
+/// but "come back later" by meaning, and stay retryable.
+pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
+    status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
 async fn post_json(
     role: &'static str,
     c: &reqwest::Client,
@@ -52,9 +60,11 @@ async fn post_json(
         // Truncate: an upstream error page can be megabytes, and this string
         // ends up in a job's last_error column.
         let detail: String = body.chars().take(400).collect();
-        return Err(Error::Inference {
-            role,
-            detail: format!("HTTP {status}: {detail}"),
+        let detail = format!("HTTP {status}: {detail}");
+        return Err(if permanent_upstream_status(status) {
+            Error::InferenceRejected { role, detail }
+        } else {
+            Error::Inference { role, detail }
         });
     }
     res.json().await.map_err(|e| Error::Inference {
@@ -519,6 +529,20 @@ pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_4xx_is_permanent_except_the_two_that_mean_try_again() {
+        use reqwest::StatusCode as S;
+        assert!(permanent_upstream_status(S::BAD_REQUEST));
+        assert!(permanent_upstream_status(S::NOT_FOUND));
+        assert!(permanent_upstream_status(S::PAYLOAD_TOO_LARGE));
+        assert!(permanent_upstream_status(S::UNSUPPORTED_MEDIA_TYPE));
+        assert!(permanent_upstream_status(S::UNPROCESSABLE_ENTITY));
+        assert!(!permanent_upstream_status(S::REQUEST_TIMEOUT));
+        assert!(!permanent_upstream_status(S::TOO_MANY_REQUESTS));
+        assert!(!permanent_upstream_status(S::INTERNAL_SERVER_ERROR));
+        assert!(!permanent_upstream_status(S::BAD_GATEWAY));
+    }
 
     /// The empty context every one of these tests wants: they exercise the
     /// transport and the parser, not the windowing.

@@ -535,6 +535,8 @@ impl Completer for ScriptedCompleter {
 pub struct FakeDescriber {
     pub reply: String,
     pub fail_with: Option<String>,
+    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    pub reject: bool,
     calls: std::sync::atomic::AtomicUsize,
     last_context: std::sync::Mutex<String>,
 }
@@ -550,6 +552,7 @@ impl FakeDescriber {
         Self {
             reply: reply.into(),
             fail_with: None,
+            reject: false,
             calls: Default::default(),
             last_context: Default::default(),
         }
@@ -557,6 +560,13 @@ impl FakeDescriber {
     pub fn failing(msg: &str) -> Self {
         let mut d = Self::saying("");
         d.fail_with = Some(msg.into());
+        d
+    }
+    /// The endpoint's "no", not its "not now": what a non-multimodal model
+    /// answers with, and what a worker must not retry.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut d = Self::failing(msg);
+        d.reject = true;
         d
     }
     pub fn calls(&self) -> usize {
@@ -573,6 +583,10 @@ impl Describer for FakeDescriber {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.last_context.lock().unwrap() = context.to_string();
         match &self.fail_with {
+            Some(m) if self.reject => Err(Error::InferenceRejected {
+                role: "vision",
+                detail: m.clone(),
+            }),
             Some(m) => Err(Error::Inference {
                 role: "vision",
                 detail: m.clone(),
