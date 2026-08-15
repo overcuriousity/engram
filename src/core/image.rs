@@ -23,6 +23,13 @@ pub struct PreparedImage {
 /// page survives, well below the original's size.
 const PREVIEW_QUALITY: u8 = 85;
 
+/// Longest side a capture may have. Phone sensors top out around 9 000 px on
+/// the long edge; the cap exists for the file that *claims* to be bigger,
+/// which costs width × height × 4 bytes before a single pixel is checked.
+pub const MAX_IMAGE_EDGE: u32 = 10_000;
+/// Ceiling on what the decoder may allocate for one image.
+pub const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
 pub fn prepare(bytes: &[u8], preview_edge: u32) -> Result<PreparedImage> {
     let format = image::guess_format(bytes).map_err(|_| {
         Error::Validation("that upload is not a supported image (JPEG, PNG or WebP)".into())
@@ -42,8 +49,18 @@ pub fn prepare(bytes: &[u8], preview_edge: u32) -> Result<PreparedImage> {
             )));
         }
     };
-    let decoded = image::load_from_memory_with_format(bytes, format)
-        .map_err(|e| Error::Validation(format!("that image could not be decoded: {e}")))?;
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_EDGE);
+    limits.max_image_height = Some(MAX_IMAGE_EDGE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|e| match e {
+        image::ImageError::Limits(_) => Error::Validation(format!(
+            "that image is too large to read — at most {MAX_IMAGE_EDGE} pixels on a side"
+        )),
+        e => Error::Validation(format!("that image could not be decoded: {e}")),
+    })?;
 
     let exif = read_exif(bytes);
     let exif_json = exif
@@ -217,6 +234,45 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
     use std::io::Cursor;
+
+    /// PNG's CRC-32, spelled out because no crate in the tree exposes it
+    /// directly and the header the test patches must still verify.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn an_image_declaring_absurd_dimensions_is_refused_before_it_is_decoded() {
+        // A real 1x1 PNG whose IHDR is patched to claim 11000x11000 — under the decoder's own default allocation ceiling, so only a limit of ours refuses it: the
+        // header verifies, the pixel data does not match, and the decoder must
+        // stop at the header rather than allocate for what it announces.
+        let img = ImageBuffer::from_fn(1, 1, |_, _| Rgb([1u8, 2, 3]));
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Png)
+            .unwrap();
+        let mut png = out.into_inner();
+        // Signature (8) + length (4) + "IHDR" (4) + width (4) + height (4) ...
+        png[16..20].copy_from_slice(&11_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&11_000u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+
+        let e = prepare(&png, 2048).unwrap_err();
+        assert!(matches!(e, Error::Validation(_)), "{e}");
+        assert!(e.to_string().contains("large"), "{e}");
+    }
 
     fn png(w: u32, h: u32) -> Vec<u8> {
         let img = ImageBuffer::from_fn(w, h, |x, _| Rgb([(x % 256) as u8, 0, 0]));
