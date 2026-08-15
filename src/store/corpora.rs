@@ -495,6 +495,17 @@ impl Store {
         })
     }
 
+    /// The reverse of `set_described_text`, for a re-read: no text and no
+    /// signature, so the row is comparable to nothing until the model speaks.
+    pub async fn clear_described_text(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET raw_text = '', shingles = '', updated_at = ? WHERE id = ?")
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// What the vision stage read. Text and signature together, so the row is
     /// never comparable-by-shingle to something it does not say. Status is
     /// left to the caller, who knows whether this parks or proceeds.

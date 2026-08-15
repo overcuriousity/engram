@@ -945,50 +945,56 @@ impl Core {
         Ok(())
     }
 
+    /// Everything a rerun of the pipeline from `raw_text` has to forget first.
+    /// Shared by re-segment and re-read; the comment on each line is the reason
+    /// the line exists.
+    async fn forget_derived_work(&self, id: &str) -> Result<()> {
+        // Re-segmenting replaces every chunk, so the old vectors and rows go
+        // first.
+        self.vectors.delete_by_corpus(id).await?;
+        for c in self.store.artifacts_for_corpus(id).await? {
+            self.store.delete_artifact(&c.id).await?;
+        }
+        // The window rows are the segment job's memory of what it has already
+        // done. Leaving them behind means the rerun finds every window `done`,
+        // segments nothing, and lands on a source with no chunks at all.
+        // Re-windowing is also the point of a reprocess after a model or budget
+        // change.
+        self.store.clear_segments(id).await?;
+        // The measure those windows produced goes with them. It is not just
+        // stale: the reconciliation sweep identifies a document whose last
+        // window resolved but whose `settle` never ran by having no coverage,
+        // so a value left over from the previous run reads as "already
+        // finished". A rerun that dies in exactly that window would then be
+        // stuck in `segmenting` for good — nothing resolves again to trigger
+        // `settle`, and the one sweep that repairs it has been told there is
+        // nothing to repair.
+        self.store.clear_corpus_coverage(id).await?;
+        // And the units that name those windows, which outlive them. Planning
+        // arms idle-only, so a unit still queued from the run being replaced
+        // would carry its attempts into the rerun — the person who asked for
+        // another try would get a window that gives up after one.
+        self.store.delete_window_jobs(id).await?;
+        // The title unit is armed once per corpus and never again, so that a
+        // document the model will not name stops costing calls. The row is
+        // what remembers that, which also means a corpus left unnamed by a
+        // transient failure could never be named again — including by the
+        // person who noticed and asked for the rerun. An explicit reprocess is
+        // exactly the case that rule is not meant to cover.
+        self.store.delete_job(Stage::Title, id).await?;
+        // Reprocessing a parked capture is a decision to process it, so the
+        // park has to be lifted with it. Leaving the flag set means a fully
+        // synthesized and embedded corpus sits on the review queue forever,
+        // where the discard button now deletes real work.
+        self.store.set_near_dupe(id, None, None).await?;
+        Ok(())
+    }
+
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
         let src = self.store.get_corpus(id).await?;
         match stage {
             Stage::Synthesize | Stage::Enrich => {
-                // Re-segmenting replaces every chunk, so the old vectors and
-                // rows go first.
-                self.vectors.delete_by_corpus(&src.id).await?;
-                for c in self.store.artifacts_for_corpus(&src.id).await? {
-                    self.store.delete_artifact(&c.id).await?;
-                }
-                // The window rows are the segment job's memory of what it has
-                // already done. Leaving them behind means the rerun finds every
-                // window `done`, segments nothing, and lands on a source with
-                // no chunks at all. Re-windowing is also the point of a
-                // reprocess after a model or budget change.
-                self.store.clear_segments(&src.id).await?;
-                // The measure those windows produced goes with them. It is not
-                // just stale: the reconciliation sweep identifies a document
-                // whose last window resolved but whose `settle` never ran by
-                // having no coverage, so a value left over from the previous run
-                // reads as "already finished". A rerun that dies in exactly that
-                // window would then be stuck in `segmenting` for good — nothing
-                // resolves again to trigger `settle`, and the one sweep that
-                // repairs it has been told there is nothing to repair.
-                self.store.clear_corpus_coverage(&src.id).await?;
-                // And the units that name those windows, which outlive them.
-                // Planning arms idle-only, so a unit still queued from the run
-                // being replaced would carry its attempts into the rerun — the
-                // person who asked for another try would get a window that gives
-                // up after one.
-                self.store.delete_window_jobs(&src.id).await?;
-                // The title unit is armed once per corpus and never again, so
-                // that a document the model will not name stops costing calls.
-                // The row is what remembers that, which also means a corpus left
-                // unnamed by a transient failure could never be named again —
-                // including by the person who noticed and asked for the rerun.
-                // An explicit reprocess is exactly the case that rule is not
-                // meant to cover.
-                self.store.delete_job(Stage::Title, &src.id).await?;
-                // Reprocessing a parked capture is a decision to process it, so
-                // the park has to be lifted with it. Leaving the flag set means
-                // a fully synthesized and embedded corpus sits on the review
-                // queue forever, where the discard button now deletes real work.
-                self.store.set_near_dupe(&src.id, None, None).await?;
+                self.forget_derived_work(&src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
@@ -1025,12 +1031,35 @@ impl Core {
                         .into(),
                 ));
             }
-            // Re-reading a stored image with a different model is a later
-            // feature; the original is kept so it stays possible.
+            // A stored image can always be read again — with a better model, or
+            // after the endpoint that refused it is fixed. The reading and
+            // everything derived from it are replaced wholesale, because a
+            // chunk of the old reading has no span in the new one.
             Stage::Describe => {
-                return Err(Error::Validation(
-                    "re-reading an image is not supported yet; capture it again".into(),
-                ));
+                if self.store.attachment_for_corpus(&src.id).await?.is_none() {
+                    return Err(Error::Validation(
+                        "only a captured image can be re-read".into(),
+                    ));
+                }
+                if self.describer.is_none() {
+                    return Err(Error::Validation(
+                        "image capture is not configured — set [infer.vision] to enable it".into(),
+                    ));
+                }
+                self.forget_derived_work(&src.id).await?;
+                self.store.clear_described_text(&src.id).await?;
+                let mut meta = src.metadata.clone();
+                if let Some(m) = meta.as_object_mut() {
+                    m.remove("describe");
+                }
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::Describing)
+                    .await?;
+                self.heal_dangling_supersessions().await?;
+                self.store
+                    .enqueue(Stage::Describe, "corpus", &src.id)
+                    .await?;
             }
         }
         Ok(())
@@ -1047,6 +1076,92 @@ mod tests {
     use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    fn a_seeded_png(seed: u8) -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(16, 16, |x, y| Rgb([seed, x as u8, y as u8]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn an_image(seed: u8) -> ImageCapture {
+        ImageCapture {
+            bytes: a_seeded_png(seed),
+            filename: None,
+            title_hint: None,
+            note: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn re_reading_a_failed_image_clears_the_reason_and_queues_describe_again() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(1)).await.unwrap().id;
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        core.store.complete_job(job.id).await.unwrap();
+
+        core.reprocess(&id, Stage::Describe).await.unwrap();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Describing);
+        assert!(src.metadata.get("describe").is_none());
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("describe re-armed");
+        assert_eq!(
+            (job.stage, job.target_id.as_str()),
+            (Stage::Describe, id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn re_reading_a_ready_image_starts_it_over_from_the_pixels() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(2)).await.unwrap().id;
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Ready
+        );
+
+        core.reprocess(&id, Stage::Describe).await.unwrap();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Describing);
+        assert_eq!(src.raw_text, "");
+        assert!(src.shingles.is_empty());
+        assert!(
+            core.store
+                .artifacts_for_corpus(&id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_corpus_cannot_be_re_read() {
+        let core = test_core().await;
+        let src = core.ingest("some text", "web", None).await.unwrap();
+        assert!(matches!(
+            core.reprocess(&src.id, Stage::Describe).await,
+            Err(Error::Validation(_))
+        ));
+    }
 
     #[tokio::test]
     async fn healing_a_dangling_supersession_leaves_no_unfinished_write_behind() {
