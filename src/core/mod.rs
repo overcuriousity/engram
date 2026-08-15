@@ -71,6 +71,11 @@ pub struct Core {
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
+    /// The model that rules on duplicate pairs. Separate from `completer`
+    /// because judging is background work on the synthesize endpoint, not an
+    /// interactive answer: sharing one endpoint put sweep traffic in front of
+    /// the user's question and tuned one model for two unrelated tasks.
+    pub judge: Arc<dyn Completer>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
@@ -136,6 +141,7 @@ impl Core {
                 .as_ref()
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
+            judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
             describer: cfg.infer.vision.as_ref().map(|v| {
                 let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
                 Arc::new(HttpDescriber::new(
@@ -289,6 +295,7 @@ pub mod test_support {
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             completer: Arc::new(FakeCompleter::default()),
+            judge: Arc::new(FakeCompleter::default()),
             describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter::Estimate),
             background: Arc::new(Background::default()),

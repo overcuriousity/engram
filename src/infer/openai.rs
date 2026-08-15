@@ -406,6 +406,10 @@ pub struct HttpCompleter {
     model: String,
     api_key: Option<String>,
     context_tokens: usize,
+    reasoning_effort: Option<String>,
+    /// Which configured role this completer speaks for, so a failure names the
+    /// endpoint the operator has to go and look at.
+    role: &'static str,
 }
 
 impl HttpCompleter {
@@ -416,6 +420,27 @@ impl HttpCompleter {
             model: cfg.model.clone(),
             api_key: cfg.api_key.clone(),
             context_tokens: cfg.context_tokens,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+            role: "ask",
+        }
+    }
+
+    /// The judge that rules on duplicate pairs, on the synthesize endpoint.
+    ///
+    /// Judging is the same kind of work as segmentation — read a passage,
+    /// decide something about it, answer in a fixed shape — and nothing like
+    /// answering a user's question. It also runs in the background, where a
+    /// slow careful model costs nobody a wait, while sharing the ask endpoint
+    /// puts sweep traffic in front of an interactive request.
+    pub fn for_judging(cfg: &SynthesizeRole) -> Self {
+        Self {
+            client: client(cfg.timeout_secs),
+            base_url: cfg.base_url.clone(),
+            model: cfg.model.clone(),
+            api_key: cfg.api_key.clone(),
+            context_tokens: cfg.context_tokens,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+            role: "judge",
         }
     }
 }
@@ -423,7 +448,7 @@ impl HttpCompleter {
 #[async_trait]
 impl Completer for HttpCompleter {
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role":"system","content": system},
@@ -431,8 +456,11 @@ impl Completer for HttpCompleter {
             ],
             "temperature": 0.3,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         let v = post_json(
-            "ask",
+            self.role,
             &self.client,
             url(&self.base_url, "chat/completions"),
             self.api_key.as_deref(),
@@ -443,7 +471,7 @@ impl Completer for HttpCompleter {
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| Error::Inference {
-                role: "ask",
+                role: self.role,
                 detail: "no message content".into(),
             })
     }

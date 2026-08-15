@@ -192,7 +192,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
 
     let permit = core.gate.background().await;
     let reply = match core
-        .completer
+        .judge
         .complete(
             crate::infer::prompt::DEDUPE_SYSTEM,
             &crate::infer::prompt::dedupe_prompt(&shown, &differing, p.judge_attempts),
@@ -510,6 +510,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_judge_runs_on_the_synthesize_endpoint_not_the_ask_one() {
+        // The duplicate judge used to share `completer` with the RAG answer
+        // path, which put background sweep traffic in front of an interactive
+        // question and tuned one model for two unrelated jobs. The pair here
+        // must be ruled on without the ask model being touched at all.
+        let mut core = test_core().await;
+        core.consolidate.autonomous = true;
+        let judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        let asker = Arc::new(ScriptedCompleter::new(vec![]));
+        core.judge = judge.clone();
+        core.completer = asker.clone();
+        let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])]).await;
+        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &seed_pair.to_string()).await.unwrap();
+
+        assert_eq!(judge.calls(), 1, "the judge endpoint was not the one asked");
+        assert_eq!(asker.calls(), 0, "the sweep called the ask model");
+    }
+
+    #[tokio::test]
     async fn a_retired_members_roots_do_not_count_against_the_cap() {
         // C is deprecated while the unit waits. Its pair is dismissed and it
         // is dropped from the component — but its root must also leave the
@@ -519,7 +542,7 @@ mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.consolidate.merge_max_roots = 2;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         let ids = seed(
@@ -563,7 +586,7 @@ mod tests {
         // happened.
         let mut core = test_core().await;
         core.consolidate.autonomous = false;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"a is stale"}"#.into(),
         ]));
         let ids = seed(
@@ -617,7 +640,7 @@ mod tests {
         // document into one paragraph that describes none of its subjects.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"two different filesystems"}"#.into(),
         ]));
         let ids = seed_titled(
@@ -668,7 +691,7 @@ mod tests {
         // empty it.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -702,7 +725,7 @@ mod tests {
         // so the prompt prefers it and this pins that the code does too.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -736,7 +759,7 @@ mod tests {
         // on them, rather than switching autonomy on blind.
         let mut core = test_core().await;
         core.consolidate.autonomous = false;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -770,7 +793,7 @@ mod tests {
         // not contain behind an "apply supersede" button in Ops.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"the first is stale"}"#.into(),
         ]));
         let ids = seed(
@@ -823,7 +846,7 @@ mod tests {
         // named. Under autonomy that hides the wrong artifact outright.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"b","detail":"b is the stale one"}"#.into(),
         ]));
         let ids = seed(
@@ -891,7 +914,7 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"b","detail":"x"}"#.into(),
         ]));
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
@@ -925,7 +948,7 @@ mod tests {
         // 1.21.4" is a line an operator can act on; "verification failed" is not.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"engram needs Rust 1.30.0 to build.","tags":[],"caveats":[]}}"#
                 .into(),
@@ -971,7 +994,7 @@ mod tests {
         let completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"three different things"}"#.into(),
         ]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = seed(
             &core,
             &[
@@ -1010,7 +1033,7 @@ mod tests {
         core.consolidate.autonomous = true;
         core.consolidate.merge_max_roots = 2;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = seed(
             &core,
             &[
@@ -1043,7 +1066,7 @@ mod tests {
         let completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"unrelated"}"#.into(),
         ]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = seed(
             &core,
             &[
@@ -1066,7 +1089,7 @@ mod tests {
     async fn a_failed_dedupe_leaves_the_component_pending() {
         // A dead endpoint must not silently clear a queue of real duplicates.
         let mut core = test_core().await;
-        core.completer = Arc::new(ScriptedCompleter::new(vec!["not json".into()]));
+        core.judge = Arc::new(ScriptedCompleter::new(vec!["not json".into()]));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -1087,7 +1110,7 @@ mod tests {
     async fn a_component_whose_member_was_retired_is_dismissed_without_a_call() {
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -1114,7 +1137,7 @@ mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = disagreeing(&core).await;
         let m = core
             .store
@@ -1160,7 +1183,7 @@ mod tests {
         // duplication became invisible forever.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         let ids = seed(
@@ -1197,7 +1220,7 @@ mod tests {
         // return a validation error against the already-superseded side.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -1241,7 +1264,7 @@ mod tests {
         // verdict was recorded on the pairs yet never applied.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"c","detail":"superseded by the merge"}"#.into(),
         ]));
         let ids = seed(
@@ -1308,7 +1331,7 @@ mod tests {
         // only the lossy keep-one buttons for it.
         let mut core = test_core().await;
         core.consolidate.autonomous = false;
-        core.completer = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"engram needs Rust 1.21.4 and 1.30.0 to build.","tags":[],"caveats":[]}}"#
                 .into(),

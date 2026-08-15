@@ -1213,7 +1213,7 @@ pub(crate) mod tests {
         // posts a contradiction about something nobody can see.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         // Queue the pair with the judge off, so the only call this test can
         // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
@@ -1259,7 +1259,7 @@ pub(crate) mod tests {
         // only, which a deprecation never sets.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
         core.consolidate.autonomous = true;
@@ -1831,7 +1831,7 @@ pub(crate) mod tests {
         // still leaves a verdict to read.
         let mut core = test_core().await;
         core.consolidate.autonomous = false;
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old versus new"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -1867,7 +1867,7 @@ pub(crate) mod tests {
     async fn an_enabled_dedupe_pass_marks_a_real_contradiction() {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
         ]));
         disagreeing(&core).await;
@@ -1897,7 +1897,7 @@ pub(crate) mod tests {
         // is where it is pinned now.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","detail":"old flag vs new flag","supersedes":"a"}"#.into(),
         ]));
         let ids = disagreeing(&core).await;
@@ -1956,7 +1956,7 @@ pub(crate) mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","detail":"x","supersedes":"b"}"#.into(),
         ]));
 
@@ -2020,7 +2020,7 @@ pub(crate) mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         seed(
             &core,
             &[
@@ -2040,7 +2040,7 @@ pub(crate) mod tests {
         // A dead endpoint must not silently clear a queue of real conflicts.
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
         ]));
         disagreeing(&core).await;
@@ -2191,7 +2191,7 @@ pub(crate) mod tests {
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         disagreeing(&core).await;
 
         let out = run(&core).await.unwrap();
@@ -2225,7 +2225,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.completer = completer.clone();
+        core.judge = completer.clone();
         seed(
             &core,
             &[
@@ -2258,7 +2258,7 @@ pub(crate) mod tests {
         let mut core = test_core().await;
         core.consolidate.autonomous = true;
         core.consolidate.max_dedupe_per_tick = 1;
-        core.completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "not json".into(),
             r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
         ]));
