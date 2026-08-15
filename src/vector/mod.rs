@@ -51,17 +51,6 @@ pub struct VectorPayload {
     /// without a second lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
-    /// `captured` or `merged`, mirroring `Chunk::provenance`.
-    ///
-    /// Carried here for one reason that is not cosmetic: `restore_artifact`
-    /// rebuilds a SQLite row from this payload, and `corpus_id` is the empty
-    /// string for a merged artifact. Without the kind, a restore cannot tell a
-    /// merged artifact from a captured one whose corpus id was lost, and would
-    /// write the wrong sort of row back. Omitted when unset, like the fields
-    /// above, so a point written before this existed reads as `captured` — the
-    /// right default, since no merge can predate the column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -314,11 +303,7 @@ pub trait VectorStore: Send + Sync {
     /// not an engram point and nothing can be said about it.
     async fn all_artifact_ids(&self) -> Result<Vec<String>>;
     /// The full stored payloads for these ids. Ids with no point are absent
-    /// from the answer.
-    ///
-    /// This is what the heal restores an artifact row from, so unlike
-    /// `lifecycle_of` it has to hand back everything the payload holds — the
-    /// text, the title, the tags — not just the lifecycle fields.
+    /// from the answer. What the lifecycle backfill stamps an orphan point from.
     async fn payloads_of(
         &self,
         artifact_ids: &[String],

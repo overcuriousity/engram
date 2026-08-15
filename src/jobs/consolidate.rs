@@ -169,7 +169,10 @@ async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     // payload-first reveal is exactly the sequence that hides an artifact
     // with no marker left to find it by.
     let _guard = core.lifecycle_lock.lock().await;
-    let dirty = core.store.dirty_lifecycle_artifacts(DRIFT_REPAIR_BATCH).await?;
+    let dirty = core
+        .store
+        .dirty_lifecycle_artifacts(DRIFT_REPAIR_BATCH)
+        .await?;
     if dirty.is_empty() {
         return Ok(0);
     }
@@ -645,7 +648,6 @@ pub(crate) mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
-                    provenance: None,
                 },
             })
             .collect();

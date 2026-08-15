@@ -58,7 +58,6 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             status: None,
             last_verified_at: None,
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -782,7 +781,6 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             status: None,
             last_verified_at: None,
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -984,7 +982,6 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             // scores, so it has to set the field the formula actually uses.
             last_verified_at: Some(ts),
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -1923,10 +1920,8 @@ async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
 
 #[tokio::test]
 #[ignore]
-async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
-    // What `Core::heal_store_drift` restores an artifact from. Unlike
-    // `lifecycle_of` it has to carry the text, title, tags and category, or the
-    // restored row is an empty artifact with the right id.
+async fn payloads_of_reads_the_whole_payload_and_skips_missing_points() {
+    // What the lifecycle backfill stamps an orphan point from.
     let v = fresh("engram_it_payloads_of", 4).await;
     v.upsert(vec![point(
         "a",
@@ -1958,11 +1953,7 @@ async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
     assert_eq!(p.category.as_deref(), Some("procedure"));
     assert_eq!(p.tags, vec!["t1".to_string(), "t2".to_string()]);
     assert_eq!(p.created_at, 42);
-    assert_eq!(
-        p.status,
-        Some(ArtifactStatus::Deprecated),
-        "a restored artifact would come back active and searchable"
-    );
+    assert_eq!(p.status, Some(ArtifactStatus::Deprecated));
     v.drop_collection().await.unwrap();
 }
 

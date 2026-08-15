@@ -181,32 +181,6 @@ pub struct NewArtifact {
     pub caveats: Vec<String>,
 }
 
-/// An artifact rebuilt from a vector payload, keeping its original id.
-///
-/// Separate from `NewArtifact` because the two are opposites: that one describes
-/// an artifact being created, and the store assigns its id, while this one
-/// describes an artifact that already existed and whose id is the one thing that
-/// must not change. Only the fields a `VectorPayload` actually carries are here
-/// — see `Store::restore_artifact` for what is left neutral and why.
-#[derive(Debug, Clone)]
-pub struct RestoredArtifact {
-    pub id: String,
-    /// `None` for a merged artifact. A payload carries `corpus_id` as the empty
-    /// string for one of those, which is not a corpus that exists — writing it
-    /// would break the foreign key, and writing it as a corpus id would be a
-    /// lie. `provenance` is what tells the two cases apart.
-    pub corpus_id: Option<String>,
-    pub provenance: Provenance,
-    pub text: String,
-    pub title: Option<String>,
-    pub category: Option<String>,
-    pub tags: Vec<String>,
-    pub created_at: i64,
-    pub status: ArtifactStatus,
-    pub last_verified_at: Option<i64>,
-    pub superseded_by: Option<String>,
-}
-
 pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     let tags_json: String = r.get("tags");
     let span_json: Option<String> = r.get("corpus_span");
@@ -394,47 +368,6 @@ impl Store {
         }
         tx.commit().await?;
         Ok(out)
-    }
-
-    /// Re-create an artifact row from what the vector store still holds about
-    /// it, keeping the original id. Returns whether a row was written; an id
-    /// that already exists is left exactly as it is.
-    ///
-    /// This is the SQLite half of the two-way heal (`Core::heal_store_drift`),
-    /// so it is deliberately not `insert_artifacts`: that mints a new id, and a
-    /// restored artifact that does not keep its own is a second copy rather than
-    /// the same artifact — its point would still be an orphan, and the next heal
-    /// would restore it again.
-    ///
-    /// What the payload cannot supply is left at its neutral value rather than
-    /// guessed. `ordinal` is 0 and `corpus_span` NULL because a payload records
-    /// neither, so a restored artifact has no position within its source; the
-    /// same goes for `segment_idx`, `caveats`, and `flags`. `embed_state` is
-    /// `pending` on purpose even though a vector demonstrably exists: the stored
-    /// vector may have been written by a different embedding model than the
-    /// collection now uses, and a restored row that claims `done` would keep
-    /// that mismatch permanently invisible. Re-embedding costs one call and
-    /// makes `embed_model` true.
-    pub async fn restore_artifact(&self, c: &RestoredArtifact) -> Result<bool> {
-        let res = sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, superseded_by)
-             VALUES (?, ?, ?, 0, ?, NULL, ?, ?, ?, 'pending', NULL, ?, NULL, '[]', ?, ?, ?)
-             ON CONFLICT(id) DO NOTHING",
-        )
-        .bind(&c.id)
-        .bind(&c.corpus_id)
-        .bind(c.provenance.as_str())
-        .bind(&c.text)
-        .bind(&c.title)
-        .bind(&c.category)
-        .bind(serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()))
-        .bind(c.created_at)
-        .bind(c.status.as_str())
-        .bind(c.last_verified_at)
-        .bind(&c.superseded_by)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
@@ -1052,35 +985,6 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
-    }
-
-    #[tokio::test]
-    async fn restoring_a_merged_artifact_gives_it_no_corpus() {
-        // A payload carries `corpus_id` as the empty string for a merged
-        // artifact, and "" is not a corpus that exists — restoring it as one
-        // fails the foreign key, and restoring it as a corpus id would put the
-        // wrong document's lines beside the artifact forever. The kind is what
-        // tells the two cases apart, which is why it rides in the payload.
-        let s = Store::memory().await.unwrap();
-        let restored = RestoredArtifact {
-            id: "merged-1".into(),
-            corpus_id: None,
-            provenance: Provenance::Merged,
-            text: "one artifact out of two".into(),
-            title: None,
-            category: None,
-            tags: vec![],
-            created_at: 1,
-            status: ArtifactStatus::Active,
-            last_verified_at: None,
-            superseded_by: None,
-        };
-
-        assert!(s.restore_artifact(&restored).await.unwrap());
-
-        let back = s.get_artifact("merged-1").await.unwrap();
-        assert_eq!(back.provenance, Provenance::Merged);
-        assert_eq!(back.corpus_id, None);
     }
 
     #[tokio::test]

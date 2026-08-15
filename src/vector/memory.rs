@@ -456,7 +456,6 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
-                provenance: None,
             },
         }
     }

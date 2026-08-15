@@ -598,12 +598,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
     VectorPayload {
         artifact_id: chunk.id.clone(),
         // A merged artifact belongs to no corpus and carries the empty string
-        // here. `provenance` below is what tells the two apart — a corpus
-        // filter genuinely should not match an artifact that belongs to none,
-        // and `restore_artifact` reads the kind rather than guessing what an
-        // empty id meant.
+        // here: a corpus filter genuinely should not match an artifact that
+        // belongs to none.
         corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
-        provenance: Some(chunk.provenance.as_str().to_string()),
         text: chunk.text.clone(),
         title: chunk.title.clone(),
         category: chunk.category.clone(),
