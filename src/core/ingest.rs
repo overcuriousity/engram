@@ -1088,7 +1088,7 @@ impl Core {
             // everything derived from it are replaced wholesale, because a
             // chunk of the old reading has no span in the new one.
             Stage::Describe => {
-                if self.store.attachment_for_corpus(&src.id).await?.is_none() {
+                if !self.store.has_attachment(&src.id).await? {
                     return Err(Error::Validation(
                         "only a captured image can be re-read".into(),
                     ));

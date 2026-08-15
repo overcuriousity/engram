@@ -113,6 +113,20 @@ impl Store {
         }))
     }
 
+    /// Whether this corpus is a capture at all. Separate from the two readers
+    /// below for the same reason they are separate from each other: answering
+    /// yes or no must not pull `image_max_bytes` of original off disk and into
+    /// memory to do it.
+    pub async fn has_attachment(&self, corpus_id: &str) -> Result<bool> {
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM attachments WHERE corpus_id = ? LIMIT 1")
+                .bind(corpus_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
+    }
+
     /// The preview alone. Separate from `attachment_for_corpus` so serving a
     /// thumbnail does not read the original's megabytes off disk.
     pub async fn attachment_preview(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
@@ -138,6 +152,30 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_corpus_is_known_to_be_a_capture_without_its_bytes_being_read() {
+        let s = Store::memory().await.unwrap();
+        let text = s.insert_corpus("raw", "web", None).await.unwrap();
+        assert!(!s.has_attachment(&text.id).await.unwrap());
+
+        let img = s.insert_corpus("raw", "image", None).await.unwrap();
+        let original = vec![7u8; 4096];
+        s.insert_attachment(&NewAttachment {
+            corpus_id: &img.id,
+            kind: "image",
+            mime: "image/png",
+            filename: Some("a.png"),
+            bytes: &original,
+            preview: b"prev",
+            width: Some(4),
+            height: Some(4),
+        })
+        .await
+        .unwrap();
+        assert!(s.has_attachment(&img.id).await.unwrap());
+        assert!(!s.has_attachment("no-such-corpus").await.unwrap());
+    }
 
     #[tokio::test]
     async fn an_attachment_round_trips_and_goes_with_its_corpus() {
