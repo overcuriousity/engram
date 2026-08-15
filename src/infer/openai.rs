@@ -42,7 +42,11 @@ pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
     status.is_client_error()
         && !matches!(
             status,
-            S::REQUEST_TIMEOUT | S::TOO_MANY_REQUESTS | S::UNAUTHORIZED | S::FORBIDDEN | S::NOT_FOUND
+            S::REQUEST_TIMEOUT
+                | S::TOO_MANY_REQUESTS
+                | S::UNAUTHORIZED
+                | S::FORBIDDEN
+                | S::NOT_FOUND
         )
 }
 
