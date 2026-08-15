@@ -33,6 +33,28 @@
 {% endif %}
 {% endif %}
 
+{% if image %}
+<div class="card">
+  <div class="card-head">
+    <span class="card-title">Photo</span>
+    <span class="spacer"></span>
+    <a class="quiet-link" href="/api/v1/corpora/{{ id }}/image?original=1">original</a>
+  </div>
+  <a href="/api/v1/corpora/{{ id }}/image?original=1">
+    <img src="/api/v1/corpora/{{ id }}/image" alt="captured image"
+         style="max-width:100%;height:auto;border-radius:.4rem">
+  </a>
+  {% if let Some(n) = note %}<p><b>Note:</b> {{ n }}</p>{% endif %}
+  {% if !meta_rows.is_empty() %}
+  <table class="meta">
+    {% for r in meta_rows %}<tr><td class="muted">{{ r.0 }}</td><td>{{ r.1 }}</td></tr>{% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% else if let Some(n) = note %}
+<p><b>Note:</b> {{ n }}</p>
+{% endif %}
+
 {% if restored %}
 <div class="flag" role="status">
   <div aria-hidden="true">⚠</div>
@@ -48,8 +70,12 @@
 
 <div class="card">
   <div class="card-head">
-    <span class="card-title">{% if restored %}Restored artifacts{% else %}Raw corpus{% endif %}</span>
+    <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw corpus{% endif %}</span>
+    {% if image %}<span class="muted">— the model's reading of the photo, not the source itself</span>{% endif %}
   </div>
+  {% if image && lines.is_empty() %}
+  <p class="muted">Not read yet — the photo is queued for the vision model.</p>
+  {% endif %}
   {# Every line is anchored, so an artifact's "open at these lines" link lands
      on the exact lines it was drawn from instead of the top of the document.
      Same markup and highlighting as the excerpt in the artifact pane. #}
