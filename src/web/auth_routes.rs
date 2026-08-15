@@ -192,21 +192,13 @@ mod tests {
     use tower::ServiceExt;
 
     async fn local_app() -> axum::Router {
-        let core = crate::core::test_support::test_core().await;
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: Some(crate::config::LocalConfig {
-                    username: "dev".into(),
-                    password_hash: crate::auth::local::hash_password("hunter2").unwrap(),
-                }),
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
+        crate::web::test_support::router(
+            crate::core::test_support::test_core().await,
+            Some(crate::config::LocalConfig {
+                username: "dev".into(),
+                password_hash: crate::auth::local::hash_password("hunter2").unwrap(),
             }),
-        };
-        crate::web::router(state)
+        )
     }
 
     fn form(uri: &str, body: &str) -> Request<Body> {

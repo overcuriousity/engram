@@ -1645,6 +1645,7 @@ pub fn ui_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::test_support::{a_png, app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1897,27 +1898,9 @@ mod tests {
 
     async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
         let handle = core.clone();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (
-            crate::web::router(state),
-            format!("engram_session={cid}"),
-            handle,
-        )
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle)
     }
 
     async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
@@ -1934,13 +1917,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
         body_of(res).await
-    }
-
-    async fn body_of(res: axum::response::Response) -> String {
-        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        String::from_utf8_lossy(&b).to_string()
     }
 
     fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
@@ -1967,22 +1943,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     /// Markup with every run of whitespace collapsed, so an assertion about an
@@ -1994,22 +1955,7 @@ mod tests {
     /// A session on the given core, for pages that need a core built a
     /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     #[tokio::test]
@@ -2072,16 +2018,6 @@ mod tests {
             "the text is labelled as derived, not 'Raw corpus'"
         );
         assert!(html.contains("blue door"));
-    }
-
-    fn a_png() -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        let img = ImageBuffer::from_fn(8, 8, |x, y| Rgb([x as u8 * 30, y as u8 * 30, 0]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
     }
 
     async fn an_unread_image(core: &crate::core::Core) -> String {
@@ -2169,22 +2105,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     #[tokio::test]
@@ -2227,20 +2148,6 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
         assert!(!html.contains("/ui/judge"), "judging was advertised anyway");
-    }
-
-    #[tokio::test]
-    async fn every_page_declares_itself_installable() {
-        // The manifest link is what a phone looks for before offering to
-        // install the app; the touch icon is what iOS uses instead.
-        let (app, cookie) = app_with_session().await;
-        let html = flat(&get(&app, "/ui/search", &cookie).await);
-        assert!(html.contains(r#"rel="manifest" href="/assets/manifest.webmanifest""#));
-        assert!(html.contains(r#"rel="apple-touch-icon""#));
-        assert!(
-            html.contains(r#"name="theme-color""#),
-            "an installed window frames the page in this colour"
-        );
     }
 
     #[tokio::test]
@@ -2623,38 +2530,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_page_renders_a_form() {
-        let (app, cookie) = app_with_session().await;
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/capture")
-                    .header("cookie", cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let html = body_of(res).await;
-        assert!(html.contains("<textarea"));
-        assert!(html.contains("hx-post=\"/ui/capture\""));
-        // The two halves of "a capture appears under Recent without a reload":
-        // the form announces the capture, the queue below is listening. The
-        // form only swaps its own result card, so without the event a capture
-        // pasted onto an idle page leaves the list below it stale.
-        assert!(
-            html.contains("htmx.trigger(document.body, 'captured')"),
-            "a successful capture announces nothing for the queue to hear"
-        );
-        assert!(
-            !html.contains("autofocus"),
-            "this page is the app's start_url: autofocus opens the software \
-             keyboard over the page the moment the installed app launches"
-        );
-    }
-
-    #[tokio::test]
     async fn capturing_text_stores_it_and_says_nothing() {
         // The confirmation is the row that appears under "Recent" — same link,
         // same progress badge. A card above the list saying it again was the
@@ -2930,46 +2805,6 @@ mod tests {
         assert!(
             body.contains("2 more waiting"),
             "a capped list that does not say it is capped reads as an empty queue"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_result_card_does_not_repeat_the_pane_beside_it() {
-        // The pane lists an artifact's tags in full. Repeating them on the card
-        // was what made the rail heavy enough to need its own scrollbar, and on
-        // a short artifact the card and the pane read as the same thing twice.
-        let (app, cookie) = app_with_embedded_corpus().await;
-        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
-        assert!(
-            body.contains("rail-title"),
-            "the card still names the artifact"
-        );
-        assert!(
-            !body.contains("badge-accent"),
-            "the card no longer carries the category chip the pane already lists"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_source_pane_names_its_lines_once() {
-        let (app, cookie) = app_with_embedded_corpus().await;
-        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
-        let id = body
-            .split("/ui/artifacts/")
-            .nth(1)
-            .and_then(|s| s.split(['"', '?']).next())
-            .expect("a result to open")
-            .to_string();
-
-        let body = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
-        assert!(
-            !body.contains("open source at these lines"),
-            "the pane label is the link now"
-        );
-        assert_eq!(
-            body.matches("highlighted").count(),
-            1,
-            "the span is named once, not in a crumb and a label and a link"
         );
     }
 

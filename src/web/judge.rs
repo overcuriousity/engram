@@ -547,6 +547,7 @@ pub fn judge_router() -> Router<AppState> {
 mod tests {
     use crate::store::artifacts::ArtifactStatus;
     use crate::store::feedback::{Door, NewCandidate, NewEvent};
+    use crate::web::test_support::{app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -558,12 +559,6 @@ mod tests {
         phantom: &[&str],
     ) -> (axum::Router, String, crate::core::Core, Vec<String>) {
         let core = crate::core::test_support::test_core().await;
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-
         let src = core
             .store
             .insert_corpus("raw for judging", "web", None)
@@ -614,29 +609,8 @@ mod tests {
         }
 
         let handle = core.clone();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (
-            crate::web::router(state),
-            format!("engram_session={cid}"),
-            handle,
-            ids,
-        )
-    }
-
-    async fn body_of(res: axum::response::Response) -> String {
-        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        String::from_utf8_lossy(&b).to_string()
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle, ids)
     }
 
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {
