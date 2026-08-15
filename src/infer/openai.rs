@@ -1,6 +1,6 @@
 use super::{
-    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
-    prompt,
+    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
+    Synthesizer, prompt,
 };
 use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
 use crate::error::{Error, Result};
@@ -429,6 +429,69 @@ impl Completer for HttpCompleter {
     }
 }
 
+// ── Describer ────────────────────────────────────────────────────────────────
+
+pub struct HttpDescriber {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+impl HttpDescriber {
+    pub fn new(model: &str, base_url: &str, api_key: Option<&str>, timeout_secs: u64) -> Self {
+        Self {
+            client: client(timeout_secs),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(str::to_string),
+        }
+    }
+}
+
+#[async_trait]
+impl Describer for HttpDescriber {
+    async fn describe(&self, image_jpeg: &[u8], context: &str) -> Result<String> {
+        use base64::Engine;
+        let data_url = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(image_jpeg)
+        );
+        let body = json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt::DESCRIBE_SYSTEM},
+                {"role": "user", "content": [
+                    {"type": "text", "text": context},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]}
+            ],
+            "temperature": 0.2,
+        });
+        let started = std::time::Instant::now();
+        let v = post_json(
+            "vision",
+            &self.client,
+            url(&self.base_url, "chat/completions"),
+            self.api_key.as_deref(),
+            body,
+        )
+        .await?;
+        tracing::info!(
+            ms = started.elapsed().as_millis(),
+            tokens = v["usage"]["completion_tokens"].as_u64(),
+            "vision call finished"
+        );
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Inference {
+                role: "vision",
+                detail: "no message content".into(),
+            })
+    }
+}
+
 /// One cheap reachability check per role at startup. Failure is a warning, not
 /// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
@@ -828,5 +891,54 @@ mod tests {
             "error string was {} chars",
             e.to_string().len()
         );
+    }
+
+    #[tokio::test]
+    async fn the_describer_sends_the_image_as_a_data_url_beside_the_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "# Whiteboard\n\n- item"}}]
+            })))
+            .mount(&server)
+            .await;
+        let d = HttpDescriber::new("vl", &format!("{}/v1", server.uri()), Some("k"), 30);
+        let out = d
+            .describe(b"\xFF\xD8jpegbytes", "Photo taken 2026-08-09")
+            .await
+            .unwrap();
+        assert_eq!(out, "# Whiteboard\n\n- item");
+
+        let req = &server.received_requests().await.unwrap()[0];
+        assert_eq!(req.headers.get("authorization").unwrap(), "Bearer k");
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["model"], "vl");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], prompt::DESCRIBE_SYSTEM);
+        let parts = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Photo taken 2026-08-09");
+        assert_eq!(parts[1]["type"], "image_url");
+        let url = parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"), "{url}");
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(url.trim_start_matches("data:image/jpeg;base64,"))
+            .unwrap();
+        assert_eq!(decoded, b"\xFF\xD8jpegbytes");
+    }
+
+    #[tokio::test]
+    async fn a_describer_error_is_an_inference_error_for_the_vision_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .mount(&server)
+            .await;
+        let d = HttpDescriber::new("vl", &server.uri(), None, 30);
+        let e = d.describe(b"x", "").await.unwrap_err();
+        assert!(matches!(e, Error::Inference { role: "vision", .. }), "{e}");
+        assert!(e.retryable());
     }
 }

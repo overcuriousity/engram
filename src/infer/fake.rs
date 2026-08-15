@@ -1,5 +1,6 @@
 use super::{
-    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
+    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
+    Synthesizer,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -526,6 +527,58 @@ impl Completer for ScriptedCompleter {
     }
     fn context_tokens(&self) -> usize {
         4096
+    }
+}
+
+/// Answers every image with one scripted reply, or one scripted failure, and
+/// remembers what context it was shown.
+pub struct FakeDescriber {
+    pub reply: String,
+    pub fail_with: Option<String>,
+    calls: std::sync::atomic::AtomicUsize,
+    last_context: std::sync::Mutex<String>,
+}
+
+impl Default for FakeDescriber {
+    fn default() -> Self {
+        Self::saying("# Photo\n\nA whiteboard listing three tasks: ship, test, rest.")
+    }
+}
+
+impl FakeDescriber {
+    pub fn saying(reply: &str) -> Self {
+        Self {
+            reply: reply.into(),
+            fail_with: None,
+            calls: Default::default(),
+            last_context: Default::default(),
+        }
+    }
+    pub fn failing(msg: &str) -> Self {
+        let mut d = Self::saying("");
+        d.fail_with = Some(msg.into());
+        d
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_context(&self) -> String {
+        self.last_context.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Describer for FakeDescriber {
+    async fn describe(&self, _image_jpeg: &[u8], context: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_context.lock().unwrap() = context.to_string();
+        match &self.fail_with {
+            Some(m) => Err(Error::Inference {
+                role: "vision",
+                detail: m.clone(),
+            }),
+            None => Ok(self.reply.clone()),
+        }
     }
 }
 

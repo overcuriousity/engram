@@ -8,8 +8,10 @@ pub mod search;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
-use crate::infer::openai::{HttpCompleter, HttpEmbedder, HttpReranker, HttpSynthesizer};
-use crate::infer::{Completer, Embedder, Reranker, Synthesizer};
+use crate::infer::openai::{
+    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer,
+};
+use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer};
 use crate::store::Store;
 use crate::vector::VectorStore;
 use background::Background;
@@ -69,6 +71,8 @@ pub struct Core {
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
+    /// The vision model, when one is configured. `None` closes the image door.
+    pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
     /// so draining one drains them all.
@@ -128,6 +132,15 @@ impl Core {
                 .as_ref()
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
+            describer: cfg.infer.vision.as_ref().map(|v| {
+                let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
+                Arc::new(HttpDescriber::new(
+                    &v.model,
+                    &base_url,
+                    api_key.as_deref(),
+                    v.timeout_secs,
+                )) as Arc<dyn Describer>
+            }),
             counter: Arc::new(TokenCounter::load(
                 cfg.infer.synthesize.tokenizer_path.as_deref(),
             )),
@@ -188,7 +201,9 @@ impl Core {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
-    use crate::infer::fake::{FakeCompleter, FakeEmbedder, FakeReranker, FakeSynthesizer};
+    use crate::infer::fake::{
+        FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
+    };
     use crate::vector::memory::MemoryVectors;
 
     pub const TEST_DIM: usize = 8;
@@ -222,6 +237,21 @@ pub mod test_support {
         (core, embedder)
     }
 
+    /// A core whose vision model is the given fake, for asserting what it was
+    /// asked and answering what a test needs.
+    pub async fn test_core_with_describer(d: Arc<FakeDescriber>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.describer = Some(d);
+        core
+    }
+
+    /// The shipped default: no `[infer.vision]`, image door closed.
+    pub async fn test_core_without_vision() -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.describer = None;
+        core
+    }
+
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
@@ -231,6 +261,7 @@ pub mod test_support {
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             completer: Arc::new(FakeCompleter::default()),
+            describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter::Estimate),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
