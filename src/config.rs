@@ -62,7 +62,7 @@ impl Default for CaptureConfig {
 /// roles each honouring their own cooldown still interleave into unbroken work.
 /// One gap in front of all of them is the only version of this setting that
 /// means what it says.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct PacingConfig {
     /// Minimum seconds between the end of one background call and the start of
@@ -75,15 +75,6 @@ pub struct PacingConfig {
     pub breaker_probe_secs: Option<u64>,
 }
 
-impl Default for PacingConfig {
-    fn default() -> Self {
-        Self {
-            cooldown_secs: 0,
-            breaker_after: None,
-            breaker_probe_secs: None,
-        }
-    }
-}
 
 /// Recording real searches so they can be judged later.
 ///
