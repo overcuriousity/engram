@@ -31,7 +31,11 @@ markdown in the background, and from there it is a text corpus like any other.
 File facts and EXIF (time, camera, location) are recorded on the corpus and
 handed to the model as context. Every file door also accepts a short `note` —
 your own words about what the file is — which is stored with the corpus and,
-for an image, read by the model too.
+for an image, read by the model too. A photo the model cannot read — the
+endpoint refuses it, it answers with nothing, or the retries run out — is shown
+as `failed` with the reason on its page; **Re-read** on that page (or
+`POST /api/v1/corpora/{id}/reprocess` with `{"stage":"describe"}`) reads it
+again from the stored original, with whatever model is configured now.
 
 A **segment** is a slice of one corpus, sized to fit the model's context. The
 split is local and mechanical — a heading, then a blank line, then wherever the

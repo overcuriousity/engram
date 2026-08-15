@@ -137,8 +137,9 @@ to the query path.
   as the label — and the pane needs no changes. `.txt` upload and image
   capture are in: images live in the `attachments` table beside their corpus,
   are read by the `[infer.vision]` role in a `describe` job, and render
-  through `ImageTranscript`; PDF slots into the same two places. The body
-  limit is 8 MB globally and 25 MB on the image door.
+  through `ImageTranscript`, and can be re-read from the stored original with
+  `reprocess(describe)`; PDF slots into the same two places. The body limit is
+  8 MB globally and 25 MB on the image door.
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored
   together, so recovery does not mean paying for every embedding again. The
   snapshot is the artifact of record for a rebuild; a reindex is the fallback,
