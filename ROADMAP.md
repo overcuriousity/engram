@@ -131,11 +131,14 @@ to the query path.
 
 ## [Core Platform & Tooling]
 
-- **File upload**, then **PDF**, then a **CLI**. The detail pane asks a
-  `SourceView` for the lines an artifact claims, so a PDF corpus implements the
-  same trait — extracted text, a page map, `page 42` as the label — and the
-  pane needs no changes. Upload comes first; the body limit is explicit now, at
-  8 MB.
+- ~~**File upload**~~, ~~**image capture**~~, then **PDF**, then a **CLI**.
+  The detail pane asks a `CorpusView` for the lines an artifact claims, so a
+  PDF corpus implements the same trait — extracted text, a page map, `page 42`
+  as the label — and the pane needs no changes. `.txt` upload and image
+  capture are in: images live in the `attachments` table beside their corpus,
+  are read by the `[infer.vision]` role in a `describe` job, and render
+  through `ImageTranscript`; PDF slots into the same two places. The body
+  limit is 8 MB globally and 25 MB on the image door.
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored
   together, so recovery does not mean paying for every embedding again. The
   snapshot is the artifact of record for a rebuild; a reindex is the fallback,

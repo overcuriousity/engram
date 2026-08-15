@@ -20,6 +20,19 @@ Claude Code or Claude Desktop can read and write it mid-session.
 A **corpus** is what you paste: a chapter, a manual, a transcript. Stored
 verbatim, never edited, and the provenance every answer traces back to.
 
+A corpus can also be a **photo or image** — a whiteboard, a receipt, a page,
+a diagram — dropped on the capture page, taken with the phone camera through
+the installed PWA, pasted from the clipboard, or sent to
+`POST /api/v1/corpora/image` (multipart `image`, optional `note` and
+`title_hint`). Needs `[infer.vision]` in the config; without it the image door
+is closed. The original file is kept untouched and served at
+`GET /api/v1/corpora/{id}/image?original=1`; a vision model reads it into
+markdown in the background, and from there it is a text corpus like any other.
+File facts and EXIF (time, camera, location) are recorded on the corpus and
+handed to the model as context. Every file door also accepts a short `note` —
+your own words about what the file is — which is stored with the corpus and,
+for an image, read by the model too.
+
 A **segment** is a slice of one corpus, sized to fit the model's context. The
 split is local and mechanical — a heading, then a blank line, then wherever the
 budget runs out. It stores line numbers rather than a copy, and doubles as the
