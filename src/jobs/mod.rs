@@ -1,6 +1,7 @@
 pub mod classify;
 pub mod consolidate;
 pub mod dedupe;
+pub mod describe;
 pub mod embed;
 pub mod merge;
 pub mod reconcile;
@@ -52,7 +53,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
-        (Stage::Describe, _) => Err(Error::Internal("describe stage not wired yet".into())),
+        (Stage::Describe, _) => describe::run(core, &job.target_id).await,
     };
 
     match result {
