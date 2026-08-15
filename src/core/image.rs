@@ -167,8 +167,7 @@ pub fn file_facts(name: Option<&str>, size: usize, img: &PreparedImage) -> serde
     v
 }
 
-/// The `exif` namespace: the handful of facts worth naming, then every other
-/// tag under `tags` by name so nothing the file carries is thrown away.
+/// The `exif` namespace: when and where the photo was taken, and by what.
 pub fn exif_to_json(exif: &exif::Exif) -> serde_json::Value {
     use exif::{In, Tag};
     let mut out = serde_json::Map::new();
@@ -209,31 +208,6 @@ pub fn exif_to_json(exif: &exif::Exif) -> serde_json::Value {
         out.insert("gps".into(), gps);
     }
 
-    let mut tags = serde_json::Map::new();
-    for f in exif.fields() {
-        if f.ifd_num != In::PRIMARY {
-            continue;
-        }
-        let name = f.tag.to_string();
-        // Already named above, or binary noise nobody reads back.
-        if matches!(f.tag, Tag::MakerNote | Tag::UserComment) || name.starts_with("Tag(") {
-            continue;
-        }
-        // ASCII fields display quoted; the quotes are the formatter's, not
-        // the file's.
-        let value: String = match &f.value {
-            exif::Value::Ascii(v) => v
-                .first()
-                .map(|b| String::from_utf8_lossy(b).trim().to_string())
-                .unwrap_or_default(),
-            _ => f.display_value().with_unit(exif).to_string(),
-        };
-        let value: String = value.chars().take(200).collect();
-        tags.insert(name, value.into());
-    }
-    if !tags.is_empty() {
-        out.insert("tags".into(), tags.into());
-    }
     serde_json::Value::Object(out)
 }
 
@@ -504,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn exif_facts_are_mapped_and_the_rest_kept_as_tags() {
+    fn exif_facts_are_mapped() {
         let fields = vec![
             ascii(exif::Tag::DateTimeOriginal, "2026:08:09 14:12:03"),
             ascii(exif::Tag::Make, "Apple"),
@@ -514,7 +488,7 @@ mod tests {
         let p = prepare(&jpeg_with_exif(64, 64, &fields), 2048).unwrap();
         assert_eq!(p.exif["taken_at"], "2026-08-09T14:12:03");
         assert_eq!(p.exif["camera"], "Apple iPhone 15");
-        assert_eq!(p.exif["tags"]["Software"], "17.5");
+        assert!(p.exif.get("tags").is_none());
         assert!(p.exif.get("gps").is_none());
     }
 

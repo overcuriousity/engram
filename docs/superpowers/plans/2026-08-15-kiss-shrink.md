@@ -28,17 +28,17 @@
 
 ### Task 0: Branch and baseline
 
-- [ ] **Step 1: Branch**
+- [x] **Step 1: Branch**
 ```bash
 git checkout -b chore/kiss master
 ```
-- [ ] **Step 2: Baseline numbers** (record in the final report)
+- [x] **Step 2: Baseline numbers** (record in the final report)
 ```bash
 find . -name '*.rs' -not -path './target/*' | xargs wc -l | tail -1
 find docs spec.md -name '*.md' | xargs wc -l | tail -1
 cargo test 2>&1 | grep -E '^test result' 
 ```
-- [ ] **Step 3: Confirm Qdrant is available for integration tests**
+- [x] **Step 3: Confirm Qdrant is available for integration tests**
 ```bash
 docker compose up -d && curl -s localhost:6333/collections | head -c 200
 ```
@@ -55,21 +55,21 @@ If Qdrant cannot run, note it; Tiers 2 and 4 must then skip `integration_qdrant`
 - Delete: `docs/superpowers/specs/*.md` except `2026-08-14-autonomous-consolidation-design.md` and `2026-08-15-kiss-shrink-design.md`
 - Delete: `spec.md`
 
-- [ ] **Step 1: Verify nothing outside docs references them**
+- [x] **Step 1: Verify nothing outside docs references them**
 ```bash
 grep -rn 'docs/superpowers\|spec\.md' --include='*.rs' --include='*.md' --include='*.toml' --include='*.html' --include='*.js' . | grep -v '^./docs/' | grep -v '^./target/'
 ```
 Expected: only ROADMAP.md lines pointing at `2026-08-14-autonomous-consolidation-design.md`.
-- [ ] **Step 2: Delete**
+- [x] **Step 2: Delete**
 ```bash
 cd docs/superpowers/plans && ls | grep -v '2026-08-15-kiss-shrink.md' | xargs git rm -q && cd ../specs && ls | grep -v -e '2026-08-14-autonomous-consolidation-design.md' -e '2026-08-15-kiss-shrink-design.md' | xargs git rm -q && cd ../../.. && git rm -q spec.md
 ```
-- [ ] **Step 3: Check README/ROADMAP don't link `spec.md`**
+- [x] **Step 3: Check README/ROADMAP don't link `spec.md`**
 ```bash
 grep -n 'spec\.md' README.md ROADMAP.md
 ```
 Remove any hit's link text (keep the sentence if it stands alone).
-- [ ] **Step 4: Commit** — `chore(kiss): drop plans and specs for merged work, and the stale spec.md`
+- [x] **Step 4: Commit** — `chore(kiss): drop plans and specs for merged work, and the stale spec.md`
 
 ---
 
@@ -84,14 +84,14 @@ Remove any hit's link text (keep the sentence if it stands alone).
 - Modify: `src/error.rs` (`Duplicate` variant ~L13-14, `status()` arm ~L62)
 - Modify: `src/infer/split.rs` (`is_heading_for_test` ~L22-25), `src/core/extract.rs` (its one assertion ~L203)
 
-- [ ] **Step 1: Prove each is uncalled**
+- [x] **Step 1: Prove each is uncalled**
 ```bash
 for s in failing_on span_is_plausible 'fn probe\|\.probe(' 'Error::Duplicate' is_heading_for_test; do echo "== $s"; grep -rn "$s" src tests; done
 ```
 Expected: definitions + (for probe) the four discarded call sites in `main.rs`; for `Error::Duplicate` only the `status()` arm; nothing else.
-- [ ] **Step 2: Delete them.** In `main.rs`, delete the whole "probe each role" block; if it was the only user of a `let` binding, delete that too. In `extract.rs` remove just the assertion line(s) using `is_heading_for_test`; keep the rest of the test.
-- [ ] **Step 3: `cargo build && cargo test`** — green.
-- [ ] **Step 4: Commit** — `chore(kiss): delete functions with no callers`
+- [x] **Step 2: Delete them.** In `main.rs`, delete the whole "probe each role" block; if it was the only user of a `let` binding, delete that too. In `extract.rs` remove just the assertion line(s) using `is_heading_for_test`; keep the rest of the test.
+- [x] **Step 3: `cargo build && cargo test`** — green.
+- [x] **Step 4: Commit** — `chore(kiss): delete functions with no callers`
 
 ### Task 3: Stop writing EXIF `tags` catch-all; drop `StoreDrift` counters
 
