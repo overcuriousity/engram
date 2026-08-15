@@ -385,6 +385,9 @@ struct CorpusTemplate {
     /// An image corpus: the page shows the photo, and the lines below are the
     /// model's reading of it rather than the source itself.
     image: bool,
+    /// An image whose reading has not landed — still `describing`, or parked
+    /// before any text was read. Nothing to re-segment; only re-read.
+    unread: bool,
     /// Rows of what the door recorded about the capture, already formatted.
     meta_rows: Vec<(String, String)>,
     note: Option<String>,
@@ -815,6 +818,7 @@ async fn corpus_detail(
         })
         .collect();
     let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
+    let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
@@ -827,6 +831,7 @@ async fn corpus_detail(
         restored: s.restored_at.is_some(),
         source_url: s.source_url.clone(),
         image,
+        unread,
         meta_rows,
         note,
         artifacts,
@@ -932,14 +937,25 @@ async fn delete_artifact_ui(
     })
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ReprocessForm {
+    #[serde(default)]
+    stage: Option<String>,
+}
+
+/// Re-segment by default; `stage=describe` re-reads a captured image.
 async fn reprocess_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
+    Form(form): Form<ReprocessForm>,
 ) -> Result<Response> {
-    st.core
-        .reprocess(&cid, crate::store::jobs::Stage::Synthesize)
-        .await?;
+    let stage = match form.stage {
+        None => crate::store::jobs::Stage::Synthesize,
+        Some(s) => crate::store::jobs::Stage::parse(&s)
+            .ok_or_else(|| Error::Validation(format!("unknown stage `{s}`")))?,
+    };
+    st.core.reprocess(&cid, stage).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
@@ -2059,6 +2075,61 @@ mod tests {
             "the text is labelled as derived, not 'Raw corpus'"
         );
         assert!(html.contains("blue door"));
+    }
+
+    fn a_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(8, 8, |x, y| Rgb([x as u8 * 30, y as u8 * 30, 0]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    async fn an_unread_image(core: &crate::core::Core) -> String {
+        core.ingest_image(crate::core::ingest::ImageCapture {
+            bytes: a_png(),
+            filename: Some("p.png".into()),
+            title_hint: None,
+            note: None,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn an_unread_image_page_offers_re_read_and_not_re_segment() {
+        let core = crate::core::test_support::test_core().await;
+        let id = an_unread_image(&core).await;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, &format!("/ui/corpora/{id}"), &cookie).await;
+        assert!(html.contains("Re-read"));
+        assert!(!html.contains("Re-segment"));
+    }
+
+    #[tokio::test]
+    async fn the_re_read_button_queues_describe() {
+        let core = crate::core::test_support::test_core().await;
+        let id = an_unread_image(&core).await;
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        let (app, cookie) = app_for(core.clone()).await;
+        let res = app
+            .oneshot(form(
+                &format!("/ui/corpora/{id}/reprocess"),
+                &cookie,
+                "stage=describe",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Describing
+        );
     }
 
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {

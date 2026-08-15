@@ -5,10 +5,18 @@
   <span class="badge {{ badge }}">{{ status }}</span>
   <span class="spacer"></span>
   {# Re-segmenting a placeholder would delete the restored artifacts and pay the
-     model to re-derive them from their own text. Nothing to re-segment. #}
-  {% if !restored %}
+     model to re-derive them from their own text. Nothing to re-segment. An
+     image with no reading yet has nothing to re-segment either. #}
+  {% if !restored && !unread %}
   <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline">
     <button class="btn btn-sm" type="submit">Re-segment</button>
+  </form>
+  {% endif %}
+  {% if image %}
+  <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline"
+        onsubmit="return confirm('Read the photo again? The current reading and its artifacts are replaced.')">
+    <input type="hidden" name="stage" value="describe">
+    <button class="btn btn-sm" type="submit">Re-read</button>
   </form>
   {% endif %}
   <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
