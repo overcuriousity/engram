@@ -42,8 +42,28 @@ CREATE TABLE IF NOT EXISTS corpora (
   -- channel it arrived through and this is the location it came from; one
   -- column cannot be both without losing the channel.
   source_url      TEXT,
-  restored_at     INTEGER
+  restored_at     INTEGER,
+  -- What a door knew about the capture beyond the text: a note, file facts,
+  -- EXIF. Namespaced JSON, '{}' when nothing was recorded.
+  metadata        TEXT NOT NULL DEFAULT '{}'
 );
+
+-- The bytes an image corpus was captured from. `bytes` is the upload exactly
+-- as it arrived — the verbatim source, as `raw_text` is for a paste — and
+-- `preview` is the one derived copy: orientation applied, downscaled, JPEG.
+CREATE TABLE IF NOT EXISTS attachments (
+  id         INTEGER PRIMARY KEY,
+  corpus_id  TEXT    NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
+  kind       TEXT    NOT NULL,
+  mime       TEXT    NOT NULL,
+  filename   TEXT,
+  bytes      BLOB    NOT NULL,
+  preview    BLOB    NOT NULL,
+  width      INTEGER,
+  height     INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attachments_corpus ON attachments(corpus_id);
 CREATE INDEX IF NOT EXISTS idx_corpora_status  ON corpora(status);
 CREATE INDEX IF NOT EXISTS idx_corpora_created ON corpora(created_at DESC);
 

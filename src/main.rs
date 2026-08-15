@@ -158,6 +158,12 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     } else {
         tracing::info!("rerank not configured; search returns vector order");
     }
+    if let Some(v) = &cfg.infer.vision {
+        let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
+        engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
+    } else {
+        tracing::info!("vision not configured; the image door is closed");
+    }
     Ok(())
 }
 
@@ -388,6 +394,7 @@ mod startup_tests {
                     reasoning_effort: None,
                 },
                 rerank: None,
+                vision: None,
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,

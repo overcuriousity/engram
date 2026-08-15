@@ -273,66 +273,202 @@ fn named_txt(filename: Option<&str>) -> bool {
     })
 }
 
+/// One file part of a multipart upload.
+struct FilePart {
+    filename: Option<String>,
+    /// The part's `Content-Type`, or "" when it carried none.
+    declared: String,
+    bytes: axum::body::Bytes,
+}
+
+struct UploadParts {
+    file: Option<FilePart>,
+    /// The text fields asked for, by name; only non-blank values are kept.
+    fields: std::collections::HashMap<&'static str, String>,
+}
+
+/// Drain a multipart body: one file part under `file_field`, any of
+/// `text_fields` as text. Order-independent, because a browser sends `note`
+/// before or after the file depending on the form. A second part under
+/// `file_field` is refused rather than silently winning or losing: two files
+/// in one request is a client bug, and whichever we picked would be wrong for
+/// half of them.
+async fn read_upload(
+    mut multipart: axum::extract::Multipart,
+    file_field: &'static str,
+    text_fields: &[&'static str],
+) -> Result<UploadParts> {
+    let mut out = UploadParts {
+        file: None,
+        fields: Default::default(),
+    };
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
+    {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+        if name == file_field {
+            if out.file.is_some() {
+                return Err(Error::Validation(format!(
+                    "more than one `{file_field}` part — send one file per request"
+                )));
+            }
+            let filename = field.file_name().map(str::to_string);
+            let declared = field.content_type().unwrap_or("").to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
+            out.file = Some(FilePart {
+                filename,
+                declared,
+                bytes,
+            });
+        } else if let Some(key) = text_fields.iter().copied().find(|k| *k == name) {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?;
+            if !text.trim().is_empty() {
+                out.fields.insert(key, text);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `.txt` and nothing else, for now. PDF is a `SourceView` implementation and
 /// a later plan; refusing everything else by name is what keeps this one from
 /// quietly ingesting the bytes of a format it cannot read.
 async fn upload(
     State(st): State<AppState>,
     _id: Identity,
-    mut multipart: axum::extract::Multipart,
+    multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
-    {
-        if field.name() != Some("file") {
-            continue;
+    let parts = read_upload(multipart, "file", &["note"]).await?;
+    let Some(FilePart {
+        filename,
+        declared,
+        bytes,
+    }) = parts.file
+    else {
+        return Err(Error::Validation("no file in the upload".into()));
+    };
+    let note = parts.fields.get("note").cloned();
+    // A part may legally carry no `Content-Type` at all, and letting that
+    // skip the check turns "`.txt` and nothing else" into "anything whose
+    // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
+    // An absent type is not a pass; it just moves the question to the
+    // name, which is the only other thing the sender told us.
+    if declared.is_empty() {
+        if !named_txt(filename.as_deref()) {
+            return Err(Error::Validation(
+                "that upload declares no type and is not named `.txt` — \
+                 only text/plain is accepted"
+                    .into(),
+            ));
         }
-        let filename = field.file_name().map(str::to_string);
-        // A part may legally carry no `Content-Type` at all, and letting that
-        // skip the check turns "`.txt` and nothing else" into "anything whose
-        // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
-        // An absent type is not a pass; it just moves the question to the
-        // name, which is the only other thing the sender told us.
-        let declared = field.content_type().unwrap_or("").to_string();
-        if declared.is_empty() {
-            if !named_txt(filename.as_deref()) {
-                return Err(Error::Validation(
-                    "that upload declares no type and is not named `.txt` — \
-                     only text/plain is accepted"
-                        .into(),
-                ));
-            }
-        } else if !declared.starts_with("text/plain") {
-            return Err(Error::Validation(format!(
-                "that file is `{declared}` — only text/plain is accepted"
-            )));
-        }
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
-        // Refused rather than lossily converted: a corpus is quoted back
-        // verbatim, so text that arrived mangled would be a fidelity loss
-        // nothing downstream could detect.
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
-
-        let out = st
-            .core
-            .ingest_capture(
-                crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD).with_title(filename),
-            )
-            .await?;
-        let code = if out.duplicate {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        };
-        return Ok((code, Json(out)));
+    } else if !declared.starts_with("text/plain") {
+        return Err(Error::Validation(format!(
+            "that file is `{declared}` — only text/plain is accepted"
+        )));
     }
-    Err(Error::Validation("no file in the upload".into()))
+    // Refused rather than lossily converted: a corpus is quoted back
+    // verbatim, so text that arrived mangled would be a fidelity loss
+    // nothing downstream could detect.
+    let text = String::from_utf8(bytes.to_vec())
+        .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
+    let size = bytes.len();
+
+    let out = st
+        .core
+        .ingest_capture(
+            crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
+                .with_note(note)
+                .with_file(filename.as_deref(), size, "text/plain"),
+        )
+        .await?;
+    let code = if out.duplicate {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((code, Json(out)))
+}
+
+/// The image door. Parts: `image` (required), `title_hint`, `note`. The
+/// bytes are validated and stored here; the reading happens in a job.
+async fn upload_image(
+    State(st): State<AppState>,
+    _id: Identity,
+    multipart: axum::extract::Multipart,
+) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let mut parts = read_upload(multipart, "image", &["note", "title_hint"]).await?;
+    let Some(FilePart {
+        filename, bytes, ..
+    }) = parts.file
+    else {
+        return Err(Error::Validation("no image in the upload".into()));
+    };
+    let out = st
+        .core
+        .ingest_image(crate::core::ingest::ImageCapture {
+            bytes: bytes.to_vec(),
+            filename,
+            title_hint: parts.fields.remove("title_hint"),
+            note: parts.fields.remove("note"),
+        })
+        .await?;
+    // 202, not 201: stored, but the reading — the part that makes it a corpus
+    // anyone can search — is still queued.
+    let code = if out.duplicate {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((code, Json(out)))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ImageQuery {
+    #[serde(default)]
+    original: Option<String>,
+}
+
+/// The preview by default; `?original=1` for the bytes as uploaded.
+async fn get_image(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+    Query(q): Query<ImageQuery>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let want_original = q
+        .original
+        .as_deref()
+        .is_some_and(|v| v == "1" || v == "true");
+    let found = if want_original {
+        st.core.store.attachment_original(&id).await?
+    } else {
+        st.core.store.attachment_preview(&id).await?
+    };
+    let Some((mime, bytes)) = found else {
+        return Err(Error::NotFound);
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, max-age=3600".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -695,11 +831,17 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
     }))
 }
 
-pub fn api_router() -> Router<AppState> {
+pub fn api_router(image_max_bytes: usize) -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
         .route("/corpora/upload", post(upload))
+        // Its own ceiling: a phone photo is several times the global limit.
+        .route(
+            "/corpora/image",
+            post(upload_image).layer(axum::extract::DefaultBodyLimit::max(image_max_bytes)),
+        )
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
+        .route("/corpora/{id}/image", get(get_image))
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
@@ -822,6 +964,332 @@ pub(crate) mod tests {
             .header("content-type", format!("multipart/form-data; boundary={B}"))
             .body(Body::from(buf))
             .unwrap()
+    }
+
+    /// Like `post_file`, with text fields sent before the file part.
+    fn post_file_with(
+        uri: &str,
+        token: &str,
+        fields: &[(&str, &str)],
+        field_name: &str,
+        filename: &str,
+        mime: Option<&str>,
+        body: &[u8],
+    ) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let mut buf: Vec<u8> = Vec::new();
+        for (k, v) in fields {
+            buf.extend_from_slice(
+                format!("--{B}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                    .as_bytes(),
+            );
+        }
+        let typed = match mime {
+            Some(m) => format!("Content-Type: {m}\r\n"),
+            None => String::new(),
+        };
+        buf.extend_from_slice(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\n{typed}\r\n"
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(format!("\r\n--{B}--\r\n").as_bytes());
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    /// Two parts under the same file field, which no browser form sends and
+    /// no handler should guess about.
+    fn post_two_files(uri: &str, token: &str, field_name: &str, mime: &str) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let mut buf = String::new();
+        for (name, body) in [("a", "first"), ("b", "second")] {
+            buf.push_str(&format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{name}.txt\"\r\nContent-Type: {mime}\r\n\r\n{body}\r\n"
+            ));
+        }
+        buf.push_str(&format!("--{B}--\r\n"));
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_with_two_file_parts_is_refused() {
+        let (app, token, core) = app_token_and_core().await;
+        for (uri, field, mime) in [
+            ("/api/v1/corpora/upload", "file", "text/plain"),
+            ("/api/v1/corpora/image", "image", "image/png"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_two_files(uri, &token, field, mime))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let err = json_of(res).await["error"].as_str().unwrap().to_string();
+            assert!(err.contains("one file"), "{uri}: {err}");
+        }
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    fn a_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(24, 12, |x, _| Rgb([x as u8 * 10, 0, 0]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[tokio::test]
+    async fn an_image_upload_is_accepted_with_its_note_and_queued() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[
+                    ("note", "front of the router"),
+                    ("title_hint", "Router label"),
+                ],
+                "image",
+                "IMG_9.png",
+                Some("image/png"),
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let body = json_of(res).await;
+        assert_eq!(body["status"], "describing");
+        let id = body["id"].as_str().unwrap().to_string();
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.title_hint.as_deref(), Some("Router label"));
+        assert_eq!(src.metadata["note"], "front of the router");
+        assert_eq!(src.origin, "image");
+
+        // The same bytes again: 200, same id.
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[],
+                "image",
+                "IMG_9.png",
+                Some("image/png"),
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(json_of(res).await["id"], id);
+    }
+
+    #[tokio::test]
+    async fn the_image_door_refuses_junk_missing_parts_and_a_closed_door() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[],
+                "image",
+                "x.jpg",
+                Some("image/jpeg"),
+                b"not really",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_of(res).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("supported image")
+        );
+
+        let res = app
+            .clone()
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[("note", "n")],
+                "file",
+                "x.png",
+                Some("image/png"),
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "wrong part name is 'no image in the upload'"
+        );
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+
+        let (app, token, _) =
+            app_from_core(crate::core::test_support::test_core_without_vision().await).await;
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[],
+                "image",
+                "x.png",
+                Some("image/png"),
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_of(res).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_image_door_has_its_own_larger_body_limit() {
+        // Over the global 8 MB, under the image ceiling: the multipart parser
+        // gets to see it, so the answer is the handler's (junk → 400), not the
+        // framework's 413.
+        let (app, token) = app_and_token().await;
+        let big = vec![0u8; crate::web::MAX_BODY_BYTES + 1024];
+        let res = app
+            .clone()
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[],
+                "image",
+                "big.png",
+                Some("image/png"),
+                &big,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // And the text door still stops at 8 MB. Multipart streams, so the
+        // limit surfaces as a parse error inside the handler rather than a
+        // 413 from the framework; either way nothing is stored.
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "big.txt",
+                Some("text/plain"),
+                &big,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                res.status(),
+                StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+            ),
+            "{}",
+            res.status()
+        );
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_preview_and_the_original_are_served() {
+        let (app, token, _core) = app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(post_file_with(
+                "/api/v1/corpora/image",
+                &token,
+                &[],
+                "image",
+                "p.png",
+                Some("image/png"),
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/v1/corpora/{id}/image"), Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "image/jpeg");
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        assert!(image::load_from_memory(&bytes).is_ok());
+
+        let res = app
+            .clone()
+            .oneshot(get(
+                &format!("/api/v1/corpora/{id}/image?original=1"),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.headers()["content-type"], "image/png");
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        assert_eq!(bytes.to_vec(), a_png());
+
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/v1/corpora/{id}/image"), None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let res = app
+            .oneshot(get("/api/v1/corpora/nope/image", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_text_upload_records_its_note_and_file_facts() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/upload",
+                &token,
+                &[("note", "from the printer")],
+                "file",
+                "notes.txt",
+                Some("text/plain"),
+                b"hello there",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let m = core.store.get_corpus(&id).await.unwrap().metadata;
+        assert_eq!(m["note"], "from the printer");
+        assert_eq!(m["file"]["name"], "notes.txt");
+        assert_eq!(m["file"]["size"], 11);
     }
 
     #[tokio::test]
@@ -973,7 +1441,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_uploaded_filename_becomes_the_title_hint() {
+    async fn an_uploaded_filename_is_a_file_fact_not_a_title() {
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .oneshot(post_file(
@@ -988,7 +1456,11 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
         let src = core.store.get_corpus(&id).await.unwrap();
-        assert_eq!(src.title_hint.as_deref(), Some("mounting-notes.txt"));
+        assert_eq!(
+            src.title_hint, None,
+            "the Title stage names it; the filename is not a name"
+        );
+        assert_eq!(src.metadata["file"]["name"], "mounting-notes.txt");
         assert_eq!(src.origin, "upload");
         assert_eq!(src.source_url, None);
     }

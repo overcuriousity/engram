@@ -120,6 +120,17 @@ context_tokens = 32768
 # model = "bge-reranker-v2-m3"
 # style = "tei"
 
+# Reading captured images. Optional and disabled by default: with this block
+# absent the image door is closed and the capture page offers text only.
+# `model` is required. `base_url` and `api_key` default to the synthesize
+# role's, which is the common case — one local server hosting a multimodal
+# model. Set them when a separate vision endpoint serves the images.
+# [infer.vision]
+# model = "qwen2.5-vl-7b"
+# base_url = "http://localhost:8002/v1"
+# api_key = ""
+# timeout_secs = 120
+
 # ── Authentication ──────────────────────────────────────────────────────────
 # Exactly one mode is active.
 
@@ -274,3 +285,9 @@ fetch_max_bytes = 8388608
 # a corpus that quietly holds the subscribe prompt instead of the article is
 # worse than no capture at all.
 min_extracted_chars = 200
+# Bytes an uploaded image may weigh. The image door has its own ceiling
+# because a phone photo is several times the 8 MB the rest of the API allows.
+image_max_bytes = 26214400
+# Longest edge of the preview shown to the vision model and in the UI. The
+# original is stored untouched either way.
+image_preview_edge = 2048

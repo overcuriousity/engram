@@ -2,13 +2,16 @@ pub mod ask;
 pub mod background;
 pub mod extract;
 pub mod fetch;
+pub mod image;
 pub mod ingest;
 pub mod search;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
-use crate::infer::openai::{HttpCompleter, HttpEmbedder, HttpReranker, HttpSynthesizer};
-use crate::infer::{Completer, Embedder, Reranker, Synthesizer};
+use crate::infer::openai::{
+    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer,
+};
+use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer};
 use crate::store::Store;
 use crate::vector::VectorStore;
 use background::Background;
@@ -68,6 +71,8 @@ pub struct Core {
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub completer: Arc<dyn Completer>,
+    /// The vision model, when one is configured. `None` closes the image door.
+    pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
     /// so draining one drains them all.
@@ -101,6 +106,10 @@ pub struct Core {
     /// hidden, and nothing left that would ever notice. Shared by every
     /// clone, like the background queue.
     pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    /// How many uploads may be decoded at once. See
+    /// `image::MAX_CONCURRENT_DECODES`; shared by every clone, because a
+    /// per-clone permit would bound nothing.
+    pub decodes: Arc<tokio::sync::Semaphore>,
 }
 
 impl Core {
@@ -127,6 +136,15 @@ impl Core {
                 .as_ref()
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
+            describer: cfg.infer.vision.as_ref().map(|v| {
+                let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
+                Arc::new(HttpDescriber::new(
+                    &v.model,
+                    &base_url,
+                    api_key.as_deref(),
+                    v.timeout_secs,
+                )) as Arc<dyn Describer>
+            }),
             counter: Arc::new(TokenCounter::load(
                 cfg.infer.synthesize.tokenizer_path.as_deref(),
             )),
@@ -147,6 +165,9 @@ impl Core {
             ),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
         }
     }
 
@@ -187,7 +208,9 @@ impl Core {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
-    use crate::infer::fake::{FakeCompleter, FakeEmbedder, FakeReranker, FakeSynthesizer};
+    use crate::infer::fake::{
+        FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
+    };
     use crate::vector::memory::MemoryVectors;
 
     pub const TEST_DIM: usize = 8;
@@ -198,6 +221,19 @@ pub mod test_support {
 
     pub async fn test_core_with_failing_synthesizer() -> Core {
         build(Arc::new(FakeSynthesizer::failing("endpoint down")), None).await
+    }
+
+    /// A synthesizer whose every call comes back refused rather than
+    /// unanswered — the 400 an endpoint returns for a window it will never
+    /// take, which the worker classifies as permanent.
+    pub async fn test_core_with_rejecting_synthesizer() -> Core {
+        build(
+            Arc::new(FakeSynthesizer::rejecting(
+                "HTTP 400: context length exceeded",
+            )),
+            None,
+        )
+        .await
     }
 
     pub async fn test_core_with_rerank() -> Core {
@@ -221,6 +257,29 @@ pub mod test_support {
         (core, embedder)
     }
 
+    /// A core whose embedder is the given fake, for driving the embed stage
+    /// into a refusal.
+    pub async fn test_core_with_embedder(e: Arc<FakeEmbedder>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.embedder = e;
+        core
+    }
+
+    /// A core whose vision model is the given fake, for asserting what it was
+    /// asked and answering what a test needs.
+    pub async fn test_core_with_describer(d: Arc<FakeDescriber>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.describer = Some(d);
+        core
+    }
+
+    /// The shipped default: no `[infer.vision]`, image door closed.
+    pub async fn test_core_without_vision() -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.describer = None;
+        core
+    }
+
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
@@ -230,6 +289,7 @@ pub mod test_support {
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             completer: Arc::new(FakeCompleter::default()),
+            describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter::Estimate),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
@@ -249,6 +309,9 @@ pub mod test_support {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            decodes: Arc::new(tokio::sync::Semaphore::new(
+                crate::core::image::MAX_CONCURRENT_DECODES,
+            )),
         }
     }
 }

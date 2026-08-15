@@ -26,14 +26,24 @@
      and this one is multipart. #}
   <label class="row muted" id="drop"
          style="border:1px dashed var(--line);padding:.6rem;border-radius:.4rem">
+    {% if vision_enabled %}
+    <input type="file" name="file" accept=".txt,text/plain,image/*" hidden>
+    <span>…or drop a <code>.txt</code> file or an image here — on a phone, tap to take a photo.</span>
+    {% else %}
     <input type="file" name="file" accept=".txt,text/plain" hidden>
     <span>…or drop a <code>.txt</code> file here.</span>
+    {% endif %}
   </label>
   <div class="row">
     <button class="btn btn-accent" type="submit">Capture</button>
     <span class="spinner">saving…</span>
   </div>
 </form>
+{# Context for whatever file comes next: a sentence about what it is. Sent
+   with the file, then cleared. For an image the vision model reads it too.
+   Outside the form above on purpose, so a text paste does not send it. #}
+<input class="input" type="text" name="note" maxlength="2000" style="margin-top:.6rem;width:100%"
+       placeholder="Add context for the file (optional) — what is it, why keep it?">
 <div id="capture-result" style="margin-top:1rem"></div>
 
 {% if !pairs.is_empty() %}
@@ -72,17 +82,27 @@
 
     var drop = document.getElementById('drop');
     var picker = drop && drop.querySelector('input[type=file]');
+    var noteBox = document.querySelector('input[name="note"]');
+    var VISION = {% if vision_enabled %}true{% else %}false{% endif %};
     function send(file) {
       if (!file) return;
+      var isImage = file.type.indexOf('image/') === 0;
+      var result = document.getElementById('capture-result');
+      if (isImage && !VISION) {
+        result.textContent = 'Image capture is not configured on this server.';
+        return;
+      }
       var payload = new FormData();
-      payload.append('file', file);
+      if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
+      payload.append(isImage ? 'image' : 'file', file, file.name || (isImage ? 'photo.jpg' : 'paste.txt'));
+      var url = isImage ? '/api/v1/corpora/image' : '/api/v1/corpora/upload';
       // The session cookie authenticates this: it is same-origin, so no token
       // is involved.
-      fetch('/api/v1/corpora/upload', { method: 'POST', body: payload })
-        // Not every failure answers in JSON. A file over the 8 MB body limit
-        // is rejected by the framework before the handler sees it, and that
-        // reply is plain text — parsing it threw, and with nothing catching
-        // the throw the drop zone sat there having visibly done nothing.
+      fetch(url, { method: 'POST', body: payload })
+        // Not every failure answers in JSON. A file over the body limit is
+        // rejected before the handler sees it, and that reply is plain text —
+        // parsing it threw, and with nothing catching the throw the drop zone
+        // sat there having visibly done nothing.
         .then(function (r) {
           return r.json()
             .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
@@ -90,12 +110,16 @@
         })
         .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
         .then(function (pair) {
-          var result = document.getElementById('capture-result');
           // The server's reason, verbatim. A generic "upload failed" would
-          // hide the two things that actually go wrong here: wrong type and
-          // wrong encoding.
-          result.textContent = pair[0] ? 'Captured.' : (pair[1].error || 'Upload failed.');
-          if (pair[0]) htmx.trigger(document.body, 'captured');
+          // hide what actually goes wrong here: wrong type, wrong encoding,
+          // an image door that is closed.
+          result.textContent = pair[0]
+            ? (isImage ? 'Captured — the photo is queued to be read.' : 'Captured.')
+            : (pair[1].error || 'Upload failed.');
+          if (pair[0]) {
+            if (noteBox) noteBox.value = '';
+            htmx.trigger(document.body, 'captured');
+          }
         });
     }
     if (drop) {
@@ -106,6 +130,23 @@
         send(e.dataTransfer.files[0]);
       });
     }
+    // A pasted screenshot goes the same way as a dropped one — unless the
+    // paste is on its way somewhere that takes text. A clipboard from Sheets,
+    // Excel or Word carries the selection twice, as text and as a picture of
+    // itself, so taking the picture while the caret sat in the note box
+    // uploaded a screenshot and swallowed the paste the user asked for.
+    document.addEventListener('paste', function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+          e.preventDefault();
+          send(items[i].getAsFile());
+          return;
+        }
+      }
+    });
   })();
 </script>
 {% endblock %}

@@ -1,10 +1,11 @@
 //! How the right-hand pane gets at the text a chunk claims to come from.
 //!
 //! A trait rather than a function because the answer depends on what the
-//! source is. Today every source is raw text and `TextLines` answers all of
-//! them. A PDF source will implement the same trait — its label reads
-//! `page 42` and its lines come from extracted text — and nothing in the pane
-//! needs to know which implementation answered.
+//! source is. A text source is answered by `TextLines`; an image source by
+//! `ImageTranscript`, whose lines are the model's reading of the picture. A
+//! PDF source will implement the same trait — its label reads `page 42` and
+//! its lines come from extracted text — and nothing in the pane needs to know
+//! which implementation answered.
 
 use crate::store::artifacts::CorpusSpan;
 use crate::store::corpora::Corpus;
@@ -75,10 +76,29 @@ impl CorpusView for TextLines {
     }
 }
 
-/// The view for a source. One implementation today; this is where a PDF source
-/// will branch.
-pub fn for_corpus(_source: &Corpus) -> Box<dyn CorpusView> {
-    Box::new(TextLines)
+/// An image corpus: the lines are the model's reading of the picture, and the
+/// label says so, because a span into a transcription is a claim about what
+/// the model wrote, not about what the photo shows.
+pub struct ImageTranscript;
+
+impl CorpusView for ImageTranscript {
+    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
+        let mut s = TextLines.slice(source, span, context);
+        s.label = match span {
+            Some(sp) => format!("transcription lines {}–{}", sp.start_line, sp.end_line),
+            None => "transcription".into(),
+        };
+        s
+    }
+}
+
+/// The view for a source. This is where a PDF source will branch too.
+pub fn for_corpus(source: &Corpus) -> Box<dyn CorpusView> {
+    if source.origin == crate::core::ingest::ORIGIN_IMAGE {
+        Box::new(ImageTranscript)
+    } else {
+        Box::new(TextLines)
+    }
 }
 
 #[cfg(test)]
@@ -136,5 +156,47 @@ mod tests {
             2,
         );
         assert!(slice.lines.iter().all(|l| l.number <= 2));
+    }
+
+    #[tokio::test]
+    async fn an_image_corpus_labels_its_lines_as_transcription() {
+        let s = crate::store::Store::memory().await.unwrap();
+        let src = s
+            .insert_image_corpus(
+                "h",
+                "image",
+                None,
+                &serde_json::json!({}),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: None,
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(1),
+                    height: Some(1),
+                },
+            )
+            .await
+            .unwrap()
+            .into_corpus();
+        s.set_described_text(&src.id, "a\nb\nc", vec![])
+            .await
+            .unwrap();
+        let src = s.get_corpus(&src.id).await.unwrap();
+        let view = for_corpus(&src);
+        assert_eq!(
+            view.slice(
+                &src,
+                Some(&CorpusSpan {
+                    start_line: 2,
+                    end_line: 2
+                }),
+                0
+            )
+            .label,
+            "transcription lines 2–2"
+        );
+        assert_eq!(view.slice(&src, None, 0).label, "transcription");
     }
 }

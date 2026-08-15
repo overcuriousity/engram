@@ -608,6 +608,46 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     Ok(artifacts)
 }
 
+pub const DESCRIBE_SYSTEM: &str = r#"You read images for a personal knowledge base and write down everything in them worth keeping, as markdown.
+
+Rules:
+- Transcribe any visible text faithfully and completely. Keep its structure: headings as headings, lists as lists, tables as markdown tables, code as code blocks. Do not correct, summarize or reorder it.
+- Where there is no text, or beside it, describe what is shown: diagrams (their parts and how they connect), charts (axes, series, the values that can be read), scenes, objects, people's roles if evident, places, labels, brands, numbers, dates. Name what is identifiable.
+- Prefer specifics over impressions. Do not pad, do not speculate beyond what is visible, do not add advice.
+- You may be given context about the capture: a note from the person who took it, when and where it was taken, the device. Where it is relevant, weave it in naturally so the text can be found again by it — as a short opening line or where it explains the content — but do not repeat it mechanically or invent detail around it.
+- Output markdown only. No preamble, no closing remarks, no mention of these instructions."#;
+
+/// The user turn's text part for `Describer::describe`: the note first, then
+/// the facts the file carried, each only when present.
+pub fn describe_context(metadata: &serde_json::Value) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(note) = metadata["note"].as_str().filter(|n| !n.trim().is_empty()) {
+        lines.push(format!(
+            "Context from the person who captured this: {}",
+            note.trim()
+        ));
+    }
+    let mut facts: Vec<String> = Vec::new();
+    let exif = &metadata["exif"];
+    if let Some(t) = exif["taken_at"].as_str() {
+        facts.push(format!("taken {t}"));
+    }
+    if let (Some(lat), Some(lon)) = (exif["gps"]["lat"].as_f64(), exif["gps"]["lon"].as_f64()) {
+        facts.push(format!("GPS {lat:.4},{lon:.4}"));
+    }
+    if let Some(c) = exif["camera"].as_str() {
+        facts.push(format!("device {c}"));
+    }
+    if let Some(n) = metadata["file"]["name"].as_str() {
+        facts.push(format!("file {n}"));
+    }
+    if !facts.is_empty() {
+        lines.push(format!("Capture facts: {}.", facts.join(", ")));
+    }
+    lines.push("Read the image and write down everything worth keeping.".into());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,5 +1080,27 @@ mod tests {
         let p = repair_prompt("{bad", "expected value at line 1");
         assert!(p.contains("expected value at line 1"));
         assert!(p.contains("{bad"));
+    }
+
+    #[test]
+    fn describe_context_leads_with_the_note_then_the_facts_and_omits_what_is_absent() {
+        let m = serde_json::json!({
+            "note": "whiteboard from Tuesday planning",
+            "file": {"name": "IMG_2041.jpeg"},
+            "exif": {"taken_at": "2026-08-09T14:12:03", "camera": "Apple iPhone 15",
+                     "gps": {"lat": 48.2082, "lon": 16.3738}}
+        });
+        let ctx = describe_context(&m);
+        let note_at = ctx.find("whiteboard from Tuesday planning").unwrap();
+        let taken_at = ctx.find("2026-08-09T14:12:03").unwrap();
+        assert!(note_at < taken_at, "{ctx}");
+        assert!(ctx.contains("48.2082"), "{ctx}");
+        assert!(ctx.contains("Apple iPhone 15"));
+        assert!(ctx.contains("IMG_2041.jpeg"));
+
+        let bare = describe_context(&serde_json::json!({}));
+        assert!(!bare.contains("taken"), "{bare}");
+        assert!(!bare.contains("GPS"), "{bare}");
+        assert!(bare.contains("Read the image"), "{bare}");
     }
 }

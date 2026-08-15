@@ -317,6 +317,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         embedder: Arc::new(engram::infer::fake::FakeEmbedder::new(8)),
         reranker: None,
         completer: Arc::new(engram::infer::fake::FakeCompleter::default()),
+        describer: None,
         counter: Arc::new(engram::infer::budget::TokenCounter::Estimate),
         background: Arc::new(engram::core::background::Background::default()),
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
@@ -333,6 +334,10 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         )),
         corpus_locks: Default::default(),
         lifecycle_lock: Default::default(),
+        // The benchmark ingests no images, so nothing ever takes a permit.
+        decodes: Arc::new(tokio::sync::Semaphore::new(
+            engram::core::image::MAX_CONCURRENT_DECODES,
+        )),
     };
     let translated = index(&core, &artifacts).await;
 

@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod attachments;
 pub mod auth;
 pub mod corpora;
 pub mod feedback;
@@ -107,6 +108,9 @@ impl Store {
             // existing row, which is correct: nothing predating the column
             // was explicitly restored.
             ("artifact_sources", "restored", "INTEGER NOT NULL DEFAULT 0"),
+            // Arrived with image capture. Every corpus predating it recorded
+            // nothing beyond its text, which is what the empty object says.
+            ("corpora", "metadata", "TEXT NOT NULL DEFAULT '{}'"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -310,7 +314,15 @@ mod tests {
 
         // And a capture still works against the upgraded base.
         let c = store
-            .insert_corpus_with_signature("alpha\n\nbeta", "web", None, vec![], None)
+            .insert_corpus_with_signature(
+                "alpha\n\nbeta",
+                "web",
+                None,
+                vec![],
+                None,
+                &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
+            )
             .await
             .unwrap()
             .into_corpus();
@@ -405,7 +417,15 @@ mod tests {
         // And the defaults have to be the truth about an artifact that predates
         // merging, or every one of them reads back as a merge with no sources.
         let c = store
-            .insert_corpus_with_signature("alpha\n\nbeta", "web", None, vec![], None)
+            .insert_corpus_with_signature(
+                "alpha\n\nbeta",
+                "web",
+                None,
+                vec![],
+                None,
+                &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
+            )
             .await
             .unwrap()
             .into_corpus();

@@ -81,3 +81,12 @@ pub trait Completer: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<String>;
     fn context_tokens(&self) -> usize;
 }
+
+/// Reads a captured image into text. One call per image; the caller has
+/// already decoded, oriented and downscaled the picture into a JPEG.
+#[async_trait]
+pub trait Describer: Send + Sync {
+    /// `context` is what is known about the capture beyond its pixels — the
+    /// user's note, when and where it was taken. Markdown comes back.
+    async fn describe(&self, image_jpeg: &[u8], context: &str) -> Result<String>;
+}

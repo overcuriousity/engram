@@ -1,9 +1,26 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::corpora::{CorpusStatus, Insertion, NearDuplicate, content_hash};
+use crate::store::corpora::{CorpusStatus, Followup, Insertion, NearDuplicate, content_hash};
 use crate::store::jobs::Stage;
 use crate::store::now;
+
+/// The channel an image arrives through. Its own value, like `upload`, so
+/// the queue and the detail page can tell a photo from a paste.
+pub const ORIGIN_IMAGE: &str = "image";
+/// Longest note kept. Context, not a document: someone wanting to say more
+/// than this has a paste box.
+pub const MAX_NOTE_CHARS: usize = 2000;
+
+/// The user's context for a capture, cleaned: trimmed, capped, `None` when
+/// there is nothing in it.
+fn clean_note(note: Option<String>) -> Option<String> {
+    let n = note?.trim().to_string();
+    if n.is_empty() {
+        return None;
+    }
+    Some(n.chars().take(MAX_NOTE_CHARS).collect())
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IngestOutcome {
@@ -51,6 +68,15 @@ pub enum NearDupeAction {
     Discard,
 }
 
+/// One image, whichever door it arrived through.
+#[derive(Debug, Clone)]
+pub struct ImageCapture {
+    pub bytes: Vec<u8>,
+    pub filename: Option<String>,
+    pub title_hint: Option<String>,
+    pub note: Option<String>,
+}
+
 /// One capture, whichever door it arrived through.
 ///
 /// A struct rather than four positional arguments: `origin` and `source_url`
@@ -65,6 +91,8 @@ pub struct Capture {
     /// Where the text was read. Provenance, never an instruction: nothing
     /// downstream ever fetches this.
     pub source_url: Option<String>,
+    /// What the door knew beyond the text. Namespaced; see the schema comment.
+    pub metadata: serde_json::Value,
 }
 
 impl Capture {
@@ -74,7 +102,25 @@ impl Capture {
             origin: origin.into(),
             title_hint: None,
             source_url: None,
+            metadata: serde_json::json!({}),
         }
+    }
+
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        if let Some(n) = clean_note(note) {
+            self.metadata["note"] = serde_json::Value::String(n);
+        }
+        self
+    }
+
+    /// The `file` facts of an uploaded text file.
+    pub fn with_file(mut self, name: Option<&str>, size: usize, mime: &str) -> Self {
+        let mut f = serde_json::json!({ "size": size, "mime": mime });
+        if let Some(n) = name {
+            f["name"] = serde_json::Value::String(n.to_string());
+        }
+        self.metadata["file"] = f;
+        self
     }
 
     pub fn with_title(mut self, title: Option<String>) -> Self {
@@ -128,9 +174,28 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
+        // Parked, or queued. Synthesis is the expensive stage and text that
+        // resembles something stored may not deserve it; an operator decides
+        // on Ops. Nothing is lost either way — the corpus is stored verbatim
+        // like any other. Written with the row, not after it.
+        let followup = match &near {
+            Some(n) => Followup::Park {
+                of: n.corpus_id.clone(),
+                similarity: n.similarity,
+            },
+            None => Followup::Queue(Stage::Synthesize),
+        };
         let src = match self
             .store
-            .insert_corpus_with_signature(text, origin, title_hint, sig, c.source_url.as_deref())
+            .insert_corpus_with_signature(
+                text,
+                origin,
+                title_hint,
+                sig,
+                c.source_url.as_deref(),
+                &c.metadata,
+                followup,
+            )
             .await?
         {
             Insertion::Created(src) => src,
@@ -153,40 +218,157 @@ impl Core {
         };
 
         match &near {
-            // Parked. Synthesis is the expensive stage and this text may not
-            // deserve it; an operator decides on Ops. Nothing is lost either
-            // way — the corpus is stored verbatim like any other.
-            Some(n) => {
-                self.store
-                    .set_near_dupe(&src.id, Some(&n.corpus_id), Some(n.similarity))
-                    .await?;
-                self.store
-                    .set_corpus_status(&src.id, CorpusStatus::NeedsReview)
-                    .await?;
-                tracing::info!(
-                    corpus_id = %src.id,
-                    near = %n.corpus_id,
-                    similarity = n.similarity,
-                    "capture looks like an existing corpus; parked for review"
-                );
-            }
-            None => {
-                self.store
-                    .enqueue(Stage::Synthesize, "corpus", &src.id)
-                    .await?;
-                tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested");
-            }
+            Some(n) => tracing::info!(
+                corpus_id = %src.id,
+                near = %n.corpus_id,
+                similarity = n.similarity,
+                "capture looks like an existing corpus; parked for review"
+            ),
+            None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
         }
 
         Ok(IngestOutcome {
             id: src.id,
-            status: if near.is_some() {
-                CorpusStatus::NeedsReview
-            } else {
-                CorpusStatus::Raw
-            },
+            status: src.status,
             duplicate: false,
             near_duplicate: near,
+        })
+    }
+
+    /// The fork every capture reaches once its text is known: parked next to
+    /// what it resembles, or queued for synthesis. The status write is here so
+    /// no caller can park without saying what it parked beside.
+    pub(crate) async fn park_or_queue(
+        &self,
+        corpus_id: &str,
+        near: Option<&crate::store::corpora::NearDuplicate>,
+    ) -> Result<()> {
+        let followup = match near {
+            Some(n) => crate::store::corpora::Followup::Park {
+                of: n.corpus_id.clone(),
+                similarity: n.similarity,
+            },
+            None => crate::store::corpora::Followup::Queue(Stage::Synthesize),
+        };
+        // One transaction, the same one a text capture's insert uses: the
+        // status and the job it implies cannot be written apart.
+        self.store.apply_followup(corpus_id, followup).await?;
+        if let Some(n) = near {
+            tracing::info!(
+                corpus_id,
+                near = %n.corpus_id,
+                similarity = n.similarity,
+                "looks like an existing corpus; parked for review"
+            );
+        }
+        Ok(())
+    }
+
+    /// Store the image and queue the vision stage. Like `ingest_capture`, this
+    /// makes no inference call: the phone gets its answer the moment the bytes
+    /// are safe, and a dead vision endpoint costs a wait, not a photo.
+    pub async fn ingest_image(&self, c: ImageCapture) -> Result<IngestOutcome> {
+        if self.describer.is_none() {
+            return Err(Error::Validation(
+                "image capture is not configured — set [infer.vision] to enable it".into(),
+            ));
+        }
+        let ImageCapture {
+            bytes,
+            filename,
+            title_hint,
+            note,
+        } = c;
+        // Hashed and looked up before it is decoded: a photo sent twice costs
+        // one SHA-256 the second time, not a full decode and re-encode.
+        let hash = content_hash(&bytes);
+        if let Some(existing) = self.store.find_by_hash(&hash).await? {
+            tracing::info!(corpus_id = %existing.id, "duplicate image, returning existing source");
+            return Ok(IngestOutcome {
+                id: existing.id,
+                status: existing.status,
+                duplicate: true,
+                near_duplicate: None,
+            });
+        }
+        // Decoding, EXIF, the preview and its re-encode are a synchronous walk
+        // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
+        // is seconds during which search, health and the queue poll on that
+        // thread all wait; see `web::api::extract` for the same move.
+        //
+        // Held across the whole decode, and taken before it rather than inside
+        // it: the blocking pool is 512 threads deep, so without a permit the
+        // only bound on how much of this runs at once is how fast clients can
+        // post. See `image::MAX_CONCURRENT_DECODES`.
+        let edge = self.capture.image_preview_edge;
+        let permit = self
+            .decodes
+            .acquire()
+            .await
+            .expect("the decode permit is never closed");
+        let decoded = tokio::task::spawn_blocking(move || {
+            let prepared = super::image::prepare(&bytes, edge)?;
+            Ok::<_, Error>((bytes, prepared))
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("image preparation did not finish: {e}")))?;
+        drop(permit);
+        let (bytes, prepared) = decoded?;
+
+        let mut metadata = serde_json::json!({
+            "file": super::image::file_facts(filename.as_deref(), bytes.len(), &prepared),
+        });
+        if prepared.exif.as_object().is_some_and(|o| !o.is_empty()) {
+            metadata["exif"] = prepared.exif.clone();
+        }
+        if let Some(n) = clean_note(note) {
+            metadata["note"] = serde_json::Value::String(n);
+        }
+        // A filename is a file fact, not a name: `photo.jpg` and `image.png`
+        // are what a camera and a clipboard call everything. Seeding the title
+        // from it would disarm the one stage that can name the capture.
+
+        let attachment = crate::store::attachments::NewImage {
+            kind: "image",
+            mime: prepared.mime,
+            filename: filename.as_deref(),
+            bytes: &bytes,
+            preview: &prepared.preview_jpeg,
+            width: Some(prepared.width as i64),
+            height: Some(prepared.height as i64),
+        };
+        let src = match self
+            .store
+            .insert_image_corpus(
+                &hash,
+                ORIGIN_IMAGE,
+                title_hint.as_deref(),
+                &metadata,
+                &attachment,
+            )
+            .await?
+        {
+            Insertion::Created(src) => src,
+            Insertion::Existing(existing) => {
+                return Ok(IngestOutcome {
+                    id: existing.id,
+                    status: existing.status,
+                    duplicate: true,
+                    near_duplicate: None,
+                });
+            }
+        };
+        tracing::info!(
+            corpus_id = %src.id,
+            bytes = bytes.len(),
+            mime = prepared.mime,
+            "image captured; queued for reading"
+        );
+        Ok(IngestOutcome {
+            id: src.id,
+            status: CorpusStatus::Describing,
+            duplicate: false,
+            near_duplicate: None,
         })
     }
 
@@ -815,50 +997,68 @@ impl Core {
         Ok(())
     }
 
+    /// Everything a rerun of the pipeline from `raw_text` has to forget first.
+    /// Shared by re-segment and re-read; the comment on each line is the reason
+    /// the line exists.
+    async fn forget_derived_work(&self, id: &str) -> Result<()> {
+        // Re-segmenting replaces every chunk, so the old vectors and rows go
+        // first.
+        self.vectors.delete_by_corpus(id).await?;
+        for c in self.store.artifacts_for_corpus(id).await? {
+            self.store.delete_artifact(&c.id).await?;
+        }
+        // The window rows are the segment job's memory of what it has already
+        // done. Leaving them behind means the rerun finds every window `done`,
+        // segments nothing, and lands on a source with no chunks at all.
+        // Re-windowing is also the point of a reprocess after a model or budget
+        // change.
+        self.store.clear_segments(id).await?;
+        // The measure those windows produced goes with them. It is not just
+        // stale: the reconciliation sweep identifies a document whose last
+        // window resolved but whose `settle` never ran by having no coverage,
+        // so a value left over from the previous run reads as "already
+        // finished". A rerun that dies in exactly that window would then be
+        // stuck in `segmenting` for good — nothing resolves again to trigger
+        // `settle`, and the one sweep that repairs it has been told there is
+        // nothing to repair.
+        self.store.clear_corpus_coverage(id).await?;
+        // And the units that name those windows, which outlive them. Planning
+        // arms idle-only, so a unit still queued from the run being replaced
+        // would carry its attempts into the rerun — the person who asked for
+        // another try would get a window that gives up after one.
+        self.store.delete_window_jobs(id).await?;
+        // The title unit is armed once per corpus and never again, so that a
+        // document the model will not name stops costing calls. The row is
+        // what remembers that, which also means a corpus left unnamed by a
+        // transient failure could never be named again — including by the
+        // person who noticed and asked for the rerun. An explicit reprocess is
+        // exactly the case that rule is not meant to cover.
+        self.store.delete_job(Stage::Title, id).await?;
+        // Reprocessing a parked capture is a decision to process it, so the
+        // park has to be lifted with it. Leaving the flag set means a fully
+        // synthesized and embedded corpus sits on the review queue forever,
+        // where the discard button now deletes real work.
+        self.store.set_near_dupe(id, None, None).await?;
+        Ok(())
+    }
+
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
         let src = self.store.get_corpus(id).await?;
         match stage {
             Stage::Synthesize | Stage::Enrich => {
-                // Re-segmenting replaces every chunk, so the old vectors and
-                // rows go first.
-                self.vectors.delete_by_corpus(&src.id).await?;
-                for c in self.store.artifacts_for_corpus(&src.id).await? {
-                    self.store.delete_artifact(&c.id).await?;
+                // Re-segmenting starts from `raw_text`, and an image whose read
+                // has not landed has none. Flipping it to `raw` would have
+                // synthesis fail on empty text and the pending read then find
+                // a corpus that is no longer `describing` — a photo never
+                // read, by way of a button that promised to process it.
+                if src.status == CorpusStatus::Describing
+                    || (src.origin == ORIGIN_IMAGE && src.raw_text.trim().is_empty())
+                {
+                    return Err(Error::Validation(
+                        "this image has not been read yet — re-read it instead".into(),
+                    ));
                 }
-                // The window rows are the segment job's memory of what it has
-                // already done. Leaving them behind means the rerun finds every
-                // window `done`, segments nothing, and lands on a source with
-                // no chunks at all. Re-windowing is also the point of a
-                // reprocess after a model or budget change.
-                self.store.clear_segments(&src.id).await?;
-                // The measure those windows produced goes with them. It is not
-                // just stale: the reconciliation sweep identifies a document
-                // whose last window resolved but whose `settle` never ran by
-                // having no coverage, so a value left over from the previous run
-                // reads as "already finished". A rerun that dies in exactly that
-                // window would then be stuck in `segmenting` for good — nothing
-                // resolves again to trigger `settle`, and the one sweep that
-                // repairs it has been told there is nothing to repair.
-                self.store.clear_corpus_coverage(&src.id).await?;
-                // And the units that name those windows, which outlive them.
-                // Planning arms idle-only, so a unit still queued from the run
-                // being replaced would carry its attempts into the rerun — the
-                // person who asked for another try would get a window that gives
-                // up after one.
-                self.store.delete_window_jobs(&src.id).await?;
-                // The title unit is armed once per corpus and never again, so
-                // that a document the model will not name stops costing calls.
-                // The row is what remembers that, which also means a corpus left
-                // unnamed by a transient failure could never be named again —
-                // including by the person who noticed and asked for the rerun.
-                // An explicit reprocess is exactly the case that rule is not
-                // meant to cover.
-                self.store.delete_job(Stage::Title, &src.id).await?;
-                // Reprocessing a parked capture is a decision to process it, so
-                // the park has to be lifted with it. Leaving the flag set means
-                // a fully synthesized and embedded corpus sits on the review
-                // queue forever, where the discard button now deletes real work.
-                self.store.set_near_dupe(&src.id, None, None).await?;
+                self.forget_derived_work(&src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
@@ -895,6 +1095,36 @@ impl Core {
                         .into(),
                 ));
             }
+            // A stored image can always be read again — with a better model, or
+            // after the endpoint that refused it is fixed. The reading and
+            // everything derived from it are replaced wholesale, because a
+            // chunk of the old reading has no span in the new one.
+            Stage::Describe => {
+                if !self.store.has_attachment(&src.id).await? {
+                    return Err(Error::Validation(
+                        "only a captured image can be re-read".into(),
+                    ));
+                }
+                if self.describer.is_none() {
+                    return Err(Error::Validation(
+                        "image capture is not configured — set [infer.vision] to enable it".into(),
+                    ));
+                }
+                self.forget_derived_work(&src.id).await?;
+                self.store.clear_described_text(&src.id).await?;
+                let mut meta = src.metadata.clone();
+                if let Some(m) = meta.as_object_mut() {
+                    m.remove("describe");
+                }
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::Describing)
+                    .await?;
+                self.heal_dangling_supersessions().await?;
+                self.store
+                    .enqueue(Stage::Describe, "corpus", &src.id)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -902,11 +1132,224 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::ingest::{NearDupeAction, StoreDrift};
+    use crate::core::ingest::{
+        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, StoreDrift,
+    };
     use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::error::Error;
     use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    fn a_seeded_png(seed: u8) -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(16, 16, |x, y| Rgb([seed, x as u8, y as u8]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn an_image(seed: u8) -> ImageCapture {
+        ImageCapture {
+            bytes: a_seeded_png(seed),
+            filename: None,
+            title_hint: None,
+            note: None,
+        }
+    }
+
+    /// `MAX_IMAGE_EDGE` and `MAX_DECODE_BYTES` bound one image and say nothing
+    /// about ten at once. Decoding runs on a 512-thread blocking pool through
+    /// no gate at all, so without a permit the ceiling on resident pixels is
+    /// however many uploads a client cares to have in flight.
+    #[tokio::test]
+    async fn only_so_many_uploads_are_decoded_at_once() {
+        let core = test_core().await;
+        // Stand in for the decodes already running: hold every permit, and the
+        // next capture must wait rather than start a decode of its own.
+        let held = core
+            .decodes
+            .clone()
+            .acquire_many_owned(crate::core::image::MAX_CONCURRENT_DECODES as u32)
+            .await
+            .unwrap();
+
+        let mut waiting = tokio::spawn({
+            let core = core.clone();
+            async move { core.ingest_image(an_image(11)).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiting)
+                .await
+                .is_err(),
+            "a capture must not decode while the permits are all taken"
+        );
+        waiting.abort();
+
+        drop(held);
+        // And once they are free again it goes through as usual.
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            core.ingest_image(an_image(12)),
+        )
+        .await
+        .expect("released permits let the next capture through")
+        .unwrap();
+        assert!(!out.duplicate);
+    }
+
+    #[tokio::test]
+    async fn re_reading_a_failed_image_clears_the_reason_and_queues_describe_again() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(1)).await.unwrap().id;
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        core.store.complete_job(job.id).await.unwrap();
+
+        core.reprocess(&id, Stage::Describe).await.unwrap();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Describing);
+        assert!(src.metadata.get("describe").is_none());
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("describe re-armed");
+        assert_eq!(
+            (job.stage, job.target_id.as_str()),
+            (Stage::Describe, id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn re_reading_a_ready_image_starts_it_over_from_the_pixels() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(2)).await.unwrap().id;
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Ready
+        );
+
+        core.reprocess(&id, Stage::Describe).await.unwrap();
+
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Describing);
+        assert_eq!(src.raw_text, "");
+        assert!(src.shingles.is_empty());
+        assert!(
+            core.store
+                .artifacts_for_corpus(&id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn re_segmenting_an_image_that_has_not_been_read_is_refused() {
+        let core = test_core().await;
+        let id = core.ingest_image(an_image(3)).await.unwrap().id;
+        // Still describing.
+        assert!(matches!(
+            core.reprocess(&id, Stage::Synthesize).await,
+            Err(Error::Validation(_))
+        ));
+        // Failed before any text was read.
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        assert!(matches!(
+            core.reprocess(&id, Stage::Synthesize).await,
+            Err(Error::Validation(_))
+        ));
+        // The describe job and the status are untouched either way.
+        assert!(core.store.live_job(Stage::Describe, &id).await.unwrap());
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_image_is_recognised_by_the_shared_hash() {
+        let core = test_core().await;
+        let bytes = a_seeded_png(4);
+        let first = core
+            .ingest_image(ImageCapture {
+                bytes: bytes.clone(),
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        let src = core.store.get_corpus(&first.id).await.unwrap();
+        assert_eq!(
+            src.content_hash,
+            crate::store::corpora::content_hash(&bytes)
+        );
+        let again = core
+            .ingest_image(ImageCapture {
+                bytes,
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+    }
+
+    #[tokio::test]
+    async fn an_image_filename_is_kept_as_a_file_fact_and_not_used_as_its_title() {
+        let core = test_core().await;
+        let id = core
+            .ingest_image(ImageCapture {
+                bytes: a_seeded_png(5),
+                filename: Some("photo.jpg".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let src = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(src.title_hint, None);
+        assert_eq!(src.metadata["file"]["name"], "photo.jpg");
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        assert!(
+            core.store
+                .get_corpus(&id)
+                .await
+                .unwrap()
+                .title_hint
+                .is_some(),
+            "the Title stage named it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_corpus_cannot_be_re_read() {
+        let core = test_core().await;
+        let src = core.ingest("some text", "web", None).await.unwrap();
+        assert!(matches!(
+            core.reprocess(&src.id, Stage::Describe).await,
+            Err(Error::Validation(_))
+        ));
+    }
 
     #[tokio::test]
     async fn healing_a_dangling_supersession_leaves_no_unfinished_write_behind() {
@@ -1700,5 +2143,168 @@ mod tests {
         let drift = core.heal_store_drift().await.unwrap();
 
         assert_eq!(drift, StoreDrift::default(), "{drift:?}");
+    }
+
+    fn a_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(40, 20, |x, _| Rgb([(x * 6) as u8, 0, 0]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[tokio::test]
+    async fn an_image_capture_stores_the_original_and_queues_describe_without_calling_the_model() {
+        let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
+        let core = crate::core::test_support::test_core_with_describer(describer.clone()).await;
+        let bytes = a_png();
+        let out = core
+            .ingest_image(ImageCapture {
+                bytes: bytes.clone(),
+                filename: Some("IMG_1.png".into()),
+                title_hint: None,
+                note: Some("  the kitchen whiteboard ".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.status, CorpusStatus::Describing);
+        assert!(!out.duplicate);
+        assert_eq!(describer.calls(), 0, "capture must not call the model");
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.origin, ORIGIN_IMAGE);
+        assert_eq!(src.raw_text, "");
+        assert_eq!(
+            src.title_hint, None,
+            "a filename is a file fact; the Title stage names the capture"
+        );
+        assert_eq!(src.metadata["note"], "the kitchen whiteboard");
+        assert_eq!(src.metadata["file"]["name"], "IMG_1.png");
+        assert_eq!(src.metadata["file"]["mime"], "image/png");
+        assert_eq!(src.metadata["file"]["width"], 40);
+
+        let a = core
+            .store
+            .attachment_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.bytes, bytes, "the original is stored byte for byte");
+        assert_eq!(a.mime, "image/png");
+        assert!(image::load_from_memory(&a.preview).is_ok());
+
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("a job was queued");
+        assert_eq!(job.stage, Stage::Describe);
+        assert_eq!(job.target_id, out.id);
+    }
+
+    #[tokio::test]
+    async fn the_same_photo_twice_is_a_duplicate_before_any_model_call() {
+        let core = crate::core::test_support::test_core().await;
+        let first = core
+            .ingest_image(ImageCapture {
+                bytes: a_png(),
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        let again = core
+            .ingest_image(ImageCapture {
+                bytes: a_png(),
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+        assert_eq!(core.store.list_corpora(10, 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_vision_role_the_image_door_is_closed() {
+        let core = crate::core::test_support::test_core_without_vision().await;
+        let e = core
+            .ingest_image(ImageCapture {
+                bytes: a_png(),
+                filename: None,
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Validation(_)));
+        assert!(e.to_string().contains("not configured"), "{e}");
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn junk_is_refused_before_anything_is_stored() {
+        let core = crate::core::test_support::test_core().await;
+        let e = core
+            .ingest_image(ImageCapture {
+                bytes: b"nope".to_vec(),
+                filename: Some("x.jpg".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Validation(_)));
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_note_is_capped_and_a_blank_one_is_dropped() {
+        let core = crate::core::test_support::test_core().await;
+        let long = "x".repeat(MAX_NOTE_CHARS + 50);
+        let out = core
+            .ingest_capture(Capture::new("some text", "upload").with_note(Some(long)))
+            .await
+            .unwrap();
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.metadata["note"].as_str().unwrap().len(), MAX_NOTE_CHARS);
+
+        let out = core
+            .ingest_capture(Capture::new("other text", "upload").with_note(Some("   ".into())))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .metadata
+                .get("note")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_capture_carries_its_file_facts() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(Capture::new("hello", "upload").with_file(
+                Some("n.txt"),
+                5,
+                "text/plain",
+            ))
+            .await
+            .unwrap();
+        let m = core.store.get_corpus(&out.id).await.unwrap().metadata;
+        assert_eq!(
+            m["file"],
+            serde_json::json!({"name": "n.txt", "size": 5, "mime": "text/plain"})
+        );
     }
 }

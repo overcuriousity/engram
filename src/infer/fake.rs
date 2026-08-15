@@ -1,5 +1,6 @@
 use super::{
-    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
+    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
+    Synthesizer,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -13,6 +14,9 @@ pub struct FakeEmbedder {
     /// How many times the endpoint was called. Batching is invisible in the
     /// output — only the call count shows whether it happened.
     calls: std::sync::atomic::AtomicUsize,
+    /// When set, every call is refused with this reason — the endpoint's "no",
+    /// which a worker must not retry.
+    reject_with: Option<String>,
 }
 
 impl FakeEmbedder {
@@ -20,7 +24,14 @@ impl FakeEmbedder {
         Self {
             dim,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            reject_with: None,
         }
+    }
+
+    pub fn rejecting(msg: &str) -> Self {
+        let mut e = Self::new(8);
+        e.reject_with = Some(msg.to_string());
+        e
     }
 
     pub fn calls(&self) -> usize {
@@ -33,6 +44,12 @@ impl Embedder for FakeEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(m) = &self.reject_with {
+            return Err(Error::InferenceRejected {
+                role: "embed",
+                detail: m.clone(),
+            });
+        }
         Ok(texts
             .iter()
             .map(|t| {
@@ -69,6 +86,8 @@ pub struct FakeSynthesizer {
     /// Answer, but with something the parser cannot read. Distinct from the
     /// two above, which model an endpoint that never answered at all.
     unparsable_on_marker: Option<String>,
+    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    reject: bool,
 }
 
 impl FakeSynthesizer {
@@ -77,7 +96,16 @@ impl FakeSynthesizer {
             fail_with: Some(msg.to_string()),
             fail_on_marker: None,
             unparsable_on_marker: None,
+            reject: false,
         }
+    }
+
+    /// The same refusal, arriving the way a 400 does: the request itself is
+    /// wrong, and asking again sends the same request.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut s = Self::failing(msg);
+        s.reject = true;
+        s
     }
 
     pub fn failing_on(marker: &str) -> Self {
@@ -85,6 +113,7 @@ impl FakeSynthesizer {
             fail_with: None,
             fail_on_marker: Some(marker.to_string()),
             unparsable_on_marker: None,
+            reject: false,
         }
     }
 
@@ -97,6 +126,15 @@ impl FakeSynthesizer {
             fail_with: None,
             fail_on_marker: None,
             unparsable_on_marker: Some(marker.to_string()),
+            reject: false,
+        }
+    }
+
+    fn refusal(&self, role: &'static str, detail: String) -> Error {
+        if self.reject {
+            Error::InferenceRejected { role, detail }
+        } else {
+            Error::Inference { role, detail }
         }
     }
 }
@@ -121,10 +159,7 @@ impl Synthesizer for FakeSynthesizer {
             ));
         }
         if let Some(m) = &self.fail_with {
-            return Err(Error::Inference {
-                role: "chunk",
-                detail: m.clone(),
-            });
+            return Err(self.refusal("chunk", m.clone()));
         }
         Ok(text
             .split("\n\n")
@@ -157,10 +192,7 @@ impl Synthesizer for FakeSynthesizer {
     /// other, and the caller has to survive it failing.
     async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
         if let Some(m) = &self.fail_with {
-            return Err(Error::Inference {
-                role: "title",
-                detail: m.clone(),
-            });
+            return Err(self.refusal("title", m.clone()));
         }
         let first: String = text
             .lines()
@@ -372,6 +404,11 @@ impl Synthesizer for HallucinatingSynthesizer {
 pub struct StrictEmbedder {
     inner: FakeEmbedder,
     limit: usize,
+    /// Whether the refusal arrives the way an HTTP endpoint's does — a 413 the
+    /// client classified as a rejection — rather than as a bare server's
+    /// message inside an otherwise ordinary failure. Both mean "too large",
+    /// and a worker that only understands one of them stops splitting.
+    over_http: bool,
 }
 
 impl StrictEmbedder {
@@ -379,7 +416,14 @@ impl StrictEmbedder {
         Self {
             inner: FakeEmbedder::new(dim),
             limit,
+            over_http: false,
         }
+    }
+    /// The same ceiling, refused as a real endpoint refuses it.
+    pub fn over_http(dim: usize, limit: usize) -> Self {
+        let mut e = Self::new(dim, limit);
+        e.over_http = true;
+        e
     }
     pub fn calls(&self) -> usize {
         self.inner.calls()
@@ -394,13 +438,29 @@ impl Embedder for StrictEmbedder {
             // not depend on a tokenizer.
             let tokens = t.len() / 4;
             if tokens > self.limit {
-                return Err(Error::Inference {
-                    role: "embed",
-                    detail: format!(
+                let detail = if self.over_http {
+                    format!(
+                        "HTTP 413 Payload Too Large: input ({tokens} tokens) is too large \
+                         to process (limit {})",
+                        self.limit
+                    )
+                } else {
+                    format!(
                         "input ({tokens} tokens) is too large to process. increase the \
                          physical batch size (current batch size: {})",
                         self.limit
-                    ),
+                    )
+                };
+                return Err(if self.over_http {
+                    Error::InferenceRejected {
+                        role: "embed",
+                        detail,
+                    }
+                } else {
+                    Error::Inference {
+                        role: "embed",
+                        detail,
+                    }
                 });
             }
         }
@@ -526,6 +586,72 @@ impl Completer for ScriptedCompleter {
     }
     fn context_tokens(&self) -> usize {
         4096
+    }
+}
+
+/// Answers every image with one scripted reply, or one scripted failure, and
+/// remembers what context it was shown.
+pub struct FakeDescriber {
+    pub reply: String,
+    pub fail_with: Option<String>,
+    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    pub reject: bool,
+    calls: std::sync::atomic::AtomicUsize,
+    last_context: std::sync::Mutex<String>,
+}
+
+impl Default for FakeDescriber {
+    fn default() -> Self {
+        Self::saying("# Photo\n\nA whiteboard listing three tasks: ship, test, rest.")
+    }
+}
+
+impl FakeDescriber {
+    pub fn saying(reply: &str) -> Self {
+        Self {
+            reply: reply.into(),
+            fail_with: None,
+            reject: false,
+            calls: Default::default(),
+            last_context: Default::default(),
+        }
+    }
+    pub fn failing(msg: &str) -> Self {
+        let mut d = Self::saying("");
+        d.fail_with = Some(msg.into());
+        d
+    }
+    /// The endpoint's "no", not its "not now": what a non-multimodal model
+    /// answers with, and what a worker must not retry.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut d = Self::failing(msg);
+        d.reject = true;
+        d
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_context(&self) -> String {
+        self.last_context.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Describer for FakeDescriber {
+    async fn describe(&self, _image_jpeg: &[u8], context: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_context.lock().unwrap() = context.to_string();
+        match &self.fail_with {
+            Some(m) if self.reject => Err(Error::InferenceRejected {
+                role: "vision",
+                detail: m.clone(),
+            }),
+            Some(m) => Err(Error::Inference {
+                role: "vision",
+                detail: m.clone(),
+            }),
+            None => Ok(self.reply.clone()),
+        }
     }
 }
 

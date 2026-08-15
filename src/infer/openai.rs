@@ -1,6 +1,6 @@
 use super::{
-    Completer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget, Synthesizer,
-    prompt,
+    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
+    Synthesizer, prompt,
 };
 use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
 use crate::error::{Error, Result};
@@ -28,6 +28,28 @@ fn url(base: &str, path: &str) -> String {
     )
 }
 
+/// A 4xx that says the request itself is wrong. 408 and 429 are 4xx by number
+/// but "come back later" by meaning, and stay retryable.
+///
+/// So do 401, 403 and 404. Those three describe the endpoint rather than the
+/// request: a key expires, a token is rotated, a proxy answers 404 for as long
+/// as the backend behind it is restarting — and in every one of them the same
+/// request succeeds once the wall is fixed. Calling them permanent meant one
+/// expired key was enough to mark chunks `embed_failed` and settle their
+/// corpora to `partial`, which coming back up does not undo.
+pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode as S;
+    status.is_client_error()
+        && !matches!(
+            status,
+            S::REQUEST_TIMEOUT
+                | S::TOO_MANY_REQUESTS
+                | S::UNAUTHORIZED
+                | S::FORBIDDEN
+                | S::NOT_FOUND
+        )
+}
+
 async fn post_json(
     role: &'static str,
     c: &reqwest::Client,
@@ -52,9 +74,11 @@ async fn post_json(
         // Truncate: an upstream error page can be megabytes, and this string
         // ends up in a job's last_error column.
         let detail: String = body.chars().take(400).collect();
-        return Err(Error::Inference {
-            role,
-            detail: format!("HTTP {status}: {detail}"),
+        let detail = format!("HTTP {status}: {detail}");
+        return Err(if permanent_upstream_status(status) {
+            Error::InferenceRejected { role, detail }
+        } else {
+            Error::Inference { role, detail }
         });
     }
     res.json().await.map_err(|e| Error::Inference {
@@ -429,6 +453,69 @@ impl Completer for HttpCompleter {
     }
 }
 
+// ── Describer ────────────────────────────────────────────────────────────────
+
+pub struct HttpDescriber {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+impl HttpDescriber {
+    pub fn new(model: &str, base_url: &str, api_key: Option<&str>, timeout_secs: u64) -> Self {
+        Self {
+            client: client(timeout_secs),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(str::to_string),
+        }
+    }
+}
+
+#[async_trait]
+impl Describer for HttpDescriber {
+    async fn describe(&self, image_jpeg: &[u8], context: &str) -> Result<String> {
+        use base64::Engine;
+        let data_url = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(image_jpeg)
+        );
+        let body = json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt::DESCRIBE_SYSTEM},
+                {"role": "user", "content": [
+                    {"type": "text", "text": context},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]}
+            ],
+            "temperature": 0.2,
+        });
+        let started = std::time::Instant::now();
+        let v = post_json(
+            "vision",
+            &self.client,
+            url(&self.base_url, "chat/completions"),
+            self.api_key.as_deref(),
+            body,
+        )
+        .await?;
+        tracing::info!(
+            ms = started.elapsed().as_millis(),
+            tokens = v["usage"]["completion_tokens"].as_u64(),
+            "vision call finished"
+        );
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Inference {
+                role: "vision",
+                detail: "no message content".into(),
+            })
+    }
+}
+
 /// One cheap reachability check per role at startup. Failure is a warning, not
 /// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
@@ -456,6 +543,24 @@ pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_4xx_is_permanent_except_the_two_that_mean_try_again() {
+        use reqwest::StatusCode as S;
+        assert!(permanent_upstream_status(S::BAD_REQUEST));
+        assert!(permanent_upstream_status(S::PAYLOAD_TOO_LARGE));
+        assert!(permanent_upstream_status(S::UNSUPPORTED_MEDIA_TYPE));
+        assert!(permanent_upstream_status(S::UNPROCESSABLE_ENTITY));
+        assert!(!permanent_upstream_status(S::REQUEST_TIMEOUT));
+        assert!(!permanent_upstream_status(S::TOO_MANY_REQUESTS));
+        // The endpoint, not the request: an expired key and a restarting proxy
+        // both answer like this, and both heal on their own.
+        assert!(!permanent_upstream_status(S::UNAUTHORIZED));
+        assert!(!permanent_upstream_status(S::FORBIDDEN));
+        assert!(!permanent_upstream_status(S::NOT_FOUND));
+        assert!(!permanent_upstream_status(S::INTERNAL_SERVER_ERROR));
+        assert!(!permanent_upstream_status(S::BAD_GATEWAY));
+    }
 
     /// The empty context every one of these tests wants: they exercise the
     /// transport and the parser, not the windowing.
@@ -828,5 +933,54 @@ mod tests {
             "error string was {} chars",
             e.to_string().len()
         );
+    }
+
+    #[tokio::test]
+    async fn the_describer_sends_the_image_as_a_data_url_beside_the_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "# Whiteboard\n\n- item"}}]
+            })))
+            .mount(&server)
+            .await;
+        let d = HttpDescriber::new("vl", &format!("{}/v1", server.uri()), Some("k"), 30);
+        let out = d
+            .describe(b"\xFF\xD8jpegbytes", "Photo taken 2026-08-09")
+            .await
+            .unwrap();
+        assert_eq!(out, "# Whiteboard\n\n- item");
+
+        let req = &server.received_requests().await.unwrap()[0];
+        assert_eq!(req.headers.get("authorization").unwrap(), "Bearer k");
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["model"], "vl");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], prompt::DESCRIBE_SYSTEM);
+        let parts = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Photo taken 2026-08-09");
+        assert_eq!(parts[1]["type"], "image_url");
+        let url = parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"), "{url}");
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(url.trim_start_matches("data:image/jpeg;base64,"))
+            .unwrap();
+        assert_eq!(decoded, b"\xFF\xD8jpegbytes");
+    }
+
+    #[tokio::test]
+    async fn a_describer_error_is_an_inference_error_for_the_vision_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .mount(&server)
+            .await;
+        let d = HttpDescriber::new("vl", &server.uri(), None, 30);
+        let e = d.describe(b"x", "").await.unwrap_err();
+        assert!(matches!(e, Error::Inference { role: "vision", .. }), "{e}");
+        assert!(e.retryable());
     }
 }

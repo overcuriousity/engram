@@ -35,6 +35,9 @@ pub enum Stage {
     /// which decays quadratically and leaves a given pair waiting years on a
     /// large base.
     Relate,
+    /// One image, one vision call: reads a captured image into the markdown
+    /// that becomes its `raw_text`, then hands off to `Synthesize`.
+    Describe,
 }
 
 impl Stage {
@@ -48,6 +51,7 @@ impl Stage {
             Stage::Consolidate => "consolidate",
             Stage::Dedupe => "dedupe",
             Stage::Relate => "relate",
+            Stage::Describe => "describe",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -60,6 +64,7 @@ impl Stage {
             "consolidate" => Some(Stage::Consolidate),
             "dedupe" => Some(Stage::Dedupe),
             "relate" => Some(Stage::Relate),
+            "describe" => Some(Stage::Describe),
             _ => None,
         }
     }
@@ -118,6 +123,37 @@ enum Guard {
     Any,
     /// Only a row closed while its work was not.
     Closed,
+}
+
+/// `enqueue`, on whatever executor the caller is inside — a capture's
+/// transaction, so the row and the unit that processes it land together or
+/// not at all.
+pub(crate) async fn enqueue_with<'e>(
+    exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    stage: Stage,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<()> {
+    upsert_job_with(exec, stage, target_kind, target_id, 0, Guard::Any).await
+}
+
+async fn upsert_job_with<'e>(
+    exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    stage: Stage,
+    target_kind: &str,
+    target_id: &str,
+    seq: i64,
+    guard: Guard,
+) -> Result<()> {
+    sqlx::query(guard.statement())
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(now())
+        .bind(seq)
+        .execute(exec)
+        .await?;
+    Ok(())
 }
 
 /// The upsert the three guards share, spelled out once per guard because a
@@ -202,15 +238,7 @@ impl Store {
         seq: i64,
         guard: Guard,
     ) -> Result<()> {
-        sqlx::query(guard.statement())
-            .bind(stage.as_str())
-            .bind(target_kind)
-            .bind(target_id)
-            .bind(now())
-            .bind(seq)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        upsert_job_with(&self.pool, stage, target_kind, target_id, seq, guard).await
     }
 
     /// The `seq` a job currently carries, so a unit that re-arms itself can
@@ -867,5 +895,11 @@ mod tests {
             s.claim_job().await.unwrap().is_none(),
             "a legacy judge row survived migration and was claimed"
         );
+    }
+
+    #[test]
+    fn describe_is_a_stage_that_round_trips_its_name() {
+        assert_eq!(Stage::Describe.as_str(), "describe");
+        assert_eq!(Stage::parse("describe"), Some(Stage::Describe));
     }
 }

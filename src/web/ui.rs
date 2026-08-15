@@ -227,7 +227,7 @@ pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static st
         // A parked capture is waiting on a person, not on a worker. It reads as
         // a warning because nothing will advance it on its own.
         NeedsReview => "badge-warning",
-        Raw | Segmenting | Segmented | Embedding => "badge-accent",
+        Describing | Raw | Segmenting | Segmented | Embedding => "badge-accent",
     }
 }
 
@@ -304,6 +304,9 @@ struct CaptureTemplate {
     /// How many more are behind the ones shown. Said once under the list, so a
     /// short list does not read as an empty queue when it is a capped one.
     more_pairs: i64,
+    /// Whether the image door is open, i.e. `[infer.vision]` is configured.
+    /// Off, the page offers text only rather than a picker that fails.
+    vision_enabled: bool,
 }
 
 #[derive(Template)]
@@ -379,6 +382,15 @@ struct CorpusTemplate {
     /// hop back to where the text came from, which is otherwise unrecoverable
     /// once the tab is closed.
     source_url: Option<String>,
+    /// An image corpus: the page shows the photo, and the lines below are the
+    /// model's reading of it rather than the source itself.
+    image: bool,
+    /// An image whose reading has not landed — still `describing`, or parked
+    /// before any text was read. Nothing to re-segment; only re-read.
+    unread: bool,
+    /// Rows of what the door recorded about the capture, already formatted.
+    meta_rows: Vec<(String, String)>,
+    note: Option<String>,
 }
 
 #[derive(Template)]
@@ -505,6 +517,7 @@ async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Respo
         judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
+        vision_enabled: st.core.describer.is_some(),
     })
     .into_response())
 }
@@ -741,10 +754,13 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // thing that tells three captures pasted in a row apart. `unnamed`
             // is what says the name is still coming; the label itself is not
             // the place to say it.
-            label: s
-                .title_hint
-                .clone()
-                .unwrap_or_else(|| markdown::snippet(&s.raw_text, 60)),
+            label: s.title_hint.clone().unwrap_or_else(|| {
+                if s.origin == crate::core::ingest::ORIGIN_IMAGE && s.raw_text.is_empty() {
+                    "photo".into()
+                } else {
+                    markdown::snippet(&s.raw_text, 60)
+                }
+            }),
             unnamed: s.title_hint.is_none() && in_flight,
             in_flight,
             settled: matches!(s.status, CorpusStatus::Ready),
@@ -801,6 +817,10 @@ async fn corpus_detail(
             }
         })
         .collect();
+    let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
+    let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
+    let note = s.metadata["note"].as_str().map(str::to_string);
+    let meta_rows = metadata_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
         theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
@@ -810,9 +830,40 @@ async fn corpus_detail(
         status: s.status.as_str().to_string(),
         restored: s.restored_at.is_some(),
         source_url: s.source_url.clone(),
+        image,
+        unread,
+        meta_rows,
+        note,
         artifacts,
     })
     .into_response())
+}
+
+/// The metadata worth a row on the corpus page, in reading order. Everything
+/// else the file carried is in the JSON, one API call away.
+fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let exif = &m["exif"];
+    if let Some(t) = exif["taken_at"].as_str() {
+        rows.push(("Taken".into(), t.into()));
+    }
+    if let Some(c) = exif["camera"].as_str() {
+        rows.push(("Camera".into(), c.into()));
+    }
+    if let (Some(lat), Some(lon)) = (exif["gps"]["lat"].as_f64(), exif["gps"]["lon"].as_f64()) {
+        rows.push(("Location".into(), format!("{lat}, {lon}")));
+    }
+    let f = &m["file"];
+    if let Some(n) = f["name"].as_str() {
+        rows.push(("File".into(), n.into()));
+    }
+    if let (Some(w), Some(h)) = (f["width"].as_u64(), f["height"].as_u64()) {
+        rows.push(("Size".into(), format!("{w}×{h}")));
+    }
+    if let Some(e) = m["describe"]["error"].as_str() {
+        rows.push(("Reading".into(), e.into()));
+    }
+    rows
 }
 
 #[derive(serde::Deserialize)]
@@ -886,14 +937,25 @@ async fn delete_artifact_ui(
     })
 }
 
+#[derive(serde::Deserialize, Default)]
+struct ReprocessForm {
+    #[serde(default)]
+    stage: Option<String>,
+}
+
+/// Re-segment by default; `stage=describe` re-reads a captured image.
 async fn reprocess_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
+    Form(form): Form<ReprocessForm>,
 ) -> Result<Response> {
-    st.core
-        .reprocess(&cid, crate::store::jobs::Stage::Synthesize)
-        .await?;
+    let stage = match form.stage {
+        None => crate::store::jobs::Stage::Synthesize,
+        Some(s) => crate::store::jobs::Stage::parse(&s)
+            .ok_or_else(|| Error::Validation(format!("unknown stage `{s}`")))?,
+    };
+    st.core.reprocess(&cid, stage).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
@@ -1939,6 +2001,144 @@ mod tests {
     /// attribute pair does not also assert where the template wrapped a line.
     fn flat(html: &str) -> String {
         html.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// A session on the given core, for pages that need a core built a
+    /// particular way.
+    async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
+        let cid = crate::store::new_id();
+        core.store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        let state = crate::web::state::AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+        };
+        (crate::web::router(state), format!("engram_session={cid}"))
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_offers_images_only_when_vision_is_configured() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui/capture", &cookie).await;
+        assert!(html.contains("image/*"), "picker accepts images");
+        assert!(html.contains("name=\"note\""), "the context field is there");
+
+        let (app, cookie) =
+            app_for(crate::core::test_support::test_core_without_vision().await).await;
+        let html = get(&app, "/ui/capture", &cookie).await;
+        assert!(!html.contains("image/*"));
+        assert!(html.contains("accept=\".txt,text/plain\""));
+    }
+
+    #[tokio::test]
+    async fn an_image_corpus_page_shows_the_photo_its_facts_and_the_reading_as_derived() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .store
+            .insert_image_corpus(
+                "h",
+                "image",
+                Some("IMG.png"),
+                &serde_json::json!({
+                    "note": "front porch",
+                    "file": {"name": "IMG.png", "width": 4, "height": 2},
+                    "exif": {"taken_at": "2026-08-09T14:12:03", "camera": "Pixel",
+                             "gps": {"lat": 1.5, "lon": 2.5}}
+                }),
+                &crate::store::attachments::NewImage {
+                    kind: "image",
+                    mime: "image/png",
+                    filename: Some("IMG.png"),
+                    bytes: b"orig",
+                    preview: b"prev",
+                    width: Some(4),
+                    height: Some(2),
+                },
+            )
+            .await
+            .unwrap()
+            .into_corpus();
+        core.store
+            .set_described_text(&src.id, "# Porch\n\nblue door", vec![])
+            .await
+            .unwrap();
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, &format!("/ui/corpora/{}", src.id), &cookie).await;
+        assert!(
+            html.contains(&format!("/api/v1/corpora/{}/image", src.id)),
+            "img src"
+        );
+        assert!(html.contains("front porch"));
+        assert!(html.contains("2026-08-09T14:12:03"));
+        assert!(html.contains("1.5"));
+        assert!(
+            html.contains("Transcription"),
+            "the text is labelled as derived, not 'Raw corpus'"
+        );
+        assert!(html.contains("blue door"));
+    }
+
+    fn a_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img = ImageBuffer::from_fn(8, 8, |x, y| Rgb([x as u8 * 30, y as u8 * 30, 0]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    async fn an_unread_image(core: &crate::core::Core) -> String {
+        core.ingest_image(crate::core::ingest::ImageCapture {
+            bytes: a_png(),
+            filename: Some("p.png".into()),
+            title_hint: None,
+            note: None,
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn an_unread_image_page_offers_re_read_and_not_re_segment() {
+        let core = crate::core::test_support::test_core().await;
+        let id = an_unread_image(&core).await;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, &format!("/ui/corpora/{id}"), &cookie).await;
+        assert!(html.contains("Re-read"));
+        assert!(!html.contains("Re-segment"));
+    }
+
+    #[tokio::test]
+    async fn the_re_read_button_queues_describe() {
+        let core = crate::core::test_support::test_core().await;
+        let id = an_unread_image(&core).await;
+        crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
+            .await
+            .unwrap();
+        let (app, cookie) = app_for(core.clone()).await;
+        let res = app
+            .oneshot(form(
+                &format!("/ui/corpora/{id}/reprocess"),
+                &cookie,
+                "stage=describe",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().status,
+            CorpusStatus::Describing
+        );
     }
 
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {
