@@ -30,10 +30,20 @@ fn url(base: &str, path: &str) -> String {
 
 /// A 4xx that says the request itself is wrong. 408 and 429 are 4xx by number
 /// but "come back later" by meaning, and stay retryable.
+///
+/// So do 401, 403 and 404. Those three describe the endpoint rather than the
+/// request: a key expires, a token is rotated, a proxy answers 404 for as long
+/// as the backend behind it is restarting — and in every one of them the same
+/// request succeeds once the wall is fixed. Calling them permanent meant one
+/// expired key was enough to mark chunks `embed_failed` and settle their
+/// corpora to `partial`, which coming back up does not undo.
 pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode as S;
     status.is_client_error()
-        && status != reqwest::StatusCode::REQUEST_TIMEOUT
-        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+        && !matches!(
+            status,
+            S::REQUEST_TIMEOUT | S::TOO_MANY_REQUESTS | S::UNAUTHORIZED | S::FORBIDDEN | S::NOT_FOUND
+        )
 }
 
 async fn post_json(
@@ -534,12 +544,16 @@ mod tests {
     fn a_4xx_is_permanent_except_the_two_that_mean_try_again() {
         use reqwest::StatusCode as S;
         assert!(permanent_upstream_status(S::BAD_REQUEST));
-        assert!(permanent_upstream_status(S::NOT_FOUND));
         assert!(permanent_upstream_status(S::PAYLOAD_TOO_LARGE));
         assert!(permanent_upstream_status(S::UNSUPPORTED_MEDIA_TYPE));
         assert!(permanent_upstream_status(S::UNPROCESSABLE_ENTITY));
         assert!(!permanent_upstream_status(S::REQUEST_TIMEOUT));
         assert!(!permanent_upstream_status(S::TOO_MANY_REQUESTS));
+        // The endpoint, not the request: an expired key and a restarting proxy
+        // both answer like this, and both heal on their own.
+        assert!(!permanent_upstream_status(S::UNAUTHORIZED));
+        assert!(!permanent_upstream_status(S::FORBIDDEN));
+        assert!(!permanent_upstream_status(S::NOT_FOUND));
         assert!(!permanent_upstream_status(S::INTERNAL_SERVER_ERROR));
         assert!(!permanent_upstream_status(S::BAD_GATEWAY));
     }
