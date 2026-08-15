@@ -93,18 +93,50 @@ fn read_exif(bytes: &[u8]) -> Option<exif::Exif> {
 }
 
 fn encode_preview(img: &DynamicImage, edge: u32) -> Result<Vec<u8>> {
+    // Before the resize, not after. A filter with a wide kernel mixes the RGB
+    // stored under transparent pixels into their opaque neighbours, so
+    // flattening afterwards leaves a dark fringe around everything that met
+    // the transparent ground.
+    let img = &DynamicImage::ImageRgb8(flatten_onto_white(img));
     let scaled = if img.width().max(img.height()) > edge {
-        img.thumbnail(edge, edge)
+        // Lanczos rather than `thumbnail`. Both average — `thumbnail` does not
+        // drop hairlines, and the test below holds for either — but its fast
+        // integer algorithm quantises to coarse levels and its sample windows
+        // drift in and out of phase with a repeating pattern, which is what
+        // moiré across a photographed page of text looks like. This runs once
+        // per capture, inside a `spawn_blocking`, on the one image the model
+        // will ever be shown; the extra milliseconds buy the sharper reading.
+        img.resize(edge, edge, image::imageops::FilterType::Lanczos3)
     } else {
         img.clone()
     };
-    // JPEG has no alpha; a PNG with transparency is flattened rather than refused.
-    let rgb = DynamicImage::ImageRgb8(scaled.to_rgb8());
+    let rgb = scaled;
     let mut out = Cursor::new(Vec::new());
     let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, PREVIEW_QUALITY);
     rgb.write_with_encoder(enc)
         .map_err(|e| Error::Internal(format!("preview encoding failed: {e}")))?;
     Ok(out.into_inner())
+}
+
+/// Composite over an opaque white ground. White rather than black because the
+/// transparency in a capture is nearly always the page the content sits on —
+/// a cropped screenshot, a window's rounded corner — and dark text is what it
+/// usually carries.
+///
+/// An image with no alpha to composite skips the arithmetic entirely; `to_rgb8`
+/// is exact for those, which is every JPEG and most PNGs.
+fn flatten_onto_white(img: &DynamicImage) -> image::RgbImage {
+    if !img.color().has_alpha() {
+        return img.to_rgb8();
+    }
+    let rgba = img.to_rgba8();
+    let mut out = image::RgbImage::new(rgba.width(), rgba.height());
+    for (x, y, p) in rgba.enumerate_pixels() {
+        let a = p.0[3] as u32;
+        let over = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+        out.put_pixel(x, y, image::Rgb([over(p.0[0]), over(p.0[1]), over(p.0[2])]));
+    }
+    out
 }
 
 /// The `file` namespace of a corpus's metadata.
@@ -250,6 +282,98 @@ mod tests {
             }
         }
         !crc
+    }
+
+    /// The preview is both what the vision model reads and what the UI shows,
+    /// and `PREVIEW_QUALITY` is chosen so small print in a photographed page
+    /// survives it. That only holds while the downscale in front of it
+    /// *averages*: a point-sampling filter keeps every nth column and discards
+    /// the rest, so a hairline falling in a discarded column is not blurred but
+    /// gone, and no quality setting downstream can bring it back.
+    #[test]
+    fn a_hairline_survives_the_downscale_wherever_it_falls() {
+        // 2000 px wide, a 2 px black line every 20 px: 99 lines, and a preview
+        // edge of 512 makes the factor 3.9 — not an integer, which is where
+        // point sampling drops columns.
+        const W: u32 = 2000;
+        const PITCH: u32 = 20;
+        let src = ImageBuffer::from_fn(W, 200, |x, _| {
+            if x % PITCH < 2 {
+                Rgb([0u8, 0, 0])
+            } else {
+                Rgb([255u8, 255, 255])
+            }
+        });
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(src)
+            .write_to(&mut out, ImageFormat::Png)
+            .unwrap();
+
+        let prepared = prepare(&out.into_inner(), 512).unwrap();
+        let preview = image::load_from_memory(&prepared.preview_jpeg)
+            .unwrap()
+            .to_luma8();
+
+        // Every line must leave a darkening somewhere in the preview column
+        // its position maps to. A tolerance of one column either side absorbs
+        // the rounding; it cannot absorb a line that was thrown away.
+        let scale = preview.width() as f32 / W as f32;
+        let column_min = |x: u32| -> u8 {
+            (0..preview.height())
+                .map(|y| preview.get_pixel(x, y).0[0])
+                .min()
+                .unwrap()
+        };
+        let lost: Vec<u32> = (0..W / PITCH)
+            .filter(|i| {
+                let centre = (((i * PITCH + 1) as f32) * scale).round() as u32;
+                let lo = centre.saturating_sub(1);
+                let hi = (centre + 1).min(preview.width() - 1);
+                (lo..=hi).all(|x| column_min(x) > 200)
+            })
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{} of {} hairlines left no trace in the preview: {:?}",
+            lost.len(),
+            W / PITCH,
+            lost
+        );
+    }
+
+    /// JPEG has no alpha, so the preview has to put something behind it.
+    /// Discarding the channel is not that: the RGB stored under a fully
+    /// transparent pixel is zero in most encoders, so a screenshot with a
+    /// transparent margin or rounded corners reached the model as black.
+    #[test]
+    fn transparency_is_flattened_onto_white_rather_than_onto_black() {
+        // Dark text on a transparent ground — a window capture's shape.
+        let src = ImageBuffer::from_fn(64, 64, |x, y| {
+            if (20..44).contains(&x) && (20..44).contains(&y) {
+                image::Rgba([10u8, 10, 10, 255])
+            } else {
+                image::Rgba([0u8, 0, 0, 0])
+            }
+        });
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut out, ImageFormat::Png)
+            .unwrap();
+
+        let prepared = prepare(&out.into_inner(), 2048).unwrap();
+        let preview = image::load_from_memory(&prepared.preview_jpeg)
+            .unwrap()
+            .to_luma8();
+
+        assert!(
+            preview.get_pixel(2, 2).0[0] > 240,
+            "the transparent ground must come out white, not black; it was {}",
+            preview.get_pixel(2, 2).0[0]
+        );
+        assert!(
+            preview.get_pixel(32, 32).0[0] < 40,
+            "and the opaque mark must still be dark"
+        );
     }
 
     #[test]
