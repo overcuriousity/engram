@@ -705,17 +705,6 @@ impl Core {
             tracing::info!(done = n, total, "lifecycle backfill progress");
         }
         self.heal_store_drift().await?;
-        // The two-sided scan runs here and nowhere else. It is O(hidden
-        // artifacts), which autonomous merging makes grow without bound, so it
-        // stopped being something the sweep can afford on every tick — but a
-        // backfill is exactly the moment to catch drift with no SQLite write
-        // behind it: a payload edited out of band, or a base that predates
-        // `lifecycle_dirty` and therefore has interrupted writes nothing marked.
-        match crate::jobs::consolidate::full_lifecycle_reconcile(self).await {
-            Ok(0) => {}
-            Ok(fixed) => tracing::info!(fixed, "reconciled lifecycle drift the marker never saw"),
-            Err(e) => tracing::warn!(error = %e, "could not run the full lifecycle reconcile"),
-        }
         tracing::info!(n, "backfilled lifecycle fields into the vector store");
         Ok(n)
     }

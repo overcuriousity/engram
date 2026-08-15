@@ -191,19 +191,6 @@ impl VectorStore for MemoryVectors {
             .count() as u64)
     }
 
-    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
-        let r = self.points.read().unwrap();
-        let mut out: Vec<String> = r
-            .values()
-            .filter(|p| status_of(&p.payload) != ArtifactStatus::Active)
-            .map(|p| p.payload.artifact_id.clone())
-            .collect();
-        // Deterministic, so a test never depends on HashMap iteration order.
-        out.sort();
-        out.truncate(limit);
-        Ok(out)
-    }
-
     async fn lifecycle_of(
         &self,
         artifact_ids: &[String],

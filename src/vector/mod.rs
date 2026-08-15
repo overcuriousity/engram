@@ -294,11 +294,6 @@ pub trait VectorStore: Send + Sync {
     /// (its payload will not parse as a chunk), and it is left alone rather than
     /// deleted: nothing here knows what it is.
     async fn unstamped_count(&self) -> Result<u64>;
-    /// Artifact ids whose payload says deprecated or superseded, capped at
-    /// `limit`. The sweep compares these against SQLite — the source of truth —
-    /// to repair drift left by a half-applied lifecycle change in either
-    /// direction.
-    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>>;
     /// What these artifacts' payloads currently say about their lifecycle. Ids
     /// with no point are absent from the answer.
     ///

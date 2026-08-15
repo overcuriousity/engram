@@ -1264,37 +1264,6 @@ impl VectorStore for QdrantVectors {
         Ok(res.count)
     }
 
-    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
-        // `point_uuid` is one-way, so the artifact id has to come out of the
-        // payload rather than the point id.
-        let page: ScrollResult = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/scroll", self.alias),
-                Some(json!({
-                    "filter": { "should": [
-                        { "key": "status", "match": { "value": "deprecated" } },
-                        { "key": "status", "match": { "value": "superseded" } },
-                        { "key": "superseded", "match": { "value": true } },
-                    ] },
-                    "limit": limit,
-                    "with_payload": ["artifact_id"],
-                    "with_vector": false,
-                })),
-            )
-            .await?;
-        Ok(page
-            .points
-            .iter()
-            .filter_map(|p| {
-                p.payload
-                    .get("artifact_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect())
-    }
-
     async fn payloads_of(
         &self,
         artifact_ids: &[String],

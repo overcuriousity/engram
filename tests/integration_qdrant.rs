@@ -1539,9 +1539,7 @@ async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
 #[tokio::test]
 #[ignore]
 async fn the_backfill_stamps_every_point_in_one_request() {
-    // What startup runs when it finds unstamped points, and what the sweep's
-    // drift repair reuses. Both directions of the repair need `non_active_ids`
-    // to report what the payloads actually say.
+    // What startup runs when it finds unstamped points.
     let v = fresh("engram_it_backfill", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
@@ -1569,7 +1567,6 @@ async fn the_backfill_stamps_every_point_in_one_request() {
     .unwrap();
 
     assert_eq!(v.unstamped_count().await.unwrap(), 0);
-    assert_eq!(v.non_active_ids(100).await.unwrap(), vec!["b".to_string()]);
     // The deprecation reached search, which is the whole point of the pass.
     let hits = v
         .search(
