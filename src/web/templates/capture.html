@@ -130,8 +130,14 @@
         send(e.dataTransfer.files[0]);
       });
     }
-    // A pasted screenshot goes the same way as a dropped one.
+    // A pasted screenshot goes the same way as a dropped one — unless the
+    // paste is on its way somewhere that takes text. A clipboard from Sheets,
+    // Excel or Word carries the selection twice, as text and as a picture of
+    // itself, so taking the picture while the caret sat in the note box
+    // uploaded a screenshot and swallowed the paste the user asked for.
     document.addEventListener('paste', function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
       var items = (e.clipboardData && e.clipboardData.items) || [];
       for (var i = 0; i < items.length; i++) {
         if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
