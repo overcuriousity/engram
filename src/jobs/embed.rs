@@ -38,13 +38,23 @@ fn default_limit(core: &Core) -> usize {
 /// changes that. Configuration is meant to keep chunks under it, but the
 /// configured ceiling is a claim about the model while this is the server's
 /// real limit, and the two disagree more often than not.
+///
+/// Both inference variants, because both carry this answer: a bare llama.cpp
+/// says it in the body of a 200-shaped failure, while an endpoint that answers
+/// 413 or 400 arrives here already classified as a rejection. Matching only
+/// the first left the 413 case falling through to the permanent path, where a
+/// chunk that wanted cutting was marked `embed_failed` instead.
 fn input_too_large(e: &Error) -> bool {
-    let Error::Inference {
-        role: "embed",
-        detail,
-    } = e
-    else {
-        return false;
+    let detail = match e {
+        Error::Inference {
+            role: "embed",
+            detail,
+        }
+        | Error::InferenceRejected {
+            role: "embed",
+            detail,
+        } => detail,
+        _ => return false,
     };
     let d = detail.to_ascii_lowercase();
     d.contains("too large")
@@ -1015,6 +1025,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_413_from_a_real_endpoint_splits_the_chunk_like_a_bare_servers_refusal() {
+        // The two refusals differ only in how they travelled: a bare server
+        // says "too large" in a body, an endpoint answers 413 and the client
+        // classifies it as a rejection. Understanding only the first took the
+        // whole splitting path out of service against every real deployment —
+        // the chunk went to the permanent path and was marked `embed_failed`
+        // instead of being cut.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::over_http(
+            crate::core::test_support::TEST_DIM,
+            120,
+        ));
+
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let text = (0..40)
+            .map(|i| format!("paragraph {i} with enough words in it to measure\n\nmore"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text,
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        // A limit our own estimate is happy with, so the proactive check passes
+        // and the endpoint's answer is the only thing that can start the split.
+        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert!(
+            chunks.len() > 1,
+            "a 413 has to cut the chunk; got {} chunk(s)",
+            chunks.len()
+        );
+        for c in &chunks {
+            assert_ne!(
+                c.embed_state,
+                crate::store::artifacts::EmbedState::Failed,
+                "the chunk was parked instead of split"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_refusal_during_the_as_is_attempt_still_ends_in_a_split() {
         // The trap this closes: the estimate says the chunk is oversize, there
         // is no paragraph to cut on, so it is embedded whole — and the server
@@ -1138,6 +1204,16 @@ mod tests {
                 .into(),
         };
         assert!(input_too_large(&too_big));
+
+        // The same refusal from a real endpoint, which answers 413 and is
+        // classified as a rejection rather than a failure. Missing this arm
+        // took the whole splitting path out of service: the chunk went
+        // straight to `embed_failed` instead of being cut.
+        let refused = Error::InferenceRejected {
+            role: "embed",
+            detail: "HTTP 413 Payload Too Large: input is too large to process".into(),
+        };
+        assert!(input_too_large(&refused));
 
         // A transient failure must stay retryable, or a flaky local server
         // would start shredding chunks instead of waiting for it to recover.

@@ -389,6 +389,11 @@ impl Synthesizer for HallucinatingSynthesizer {
 pub struct StrictEmbedder {
     inner: FakeEmbedder,
     limit: usize,
+    /// Whether the refusal arrives the way an HTTP endpoint's does — a 413 the
+    /// client classified as a rejection — rather than as a bare server's
+    /// message inside an otherwise ordinary failure. Both mean "too large",
+    /// and a worker that only understands one of them stops splitting.
+    over_http: bool,
 }
 
 impl StrictEmbedder {
@@ -396,7 +401,14 @@ impl StrictEmbedder {
         Self {
             inner: FakeEmbedder::new(dim),
             limit,
+            over_http: false,
         }
+    }
+    /// The same ceiling, refused as a real endpoint refuses it.
+    pub fn over_http(dim: usize, limit: usize) -> Self {
+        let mut e = Self::new(dim, limit);
+        e.over_http = true;
+        e
     }
     pub fn calls(&self) -> usize {
         self.inner.calls()
@@ -411,13 +423,29 @@ impl Embedder for StrictEmbedder {
             // not depend on a tokenizer.
             let tokens = t.len() / 4;
             if tokens > self.limit {
-                return Err(Error::Inference {
-                    role: "embed",
-                    detail: format!(
+                let detail = if self.over_http {
+                    format!(
+                        "HTTP 413 Payload Too Large: input ({tokens} tokens) is too large \
+                         to process (limit {})",
+                        self.limit
+                    )
+                } else {
+                    format!(
                         "input ({tokens} tokens) is too large to process. increase the \
                          physical batch size (current batch size: {})",
                         self.limit
-                    ),
+                    )
+                };
+                return Err(if self.over_http {
+                    Error::InferenceRejected {
+                        role: "embed",
+                        detail,
+                    }
+                } else {
+                    Error::Inference {
+                        role: "embed",
+                        detail,
+                    }
                 });
             }
         }
