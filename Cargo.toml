@@ -60,6 +60,11 @@ html2md = "0.2.15"
 encoding_rs = "0.8.35"
 url = "2"
 schemars = "1.2.2"
+# Decoding, orientation and the downscaled preview of a captured image. Only
+# the three formats a phone or a browser actually hands over.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+# EXIF is where the phone says when and where a photo was taken.
+kamadak-exif = "0.6.1"
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the

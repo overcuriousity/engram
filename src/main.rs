@@ -388,6 +388,7 @@ mod startup_tests {
                     reasoning_effort: None,
                 },
                 rerank: None,
+                vision: None,
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,

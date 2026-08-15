@@ -36,6 +36,12 @@ pub struct CaptureConfig {
     /// nothing. A corpus that silently holds a cookie banner instead of the
     /// document is the failure this whole path is shaped to prevent.
     pub min_extracted_chars: usize,
+    /// Bytes an uploaded image may weigh. A phone photo is 3–8 MB; this is the
+    /// per-route ceiling for the image door only, the global body limit stays.
+    pub image_max_bytes: usize,
+    /// Longest edge, in pixels, of the preview the vision model is shown and
+    /// the UI displays. The original is stored untouched regardless.
+    pub image_preview_edge: u32,
 }
 
 impl Default for CaptureConfig {
@@ -44,6 +50,8 @@ impl Default for CaptureConfig {
             fetch_timeout_secs: 30,
             fetch_max_bytes: 8 * 1024 * 1024,
             min_extracted_chars: 200,
+            image_max_bytes: 25 * 1024 * 1024,
+            image_preview_edge: 2048,
         }
     }
 }
@@ -289,6 +297,8 @@ pub struct InferConfig {
     pub ask: AskRole,
     #[serde(default)]
     pub rerank: Option<RerankRole>,
+    #[serde(default)]
+    pub vision: Option<VisionRole>,
 }
 
 /// Seconds an inference request may take before the client gives up.
@@ -395,6 +405,38 @@ pub struct RerankRole {
     pub style: RerankStyle,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+/// The vision model that reads a captured image into text. Optional: absent
+/// means the image door is closed. `base_url` and `api_key` are optional
+/// because the common case is the synthesize endpoint serving a multimodal
+/// model too — then only `model` needs saying.
+#[derive(Debug, Deserialize, Clone)]
+pub struct VisionRole {
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_vision_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_vision_timeout_secs() -> u64 {
+    120
+}
+
+impl VisionRole {
+    /// The endpoint and key this role actually calls: its own where given,
+    /// the synthesize role's otherwise.
+    pub fn resolve(&self, synth: &SynthesizeRole) -> (String, Option<String>) {
+        (
+            self.base_url
+                .clone()
+                .unwrap_or_else(|| synth.base_url.clone()),
+            self.api_key.clone().or_else(|| synth.api_key.clone()),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -640,6 +682,9 @@ impl Config {
         c.infer.ask.api_key = c.infer.ask.api_key.map(|_| R.into());
         if let Some(r) = c.infer.rerank.as_mut() {
             r.api_key = r.api_key.as_ref().map(|_| R.into());
+        }
+        if let Some(v) = c.infer.vision.as_mut() {
+            v.api_key = v.api_key.as_ref().map(|_| R.into());
         }
         if let Some(o) = c.auth.oidc.as_mut() {
             o.client_secret = o.client_secret.as_ref().map(|_| R.into());
@@ -894,5 +939,68 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let dump = cfg.redacted();
         assert!(!dump.contains("$argon2id$"), "password hash leaked: {dump}");
         assert!(dump.contains("REDACTED"));
+    }
+
+    #[test]
+    fn vision_is_off_unless_configured() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert!(
+            cfg.infer.vision.is_none(),
+            "vision must default to disabled"
+        );
+        assert_eq!(cfg.capture.image_max_bytes, 25 * 1024 * 1024);
+        assert_eq!(cfg.capture.image_preview_edge, 2048);
+    }
+
+    #[test]
+    fn a_vision_role_without_its_own_endpoint_inherits_synthesize() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        let v = cfg.infer.vision.as_ref().expect("configured");
+        assert_eq!(v.model, "qwen-vl");
+        assert_eq!(v.timeout_secs, 120);
+        let (url, key) = v.resolve(&cfg.infer.synthesize);
+        assert_eq!(url, cfg.infer.synthesize.base_url);
+        assert_eq!(key, cfg.infer.synthesize.api_key);
+    }
+
+    #[test]
+    fn a_dedicated_vision_endpoint_wins_over_synthesize() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!(
+                "{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\nbase_url = \"http://vision:9000/v1\"\napi_key = \"vk\"\n"
+            ),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        let (url, key) = cfg
+            .infer
+            .vision
+            .as_ref()
+            .unwrap()
+            .resolve(&cfg.infer.synthesize);
+        assert_eq!(url, "http://vision:9000/v1");
+        assert_eq!(key.as_deref(), Some("vk"));
+        assert!(!cfg.redacted().contains("\"vk\""), "vision key leaked");
+    }
+
+    #[test]
+    fn the_example_config_documents_the_vision_role() {
+        let text = std::fs::read_to_string("config.example.toml").unwrap();
+        assert!(
+            text.contains("[infer.vision]"),
+            "example config must show the vision block"
+        );
+        assert!(text.contains("image_max_bytes"));
     }
 }
