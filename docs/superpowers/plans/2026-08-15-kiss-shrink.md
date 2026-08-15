@@ -99,16 +99,16 @@ Expected: definitions + (for probe) the four discarded call sites in `main.rs`; 
 - Modify: `src/core/image.rs` (~L171 doc line, ~L212-236 the "every other tag" loop with `MakerNote`/`UserComment`/`Tag(` filters and 200-char truncation; test assertion ~L517)
 - Modify: `src/core/ingest.rs` (`StoreDrift` struct ~L38-54; `rows_restored`/`corpora_restored`/`points_requeued` increments inside `heal_store_drift` ~L760-905; the summary log ~L905-912 stays), `src/main.rs:~122`, `src/jobs/consolidate.rs:~387` (callers discard the value)
 
-- [ ] **Step 1: Verify readers**
+- [x] **Step 1: Verify readers**
 ```bash
 grep -rn '"tags"\|\["tags"\]\|exif.*tags' src | grep -v test
 grep -rn 'StoreDrift\|rows_restored\|corpora_restored\|points_requeued' src tests
 ```
 Expected for exif tags: only the writer in `image.rs`. Readers of `metadata["exif"]` are `src/infer/prompt.rs` and `src/web/ui.rs` and read only `taken_at`, `camera`, `gps` — confirm.
-- [ ] **Step 2: Delete the `tags` loop and its doc line; keep `taken_at`, `camera`, `gps`, `orientation`.** Update the test at ~L517 to no longer assert on `tags`.
-- [ ] **Step 3: `heal_store_drift` returns `Result<()>`.** Keep three local `u64` counters only if the closing `tracing::info!` still reports them; delete `StoreDrift` and its doc. Update the ingest tests that read `.rows_restored` etc. to assert on the store instead (e.g. `core.store.get_artifact(id).await?.is_some()`), or delete an assertion that duplicated one the same test already makes on the store. (Note: Task 20 later replaces `heal_store_drift` with a warn; keep this change minimal — only enough to compile.)
-- [ ] **Step 4: `cargo test`** — green.
-- [ ] **Step 5: Commit** — `chore(kiss): stop storing exif tags nothing reads; drift repair returns unit`
+- [x] **Step 2: Delete the `tags` loop and its doc line; keep `taken_at`, `camera`, `gps`, `orientation`.** Update the test at ~L517 to no longer assert on `tags`.
+- [x] **Step 3: `heal_store_drift` returns `Result<()>`.** Keep three local `u64` counters only if the closing `tracing::info!` still reports them; delete `StoreDrift` and its doc. Update the ingest tests that read `.rows_restored` etc. to assert on the store instead (e.g. `core.store.get_artifact(id).await?.is_some()`), or delete an assertion that duplicated one the same test already makes on the store. (Note: Task 20 later replaces `heal_store_drift` with a warn; keep this change minimal — only enough to compile.)
+- [x] **Step 4: `cargo test`** — green.
+- [x] **Step 5: Commit** — `chore(kiss): stop storing exif tags nothing reads; drift repair returns unit`
 
 ### Task 4: Remove `eval-prepare` binary
 
@@ -117,14 +117,14 @@ Expected for exif tags: only the writer in `image.rs`. Readers of `metadata["exi
 - Modify: `Cargo.toml` (`[[bin]] name = "eval-prepare"` block + comment, ~L14-21)
 - Modify: `tests/eval.rs` (~L62, 74, 80 error strings mentioning `eval-prepare`), README/ROADMAP if they mention it
 
-- [ ] **Step 1: Verify**
+- [x] **Step 1: Verify**
 ```bash
 grep -rn 'eval-prepare\|eval_prepare' --exclude-dir=target .
 ```
-- [ ] **Step 2: Delete the file, the Cargo block, and reword the three `tests/eval.rs` strings** to point at `engram --export-eval <dir>` (README §"Learning what the search got wrong" documents it).
-- [ ] **Step 3: If `Store::memory()` in `src/store/mod.rs` has a doc comment justifying itself by `eval-prepare`, shorten it to "in-memory SQLite for tests and `--recompute-coverage`."** Do not delete the fn.
-- [ ] **Step 4: `cargo build --all-targets && cargo test`** — green.
-- [ ] **Step 5: Commit** — `chore(kiss): drop eval-prepare; --export-eval replaced it`
+- [x] **Step 2: Delete the file, the Cargo block, and reword the three `tests/eval.rs` strings** to point at `engram --export-eval <dir>` (README §"Learning what the search got wrong" documents it).
+- [x] **Step 3: If `Store::memory()` in `src/store/mod.rs` has a doc comment justifying itself by `eval-prepare`, shorten it to "in-memory SQLite for tests and `--recompute-coverage`."** Do not delete the fn.
+- [x] **Step 4: `cargo build --all-targets && cargo test`** — green.
+- [x] **Step 5: Commit** — `chore(kiss): drop eval-prepare; --export-eval replaced it`
 
 ### Task 5: Bug fix — reconcile must not be gated by `consolidate.enabled`
 
@@ -132,7 +132,7 @@ grep -rn 'eval-prepare\|eval_prepare' --exclude-dir=target .
 - Modify: `src/jobs/consolidate.rs` (`run`: early `return` at ~L310 when `!enabled`; `reconcile::run(core)` at ~L316)
 - Test: `src/jobs/consolidate.rs` tests
 
-- [ ] **Step 1: Write the failing test** (in `consolidate.rs` `mod tests`, using the existing `test_core`-style helper in that module; adapt names to what exists):
+- [x] **Step 1: Write the failing test** (in `consolidate.rs` `mod tests`, using the existing `test_core`-style helper in that module; adapt names to what exists):
 ```rust
 #[tokio::test]
 async fn reconcile_runs_even_when_consolidation_is_disabled() {
@@ -143,10 +143,10 @@ async fn reconcile_runs_even_when_consolidation_is_disabled() {
     // Assert the corpus is now settled / has an Embed job — same assertion the reconcile test makes.
 }
 ```
-- [ ] **Step 2: Run it** — `cargo test -p engram reconcile_runs_even_when_consolidation_is_disabled` — FAILS (nothing repaired).
-- [ ] **Step 3: Move `reconcile::run(core).await?;` above the `if !core.consolidate.enabled { return … }` check.** Keep the return shape unchanged.
-- [ ] **Step 4: Run tests** — green.
-- [ ] **Step 5: Commit** — `fix(consolidate): the repair sweep runs even with duplicate hygiene off`
+- [x] **Step 2: Run it** — `cargo test -p engram reconcile_runs_even_when_consolidation_is_disabled` — FAILS (nothing repaired).
+- [x] **Step 3: Move `reconcile::run(core).await?;` above the `if !core.consolidate.enabled { return … }` check.** Keep the return shape unchanged.
+- [x] **Step 4: Run tests** — green.
+- [x] **Step 5: Commit** — `fix(consolidate): the repair sweep runs even with duplicate hygiene off`
 
 ### Task 6: Bug fix — remove hard-coded `theme: "light"`
 
@@ -154,16 +154,16 @@ async fn reconcile_runs_even_when_consolidation_is_disabled() {
 - Modify: `src/web/ui.rs` (field on ~9 template structs: ~L298,327,366,411,420,498; assignments ~L516,584,825,1193,1430,1593), `src/web/judge.rs:~60,216`, `src/web/pair.rs:~93,138`, `src/web/extension.rs:~23,41`, `src/web/auth_routes.rs:~33,61,69,97`
 - Modify: `src/web/templates/layout.html:2` (`data-theme="{{ theme }}"` attribute) and any other template referencing `theme`
 
-- [ ] **Step 1: Find every use**
+- [x] **Step 1: Find every use**
 ```bash
 grep -rn '\btheme\b' src/web src/web/templates assets/app.css | grep -v 'theme_color\|prefers-color-scheme'
 ```
-- [ ] **Step 2: Delete the field from every struct and every `theme: "light".into()` assignment; delete the `data-theme` attribute from `layout.html`.** Confirm `assets/app.css` has a `@media (prefers-color-scheme: dark)` block or that its `[data-theme="dark"]` block is now applied via a `prefers-color-scheme` media query. If it only has `[data-theme="dark"]`, wrap the same rules in `@media (prefers-color-scheme: dark) { :root { … } }` — copy the variables verbatim; do not redesign.
-- [ ] **Step 3: `cargo build && cargo test`** (askama compiles templates; a leftover `{{ theme }}` fails the build).
-- [ ] **Step 4: Commit** — `fix(ui): stop pinning every page to the light theme`
+- [x] **Step 2: Delete the field from every struct and every `theme: "light".into()` assignment; delete the `data-theme` attribute from `layout.html`.** Confirm `assets/app.css` has a `@media (prefers-color-scheme: dark)` block or that its `[data-theme="dark"]` block is now applied via a `prefers-color-scheme` media query. If it only has `[data-theme="dark"]`, wrap the same rules in `@media (prefers-color-scheme: dark) { :root { … } }` — copy the variables verbatim; do not redesign.
+- [x] **Step 3: `cargo build && cargo test`** (askama compiles templates; a leftover `{{ theme }}` fails the build).
+- [x] **Step 4: Commit** — `fix(ui): stop pinning every page to the light theme`
 
 ### Task 7: Tier 1 report
-- [ ] `git diff --stat master..HEAD | tail -1`; `cargo clippy 2>&1 | grep -c warning` vs baseline. Note both.
+- [x] Tier 1 done: 41 files, −21,052 / +103; clippy 0 warnings; 893 unit tests green. (StoreDrift half of Task 3 deferred into Task 22.)
 
 ---
 
