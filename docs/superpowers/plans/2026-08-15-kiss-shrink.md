@@ -175,31 +175,31 @@ grep -rn '\btheme\b' src/web src/web/templates assets/app.css | grep -v 'theme_c
 - Modify: `src/vector/memory.rs` `mod tests` (~L494-1099)
 - Reference: `tests/integration_qdrant.rs`
 
-- [ ] **Step 1: List memory tests and find each twin by name/assertion**
+- [x] **Step 1: List memory tests and find each twin by name/assertion**
 ```bash
 grep -n 'async fn \|fn ' src/vector/memory.rs | sed -n '/mod tests/,$p'
 grep -n 'async fn ' tests/integration_qdrant.rs
 ```
 Audit-known twins: memory `~822/869` ↔ qdrant `~1362/1407`; `~891` ↔ `~1430/1453`; `~922-983` ↔ `~1506-1582`; `~1063` ↔ `~1701`; `~1080` ↔ `~1763`.
-- [ ] **Step 2: Delete every memory test with a Qdrant twin. Keep tests with no twin** (list them in the commit message).
-- [ ] **Step 3: `cargo test vector::memory` and, with Qdrant up, `cargo test --test integration_qdrant`** — green.
-- [ ] **Step 4: Commit** — `chore(kiss): memory store keeps only the tests Qdrant does not already run`
+- [x] **Step 2: Delete every memory test with a Qdrant twin. Keep tests with no twin** (list them in the commit message).
+- [x] **Step 3: `cargo test vector::memory` and, with Qdrant up, `cargo test --test integration_qdrant`** — green.
+- [x] **Step 4: Commit** — `chore(kiss): memory store keeps only the tests Qdrant does not already run`
 
 ### Task 9: `jobs/consolidate.rs` — drop tests that re-run dedupe through the sweep
 
 **Files:**
 - Modify: `src/jobs/consolidate.rs` (helper `disagreeing` + ~10 tests ~L1809-2183 and ~L2215-2295; helper `sweep_and_dedupe` ~L750-767)
 
-- [ ] **Step 1: Confirm each pair.** For each candidate consolidate test, find the `dedupe.rs` test with the same assertion:
+- [x] **Step 1: Confirm each pair.** For each candidate consolidate test, find the `dedupe.rs` test with the same assertion:
   - `the_pass_records_what_it_would_do_when_autonomy_is_off` ↔ dedupe `with_autonomy_off_a_duplicate_verdict_is_filed_as_would_merge`
   - `a_direction_naming_the_newer_artifact_is_not_trusted` ↔ dedupe `a_replacement_naming_the_newer_artifact_is_not_trusted`
   - `an_enabled_dedupe_pass_marks_a_real_contradiction` ↔ dedupe `a_value_conflict_is_escalated_and_never_merged`
   - `a_failed_dedupe_call_leaves_the_pair_pending` ↔ dedupe `a_failed_dedupe_leaves_the_component_pending`
   - `a_confident_direction_is_applied_once_autonomy_is_on` ↔ dedupe `an_applied_replacement_does_not_wait_for_an_operator`
   - plus the others in the same block that only differ by verdict.
-- [ ] **Step 2: Delete those tests, `disagreeing`, and `sweep_and_dedupe` if now unused.** Keep the sweep-contract tests (~L2184-2214, ~L1531-1656, ~L2366+: arms units, no model call, budget/ordering).
-- [ ] **Step 3: `cargo test jobs::consolidate jobs::dedupe`** — green.
-- [ ] **Step 4: Commit** — `chore(kiss): dedupe verdicts are tested once, in dedupe`
+- [x] **Step 2: Delete those tests, `disagreeing`, and `sweep_and_dedupe` if now unused.** Keep the sweep-contract tests (~L2184-2214, ~L1531-1656, ~L2366+: arms units, no model call, budget/ordering).
+- [x] **Step 3: `cargo test jobs::consolidate jobs::dedupe`** — green.
+- [x] **Step 4: Commit** — `chore(kiss): dedupe verdicts are tested once, in dedupe`
 
 ### Task 10: `web/` test harness + markup assertions
 
@@ -207,13 +207,13 @@ Audit-known twins: memory `~822/869` ↔ qdrant `~1362/1407`; `~891` ↔ `~1430/
 - Create: `src/web/test_support.rs` (`#[cfg(test)]`)
 - Modify: `src/web/mod.rs` (`#[cfg(test)] mod test_support;`), `src/web/ui.rs` tests (~L1657-3359), `src/web/api.rs` tests (~L866-1030 helpers; keep `mod patch_tests`), `src/web/assets.rs` tests (~L176-390)
 
-- [ ] **Step 1: Inventory helpers**
+- [x] **Step 1: Inventory helpers**
 ```bash
 grep -n 'fn ' src/web/ui.rs | sed -n '/cfg(test)/,$p' | head -40
 grep -n 'fn ' src/web/api.rs | sed -n '/cfg(test)/,$p' | head -40
 ```
 Known: ui `app_with_session, app_session_and_core, app_for, app_with_embedded_corpus, get, get_body, body_of, form, flat, urlencoding_of`; api `app_and_token, app_token_and_core, app_from_core, get, post_json, json_of, post_file, post_file_with, post_two_files`.
-- [ ] **Step 2: Write `test_support.rs`** with one router builder and the request helpers, keeping the *union* of behaviours:
+- [x] **Step 2: Write `test_support.rs`** with one router builder and the request helpers, keeping the *union* of behaviours:
 ```rust
 //! Shared harness for web tests.
 use super::*; // adjust to what ui/api tests import today
@@ -230,43 +230,43 @@ pub async fn post_form(app:&Router, path:&str, cookie:&str, fields:&[(&str,&str)
 pub async fn post_file(app:&Router, path:&str, token:&str, parts:&[(&str,&str,&[u8])]) -> Response { /* covers post_file/post_file_with/post_two_files */ }
 ```
 Copy the existing bodies verbatim; the point is one copy, not new behaviour.
-- [ ] **Step 3: Rewrite `ui.rs`/`api.rs` tests to `use super::test_support::*;`** and delete the per-file helpers.
-- [ ] **Step 4: Delete markup-string assertions in `ui.rs`.** Rule: any test whose *only* assertion is `body.contains("<…html…>")` goes; a test that also asserts a status, redirect, auth outcome, or absence of unsanitized input stays (delete only its markup lines if it has both). Keep the ~15 behaviour tests: 401/redirect on every route without auth, sanitisation of pasted HTML, 404 for unknown ids, PUT edit round-trip, capture form → corpus exists.
-- [ ] **Step 5: `assets.rs`:** delete tests asserting file *contents* (fonts embedded, manifest fields, sw.js text, offline page colour, "no external requests" greps ~L176-193, 213-260, 284-311, 342-390). Keep the four testing `serve`: content-type, cache-control, private-prefix 404, path traversal. If `assets_router_standalone`/generic `routes<S>()` (~L90-106) existed only for the deleted tests, delete them too — verify with grep.
-- [ ] **Step 6: `cargo test web::`** — green.
-- [ ] **Step 7: Commit** — `chore(kiss): one web test harness; assert behaviour, not markup`
+- [x] **Step 3: Rewrite `ui.rs`/`api.rs` tests to `use super::test_support::*;`** and delete the per-file helpers.
+- [x] **Step 4: Delete markup-string assertions in `ui.rs`.** Rule: any test whose *only* assertion is `body.contains("<…html…>")` goes; a test that also asserts a status, redirect, auth outcome, or absence of unsanitized input stays (delete only its markup lines if it has both). Keep the ~15 behaviour tests: 401/redirect on every route without auth, sanitisation of pasted HTML, 404 for unknown ids, PUT edit round-trip, capture form → corpus exists.
+- [x] **Step 5: `assets.rs`:** delete tests asserting file *contents* (fonts embedded, manifest fields, sw.js text, offline page colour, "no external requests" greps ~L176-193, 213-260, 284-311, 342-390). Keep the four testing `serve`: content-type, cache-control, private-prefix 404, path traversal. If `assets_router_standalone`/generic `routes<S>()` (~L90-106) existed only for the deleted tests, delete them too — verify with grep.
+- [x] **Step 6: `cargo test web::`** — green.
+- [x] **Step 7: Commit** — `chore(kiss): one web test harness; assert behaviour, not markup`
 
 ### Task 11: `core/search.rs`, `core/ingest.rs`, `core/mod.rs` test cleanup
 
 **Files:**
 - Modify: `src/core/search.rs` tests (~L541-1483), `src/core/ingest.rs` tests (~L1133-2310), `src/core/mod.rs` (~L216-330 `test_core_*`)
 
-- [ ] **Step 1: search.rs** — delete `a_deprecated_artifact_is_not_a_neighbour` (~L1276, identical to `integration_qdrant.rs:~1806`); delete the four tests at ~L1120-1243 that only exercise `core.vectors.stale_candidates`/`set_last_verified_at` (covered in `integration_qdrant.rs:~184-200,1882,1978-1990,2095`); if `reembed_all` (~L582) and the bespoke `Embedder` impl (~L600-618) then have no users, delete them.
-- [ ] **Step 2: ingest.rs** — merge the two PNG fixtures (`a_seeded_png` ~L1144, `a_png` ~L2148 → keep one, name `a_png`); delete `the_same_photo_twice_is_a_duplicate_before_any_model_call` (~L2209, same assertion as `a_duplicate_image_is_recognised_by_the_shared_hash` ~L1286); pull the shared `point()`/`one_artifact()` scaffolding of the five `heal_store_drift` tests (~L2013-2147) into one helper.
-- [ ] **Step 3: mod.rs** — replace the nine `test_core_*` fns with `test_core()` plus a `TestCoreBuilder { synthesizer, embedder, reranker, completer, config_edit }` (or a `build(overrides: Overrides)` fn with `Default`), keeping the three most-used names (`test_core`, `test_core_with_config`, `test_core_counting_reranked_docs`) as thin aliases if they have >5 callers (`grep -rn test_core_ src | wc -l` per name). Delete the rest and update callers.
-- [ ] **Step 4: `cargo test`** — green.
-- [ ] **Step 5: Commit** — `chore(kiss): core tests: one fixture per shape, no duplicates of the Qdrant suite`
+- [x] **Step 1: search.rs** — delete `a_deprecated_artifact_is_not_a_neighbour` (~L1276, identical to `integration_qdrant.rs:~1806`); delete the four tests at ~L1120-1243 that only exercise `core.vectors.stale_candidates`/`set_last_verified_at` (covered in `integration_qdrant.rs:~184-200,1882,1978-1990,2095`); if `reembed_all` (~L582) and the bespoke `Embedder` impl (~L600-618) then have no users, delete them.
+- [x] **Step 2: ingest.rs** — merge the two PNG fixtures (`a_seeded_png` ~L1144, `a_png` ~L2148 → keep one, name `a_png`); delete `the_same_photo_twice_is_a_duplicate_before_any_model_call` (~L2209, same assertion as `a_duplicate_image_is_recognised_by_the_shared_hash` ~L1286); pull the shared `point()`/`one_artifact()` scaffolding of the five `heal_store_drift` tests (~L2013-2147) into one helper.
+- [x] **Step 3: mod.rs** — replace the nine `test_core_*` fns with `test_core()` plus a `TestCoreBuilder { synthesizer, embedder, reranker, completer, config_edit }` (or a `build(overrides: Overrides)` fn with `Default`), keeping the three most-used names (`test_core`, `test_core_with_config`, `test_core_counting_reranked_docs`) as thin aliases if they have >5 callers (`grep -rn test_core_ src | wc -l` per name). Delete the rest and update callers.
+- [x] **Step 4: `cargo test`** — green.
+- [x] **Step 5: Commit** — `chore(kiss): core tests: one fixture per shape, no duplicates of the Qdrant suite`
 
 ### Task 12: `infer/` and `jobs/describe.rs` test cleanup
 
 **Files:**
 - Modify: `src/infer/openai.rs` tests (~L919-1127), `src/infer/fake.rs` (~L658-743), `src/jobs/describe.rs` tests (~L276-380), `src/jobs/consolidate.rs` seed fixtures (~L777-921), `src/eval/export.rs` tests (~L74-230)
 
-- [ ] **Step 1: openai.rs** — fold `embedder_asks_for_float_encoding_explicitly`, `embedder_sends_a_batch_and_orders_results_by_index`, `base_url_with_a_trailing_slash_does_not_double_up`, `completer_returns_message_content` into one `wire_format_is_what_we_document` test with one wiremock server asserting all four properties; fold `reranker_tei_style`/`reranker_cohere_style`/`reranker_drops_out_of_range_indexes` into one table-driven test over `[(RerankStyle, response_json, expected_order)]`.
-- [ ] **Step 2: fake.rs** — delete `mod tests` (~L658-743): the fakes are exercised by ~200 other tests.
-- [ ] **Step 3: describe.rs** — one `async fn image_corpus(core:&Core) -> Corpus` helper replacing the three copied `insert_image_corpus(NewImage{…})` blocks; delete `without_a_vision_role_the_job_waits_rather_than_failing_the_corpus` (strict subset of `without_a_vision_role_an_exhausted_job_keeps_waiting`).
-- [ ] **Step 4: consolidate.rs seeds** — replace `seed_titled`/`seed`/`seed_into_new_corpus` with:
+- [x] **Step 1: openai.rs** — fold `embedder_asks_for_float_encoding_explicitly`, `embedder_sends_a_batch_and_orders_results_by_index`, `base_url_with_a_trailing_slash_does_not_double_up`, `completer_returns_message_content` into one `wire_format_is_what_we_document` test with one wiremock server asserting all four properties; fold `reranker_tei_style`/`reranker_cohere_style`/`reranker_drops_out_of_range_indexes` into one table-driven test over `[(RerankStyle, response_json, expected_order)]`.
+- [x] **Step 2: fake.rs** — delete `mod tests` (~L658-743): the fakes are exercised by ~200 other tests.
+- [x] **Step 3: describe.rs** — one `async fn image_corpus(core:&Core) -> Corpus` helper replacing the three copied `insert_image_corpus(NewImage{…})` blocks; delete `without_a_vision_role_the_job_waits_rather_than_failing_the_corpus` (strict subset of `without_a_vision_role_an_exhausted_job_keeps_waiting`).
+- [x] **Step 4: consolidate.rs seeds** — replace `seed_titled`/`seed`/`seed_into_new_corpus` with:
 ```rust
 /// Seeds artifacts with vectors. `corpus`: None → the shared test corpus; Some(title) → a fresh corpus.
 async fn seed(core:&Core, corpus: Option<&str>, rows:&[(Option<&str> /*title*/, &str /*text*/, [f32;2])]) -> Vec<String /*ids*/>
 ```
 Update callers in `consolidate.rs`, `classify.rs`, `dedupe.rs`.
-- [ ] **Step 5: export.rs** — keep one round-trip test (export → files exist → JSON parses → ids match) and one "no pairs → empty pairs.json" test; delete the rest.
-- [ ] **Step 6: `cargo test`** — green.
-- [ ] **Step 7: Commit** — `chore(kiss): fewer, table-driven infer tests; one fixture per job`
+- [x] **Step 5: export.rs** — keep one round-trip test (export → files exist → JSON parses → ids match) and one "no pairs → empty pairs.json" test; delete the rest.
+- [x] **Step 6: `cargo test`** — green.
+- [x] **Step 7: Commit** — `chore(kiss): fewer, table-driven infer tests; one fixture per job`
 
 ### Task 13: Tier 2 report
-- [ ] `git diff --stat master..HEAD | tail -1`; test count before/after (`cargo test 2>&1 | grep 'test result'`).
+- [x] Tier 2 done: 51 files, −22,760 / +424 vs master; unit tests 894 → 840, all green; integration 58/58 green. Deviations: only 4 pure-markup ui tests deleted (the rest assert behaviour through HTML); export.rs tests kept (each pins a distinct rule); ingest drift scaffolding already shared.
 
 ---
 
