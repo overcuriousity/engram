@@ -1111,12 +1111,33 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
             // `a` obsolete is a recommendation to keep `b`.
             let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
             let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
-            // The judge's `duplicate` verdict files this pair with
-            // `detail = "link"` (`src/jobs/associate.rs`) — a provenance
-            // marker meant for code, not the reader. Rendered as a sentence
-            // here rather than the bare token; the stored value is untouched.
-            let via_link = p.detail.as_deref() == Some("link");
-            let detail = if via_link {
+            // A score of exactly zero is what "no cosine was ever measured"
+            // looks like in the row: the link judge's `duplicate` verdict files
+            // the pair with one (`src/jobs/associate.rs`), and the similarity
+            // sweep — the only other producer of a pending pair — files the
+            // cosine it found, which cleared `consolidate.review_min` to get
+            // there (`src/jobs/relate.rs:68`).
+            //
+            // That gate is `>=` and `review_min` has no lower bound of its own
+            // — only `auto_supersede > review_min` is enforced — so an operator
+            // who sets it to zero could in principle file a pair measured at
+            // exactly 0.0, and this would call it unmeasured. It takes an exact
+            // float zero out of a real embedding to get there, which is why the
+            // marker is left implicit; if that ever stops being true the fix is
+            // an explicit `origin` column, not a smaller epsilon.
+            //
+            // Not `detail == "link"`, which is only the *initial* detail: the
+            // dedupe judge's `set_pair_state` and `set_pair_superseded`
+            // (`src/store/pairs.rs`) both write their own prose over that
+            // field, so a marker read out of it survives only while the pair is
+            // pending. The score is never rewritten.
+            let via_link = p.score == 0.0;
+            // The bare marker, on the other hand, *is* read out of `detail` —
+            // it is the whole of that field only while the pair is pending, and
+            // that is exactly when there is no judge's line to lose. Once one
+            // has been written the prose is what the reader needs; the score
+            // above still keeps the page from calling it a measurement.
+            let detail = if p.detail.as_deref() == Some("link") {
                 Some(
                     "Not found by similarity: these two kept being retrieved together, \
                      and the judge then found they say the same thing."
@@ -2160,6 +2181,73 @@ mod tests {
     /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
         app_with_cookie(core).await
+    }
+
+    #[tokio::test]
+    async fn a_link_derived_pair_never_claims_a_similarity_once_the_judge_has_settled_it() {
+        // The link judge files these with `detail = "link"` and a score of 0.0,
+        // because no cosine was ever measured. But `detail` is where the dedupe
+        // judge then writes its own prose — `set_pair_state` and
+        // `set_pair_superseded` both overwrite it — so provenance read out of
+        // that field survives only while the pair is pending. Once it settles,
+        // the page would go back to rendering the placeholder score, and
+        // "0% alike" reads as a measurement meaning "nothing alike".
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "the first one".into(),
+                        corpus_span: None,
+                        title: Some("first".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "the second one".into(),
+                        corpus_span: None,
+                        title: Some("second".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_pair_with_detail(&made[0].id, &made[1].id, 0.0, "link")
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM artifact_pairs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        // The dedupe judge answers, and writes its line over the marker.
+        core.store
+            .set_pair_state(
+                id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("one says the opposite of the other"),
+            )
+            .await
+            .unwrap();
+
+        let (app, cookie) = app_for(core).await;
+        let html = flat(&get(&app, "/ui/capture", &cookie).await);
+
+        assert!(
+            !html.contains("0% alike"),
+            "a pair no cosine was ever measured for reports a measured similarity"
+        );
     }
 
     #[tokio::test]

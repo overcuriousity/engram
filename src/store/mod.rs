@@ -197,9 +197,60 @@ impl Store {
         // artifact's own creation time, not zero. Left at zero every artifact
         // predating this column reads as decayed to nothing since 1970 — the
         // whole base equally inaccessible, which is the opposite of the truth.
-        sqlx::query("UPDATE artifacts SET activated_at = created_at WHERE activated_at = 0")
-            .execute(&self.pool)
-            .await?;
+        //
+        // Keyed on a zeroed stamp rather than on "this call ran the ALTER",
+        // because those are not the same moment. The `corpus_id` check above
+        // returns `Err` after both ALTERs have committed, and the operator it
+        // sends off to rebuild the artifacts table comes back to a database
+        // whose columns already exist — a flag set by the ALTER would be false
+        // from then on, and these fixups would never run at all. A kill inside
+        // the same window does the same thing. A zeroed stamp is what actually
+        // needs fixing, it is what the fix removes, and asking costs one scan
+        // of `artifacts` at boot on a database that no longer has any.
+        let adopting: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM artifacts WHERE activated_at = 0)")
+                .fetch_one(&self.pool)
+                .await?;
+        if adopting {
+            // One transaction, because the watermarks below are keyed on the
+            // same zeroed stamp this backfill erases: committed separately, a
+            // crash between them would leave nothing left to notice that the
+            // second half never happened.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("UPDATE artifacts SET activated_at = created_at WHERE activated_at = 0")
+                .execute(&mut *tx)
+                .await?;
+            // ...and the same moment decides where the association sweep starts
+            // reading. Absent watermarks mean "from the epoch", which on a base
+            // that has been recording searches for months would fold the entire
+            // historical log in on the first tick — thousands of pairs bound at
+            // once, every one of them stamped with the sweep's clock and so
+            // undecayed, feeding priming and the judge queue from a past nobody
+            // asked to relive. Learning starts now, from what happens next.
+            //
+            // A database with no artifacts at all is not adopting anything and
+            // never reaches here, so a fresh install keeps both watermarks
+            // absent and replays its own short log from the epoch, which is
+            // both correct and free.
+            //
+            // The keys are `jobs::associate::{EVENTS_AFTER, JUDGED_AFTER}`,
+            // spelled out because nothing else in `store` reaches up into
+            // `jobs`; `watermarks_named_here_are_the_ones_the_sweep_reads`
+            // pins them together.
+            let at = now().to_string();
+            for key in ["associate.events_after", "associate.judged_after"] {
+                sqlx::query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)")
+                    .bind(key)
+                    .bind(&at)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            tracing::info!(
+                "adopting associative memory: activation backfilled, \
+                 the search log before now is left unread"
+            );
+        }
 
         let mut missing = Vec::new();
         for (table, columns) in schema_columns(SCHEMA) {
@@ -564,6 +615,50 @@ mod tests {
                 .unwrap();
         assert!((value - 1.0).abs() < 1e-9);
         assert!(stamp > 0, "activated_at was left at the epoch");
+
+        // ...and the same adoption decides where the sweep starts reading. A
+        // base that has been recording searches for months must not have that
+        // whole log folded into links on its first tick.
+        for key in ["associate.events_after", "associate.judged_after"] {
+            let mark: i64 = store
+                .meta_get(key)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{key} was left unseeded on an adopting base"))
+                .parse()
+                .unwrap();
+            assert!(mark > 0, "{key} was seeded at the epoch");
+        }
+
+        // Once seeded, a later boot leaves the watermark where the sweep put
+        // it — re-seeding would skip everything learned since.
+        store
+            .meta_set("associate.events_after", "42")
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        assert_eq!(
+            store.meta_get("associate.events_after").await.unwrap(),
+            Some("42".into()),
+            "a later boot moved the watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_base_created_with_activation_is_not_treated_as_adopting_it() {
+        // Nothing to backfill and nothing to skip: a database created by this
+        // version has no search log predating the feature, and its watermarks
+        // start where every other counter does.
+        let store = Store::memory().await.unwrap();
+        store.migrate().await.unwrap();
+        assert_eq!(
+            store.meta_get("associate.events_after").await.unwrap(),
+            None
+        );
+        assert_eq!(
+            store.meta_get("associate.judged_after").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -726,5 +821,66 @@ mod tests {
 
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_associative_fixups_finish_on_a_later_boot_when_the_adopting_one_did_not() {
+        // The boot that adds the columns can fail before the fixups below them:
+        // the `corpus_id` check returns `Err` after both ALTERs have committed,
+        // and a kill in the same window does the same. On the boot after, the
+        // columns are already there — so anything keyed on "this call added
+        // them" is false forever, the stamps stay at the epoch and the sweep's
+        // watermarks are never written. An absent watermark reads as "from the
+        // epoch", which folds the entire historical search log in on one tick.
+        // Keyed on the state of the database, so a later boot finishes the job.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let ids = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // Exactly what an aborted adopting boot leaves behind: the columns
+        // present, the stamps unbackfilled, the watermarks unwritten.
+        sqlx::query("UPDATE artifacts SET activated_at = 0")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM meta WHERE key LIKE 'associate.%'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+
+        let stamp: i64 = sqlx::query_scalar("SELECT activated_at FROM artifacts WHERE id = ?")
+            .bind(&ids[0].id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_ne!(
+            stamp, 0,
+            "every artifact still reads as decayed to nothing since 1970"
+        );
+        for key in [
+            crate::jobs::associate::EVENTS_AFTER,
+            crate::jobs::associate::JUDGED_AFTER,
+        ] {
+            assert!(
+                store.meta_get(key).await.unwrap().is_some(),
+                "{key} was never seeded; the first sweep replays the whole log"
+            );
+        }
     }
 }

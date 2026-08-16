@@ -18,6 +18,22 @@ use sqlx::Row;
 /// the count of *distinct* ones is `queries`, which is not bounded by this.
 pub const MAX_CUES: usize = 3;
 
+/// How the two read-then-write transactions here open.
+///
+/// SQLite's default `BEGIN` is deferred: it takes no lock until the first
+/// statement, so a transaction that reads and *then* writes holds a read
+/// snapshot when it asks for the write lock. Under WAL, if another connection
+/// committed in between, that upgrade fails immediately with
+/// `SQLITE_BUSY_SNAPSHOT` — the one busy error `busy_timeout` does not retry,
+/// because waiting cannot make a stale snapshot fresh.
+///
+/// Both `bump_link` and `bump_activation` are exactly that shape — read the
+/// current weight, decay it, write it back — and both run from background
+/// tasks while a sweep is writing the same tables from another connection in
+/// the same pool. Taking the write lock up front makes the loser wait instead
+/// of fail, which is what `busy_timeout` is for.
+const IMMEDIATE: &str = "BEGIN IMMEDIATE";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     /// Bound by use, nothing has ruled on it. Shown, prunable, judgeable.
@@ -172,8 +188,9 @@ impl Store {
     /// co-appearance was already folded in — strengthens without claiming a new
     /// binding question.
     ///
-    /// One transaction per pair. An event with ten shown candidates is 45 of
-    /// these, which is a few milliseconds of local SQLite and no network at all.
+    /// One transaction. Callers with a whole event's worth of pairs to bind
+    /// should use `bump_links` rather than a loop over this — see its note on
+    /// what a loop costs.
     pub async fn bump_link(
         &self,
         a: &str,
@@ -189,62 +206,124 @@ impl Store {
             return Ok(());
         }
         let (a, b) = canonical(a, b);
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT weight, bumped_at, queries, cues FROM artifact_links
-              WHERE a_id = ? AND b_id = ?",
-        )
-        .bind(a)
-        .bind(b)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        bump_one(&mut tx, a, b, delta, cue, half_life_days, at).await?;
+        tx.commit().await?;
+        Ok(())
+    }
 
-        match row {
-            Some(r) => {
-                let mut cues: Vec<Cue> =
-                    serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default();
-                let fresh = cue.is_some_and(|q| bump_cue(&mut cues, q));
-                let weight =
-                    decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) + delta;
-                sqlx::query(
-                    "UPDATE artifact_links
-                        SET weight = ?, bumped_at = ?, queries = ?, cues = ?
-                      WHERE a_id = ? AND b_id = ?",
-                )
-                .bind(weight)
-                .bind(at)
-                .bind(r.get::<i64, _>("queries") + i64::from(fresh))
-                .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
-                .bind(a)
-                .bind(b)
-                .execute(&mut *tx)
-                .await?;
+    /// Every pair of one event's shown candidates, in a single transaction.
+    ///
+    /// The count is quadratic in what the searcher saw — ten shown candidates
+    /// are 45 pairs, and `search.limit` is capped at 50, which is 1225 — and
+    /// each of these transactions is an exclusive one (see `IMMEDIATE`). Bound
+    /// a pair at a time, a single catch-up sweep of `REPLAY_LIMIT` events could
+    /// take the write lock and give it back a million times over, with every
+    /// concurrent search's `bump_activation` queued behind it. Per event it is
+    /// one.
+    ///
+    /// A pair that cannot be written is warned about and stepped over rather
+    /// than failing the batch: one side deleted between the search and the
+    /// sweep is the ordinary cause, and it says nothing about the rest of what
+    /// that event showed. SQLite aborts the statement, not the transaction, so
+    /// the pairs around it still commit.
+    pub async fn bump_links(
+        &self,
+        pairs: &[(&str, &str)],
+        delta: f64,
+        cue: Option<&str>,
+        half_life_days: f64,
+        at: i64,
+    ) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        for (a, b) in pairs {
+            if a == b {
+                continue;
             }
-            None => {
-                let mut cues = Vec::new();
-                if let Some(q) = cue {
-                    bump_cue(&mut cues, q);
-                }
-                sqlx::query(
-                    "INSERT INTO artifact_links
-                       (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, 'learning', ?)",
-                )
-                .bind(a)
-                .bind(b)
-                .bind(delta)
-                .bind(at)
-                .bind(cues.len() as i64)
-                .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
-                .bind(now())
-                .execute(&mut *tx)
-                .await?;
+            let (a, b) = canonical(a, b);
+            if let Err(err) = bump_one(&mut tx, a, b, delta, cue, half_life_days, at).await {
+                // Named as what it is and not as a guess: one side being gone
+                // is one cause, write contention under WAL is another, and an
+                // operator sent looking for a deleted artifact by a line that
+                // means "the database was busy" loses the afternoon. `warn`
+                // rather than `debug` because the bump is dropped, not retried
+                // — this is learning that did not happen.
+                tracing::warn!(error = %err, a, b, "could not bind a pair");
             }
         }
         tx.commit().await?;
         Ok(())
     }
+}
 
+/// One pair's bump, on a connection the caller has already opened a transaction
+/// on. Shared by `bump_link` and `bump_links` so the two can never drift.
+async fn bump_one(
+    tx: &mut sqlx::SqliteConnection,
+    a: &str,
+    b: &str,
+    delta: f64,
+    cue: Option<&str>,
+    half_life_days: f64,
+    at: i64,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT weight, bumped_at, queries, cues FROM artifact_links
+              WHERE a_id = ? AND b_id = ?",
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    match row {
+        Some(r) => {
+            let mut cues: Vec<Cue> =
+                serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default();
+            let fresh = cue.is_some_and(|q| bump_cue(&mut cues, q));
+            let weight = decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) + delta;
+            sqlx::query(
+                "UPDATE artifact_links
+                        SET weight = ?, bumped_at = ?, queries = ?, cues = ?
+                      WHERE a_id = ? AND b_id = ?",
+            )
+            .bind(weight)
+            .bind(at)
+            .bind(r.get::<i64, _>("queries") + i64::from(fresh))
+            .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
+            .bind(a)
+            .bind(b)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            let mut cues = Vec::new();
+            if let Some(q) = cue {
+                bump_cue(&mut cues, q);
+            }
+            sqlx::query(
+                "INSERT INTO artifact_links
+                       (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, 'learning', ?)",
+            )
+            .bind(a)
+            .bind(b)
+            .bind(delta)
+            .bind(at)
+            .bind(cues.len() as i64)
+            .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+impl Store {
     /// One link, whichever way round it is named.
     pub async fn get_link(&self, a: &str, b: &str) -> Result<Option<Link>> {
         let (a, b) = canonical(a, b);
@@ -621,7 +700,7 @@ impl Store {
             return Ok(());
         }
         for id in ids {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with(IMMEDIATE).await?;
             let row = sqlx::query("SELECT activation, activated_at FROM artifacts WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&mut *tx)

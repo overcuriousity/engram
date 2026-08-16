@@ -354,7 +354,11 @@ pub fn spawn_associate_ticker(
             tracing::info!("association sweep disabled");
             return;
         }
-        let period = std::time::Duration::from_secs(core.associate.interval_mins.max(1) * 60);
+        // Saturating: the operand is operator-typed, and a wrap here would turn
+        // a very long configured interval into a very short one — a sweep
+        // hammering the queue is the opposite of what was asked for.
+        let period =
+            std::time::Duration::from_secs(core.associate.interval_mins.max(1).saturating_mul(60));
         let mut tick = tokio::time::interval(period);
         loop {
             tokio::select! {

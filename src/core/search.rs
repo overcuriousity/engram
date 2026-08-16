@@ -400,7 +400,18 @@ impl Core {
     /// there is none. Everything here is additive: it never removes or reorders
     /// a ranked hit, and a store that will not answer produces an empty list and
     /// one warning.
-    async fn associated(&self, results: &[SearchResult]) -> Vec<SearchResult> {
+    ///
+    /// `filter` is the caller's own narrowing, and it applies here too. A
+    /// search for `category=runbook` is a statement about what the searcher
+    /// will accept, not a hint to the ranker, and an association that walks
+    /// past it hands back exactly the rows they asked not to see. `links_from`
+    /// already excludes anything not active and not live, so what is left to
+    /// re-check here is what the caller typed.
+    async fn associated(
+        &self,
+        results: &[SearchResult],
+        filter: &SearchFilter,
+    ) -> Vec<SearchResult> {
         let anchors: Vec<String> = results
             .iter()
             .take(self.associate.spread_from)
@@ -431,7 +442,19 @@ impl Core {
                 // leaves room for every anchor-to-anchor pair among the
                 // ranked anchors to be discarded and still fill the budget;
                 // the real cap is the `out.len() >= spread_max` check below.
-                (self.associate.spread_max * (self.associate.spread_from + 1)) as i64,
+                //
+                // Saturating, and `try_from` rather than `as`: both operands
+                // are operator-typed. `Config::normalize` clamps them to
+                // something a person could mean, so this cannot overflow in
+                // practice — but `as` on a `usize` that did would wrap to a
+                // negative `i64` and switch association silently off, which is
+                // the one failure nobody would report as a bug.
+                i64::try_from(
+                    self.associate
+                        .spread_max
+                        .saturating_mul(self.associate.spread_from.saturating_add(1)),
+                )
+                .unwrap_or(i64::MAX),
             )
             .await
         {
@@ -457,6 +480,16 @@ impl Core {
             let Ok(c) = self.store.get_artifact(&l.other).await else {
                 continue;
             };
+            // The same predicate the vector store applies, on the same two
+            // fields: every listed tag present, and the category exact.
+            if !filter.tags.iter().all(|t| c.tags.contains(t))
+                || filter
+                    .category
+                    .as_ref()
+                    .is_some_and(|want| c.category.as_ref() != Some(want))
+            {
+                continue;
+            }
             out.push(SearchResult {
                 artifact_id: c.id,
                 corpus_id: c.corpus_id.unwrap_or_default(),
@@ -704,7 +737,20 @@ impl Core {
         // is the order the searcher was actually shown — a judged rank has to
         // be a rank that happened. Bounded by `prime_lift` and never past rank
         // 1, so this can reorder near-ties and nothing else.
-        if self.associating() && self.associate.prime_lift > 0 {
+        //
+        // Held off the same two doors as association below, for the same
+        // reason in a different shape. `Ask` does not show this list to
+        // anybody: it turns the head of it into excerpts and, when they do not
+        // all fit the context window, keeps a prefix and drops the tail on the
+        // stated grounds that the tail matched the question least
+        // (`src/core/ask.rs`). Reordering by accessibility makes that untrue,
+        // and the excerpt lost is then the one that answered best — a silent
+        // change to the answer, on a path where nobody can see what was cut.
+        // `Judge` needs the pool it labels to be the pool the ranking produced.
+        if self.associating()
+            && self.associate.prime_lift > 0
+            && !matches!(door, Door::Ask | Door::Judge)
+        {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.activation_now(&ids).await;
             results = prime(
@@ -773,7 +819,7 @@ impl Core {
         // excluded because its query is composed in full knowledge of the
         // answer and needs a clean pool to label, not a widened one.
         if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
-            let recalled = self.associated(&results).await;
+            let recalled = self.associated(&results, &filter).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
                 results.extend(recalled);
@@ -1805,6 +1851,115 @@ mod tests {
         assert!(with_huge_activation.iter().all(|r| !r.primed));
     }
 
+    #[tokio::test]
+    async fn priming_never_reaches_the_list_ask_and_judge_are_given() {
+        // `ask` does not show this list to anyone: it turns the head of it into
+        // excerpts and, when they do not all fit the context window, keeps a
+        // prefix and drops the tail — on the stated grounds that the tail
+        // matched the question least. Reorder by accessibility and the excerpt
+        // dropped is the one that answered best, invisibly. `judge` needs the
+        // pool it labels to be the pool the ranking produced.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.associate.prime_lift = 2;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        // The same activation that does move the order on the UI door.
+        let moved = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert_ne!(
+            moved.last().unwrap().artifact_id,
+            bottom,
+            "this test proves nothing unless priming is working on some door"
+        );
+
+        for door in [Door::Ask, Door::Judge] {
+            let held = core.search(&q("alpha text about it"), door).await.unwrap();
+            let ids: Vec<&str> = held.iter().map(|r| r.artifact_id.as_str()).collect();
+            let plain_ids: Vec<&str> = plain.iter().map(|r| r.artifact_id.as_str()).collect();
+            assert_eq!(ids, plain_ids, "{door:?} was handed a primed order");
+            assert!(held.iter().all(|r| !r.primed));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_association_obeys_the_filters_the_searcher_typed() {
+        // A category is a statement about what the searcher will accept, not a
+        // hint to the ranker. An artifact recalled beside a hit still has to
+        // satisfy it, or the search hands back exactly the rows they narrowed
+        // away.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.associate.show_min = 1.0;
+        seed(
+            &core,
+            &[
+                ("alpha text about it", "runbook", &["ops"][..]),
+                ("something else entirely", "note", &[][..]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+        let (hit, other) = {
+            let a = core.store.get_artifact(&ids[0]).await.unwrap();
+            if a.category.as_deref() == Some("runbook") {
+                (ids[0].clone(), ids[1].clone())
+            } else {
+                (ids[1].clone(), ids[0].clone())
+            }
+        };
+        core.store
+            .bump_link(&hit, &other, 9.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        // Unfiltered, the linked artifact is recalled beside the ranked hit.
+        let wide = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(
+            wide.iter().any(|r| r.artifact_id == other),
+            "the association never fired, so the filter proves nothing"
+        );
+
+        let mut narrowed = q("alpha text about it");
+        narrowed.category = Some("runbook".into());
+        let narrow = core.search(&narrowed, Door::Ui).await.unwrap();
+        assert!(
+            !narrow.iter().any(|r| r.artifact_id == other),
+            "an association walked past the category the searcher typed"
+        );
+
+        let mut tagged = q("alpha text about it");
+        tagged.tags = vec!["ops".into()];
+        let by_tag = core.search(&tagged, Door::Ui).await.unwrap();
+        assert!(
+            !by_tag.iter().any(|r| r.artifact_id == other),
+            "an association walked past the tags the searcher typed"
+        );
+    }
+
     async fn captured_events(core: &crate::core::Core) -> i64 {
         core.background.wait_idle().await;
         sqlx::query_scalar("SELECT count(*) FROM search_events")
@@ -2310,7 +2465,7 @@ mod tests {
         };
         let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
 
-        let out = core.associated(&results).await;
+        let out = core.associated(&results, &SearchFilter::default()).await;
         let ids: Vec<&str> = out.iter().map(|r| r.artifact_id.as_str()).collect();
         assert!(
             ids.contains(&d.as_str()),

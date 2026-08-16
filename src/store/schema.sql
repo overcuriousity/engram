@@ -283,6 +283,12 @@ CREATE TABLE IF NOT EXISTS search_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
+-- The association sweep's own read: `created_at > watermark AND < cutoff`,
+-- ordered by the same column. `idx_events_pending` cannot serve it — it leads
+-- with `judged_at` — so without this the sweep full-scans and sorts the whole
+-- log every `associate.interval_mins`, and with `feedback.retain_days = 0` that
+-- log is never trimmed.
+CREATE INDEX IF NOT EXISTS idx_events_created ON search_events(created_at);
 
 CREATE TABLE IF NOT EXISTS search_candidates (
   event_id    TEXT NOT NULL REFERENCES search_events(id) ON DELETE CASCADE,

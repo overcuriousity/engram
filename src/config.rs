@@ -714,6 +714,55 @@ impl Config {
             );
             self.consolidate.merge_max_roots = d;
         }
+        // The association widths multiply each other on the search path to
+        // size one SQL `LIMIT`, and `interval_mins` is multiplied by sixty to
+        // make a `Duration`. None of the three has a ceiling that comes from
+        // anywhere else, so it is stated here: past these, the number has
+        // stopped describing a search someone would run or a rhythm someone
+        // would wait for, and the arithmetic is the only thing still reading
+        // it. Clamped rather than refused — an oversized width is a typo, not
+        // a config that destroys anything.
+        const MAX_SPREAD_FROM: usize = 64;
+        const MAX_SPREAD_MAX: usize = 64;
+        const MAX_PRIME_LIFT: usize = 64;
+        // A year. Longer than this and the ticker fires once and effectively
+        // never again, which the operator can say by setting `enabled = false`.
+        const MAX_INTERVAL_MINS: u64 = 525_600;
+        for (name, value, ceiling) in [
+            (
+                "associate.spread_from",
+                &mut self.associate.spread_from,
+                MAX_SPREAD_FROM,
+            ),
+            (
+                "associate.spread_max",
+                &mut self.associate.spread_max,
+                MAX_SPREAD_MAX,
+            ),
+            (
+                "associate.prime_lift",
+                &mut self.associate.prime_lift,
+                MAX_PRIME_LIFT,
+            ),
+        ] {
+            if *value > ceiling {
+                tracing::warn!(
+                    setting = name,
+                    configured = *value,
+                    using = ceiling,
+                    "association width is far past anything a result list can use; capping it"
+                );
+                *value = ceiling;
+            }
+        }
+        if self.associate.interval_mins > MAX_INTERVAL_MINS {
+            tracing::warn!(
+                configured = self.associate.interval_mins,
+                using = MAX_INTERVAL_MINS,
+                "associate.interval_mins is longer than a year; capping it"
+            );
+            self.associate.interval_mins = MAX_INTERVAL_MINS;
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.

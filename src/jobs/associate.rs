@@ -40,6 +40,41 @@ fn settled_cutoff(at: i64, coalesce_secs: i64) -> i64 {
     at - coalesce_secs.max(0)
 }
 
+/// How many rows of a batch it is safe to replay, given the stamps they are
+/// ordered by.
+///
+/// Both reads are `ORDER BY <stamp> ASC, id ASC LIMIT REPLAY_LIMIT` and the
+/// watermark each leaves behind is a stamp, not a row. So a batch that filled
+/// the limit may have cut a group of rows sharing one second in half, and
+/// advancing the watermark past that second would strand the remainder unread
+/// forever. The last second of a full batch is therefore left for the next
+/// sweep, which will read it whole.
+///
+/// The one shape with no smaller step available is a full batch whose every row
+/// shares a single second. Then the remainder of that second is genuinely
+/// skipped — and said so at `warn`, because a gap in what was learned from is
+/// otherwise indistinguishable from there having been nothing to learn.
+fn replayable(stamps: &[i64], limit: usize) -> usize {
+    if stamps.len() < limit {
+        return stamps.len();
+    }
+    let last = match stamps.last() {
+        Some(s) => *s,
+        None => return 0,
+    };
+    let end = stamps.partition_point(|s| *s < last);
+    if end == 0 {
+        tracing::warn!(
+            stamp = last,
+            read = stamps.len(),
+            "more rows share one second than a single sweep reads; \
+             the remainder of that second will not be replayed"
+        );
+        return stamps.len();
+    }
+    end
+}
+
 /// One sweep over everything learned since the last one.
 pub async fn run(core: &Core) -> Result<()> {
     if !core.associating() {
@@ -131,36 +166,46 @@ async fn replay_events(core: &Core, at: i64) -> Result<usize> {
     .fetch_all(&core.store.pool)
     .await?;
 
-    let mut high = after;
-    for e in &events {
+    let stamps: Vec<i64> = events
+        .iter()
+        .map(|e| e.get::<i64, _>("created_at"))
+        .collect();
+    let end = replayable(&stamps, REPLAY_LIMIT as usize);
+
+    for (idx, e) in events[..end].iter().enumerate() {
         let id: String = e.get("id");
         let cue = normalize_query(&e.get::<String, _>("query"));
         let shown = shown_candidates(core, &id).await?;
-        for i in 0..shown.len() {
-            for j in (i + 1)..shown.len() {
-                if let Err(err) = core
-                    .store
-                    .bump_link(
-                        &shown[i],
-                        &shown[j],
-                        1.0,
-                        Some(&cue),
-                        core.associate.half_life_days,
-                        at,
-                    )
-                    .await
-                {
-                    tracing::debug!(error = %err, "could not bind a pair; one side is gone");
-                }
-            }
+        // One transaction for the whole event rather than one per pair: the
+        // pairs are quadratic in what was shown, and each transaction is an
+        // exclusive one. `bump_links` warns about and steps over any single
+        // pair it cannot write.
+        let pairs: Vec<(&str, &str)> = (0..shown.len())
+            .flat_map(|i| ((i + 1)..shown.len()).map(move |j| (i, j)))
+            .map(|(i, j)| (shown[i].as_str(), shown[j].as_str()))
+            .collect();
+        core.store
+            .bump_links(&pairs, 1.0, Some(&cue), core.associate.half_life_days, at)
+            .await?;
+        // Committed as each second finishes rather than once at the end. A
+        // failure below propagates out of the sweep, and a watermark that never
+        // moved would replay every bump already written on the next tick.
+        // Weight is what pruning, showing and judging all decide on, so
+        // counting a co-appearance twice is not cosmetic.
+        if last_of_its_second(&stamps, idx, end) {
+            core.store
+                .meta_set(EVENTS_AFTER, &stamps[idx].to_string())
+                .await?;
         }
-        high = high.max(e.get::<i64, _>("created_at"));
     }
+    Ok(end)
+}
 
-    if high > after {
-        core.store.meta_set(EVENTS_AFTER, &high.to_string()).await?;
-    }
-    Ok(events.len())
+/// Whether `idx` is the last row of the run of equal stamps it belongs to,
+/// within the prefix being replayed. The watermark may only advance to a
+/// second every row of which has been folded in.
+fn last_of_its_second(stamps: &[i64], idx: usize, end: usize) -> bool {
+    idx + 1 == end || stamps[idx + 1] > stamps[idx]
 }
 
 /// Every hit verdict past the second watermark: the pairs containing the
@@ -177,18 +222,34 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    // Bounded above as well as below, for the reason `replay_events` is: the
+    // watermark left behind is a second, not a row, and `last_of_its_second`
+    // only closes that gap *within* a batch. A sweep running during second `at`
+    // that read the verdicts stamped `at` would move the watermark to `at`, and
+    // a verdict recorded moments later in that same second would then fail the
+    // `> at` test on every sweep after — its link bumps and its activation bump
+    // lost with no trace. `at` rather than `settled_cutoff`: nothing coalesces
+    // verdicts the way a typing burst coalesces events, so there is no reason to
+    // hold a confirmation back beyond the second it was written in.
     let events = sqlx::query(
         "SELECT id, expect_id, judged_at FROM search_events
-          WHERE judged_at > ? AND verdict = 'hit' AND expect_id IS NOT NULL
+          WHERE judged_at > ? AND judged_at < ?
+            AND verdict = 'hit' AND expect_id IS NOT NULL
           ORDER BY judged_at ASC, id ASC LIMIT ?",
     )
     .bind(after)
+    .bind(at)
     .bind(REPLAY_LIMIT)
     .fetch_all(&core.store.pool)
     .await?;
 
-    let mut high = after;
-    for e in &events {
+    let stamps: Vec<i64> = events
+        .iter()
+        .map(|e| e.get::<i64, _>("judged_at"))
+        .collect();
+    let end = replayable(&stamps, REPLAY_LIMIT as usize);
+
+    for (idx, e) in events[..end].iter().enumerate() {
         let id: String = e.get("id");
         let expect: String = e.get("expect_id");
         let shown = shown_candidates(core, &id).await?;
@@ -201,18 +262,17 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
         // unconditional and still fires for a find — that is the one signal a
         // find is allowed to give.
         if shown.contains(&expect) {
-            for other in shown.iter().filter(|c| **c != expect) {
-                // No cue: this event's words were already folded in as a
-                // binding query when its co-appearance was replayed, and
-                // counting them twice would say two questions bound this pair.
-                if let Err(err) = core
-                    .store
-                    .bump_link(&expect, other, 2.0, None, core.associate.half_life_days, at)
-                    .await
-                {
-                    tracing::debug!(error = %err, "could not bind a pair; one side is gone");
-                }
-            }
+            // No cue: this event's words were already folded in as a binding
+            // query when its co-appearance was replayed, and counting them
+            // twice would say two questions bound this pair.
+            let pairs: Vec<(&str, &str)> = shown
+                .iter()
+                .filter(|c| **c != expect)
+                .map(|other| (expect.as_str(), other.as_str()))
+                .collect();
+            core.store
+                .bump_links(&pairs, 2.0, None, core.associate.half_life_days, at)
+                .await?;
         }
         // Raised whether or not the answer was in the pool at all — an artifact
         // the ranking never returned and a person confirmed anyway is the most
@@ -225,13 +285,15 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
                 at,
             )
             .await?;
-        high = high.max(e.get::<i64, _>("judged_at"));
+        // Same reason as in `replay_events`: the bump above propagates, and a
+        // verdict counted twice raises an artifact's activation twice.
+        if last_of_its_second(&stamps, idx, end) {
+            core.store
+                .meta_set(JUDGED_AFTER, &stamps[idx].to_string())
+                .await?;
+        }
     }
-
-    if high > after {
-        core.store.meta_set(JUDGED_AFTER, &high.to_string()).await?;
-    }
-    Ok(events.len())
+    Ok(end)
 }
 
 /// What one event actually put in front of the searcher, in rank order.
@@ -294,7 +356,13 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
     // spend the one scarce thing in the system after they said stop. The
     // sweep will not arm more (`run` returns early), but a unit armed before
     // the flag flipped is still sitting in the queue when this runs.
-    if !core.associate.enabled {
+    //
+    // `associating()` and not `associate.enabled`: switching search recording
+    // off switches this layer off too — that is what the predicate means, and
+    // every other surface (priming, association, the detail pane, Ops) already
+    // reads it. A verdict written after that switch would name a relation on a
+    // page that no longer shows one.
+    if !core.associating() {
         return Ok(());
     }
     let (a_id, b_id) = target.split_once('|').ok_or(Error::NotFound)?;
@@ -395,8 +463,17 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
             // Handed over rather than acted on: consolidation owns every
             // decision that hides an artifact, with its own guards and its own
             // undo. The score is zero because no cosine was ever measured —
-            // that is what `detail` is there to explain on the review page.
-            core.store
+            // that is what the zero itself says on the review page.
+            //
+            // `INSERT OR IGNORE`, so this hands nothing over when a row for the
+            // pair is already on file: an operator dismissed it, or the dedupe
+            // judge answered it and consolidation is done with it. The verdict
+            // is the same either way — these two say the same thing — but the
+            // reason is rendered verbatim in the "Seen together" pane and in
+            // the associated-results rail, so it must not assert a handover
+            // that did not happen.
+            let handed = core
+                .store
                 .record_pair_with_detail(&link.a_id, &link.b_id, 0.0, "link")
                 .await?;
             core.store
@@ -404,7 +481,11 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
                     &link.a_id,
                     &link.b_id,
                     LinkState::Related,
-                    Some("same content; handed to consolidation"),
+                    Some(if handed {
+                        "same content; handed to consolidation"
+                    } else {
+                        "same content; consolidation already has this pair"
+                    }),
                     revs,
                 )
                 .await?;
@@ -489,11 +570,21 @@ mod tests {
 
     /// Age every recorded event past the coalescing window, so the sweep will
     /// look at it: a folding event is still moving.
+    /// Age everything the sweep reads far enough back that both of its upper
+    /// bounds are cleared — `created_at` below `settled_cutoff`, and `judged_at`
+    /// below the sweep's own clock. A verdict recorded in the second the sweep
+    /// runs in is deliberately left for the next one (`replay_verdicts`), so a
+    /// test that judges and sweeps in the same breath has to say which second
+    /// it means. `judged_at` is NULL on an unjudged event and stays NULL here.
     async fn settle(core: &Core) {
-        sqlx::query("UPDATE search_events SET created_at = created_at - 3600")
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE search_events
+                SET created_at = created_at - 3600,
+                    judged_at = judged_at - 3600",
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn on(core: &mut Core) {
@@ -944,6 +1035,106 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_cut_inside_one_second_leaves_that_second_for_the_next_sweep() {
+        // The watermark is a stamp, not a row. If a full batch ends in the
+        // middle of a group of events sharing one second, advancing past that
+        // second strands its remainder unread forever — so the group is left
+        // whole for the next sweep, which reads it with room to spare.
+        assert_eq!(
+            replayable(&[1, 2, 3, 3], 4),
+            2,
+            "a second the batch may have cut in half was replayed anyway"
+        );
+        // A full batch always holds back its last second, whether or not the
+        // rows read share it: what the limit cut off is invisible from here,
+        // and more rows stamped 4 may be sitting just past it.
+        assert_eq!(replayable(&[1, 2, 3, 4], 4), 3);
+        // Not full: nothing was cut, so everything is replayable including the
+        // last second.
+        assert_eq!(replayable(&[1, 2, 3, 3], 8), 4);
+        assert_eq!(replayable(&[], 8), 0);
+        // A whole full batch inside one second has no smaller step to take.
+        // Replaying it and moving on is the only way forward; `replayable`
+        // says so at `warn` rather than silently.
+        assert_eq!(replayable(&[7, 7, 7], 3), 3);
+    }
+
+    #[tokio::test]
+    async fn the_watermark_advances_only_over_seconds_that_were_replayed_whole() {
+        // Two events in one second and one in the next: the watermark must
+        // never sit between the two, or the second of them is never read.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 3).await;
+        record(&core, "a", &[&ids[0], &ids[1]], &[]).await;
+        record(&core, "b", &[&ids[1], &ids[2]], &[]).await;
+        settle(&core).await;
+        sqlx::query("UPDATE search_events SET created_at = 1000")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        replay_events(&core, 100_000).await.unwrap();
+
+        assert_eq!(
+            core.store.meta_get(EVENTS_AFTER).await.unwrap().as_deref(),
+            Some("1000")
+        );
+        // Both were read, not just the first.
+        assert!(
+            core.store
+                .get_link(&ids[1], &ids[2])
+                .await
+                .unwrap()
+                .is_some(),
+            "the second event of the second was skipped"
+        );
+    }
+
+    #[test]
+    fn the_watermarks_named_here_are_the_ones_migrate_seeds() {
+        // `Store::migrate` seeds these two keys when it adopts an existing
+        // database into activation, spelling them out because nothing in
+        // `store` reaches up into `jobs`. Renaming one there and not here
+        // would make the seeding silently stop working.
+        assert_eq!(EVENTS_AFTER, "associate.events_after");
+        assert_eq!(JUDGED_AFTER, "associate.judged_after");
+    }
+
+    #[tokio::test]
+    async fn a_queued_unit_spends_no_call_once_search_recording_is_switched_off() {
+        // `associating()`, not `associate.enabled`: turning capture off turns
+        // this whole layer off — priming, association and the pane all read
+        // that predicate — and a verdict written afterwards would name a
+        // relation on a page that no longer shows one.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"relation":"related","reason":"should never be read"}"#.into(),
+        ]));
+        core.judge = scripted.clone();
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.feedback.enabled = false;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(scripted.calls(), 0);
+        assert_eq!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            LinkState::Learning
+        );
+    }
+
+    #[test]
     fn a_link_names_itself_the_same_way_round_however_it_is_armed() {
         assert_eq!(link_target("b", "a"), link_target("a", "b"));
         assert_eq!(link_target("a", "b"), "a|b");
@@ -1212,5 +1403,142 @@ mod tests {
                 .is_none()
         );
         assert_eq!(core.store.meta_get(EVENTS_AFTER).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_verdict_recorded_in_the_second_the_sweep_ran_is_not_skipped() {
+        // `replay_events` reads below a settled cutoff, so it never consumes
+        // the second it is running in. Verdicts had no upper bound at all: a
+        // sweep at second T read every verdict stamped T and moved the
+        // watermark to T, and a verdict recorded moments later in that same
+        // second was then past the watermark's own `> T` test forever — its
+        // link bumps and its activation bump silently lost.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 3).await;
+
+        let first = record(&core, "one", &[&ids[0], &ids[1]], &[]).await;
+        core.store.judge_hit(&first, &ids[0]).await.unwrap();
+        sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
+            .bind(&first)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        // The sweep that ran during second 1000.
+        replay_verdicts(&core, 1000).await.unwrap();
+
+        // A second verdict written moments later, still inside second 1000.
+        let second = record(&core, "two", &[&ids[0], &ids[2]], &[]).await;
+        core.store.judge_hit(&second, &ids[2]).await.unwrap();
+        sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
+            .bind(&second)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        replay_verdicts(&core, 1001).await.unwrap();
+
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[2])
+                .await
+                .unwrap()
+                .is_some(),
+            "the verdict recorded inside the sweep's own second was lost"
+        );
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_some(),
+            "the verdict the sweep did see was lost too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_verdict_claims_no_handoff_when_the_pair_is_already_settled() {
+        // `record_pair_with_detail` is `INSERT OR IGNORE`. A pair an operator
+        // already dismissed, or one the dedupe judge already closed, is left
+        // exactly as it was — nothing reaches consolidation. The link's reason
+        // is rendered verbatim in the "Seen together" pane, so it must not
+        // assert a handover that did not happen.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"duplicate","reason":"same thing"}"#.into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        // The pair is already on file and already answered.
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifact_pairs SET state = 'dismissed'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, LinkState::Related);
+        assert!(
+            !l.reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("handed to consolidation"),
+            "the link claims a handoff that never happened: {:?}",
+            l.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn one_unbindable_pair_does_not_cost_an_event_its_other_pairs() {
+        // Every pair of one event's shown candidates is now bound in a single
+        // transaction rather than one apiece. A pair that cannot be written —
+        // one side deleted between the search and the sweep — must still be
+        // warned about and stepped over, not take the rest of the event's
+        // learning down with it.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 3).await;
+        record(&core, "three shown", &[&ids[0], &ids[1], &ids[2]], &[]).await;
+        settle(&core).await;
+        // Gone by the time the sweep reads the event it was shown in.
+        sqlx::query("DELETE FROM artifacts WHERE id = ?")
+            .bind(&ids[2])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        // The premise first: the pairs naming the deleted side really did fail,
+        // rather than this test quietly binding three live artifacts.
+        for gone in [&ids[0], &ids[1]] {
+            assert!(
+                core.store.get_link(gone, &ids[2]).await.unwrap().is_none(),
+                "a link was written against a deleted artifact"
+            );
+        }
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_some(),
+            "a pair that could not be bound cost the event its other pairs"
+        );
     }
 }
