@@ -114,6 +114,11 @@ max_input_tokens = 1024
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768
+# Hard cap on output tokens per answer, sent on every call. Defaults to 4096.
+# Raise it if answers are getting clipped; there is no reason to unset it, since
+# an endpoint asked for no ceiling applies its own — which is far larger, and is
+# the only thing bounding a reply the model has stopped being able to end.
+# max_output_tokens = 4096
 # ask is the one interactive inference call, so someone is watching it happen.
 # timeout_secs = 900
 # reasoning_effort = "none"

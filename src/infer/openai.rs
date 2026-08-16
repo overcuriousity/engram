@@ -442,6 +442,17 @@ fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
 pub struct HttpCompleter {
     ep: Endpoint,
     context_tokens: usize,
+    /// Hard ceiling on output tokens, sent on every call.
+    ///
+    /// Not optional, and not merely a cost control. `response_schema` compiles
+    /// into a decoding constraint, and while the model is inside a JSON string
+    /// the end-of-sequence token is not a valid continuation — so it is masked
+    /// out and the model *cannot* stop there. A small model that wanders into a
+    /// long or repeating `merged.text` therefore has nothing of its own to stop
+    /// it: without this ceiling the only limit is the server's, which one judge
+    /// call reached after ~190KB and a quarter hour, to be thrown away whole
+    /// because a reply cut off mid-string does not parse.
+    max_output_tokens: usize,
     reasoning_effort: Option<String>,
     /// The JSON Schema this role's replies must satisfy, sent as a response
     /// format so the endpoint constrains decoding. `None` for the ask role,
@@ -460,6 +471,7 @@ impl HttpCompleter {
                 "ask",
             ),
             context_tokens: cfg.context_tokens,
+            max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: None,
         }
@@ -482,6 +494,7 @@ impl HttpCompleter {
                 "judge",
             ),
             context_tokens: cfg.context_tokens,
+            max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: cfg
                 .structured_output
@@ -498,6 +511,7 @@ impl Completer for HttpCompleter {
                 {"role":"system","content": system},
                 {"role":"user","content": user}
             ],
+            "max_tokens": self.max_output_tokens,
             "temperature": 0.3,
         });
         if let Some(effort) = &self.reasoning_effort {
@@ -776,6 +790,7 @@ mod tests {
             model: "m".into(),
             api_key: None,
             context_tokens: 4096,
+            max_output_tokens: 1024,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
         })
@@ -997,6 +1012,7 @@ mod tests {
             model: "m".into(),
             api_key: None,
             context_tokens: 4096,
+            max_output_tokens: 1024,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
         };
@@ -1004,6 +1020,42 @@ mod tests {
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
             "the answer"
         );
+    }
+
+    /// A judge reply is grammar-constrained, and a grammar masks out the
+    /// end-of-sequence token everywhere it would not be valid JSON — inside a
+    /// string most of all. The model therefore cannot end a reply it has
+    /// wandered into, and the only ceiling left is whatever the endpoint applies
+    /// when asked for none. One such call ran to ~190KB and was thrown away
+    /// whole, so this asserts the ceiling is on the wire rather than merely
+    /// configured.
+    #[tokio::test]
+    async fn every_completion_carries_its_output_ceiling() {
+        for label in ["ask", "judge"] {
+            let server = echoing_server(r#"{"relation":"distinct"}"#).await;
+            let completer = match label {
+                "ask" => HttpCompleter::new(&AskRole {
+                    base_url: server.uri(),
+                    model: "m".into(),
+                    api_key: None,
+                    context_tokens: 4096,
+                    max_output_tokens: 1024,
+                    timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+                    reasoning_effort: None,
+                }),
+                _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
+            };
+            completer.complete("s", "u").await.unwrap();
+
+            // 1024 from the ask role, 2048 from the synthesize role the judge
+            // borrows: each carries its own ceiling, not a shared constant.
+            let want = if label == "ask" { 1024 } else { 2048 };
+            assert_eq!(
+                sent_body(&server).await["max_tokens"].as_u64(),
+                Some(want),
+                "{label} did not send its output ceiling"
+            );
+        }
     }
 
     #[tokio::test]

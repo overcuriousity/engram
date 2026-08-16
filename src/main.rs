@@ -393,6 +393,7 @@ mod startup_tests {
                     model: "m".into(),
                     api_key: None,
                     context_tokens: 32768,
+                    max_output_tokens: 4096,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                 },

@@ -453,34 +453,69 @@ pub fn artifacts_schema() -> serde_json::Value {
 /// The shape `parse_dedupe` will accept. Lives beside `Raw` for the same reason
 /// `artifacts_schema` lives beside `RawArtifact`.
 ///
-/// Only `relation` is required, and `merged` is not: a schema cannot say "the
-/// merged artifact is required exactly when the relation is duplicate", and
-/// requiring it unconditionally would make the model write a merged artifact
-/// for every pair it was asked to keep apart. That one conditional stays where
-/// it already is, in `parse_dedupe`.
+/// One variant per relation, rather than one object with everything optional.
+///
+/// A single flat object cannot say "the merged artifact is required exactly when
+/// the relation is duplicate" — and requiring it unconditionally would make the
+/// model write a merged artifact for every pair it was asked to keep apart. But
+/// a union of per-relation objects says exactly that, and an endpoint that
+/// compiles the schema into a decoding constraint then makes the pairing
+/// unwritable rather than merely wrong: `duplicate` cannot be emitted without
+/// `merged`, and `distinct` cannot be emitted with it.
+///
+/// That is worth more here than anywhere else, because `parse_dedupe` has no
+/// salvage path. A verdict it rejects is not a degraded verdict, it is no
+/// verdict, and the pair waits for a whole sweep to be asked about again — which
+/// left pairs pending after ten attempts at a conditional a 9B model kept
+/// getting wrong.
+///
+/// `parse_dedupe` still checks the same conditions. A grammar is only as good as
+/// the endpoint honouring it, and `structured_output` can be switched off.
 pub fn dedupe_schema() -> serde_json::Value {
-    serde_json::json!({
+    let merged = serde_json::json!({
         "type": "object",
         "properties": {
-            "relation": {
-                "type": "string",
-                "enum": ["duplicate", "distinct", "conflict", "replaced"]
-            },
-            "detail": {"type": "string"},
-            "supersedes": {"type": "string"},
-            "merged": {
+            "text": {"type": "string"},
+            "title": {"type": "string"},
+            "category": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "caveats": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["text"]
+    });
+    serde_json::json!({
+        "anyOf": [
+            {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string"},
-                    "title": {"type": "string"},
-                    "category": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "caveats": {"type": "array", "items": {"type": "string"}}
+                    "relation": {"type": "string", "enum": ["duplicate"]},
+                    "detail": {"type": "string"},
+                    "merged": merged
                 },
-                "required": ["text"]
+                "required": ["relation", "merged"]
+            },
+            {
+                // `supersedes` is required for the same reason `merged` is: a
+                // direction the model would not name is downgraded to a conflict
+                // by `parse_dedupe`, which turns the cheapest faithful outcome
+                // into a queue entry for a person.
+                "type": "object",
+                "properties": {
+                    "relation": {"type": "string", "enum": ["replaced"]},
+                    "detail": {"type": "string"},
+                    "supersedes": {"type": "string"}
+                },
+                "required": ["relation", "supersedes"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "relation": {"type": "string", "enum": ["distinct", "conflict"]},
+                    "detail": {"type": "string"}
+                },
+                "required": ["relation"]
             }
-        },
-        "required": ["relation"]
+        ]
     })
 }
 
@@ -744,24 +779,86 @@ mod tests {
 
     #[test]
     fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
-        for relation in dedupe_schema()["properties"]["relation"]["enum"]
-            .as_array()
-            .unwrap()
-        {
-            let r = relation.as_str().unwrap();
-            // `duplicate` is the one verdict that needs a merged artifact, and
-            // the schema deliberately does not require it — the parser is what
-            // enforces that pairing.
-            let body = if r == "duplicate" {
-                format!(r#"{{"relation":"{r}","merged":{{"text":"merged body"}}}}"#)
-            } else {
-                format!(r#"{{"relation":"{r}"}}"#)
-            };
-            assert!(
-                parse_dedupe(&body).is_ok(),
-                "the schema lets the model answer {r:?}, which the parser rejects"
-            );
+        let schema = dedupe_schema();
+        let variants = schema["anyOf"].as_array().expect("a union of variants");
+        let mut seen = Vec::new();
+
+        for variant in variants {
+            let required: Vec<&str> = variant["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f.as_str().unwrap())
+                .collect();
+
+            for relation in variant["properties"]["relation"]["enum"]
+                .as_array()
+                .unwrap()
+            {
+                let r = relation.as_str().unwrap();
+                seen.push(r.to_string());
+
+                // The minimum this variant permits: the relation plus whatever
+                // it makes mandatory alongside. A grammar built from this schema
+                // cannot emit less, so a parser that rejects it rejects a reply
+                // the model was steered into writing.
+                let mut body = serde_json::json!({ "relation": r });
+                for field in &required {
+                    match *field {
+                        "relation" => {}
+                        "merged" => body["merged"] = serde_json::json!({"text": "merged body"}),
+                        // A single letter, which is all `parse_dedupe` reads as
+                        // a direction; anything else downgrades to a conflict.
+                        "supersedes" => body["supersedes"] = serde_json::json!("a"),
+                        other => {
+                            panic!("the schema requires {other:?}, which this test cannot build")
+                        }
+                    }
+                }
+                assert!(
+                    parse_dedupe(&body.to_string()).is_ok(),
+                    "the schema lets the model answer {body}, which the parser rejects"
+                );
+            }
         }
+
+        seen.sort();
+        assert_eq!(
+            seen,
+            ["conflict", "distinct", "duplicate", "replaced"],
+            "the union must still cover every relation, exactly once"
+        );
+    }
+
+    /// The pairing the flat schema could not express. These are the two replies
+    /// that stalled real pairs for ten attempts each, and a union of per-relation
+    /// variants is what makes them ungrammatical rather than merely rejected.
+    #[test]
+    fn no_dedupe_variant_permits_a_duplicate_without_a_merge_or_a_distinct_with_one() {
+        let schema = dedupe_schema();
+        for variant in schema["anyOf"].as_array().unwrap() {
+            let relations = variant["properties"]["relation"]["enum"]
+                .as_array()
+                .unwrap();
+            let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
+            let required = variant["required"].as_array().unwrap();
+            let requires_merged = required.iter().any(|f| f == "merged");
+            let offers_merged = variant["properties"].get("merged").is_some();
+
+            if names.contains(&"duplicate") {
+                assert!(requires_merged, "duplicate may be written without a merge");
+            } else {
+                assert!(
+                    !offers_merged,
+                    "{names:?} may carry a merge, which the parser refuses"
+                );
+            }
+        }
+
+        // And the parser still refuses both, because a grammar is only as good
+        // as the endpoint honouring it and `structured_output` can be off.
+        assert!(parse_dedupe(r#"{"relation":"duplicate"}"#).is_err());
+        assert!(parse_dedupe(r#"{"relation":"distinct","merged":{"text":"x"}}"#).is_err());
     }
 
     #[test]

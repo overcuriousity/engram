@@ -389,11 +389,22 @@ pub struct AskRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub context_tokens: usize,
+    /// Hard cap on output tokens per answer. An answer is prose for a person to
+    /// read, so this is a generous bound on the longest one worth waiting for
+    /// rather than a tuning knob — but it must be sent, because an endpoint
+    /// asked for no ceiling applies its own, and the model's own stopping is
+    /// the only thing between the two.
+    #[serde(default = "default_ask_max_output_tokens")]
+    pub max_output_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// See `SynthesizeRole::reasoning_effort`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+}
+
+fn default_ask_max_output_tokens() -> usize {
+    4096
 }
 
 #[derive(Debug, Deserialize, Clone)]
