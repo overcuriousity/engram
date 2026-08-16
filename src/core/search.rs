@@ -306,6 +306,21 @@ impl Core {
                 tracing::warn!(error = %e, "could not record which chunks were shown");
             }
         });
+
+        // Only a retrieval raises accessibility. A list nobody asked for —
+        // `resurface`, an association — is shown, not reached, and the row in
+        // §5.4 that reads zero is the one-way guard this implements.
+        if counts_as_hit {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let store = self.store.clone();
+            let (delta, half_life) = (self.activation.retrieved, self.activation.half_life_days);
+            let at = now_secs();
+            self.background.spawn(async move {
+                if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                    tracing::warn!(error = %e, "could not raise activation for a search");
+                }
+            });
+        }
     }
 
     /// Opening a chunk is the deliberate act that counts as remembering it,
@@ -324,6 +339,18 @@ impl Core {
         self.background.spawn(async move {
             if let Err(e) = vectors.touch(&targets, now).await {
                 tracing::warn!(error = %e, "could not record that a chunk was opened");
+            }
+        });
+
+        // An open is a deliberate act and counts for less than a retrieval:
+        // clicking a candidate says you looked, not that it answered.
+        let ids = vec![artifact_id.to_string()];
+        let store = self.store.clone();
+        let (delta, half_life) = (self.activation.opened, self.activation.half_life_days);
+        let at = now_secs();
+        self.background.spawn(async move {
+            if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                tracing::warn!(error = %e, "could not raise activation for opening");
             }
         });
     }
@@ -929,6 +956,82 @@ mod tests {
             .filter(|h| h.payload.last_seen_at.is_some())
             .count();
         assert!(stamped > 0, "a deliberate search still counts as seeing");
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+
+        core.search(&q("alpha"), Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        let after = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        assert!(after > before, "a retrieval raised nothing");
+    }
+
+    #[tokio::test]
+    async fn typing_does_not_make_what_it_happened_to_match_more_accessible() {
+        // The same rule as `last_seen_at`: an incremental request is not a
+        // retrieval, and letting every keystroke raise activation would make
+        // accessibility a function of how slowly someone types.
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+
+        let mut query = q("alpha");
+        query.mark = false;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn being_drawn_at_random_raises_nothing() {
+        // `resurface` shows what has been forgotten. Counting that as a reason
+        // to be more accessible is the loop this whole design is built to close.
+        let core = test_core().await;
+        seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
+        sqlx::query("UPDATE artifacts SET created_at = ?")
+            .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+
+        core.resurface(10).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+
+        core.mark_artifact_seen(&id);
+        core.background.wait_idle().await;
+
+        let after = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        assert!((after - before - core.activation.opened).abs() < 1e-6);
+        assert!(core.activation.opened < core.activation.retrieved);
     }
 
     #[tokio::test]
