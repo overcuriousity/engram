@@ -750,7 +750,14 @@ impl Core {
             .iter()
             .filter(|id| !has_point.contains(id.as_str()))
         {
-            self.store.enqueue(Stage::Embed, "artifact", id).await?;
+            // Idle-only. This runs on every sweep, so `enqueue` — which re-arms
+            // whatever state it finds — would wind a unit that is failing
+            // against a dead endpoint back to zero attempts every tick. Its
+            // backoff would never climb, and the queue's backoff is what stands
+            // in for a circuit breaker here: see `infer::gate`.
+            self.store
+                .rearm_idle_seq(Stage::Embed, "artifact", id, 0)
+                .await?;
             requeued += 1;
         }
         if requeued > 0 {
@@ -1895,6 +1902,50 @@ mod tests {
         assert!(
             core.store.get_artifact(&artifact).await.is_ok(),
             "the heal deleted the row instead of re-embedding it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_leaves_a_retrying_embed_units_backoff_alone() {
+        // The sweep runs this every tick, and a unit that is failing against a
+        // dead endpoint is `pending` with `run_after` in the future. Re-arming
+        // it unconditionally winds `attempts` back to zero, so the backoff
+        // never climbs and the sweep hands the same dead endpoint another
+        // full-timeout call on every tick, forever. The queue's backoff is the
+        // only thing standing in for the circuit breaker, and this is what
+        // used to reset it.
+        let core = test_core().await;
+        let (_, artifact) = one_artifact(&core).await;
+        core.store
+            .mark_embedded(&artifact, "some-model", 0)
+            .await
+            .unwrap();
+        core.heal_store_drift().await.unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Embed);
+        core.store
+            .fail_job(job.id, job.attempts, "endpoint down")
+            .await
+            .unwrap();
+        let before: (i64, i64) =
+            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
+                .bind(job.id)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(before.0 > 0 && before.1 > 0, "the unit is not backing off");
+
+        core.heal_store_drift().await.unwrap();
+
+        let after: (i64, i64) = sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
+            .bind(job.id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "the drift repair cleared a retrying unit's backoff"
         );
     }
 

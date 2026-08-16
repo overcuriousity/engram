@@ -577,6 +577,12 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Superseded, 100)
             .await?,
+        // Retired, and permanently empty: `would_merge` was a verdict a person
+        // confirmed, every verdict is acted on now, and the migration rewrites
+        // the rows that carried it. Emitted anyway — a client indexing this key
+        // breaks on a response that drops it, and an empty list already says
+        // "nothing here to act on" in the language the rest of this reads.
+        "merge_proposals": serde_json::Value::Array(vec![]),
         "pairs": st
             .core
             .store
@@ -874,6 +880,36 @@ pub(crate) mod tests {
         let handle = core.clone();
         let (app, token) = app_with_token(core).await;
         (app, token, handle)
+    }
+
+    #[tokio::test]
+    async fn the_consolidation_report_still_carries_every_key_it_ever_had() {
+        // `would_merge` is a retired verdict and the migration rewrites those
+        // rows to `pending`, so `merge_proposals` is now always empty — which
+        // is a reason to stop filling it, not a reason to stop emitting it. A
+        // client indexing the key breaks on a response that omits it, and an
+        // empty list says "nothing to act on" in the language it already reads.
+        let (app, token) = app_and_token().await;
+
+        let res = app
+            .oneshot(get("/api/v1/consolidation", Some(&token)))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_of(res).await;
+        for key in [
+            "superseded",
+            "contradictions",
+            "supersede_proposals",
+            "merge_proposals",
+            "pairs",
+        ] {
+            assert!(
+                body.get(key).is_some_and(|v| v.is_array()),
+                "the report dropped `{key}`: {body}"
+            );
+        }
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {

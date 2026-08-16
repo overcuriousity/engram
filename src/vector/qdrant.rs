@@ -1005,6 +1005,58 @@ impl QdrantVectors {
         path: &str,
         body: Option<Value>,
     ) -> Result<T> {
+        let (status, text) = self.send(method, path, body).await?;
+        if !status.is_success() {
+            // The path is part of the message because several requests can fail
+            // the same way, and "which one" is the first thing anyone reading
+            // the log needs.
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        decode(path, &text)
+    }
+
+    /// `call`, for a request naming one point that may legitimately not be in
+    /// the collection yet — an artifact captured a moment ago, whose embedding
+    /// job has not run. Absent is `None`; everything else is still an error.
+    ///
+    /// The distinction has to be made on the message and not on the status
+    /// alone, which is the whole reason this is not two lines at the call site:
+    /// Qdrant answers 404 both for a point it does not hold *and* for a
+    /// collection that does not exist. The second is a store that is broken or
+    /// misconfigured — an alias pointing at a dropped generation, say — and
+    /// reading it as "this artifact has no neighbours" would turn a fault
+    /// affecting every artifact into a silent, permanent answer for each of
+    /// them.
+    async fn call_absent_point_as_none<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<T>> {
+        let (status, text) = self.send(method, path, body).await?;
+        if status == reqwest::StatusCode::NOT_FOUND && text.contains("No point with id") {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        decode(path, &text).map(Some)
+    }
+
+    /// The round trip both of the above are built on: everything up to, but not
+    /// including, the decision about what a non-success status means.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(reqwest::StatusCode, String)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.api_key {
             req = req.header("api-key", k);
@@ -1016,22 +1068,16 @@ impl QdrantVectors {
         let res = req.send().await.map_err(|e| Error::Vector(e.to_string()))?;
         let status = res.status();
         let text = res.text().await.map_err(|e| Error::Vector(e.to_string()))?;
-
-        if !status.is_success() {
-            // The path is part of the message because several requests can fail
-            // the same way, and "which one" is the first thing anyone reading
-            // the log needs.
-            return Err(Error::Vector(format!(
-                "{path}: {}",
-                describe_failure(status, &text)
-            )));
-        }
-
-        let env: Envelope<T> = serde_json::from_str(&text)
-            .map_err(|e| Error::Vector(format!("unreadable response from {path}: {e}")))?;
-        env.result
-            .ok_or_else(|| Error::Vector(format!("{path} returned no result")))
+        Ok((status, text))
     }
+}
+
+/// Unwrap Qdrant's envelope, which every successful response carries.
+fn decode<T: DeserializeOwned>(path: &str, text: &str) -> Result<T> {
+    let env: Envelope<T> = serde_json::from_str(text)
+        .map_err(|e| Error::Vector(format!("unreadable response from {path}: {e}")))?;
+    env.result
+        .ok_or_else(|| Error::Vector(format!("{path} returned no result")))
 }
 
 #[async_trait]
@@ -1801,21 +1847,32 @@ impl VectorStore for QdrantVectors {
             ] },
             "with_payload": true,
         });
+        // Absent is an empty list; unreachable, misconfigured or refused is an
+        // error. Only the first is an ordinary state — a freshly captured
+        // artifact whose embedding job has not run yet — and the detail pane
+        // loses its related list rather than failing to open.
+        //
+        // Everything else has to propagate, because this is what `jobs::relate`
+        // reads and relate is the only duplicate detector in the system. A
+        // failure reported as an empty list is a unit that completes having
+        // filed nothing, leaves a job row behind, and is therefore never asked
+        // again: that artifact's duplicates are never merged and never
+        // superseded, permanently and silently. Failing instead hands it to the
+        // queue's backoff, which retries it once the store is back.
         let res: QueryResult = match self
-            .call(
+            .call_absent_point_as_none(
                 Method::POST,
                 &format!("/collections/{}/points/query", self.alias),
                 Some(body),
             )
-            .await
+            .await?
         {
-            Ok(r) => r,
-            // An artifact whose embedding job has not run yet is not in the
-            // collection, and Qdrant answers that with an error. It is an
-            // ordinary state for a freshly captured artifact, so the detail
-            // pane loses its related list rather than failing to open.
-            Err(e) => {
-                tracing::warn!(artifact_id, error = %e, "no neighbours for this artifact");
+            Some(r) => r,
+            None => {
+                tracing::debug!(
+                    artifact_id,
+                    "not in the collection yet; no neighbours to list"
+                );
                 return Ok(vec![]);
             }
         };
@@ -1841,6 +1898,33 @@ impl VectorStore for QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn neighbours_reports_an_unreachable_store_rather_than_no_neighbours() {
+        // `jobs::relate` is the only duplicate detector there is, and a job row
+        // survives its completion — so a unit that runs while Qdrant is down
+        // and answers "no neighbours" is not a retry, it is a permanent
+        // verdict. That artifact's duplicates are never merged and never
+        // superseded, and nothing asks about it again. An empty list has to
+        // mean "asked, and there are none".
+        let v = QdrantVectors::connect(&VectorConfig {
+            // Nothing listens here, so the round trip fails before any status.
+            url: "http://127.0.0.1:1".into(),
+            collection: "engram".into(),
+            api_key: None,
+            recency_weight: 0.05,
+            recency_half_life_days: 180,
+            pinned_boost: 0.15,
+            weak_below: 0.35,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            v.neighbours("any-artifact", 5).await.is_err(),
+            "a store that could not be reached was reported as an artifact with no duplicates"
+        );
+    }
 
     #[test]
     fn facet_hits_become_chips_ordered_by_count() {

@@ -1447,6 +1447,24 @@ async fn neighbours_come_back_ranked_and_never_include_the_artifact_itself() {
 
 #[tokio::test]
 #[ignore]
+async fn neighbours_of_a_collection_that_is_gone_is_an_error() {
+    // Qdrant answers 404 for a missing collection too, and that one is a broken
+    // store rather than an artifact waiting its turn: an alias left pointing at
+    // a dropped generation fails this way for *every* artifact. Reported as an
+    // empty list it would retire the whole duplicate detector silently.
+    let v = QdrantVectors::connect(&cfg("engram_it_neighbours_no_collection"))
+        .await
+        .unwrap();
+    v.drop_collection().await.unwrap();
+
+    assert!(
+        v.neighbours("anything", 5).await.is_err(),
+        "a collection that does not exist was reported as an artifact with no duplicates"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
     // The query asks for one extra so the seed can be removed without
     // shortening the list; the caller must still get exactly what it asked for.
@@ -1473,9 +1491,10 @@ async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
 #[tokio::test]
 #[ignore]
 async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
-    // Qdrant answers a query for an absent point with an error. The pane treats
+    // Qdrant answers a query for an absent point with a 404. The pane treats
     // that as an empty list, because an artifact awaiting its embed job is an
-    // ordinary state rather than a failure.
+    // ordinary state rather than a failure — and it is the *only* failure that
+    // gets that treatment, which is what the sibling test above pins down.
     let v = fresh("engram_it_no_neighbours", 4).await;
     v.upsert(vec![point(
         "a",

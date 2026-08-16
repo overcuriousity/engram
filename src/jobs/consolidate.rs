@@ -131,6 +131,10 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
     }
 }
 
+/// How many interrupted lifecycle writes one sweep finishes. The list is
+/// almost always empty; the cap only bounds a sweep after a long outage.
+const DRIFT_REPAIR_BATCH: usize = 5_000;
+
 /// Make the vector store's lifecycle payloads agree with SQLite, which is the
 /// source of truth for all of them.
 ///
@@ -140,8 +144,8 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 /// and neither self-corrects: a row that says deprecated behind a payload that
 /// does not leaves the artifact in search results while Ops calls it retired,
 /// and a payload that says deprecated behind an active row leaves it out of
-/// search with no page listing it and no button that reaches it. The pair of
-/// scans below is the only thing in the system that notices either.
+/// search with no page listing it and no button that reaches it. This is the
+/// only thing in the system that notices either.
 ///
 /// Broader than `heal_dangling_supersessions`, which repairs one specific case
 /// (a winner that has since been deleted) in the SQLite direction only.
@@ -149,15 +153,21 @@ fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
 /// Reads `lifecycle_dirty` rather than scanning. The marker is written in the
 /// same UPDATE that changes `status`/`superseded_by` and cleared once the
 /// payload write is acknowledged, so the work list is exactly the writes that
-/// did not finish — which is almost always empty.
+/// did not finish — which is almost always empty and never grows with the base.
+///
+/// That marker is a claim about the whole system rather than about the four
+/// mutators, and it holds only while nothing else writes a lifecycle field into
+/// a payload. `jobs::embed` does — a point's payload carries `status` and
+/// `superseded_by` alongside its text — and it builds them from a row read
+/// before the embedding call, which is why that upsert re-reads them under
+/// `lifecycle_lock` and marks the artifact for the duration. Without that, an
+/// embed landing after a Restore rewrites the artifact as hidden with no marker
+/// anywhere, and this repair never hears about it: see
+/// `embed::upsert_with_current_lifecycle`.
 ///
 /// Returns how many artifacts it rewrote, which is a number worth asserting on:
 /// a repair that fires on a base in agreement is a bug that hides behind a
 /// correct end state.
-/// How many interrupted lifecycle writes one sweep finishes. The list is
-/// almost always empty; the cap only bounds a sweep after a long outage.
-const DRIFT_REPAIR_BATCH: usize = 5_000;
-
 async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     // Under the same lock as every lifecycle transition: the repair reads
     // rows, writes payloads and clears markers, and interleaving that with a

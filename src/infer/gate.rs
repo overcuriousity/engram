@@ -7,6 +7,13 @@
 //! a person is waiting on `ask`. A dead endpoint is the job queue's backoff to
 //! handle: the turn already serialises the discovery to one call at a time.
 //!
+//! That last one is a load-bearing claim rather than an aside, and it holds
+//! only while nothing re-arms a unit that is already backing off. `enqueue`
+//! re-arms whatever state it finds, so anything automatic that runs on a timer
+//! has to use `rearm_idle_seq` instead — `Core::heal_store_drift` is the one
+//! that reaches embed jobs, and it did reset them, which is what turned an
+//! unreachable endpoint into a full-timeout call on every sweep, forever.
+//!
 //! It sits around calls rather than around jobs, so the two stages that make no
 //! inference call — planning a corpus into windows, and the consolidation sweep
 //! — never wait for a cooldown they did not earn.

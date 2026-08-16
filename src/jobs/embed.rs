@@ -265,7 +265,7 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
             payload: payload_of(c),
         })
         .collect();
-    core.vectors.upsert(points).await?;
+    upsert_with_current_lifecycle(core, points).await?;
 
     for c in chunks {
         mark_indexed(core, c).await?;
@@ -413,13 +413,15 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         }
         Err(e) => return Err(e),
     };
-    core.vectors
-        .upsert(vec![VectorPoint {
+    upsert_with_current_lifecycle(
+        core,
+        vec![VectorPoint {
             vector: vectors.into_iter().next().unwrap(),
             sparse: crate::vector::sparse::encode_document(&chunk.text),
             payload: payload_of(chunk),
-        }])
-        .await?;
+        }],
+    )
+    .await?;
     mark_indexed(core, chunk).await?;
     match &chunk.corpus_id {
         Some(corpus_id) => settle_corpus(core, corpus_id).await,
@@ -610,6 +612,80 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
     }
 }
 
+/// Upsert points whose payloads were built from rows read before the embedding
+/// call returned.
+///
+/// Everything in a payload except the lifecycle fields describes the text that
+/// was embedded, so the row as it was read is exactly the right source for it —
+/// the vector and the payload have to agree about which text they are. The
+/// lifecycle fields are the one exception, because they say nothing about the
+/// text and everything about what has happened to the artifact since: an
+/// embedding call takes minutes, and `supersede`, `deprecate`, `reactivate` and
+/// `unsupersede` can all land inside that window. Writing the read-time values
+/// back is how an operator's Restore was undone by an upsert that was already
+/// in flight when they pressed it.
+///
+/// So the lifecycle half is re-read here, under `lifecycle_lock` and held
+/// across the write, which is what makes "re-read" mean anything: without the
+/// lock a transition can still land between the read and the upsert. This is
+/// also the reason `payload_of`'s deferral rules are not enough on their own —
+/// they defer *active* state, and the write that hides a restored artifact is a
+/// stale *retired* state, which is the half they write.
+///
+/// The marker is the second line. An upsert that fails after the row has moved
+/// leaves the old payload standing against a row that disagrees, and nothing
+/// else in the system would notice, so `lifecycle_dirty` is set before the
+/// write and cleared only once it is acknowledged — the same protocol
+/// `unsupersede` uses, for the same reason. Only retired artifacts are marked:
+/// an active row behind a payload that never arrived is a point that does not
+/// exist yet, which is not drift but an artifact waiting to be embedded.
+async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>) -> Result<()> {
+    if points.is_empty() {
+        return Ok(());
+    }
+    let _guard = core.lifecycle_lock.lock().await;
+
+    let mut marked: Vec<String> = Vec::new();
+    let mut gone: Vec<String> = Vec::new();
+    for p in &mut points {
+        let id = p.payload.artifact_id.clone();
+        match core.store.get_artifact(&id).await {
+            Ok(fresh) => {
+                p.payload.status = (fresh.status != ArtifactStatus::Active).then_some(fresh.status);
+                p.payload.superseded = fresh.superseded_by.is_some().then_some(true);
+                p.payload.superseded_by = fresh.superseded_by.clone();
+                if !fresh.in_results() {
+                    core.store.mark_lifecycle_dirty(&id).await?;
+                    marked.push(id);
+                }
+            }
+            // Deleted while the embedding was in flight. Writing the point
+            // anyway would put a vector in the index that no row explains —
+            // an orphan `heal_store_drift` can only report, never repair,
+            // because SQLite is the source of truth for what exists.
+            Err(Error::NotFound) => {
+                tracing::info!(
+                    artifact_id = %id,
+                    "artifact was deleted while it was being embedded; dropping its point"
+                );
+                gone.push(id);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    points.retain(|p| !gone.contains(&p.payload.artifact_id));
+    if points.is_empty() {
+        core.store.clear_lifecycle_dirty(&marked).await?;
+        return Ok(());
+    }
+
+    core.vectors.upsert(points).await?;
+    // Only after the write returns. Clearing first would turn a failed upsert
+    // into permanent drift that nothing is left to look for.
+    core.store.clear_lifecycle_dirty(&marked).await?;
+    Ok(())
+}
+
 /// Advance the parent source once no chunk is still pending: `ready` if every
 /// chunk embedded, `partial` if any gave up.
 pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
@@ -633,6 +709,112 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_upsert_landing_after_a_restore_does_not_hide_the_artifact_again() {
+        // The row is read before the embedding call and the call can take
+        // minutes, so by the time the upsert lands the lifecycle fields in hand
+        // may describe a state an operator has since reversed. Writing them
+        // back hides an artifact whose row says active — and because no
+        // lifecycle mutator ran, no `lifecycle_dirty` marker exists and
+        // `repair_lifecycle_drift` never looks at it. The artifact is out of
+        // search, off every Ops list, and reachable by no button.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        // What a re-embed job read before it called the embedder.
+        let stale = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(stale.superseded_by.is_some(), "the fixture is not hidden");
+
+        core.unsupersede(&ids[0]).await.unwrap();
+        embed_batch(
+            &core,
+            std::slice::from_ref(&stale),
+            vec![embed_text(&stale)],
+        )
+        .await
+        .unwrap();
+
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "a stale embed hid an artifact an operator had restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_deleted_while_it_embedded_leaves_no_point_behind() {
+        // The other thing that can happen across an embedding call. A point
+        // whose row is gone is an orphan `heal_store_drift` can only report —
+        // SQLite is the source of truth for what exists, so nothing may rebuild
+        // the row and nothing may delete the vector, and the operator is left
+        // reconciling two stores by hand. Not writing it is the whole fix.
+        let core = crate::core::test_support::test_core().await;
+        let (_, ids) = corpus_with_pending_chunks(&core, 1).await;
+        let stale = core.store.get_artifact(&ids[0]).await.unwrap();
+
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        embed_batch(
+            &core,
+            std::slice::from_ref(&stale),
+            vec![embed_text(&stale)],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !core
+                .vectors
+                .all_artifact_ids()
+                .await
+                .unwrap()
+                .contains(&ids[0]),
+            "the embed wrote a point for an artifact that no longer exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_embed_of_a_hidden_artifact_leaves_no_lifecycle_marker_behind() {
+        // The marker is set before the upsert so that a failed write is drift
+        // something still knows to look for. Left standing after a write that
+        // succeeded, it makes `repair_lifecycle_drift` rewrite the same payload
+        // on every sweep, forever — write amplification behind an end state
+        // that is permanently correct, which is the shape of bug nothing
+        // complains about.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        let hidden = core.store.get_artifact(&ids[0]).await.unwrap();
+
+        embed_batch(
+            &core,
+            std::slice::from_ref(&hidden),
+            vec![embed_text(&hidden)],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the re-embed left a marker on a base the two stores agree about"
+        );
+    }
 
     /// A corpus with `n` chunks, none of them embedded yet.
     async fn corpus_with_pending_chunks(core: &Core, n: usize) -> (String, Vec<String>) {
