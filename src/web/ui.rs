@@ -1730,16 +1730,7 @@ async fn dismiss_link(
     _id: Identity,
     Path((artifact_id, other_id)): Path<(String, String)>,
 ) -> Result<Response> {
-    st.core
-        .store
-        .set_link_state(
-            &artifact_id,
-            &other_id,
-            crate::store::links::LinkState::Dismissed,
-            None,
-            None,
-        )
-        .await?;
+    st.core.store.dismiss_link(&artifact_id, &other_id).await?;
     // The row swaps itself out and leaves the pane alone, so the artifact you
     // were reading is still on screen afterwards.
     Ok(axum::response::Html(String::new()).into_response())
@@ -2533,6 +2524,70 @@ mod tests {
             .unwrap();
         let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
         assert!(d.seen_together.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cross_corpus_pair_is_marked_and_a_same_corpus_pair_is_not() {
+        // "Two documents needing each other is the finding; two passages of one
+        // document needing each other is not" is the whole point of the flag —
+        // pin it on the data the pane renders, not on a CSS class name.
+        let core = crate::core::test_support::test_core().await;
+        let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
+        let other_corpus = core.store.insert_corpus("y", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &other_corpus.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "body of other document".to_string(),
+                    corpus_span: None,
+                    title: Some("other document".to_string()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let cross_id = made[0].id.clone();
+
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q1"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .bump_link(
+                &ids[0],
+                &cross_id,
+                5.0,
+                Some("q2"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let same = d
+            .seen_together
+            .iter()
+            .find(|r| r.id == ids[1])
+            .expect("the same-corpus pair should still be listed");
+        let cross = d
+            .seen_together
+            .iter()
+            .find(|r| r.id == cross_id)
+            .expect("the cross-corpus pair should be listed");
+        assert!(
+            !same.cross_corpus,
+            "two passages of one document is not the finding"
+        );
+        assert!(
+            cross.cross_corpus,
+            "two documents needing each other is the finding"
+        );
     }
 
     #[tokio::test]

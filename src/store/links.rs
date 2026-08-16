@@ -503,6 +503,26 @@ impl Store {
         Ok(())
     }
 
+    /// The operator saying this pair does not belong together.
+    ///
+    /// Deliberately narrower than `set_link_state`: dismissal records a
+    /// decision, it does not erase what the decision was made about. Weight
+    /// stays so the decision is auditable against the evidence that produced
+    /// it, and the judge's `reason` — where there is one — stays too, because
+    /// it is part of that evidence: an operator overruling "the config and the
+    /// errors it produces" should leave a row that still says both what was
+    /// claimed and that a person overruled it. Only `state` moves.
+    pub async fn dismiss_link(&self, a: &str, b: &str) -> Result<()> {
+        let (a, b) = canonical(a, b);
+        sqlx::query("UPDATE artifact_links SET state = ? WHERE a_id = ? AND b_id = ?")
+            .bind(LinkState::Dismissed.as_str())
+            .bind(a)
+            .bind(b)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Count one call against a link and report the new total.
     ///
     /// Counted only where the answer said something about the *link* — an
@@ -900,6 +920,40 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_link_records_the_decision_without_erasing_the_evidence() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store
+            .set_link_state(
+                &a,
+                &b,
+                LinkState::Related,
+                Some("the config and the errors it produces"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+
+        store.dismiss_link(&a, &b).await.unwrap();
+
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Dismissed);
+        assert_eq!(
+            l.weight, 9.0,
+            "the evidence was thrown away with the decision"
+        );
+        assert_eq!(
+            l.reason.as_deref(),
+            Some("the config and the errors it produces"),
+            "the judge's assessment is part of the evidence, not decoration"
         );
     }
 
