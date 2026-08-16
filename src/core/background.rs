@@ -614,10 +614,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_association_ticker_queues_exactly_one_sweep() {
-        // Same reasoning as the consolidation sweep: `jobs` is unique on
-        // (stage, target), so a ticker firing while a sweep is still queued
-        // collapses onto the same row rather than stacking sweeps.
+    async fn the_association_sweep_never_stacks_up_in_the_queue() {
+        // `jobs` is unique on (stage, target), so a ticker firing while a
+        // sweep is still queued must collapse onto the same row rather than
+        // stacking sweeps behind a slow one.
+        let core = crate::core::test_support::test_core().await;
+        for _ in 0..3 {
+            core.store
+                .enqueue(
+                    crate::store::jobs::Stage::Associate,
+                    "collection",
+                    ASSOCIATE_TARGET,
+                )
+                .await
+                .unwrap();
+        }
+        let mut seen = 0;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            assert_eq!(j.stage, crate::store::jobs::Stage::Associate);
+            seen += 1;
+        }
+        assert_eq!(seen, 1, "the sweep stacked up in the queue");
+    }
+
+    #[tokio::test]
+    async fn the_association_ticker_queues_a_sweep_as_soon_as_it_starts() {
+        // `tokio::time::interval` fires immediately on its first tick, which
+        // is what makes a restart pick the association sweep up rather than
+        // waiting out a full `interval_mins`.
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.enabled = true;
         let (tx, rx) = tokio::sync::watch::channel(false);
