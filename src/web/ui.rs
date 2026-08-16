@@ -464,6 +464,10 @@ struct OpsTemplate {
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
     feedback: Option<crate::store::feedback::Stats>,
+    /// `None` when nothing is being learned, which renders nothing at all: a
+    /// count of links on a base that records no searches is a line about a
+    /// feature that is switched off.
+    links: Option<crate::store::links::LinkCounts>,
 }
 
 struct MergedRow {
@@ -1279,6 +1283,10 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             true => Some(st.core.store.feedback_stats().await?),
             false => None,
         },
+        links: match st.core.associate.enabled && st.core.feedback.enabled {
+            true => Some(st.core.store.link_counts().await?),
+            false => None,
+        },
     })
     .into_response())
 }
@@ -2053,6 +2061,18 @@ mod tests {
 
     async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle)
+    }
+
+    /// A session whose core records searches, which is what the association
+    /// features are gated on. `app_session_and_core` cannot be reused: the
+    /// router owns its own clone of the core, so flipping a flag afterwards
+    /// changes the handle and not the app.
+    async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         (app, cookie, handle)
@@ -3371,6 +3391,23 @@ mod tests {
         // "None."
         assert!(html.contains("Nothing deprecated"));
         assert!(!html.contains("<h3>Deprecated</h3>"));
+    }
+
+    #[tokio::test]
+    async fn ops_says_how_many_links_there_are_and_how_many_are_named() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        // One `bump_link` call between one pair is one row in `artifact_links`
+        // — see `the_counts_say_how_many_links_there_are_and_how_many_are_named`
+        // in store::links, which needs two calls between two different pairs
+        // to reach a total of two.
+        assert!(page.contains("1 links"), "{page}");
     }
 
     #[tokio::test]

@@ -246,6 +246,48 @@ retain_days = 0
 # checking more often than this, and the sweep is a single DELETE.
 sweep_hours = 6
 
+# Links learned from co-retrieval, and a decaying accessibility per artifact.
+# Both are learned from use and neither touches what is stored: the trace is
+# fixed, access is plastic. Needs `feedback.enabled` — without recorded searches
+# there is nothing to learn from, and saying otherwise is a warning at startup.
+[associate]
+enabled = true
+# How often the sweep replays the search log. Pure SQLite, no model call.
+interval_mins = 30
+# A link unused for this long has half the strength it had. One co-appearance is
+# +1 and one confirmed answer is +2, so these numbers are in "uses".
+half_life_days = 30
+# Below this, a link nobody has ruled on is forgotten. A judged one never is: a
+# verified relation is about content, not use.
+prune_below = 0.5
+# Strength at which a link is worth showing, and at which it is worth one call.
+show_min = 2.0
+judge_min = 4.0
+# Distinct questions a link needs before it is judged. One question asked six
+# times is one question, and this is what keeps the judge cheap.
+judge_min_queries = 3
+judge_per_sweep = 10
+# How many top hits are asked what they are linked to, and how many associated
+# hits may be appended after the ranked list — outside `limit`, never instead
+# of a ranked hit.
+spread_from = 3
+spread_max = 3
+# How much more accessible a hit must be than the one above it to pass it, as a
+# fraction of the most accessible hit in that list; and how many places it may
+# climb. 0 turns priming off. Neither default moves until the eval harness has
+# been run with it off and on against the frozen corpus.
+prime_margin = 0.5
+prime_lift = 2
+
+[activation]
+half_life_days = 14
+# Returned by a deliberate search, opened in the pane, judged the answer. Being
+# surfaced *because* of activation — resurfaced, or recalled by a link — raises
+# nothing: that is the loop this design exists to close.
+retrieved = 1.0
+opened = 0.5
+confirmed = 3.0
+
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
 # one GPU, so a per-role cooldown could not bound total load. Upgrading: this

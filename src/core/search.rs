@@ -1076,7 +1076,14 @@ mod tests {
             .await
             .unwrap()[&id]
             .0;
-        assert!((after - before - core.activation.opened).abs() < 1e-6);
+        // Loose on purpose: `before` is the raw stored activation, but the bump
+        // re-reads it through decay, so the error grows with wall-clock time
+        // between the artifact's creation and the bump (5.7e-7 after one
+        // second, 1.15e-6 after two) and a loaded machine can straddle 1e-6.
+        // 1e-3 still separates `opened` (0.5) from `retrieved` (1.0) by three
+        // orders of magnitude, so it cannot mask a real regression — don't
+        // tighten it back without addressing the decay re-read instead.
+        assert!((after - before - core.activation.opened).abs() < 1e-3);
         assert!(core.activation.opened < core.activation.retrieved);
     }
 
