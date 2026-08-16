@@ -177,17 +177,18 @@ the file — the loader warns if it finds one.
 | `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
 | `vector.pinned_boost` | Extra score for an artifact tagged `pinned`. Default 0.15. |
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
-| `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
+| `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `cooldown_secs`. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
-| `infer.ask.*` | Completion model, used only by `ask`: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`. |
+| `infer.ask.*` | Completion model, used only by `ask`: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
+| `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`, `merge_max_roots`. |
 | `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
 
-Five worth knowing:
+Six worth knowing:
 
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
@@ -202,7 +203,16 @@ Five worth knowing:
 - **`infer.ask.max_output_tokens`** defaults to 4096 and comes out of
   `context_tokens`. The endpoint measures the prompt and this ceiling against
   one window, so `ask` reserves it and packs excerpts into the remainder:
-  raising it buys longer answers by showing the model fewer of them.
+  raising it buys longer answers by showing the model fewer of them. It never
+  reserves more than half the window — a ceiling as wide as its context would
+  otherwise leave nothing to pack and answer nothing at all — and the answer
+  says when it was cut off at the ceiling.
+- **`infer.*.ceiling_param`** — which name the endpoint takes the output
+  ceiling under, `max_tokens` or `max_completion_tokens`. Left unset it is
+  inferred from `reasoning_effort` and corrected from the endpoint's own 400.
+  Set it when the endpoint ignores what it does not recognise rather than
+  refusing it — a llama.cpp or vLLM build with `reasoning_effort` set is the
+  case that needs it, since an ignored ceiling is no ceiling at all.
 - **`timeout_secs`** defaults to 900. Absurd for a hosted API, about right for a
   local model answering in minutes.
 

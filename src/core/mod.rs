@@ -153,13 +153,7 @@ impl Core {
             judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
             link_judge: Arc::new(HttpCompleter::for_link_judging(&cfg.infer.synthesize)),
             describer: cfg.infer.vision.as_ref().map(|v| {
-                let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
-                Arc::new(HttpDescriber::new(
-                    &v.model,
-                    &base_url,
-                    api_key.as_deref(),
-                    v.timeout_secs,
-                )) as Arc<dyn Describer>
+                Arc::new(HttpDescriber::new(v, &cfg.infer.synthesize)) as Arc<dyn Describer>
             }),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),

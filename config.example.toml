@@ -70,12 +70,21 @@ output_ratio = 8.0
 # Sent as `reasoning_effort` when set. On a reasoning model the thinking comes
 # out of max_output_tokens, so suppressing it is what stops the artifact list
 # from being cut off. Unset by default: models that do not reason reject the field.
-#
-# Setting this also changes how the ceiling is sent — `max_completion_tokens`
-# rather than `max_tokens`, which is what a reasoning model accepts. Leave it
-# unset against an endpoint that does not reason, or the ceiling may not be
-# recognised and the reply is bounded by the server's limit alone.
 # reasoning_effort = "none"
+
+# Which name this endpoint takes the output ceiling under: "max_tokens" or
+# "max_completion_tokens". The two mean the same thing and no endpoint takes
+# both — OpenAI's reasoning models refuse `max_tokens` with a 400 naming the
+# other, and llama.cpp/vLLM read `max_tokens` and silently ignore what they do
+# not recognise.
+#
+# Unset by default, which means: guess from `reasoning_effort` (set implies the
+# hosted spelling), then correct the guess the first time the endpoint refuses
+# the name. Set it explicitly for the case the guess gets wrong and no 400 ever
+# corrects — a local endpoint told `reasoning_effort = "none"` to suppress its
+# thinking, which then silently drops a `max_completion_tokens` it does not know
+# and answers with no ceiling at all.
+# ceiling_param = "max_tokens"
 
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
 # the endpoint constrains decoding to the shape the parser expects. On by
@@ -126,13 +135,22 @@ context_tokens = 32768
 # the only thing bounding a reply the model has stopped being able to end.
 #
 # It comes out of `context_tokens`: the endpoint measures the prompt and this
-# ceiling against one window, so ask reserves exactly this much and packs
-# excerpts into what is left. Raising it buys longer answers by showing the
-# model fewer excerpts, and `dropped` on the answer says how many.
+# ceiling against one window, so ask reserves this much and packs excerpts into
+# what is left. Raising it buys longer answers by showing the model fewer
+# excerpts, and `dropped` on the answer says how many.
+#
+# Never more than half the window, though, whatever it is set to: a ceiling as
+# wide as its own context would reserve everything, pack nothing, and answer
+# every question with "too large for the configured context window". The call
+# itself then asks for whatever the packed prompt actually left over, up to this
+# number — and if the answer still runs into it, the answer says so.
 # max_output_tokens = 4096
 # ask is the one interactive inference call, so someone is watching it happen.
 # timeout_secs = 900
 # reasoning_effort = "none"
+# See [infer.synthesize].ceiling_param. Set it here too if this endpoint is one
+# that ignores an unrecognised ceiling rather than refusing it.
+# ceiling_param = "max_tokens"
 
 # Reranking is optional and disabled by default. There is no OpenAI-standard
 # rerank endpoint, so the wire format is configured explicitly.
@@ -152,6 +170,13 @@ context_tokens = 32768
 # base_url = "http://localhost:8002/v1"
 # api_key = ""
 # timeout_secs = 120
+# Hard cap on output tokens per description, sent on every call. Defaults to
+# 4096. What comes back is stored as a corpus and segmented from there, so an
+# endpoint left to apply its own ceiling is a document nobody sized.
+# max_output_tokens = 4096
+# See [infer.synthesize].ceiling_param. Inherited from that role when this block
+# has no base_url of its own, since then it is the same endpoint.
+# ceiling_param = "max_tokens"
 
 # ── Authentication ──────────────────────────────────────────────────────────
 # Exactly one mode is active.

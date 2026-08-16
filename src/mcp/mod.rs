@@ -157,6 +157,14 @@ impl PkdbTools {
         {
             Ok(a) => {
                 let mut out = a.answer;
+                // Said before the sources rather than after: an agent reading a
+                // cut-off answer as a complete one is the failure this prevents.
+                if a.truncated {
+                    out.push_str(
+                        "\n\n_This answer was cut off at the configured answer length limit \
+                         (ask.max_output_tokens) and is incomplete._",
+                    );
+                }
                 if !a.citations.is_empty() {
                     out.push_str("\n\n---\n\n**Sources**\n\n");
                     out.push_str(&format_search_results(&a.citations));

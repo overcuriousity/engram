@@ -1,6 +1,9 @@
 <div class="card">
   <div class="card-head">
     <span class="card-title">Answer</span>
+    {% if truncated %}
+      <span class="card-meta"><span class="badge badge-warning">cut off at the answer length limit (ask.max_output_tokens)</span></span>
+    {% endif %}
     {% if dropped > 0 %}
       <span class="card-meta"><span class="badge badge-warning">{{ dropped }} excerpt(s) omitted for context budget</span></span>
     {% endif %}

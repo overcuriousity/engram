@@ -1,8 +1,8 @@
 use super::{
-    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
-    Synthesizer, prompt,
+    Completer, Completion, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput,
+    SynthesisBudget, Synthesizer, prompt,
 };
-use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
+use crate::config::{AskRole, CeilingParam, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -58,6 +58,51 @@ pub(crate) struct Endpoint {
     model: String,
     api_key: Option<String>,
     role: &'static str,
+    /// Which name this endpoint takes the output ceiling under, corrected in
+    /// place the first time the endpoint rejects the name we guessed.
+    ///
+    /// Shared mutable state on a struct that is otherwise plain configuration,
+    /// because the correction is worth nothing if every later call re-learns it:
+    /// one 400 per process, not one per judge call.
+    ceiling_param: AtomicCeilingParam,
+}
+
+/// `CeilingParam` behind an atomic, so a `&self` call can record what it
+/// learned.
+struct AtomicCeilingParam(std::sync::atomic::AtomicBool);
+
+impl AtomicCeilingParam {
+    fn new(p: CeilingParam) -> Self {
+        Self(std::sync::atomic::AtomicBool::new(
+            p == CeilingParam::MaxCompletionTokens,
+        ))
+    }
+
+    fn get(&self) -> CeilingParam {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            CeilingParam::MaxCompletionTokens
+        } else {
+            CeilingParam::MaxTokens
+        }
+    }
+
+    fn set(&self, p: CeilingParam) {
+        self.0.store(
+            p == CeilingParam::MaxCompletionTokens,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// A completion, and how it ended.
+///
+/// `truncated` is `finish_reason == "length"`: the model did not stop, the
+/// ceiling stopped it. Carried out of the transport rather than only logged
+/// because the caller is the only one that knows what a cut-off reply costs —
+/// synthesis salvages what parsed, ask has to say so on the answer.
+pub(crate) struct ChatReply {
+    text: String,
+    truncated: bool,
 }
 
 impl Endpoint {
@@ -74,7 +119,15 @@ impl Endpoint {
             model: model.to_string(),
             api_key: api_key.map(str::to_string),
             role,
+            ceiling_param: AtomicCeilingParam::new(CeilingParam::MaxTokens),
         }
+    }
+
+    /// The name to send the output ceiling under, configured or inferred.
+    fn with_ceiling_param(self, configured: Option<CeilingParam>, effort: Option<&str>) -> Self {
+        self.ceiling_param
+            .set(configured.unwrap_or_else(|| inferred_ceiling_param(effort)));
+        self
     }
 
     async fn post_json(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
@@ -109,28 +162,131 @@ impl Endpoint {
         })
     }
 
-    /// One chat completion; `body` carries everything but `model`. Logs the
-    /// cost of every call — on local hardware a window takes minutes, and the
-    /// log is what tells a long wait from a hang. `finish_reason` is what tells
-    /// a truncated reply from a model that wrote bad JSON of its own accord.
-    async fn chat(&self, mut body: serde_json::Value) -> Result<String> {
+    /// One chat completion; `body` carries everything but `model` and the
+    /// output ceiling. Logs the cost of every call — on local hardware a window
+    /// takes minutes, and the log is what tells a long wait from a hang.
+    ///
+    /// `ceiling` is applied here rather than by the caller because the name it
+    /// goes out under is a property of the endpoint, and one that has to be
+    /// learned: a request rejected for naming the wrong one is retried under the
+    /// other, once, and the answer is remembered for every later call. Only the
+    /// name is retried — a 400 about anything else stays a 400.
+    async fn chat(&self, mut body: serde_json::Value, ceiling: Option<usize>) -> Result<ChatReply> {
         body["model"] = json!(self.model);
         let started = std::time::Instant::now();
-        let v = self.post_json("chat/completions", body).await?;
+
+        let mut sent = self.ceiling_param.get();
+        let mut may_retry = ceiling.is_some();
+        let v = loop {
+            if let Some(max) = ceiling {
+                if let Some(o) = body.as_object_mut() {
+                    o.remove(sent.flipped().as_str());
+                }
+                body[sent.as_str()] = json!(max);
+            }
+            match self.post_json("chat/completions", body.clone()).await {
+                Ok(v) => break v,
+                Err(e) if may_retry && rejects_ceiling_name(error_detail(&e), sent) => {
+                    may_retry = false;
+                    sent = sent.flipped();
+                    tracing::warn!(
+                        role = self.role,
+                        rejected = sent.flipped().as_str(),
+                        retrying_as = sent.as_str(),
+                        "the endpoint refused the output ceiling's name; using the other one \
+                         from now on. Set ceiling_param to skip this."
+                    );
+                    self.ceiling_param.set(sent);
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        let finish_reason = v["choices"][0]["finish_reason"].as_str();
         tracing::info!(
             role = self.role,
             ms = started.elapsed().as_millis(),
             tokens = v["usage"]["completion_tokens"].as_u64(),
-            finish_reason = v["choices"][0]["finish_reason"].as_str(),
+            finish_reason,
             "completion finished"
         );
-        v["choices"][0]["message"]["content"]
+        // `length` means the ceiling stopped the model rather than the model
+        // stopping itself, and a reply nothing marks as cut off is read as a
+        // complete one — by the parser, and by whoever asked.
+        let truncated = finish_reason == Some("length");
+        if truncated {
+            tracing::warn!(
+                role = self.role,
+                ceiling,
+                "the reply hit its output ceiling and is cut off"
+            );
+        }
+
+        let text = v["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| Error::Inference {
                 role: self.role,
-                detail: "no message content".into(),
-            })
+                // An empty reply at `length` is the one failure that reads as a
+                // transport fault and is not one: a reasoning model bills its
+                // thinking against this ceiling, and can spend all of it before
+                // the message content starts.
+                detail: if truncated {
+                    "the output ceiling was spent before any message content was written; \
+                     raise max_output_tokens or lower reasoning_effort"
+                        .into()
+                } else {
+                    "no message content".into()
+                },
+            })?;
+        Ok(ChatReply { text, truncated })
+    }
+}
+
+/// The name to send the output ceiling under when the operator has not said.
+///
+/// A reasoning model refuses `max_tokens` outright — a 400 naming
+/// `max_completion_tokens` — and `reasoning_effort` is the only signal at this
+/// layer that one is on the other end. It is a guess, not a fact: the field is
+/// also what suppresses thinking on a local model that understands it, and that
+/// endpoint wants `max_tokens`. `ceiling_param` overrides it, and a 400
+/// corrects it.
+fn inferred_ceiling_param(effort: Option<&str>) -> CeilingParam {
+    match effort {
+        Some(_) => CeilingParam::MaxCompletionTokens,
+        None => CeilingParam::MaxTokens,
+    }
+}
+
+/// Whether this rejection is the endpoint saying the ceiling went out under the
+/// wrong name — as opposed to any of the other things a 400 can mean.
+///
+/// The two names share no substring, so naming the other one is unambiguous;
+/// OpenAI's own message does exactly that ("Use 'max_completion_tokens'
+/// instead"). An endpoint that only names the field it refused is read as such
+/// when it also says it did not understand it.
+fn rejects_ceiling_name(detail: &str, sent: CeilingParam) -> bool {
+    if detail.contains(sent.flipped().as_str()) {
+        return true;
+    }
+    let lower = detail.to_ascii_lowercase();
+    detail.contains(sent.as_str())
+        && [
+            "unsupported",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "unrecognised",
+        ]
+        .iter()
+        .any(|w| lower.contains(w))
+}
+
+/// The message an upstream failure carries, whichever way it was classified.
+fn error_detail(e: &Error) -> &str {
+    match e {
+        Error::Inference { detail, .. } | Error::InferenceRejected { detail, .. } => detail,
+        _ => "",
     }
 }
 
@@ -153,7 +309,8 @@ impl HttpSynthesizer {
                 cfg.api_key.as_deref(),
                 cfg.timeout_secs,
                 "chunk",
-            ),
+            )
+            .with_ceiling_param(cfg.ceiling_param, cfg.reasoning_effort.as_deref()),
             budget: SynthesisBudget {
                 context_tokens: cfg.context_tokens,
                 max_output_tokens: cfg.max_output_tokens,
@@ -186,15 +343,20 @@ impl HttpSynthesizer {
             "messages": messages,
             "temperature": 0.2,
         });
-        set_output_ceiling(
-            &mut body,
-            self.budget.max_output_tokens,
-            self.reasoning_effort.as_deref(),
-        );
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if let Some(name) = schema.filter(|_| self.structured_output) {
             body["response_format"] = response_format(name, prompt::artifacts_schema());
         }
-        self.ep.chat(body).await
+        // Truncation is not an error here: `parse_response` salvages the
+        // artifacts a cut-off list still got right, and losing nine good ones to
+        // the tenth is the worst trade in the write path.
+        Ok(self
+            .ep
+            .chat(body, Some(self.budget.max_output_tokens))
+            .await?
+            .text)
     }
 }
 
@@ -427,35 +589,6 @@ impl Reranker for HttpReranker {
     }
 }
 
-/// The output ceiling, under whichever name this endpoint will accept it.
-///
-/// A reasoning model refuses `max_tokens` outright — a 400 naming
-/// `max_completion_tokens` — and the two mean the same ceiling. `reasoning_effort`
-/// is the only signal available at this layer that such a model is on the other
-/// end, and it is a reliable one: a model that does not reason rejects that
-/// field, so it is only ever set against one that does.
-///
-/// Under either name the ceiling has to be sent. It is not a cost control:
-/// `response_format` compiles into a decoding constraint, and while the model is
-/// inside a JSON string the end-of-sequence token is masked out, so a small model
-/// that wanders has nothing of its own to stop it.
-///
-/// What the two names do not share is what the ceiling buys. A reasoning model
-/// bills its thinking against this number as well, so a low ceiling and a high
-/// effort can be spent entirely before the message content starts — which
-/// surfaces as an empty reply rather than as a truncation. `reasoning_effort`'s
-/// documentation in `config.example.toml` says so; there is nothing to do about
-/// it here beyond sending a ceiling the endpoint will honour.
-fn set_output_ceiling(body: &mut serde_json::Value, max: usize, reasoning_effort: Option<&str>) {
-    match reasoning_effort {
-        Some(effort) => {
-            body["reasoning_effort"] = json!(effort);
-            body["max_completion_tokens"] = json!(max);
-        }
-        None => body["max_tokens"] = json!(max),
-    }
-}
-
 /// An OpenAI `json_schema` response format.
 ///
 /// `strict` is what makes the difference between a schema the endpoint treats
@@ -499,7 +632,8 @@ impl HttpCompleter {
                 cfg.api_key.as_deref(),
                 cfg.timeout_secs,
                 "ask",
-            ),
+            )
+            .with_ceiling_param(cfg.ceiling_param, cfg.reasoning_effort.as_deref()),
             context_tokens: cfg.context_tokens,
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
@@ -536,7 +670,8 @@ impl HttpCompleter {
                 cfg.api_key.as_deref(),
                 cfg.timeout_secs,
                 "judge",
-            ),
+            )
+            .with_ceiling_param(cfg.ceiling_param, cfg.reasoning_effort.as_deref()),
             context_tokens: cfg.context_tokens,
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
@@ -548,6 +683,13 @@ impl HttpCompleter {
 #[async_trait]
 impl Completer for HttpCompleter {
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        Ok(self
+            .answer(system, user, self.max_output_tokens)
+            .await?
+            .text)
+    }
+
+    async fn answer(&self, system: &str, user: &str, ceiling: usize) -> Result<Completion> {
         let mut body = json!({
             "messages": [
                 {"role":"system","content": system},
@@ -555,15 +697,21 @@ impl Completer for HttpCompleter {
             ],
             "temperature": 0.3,
         });
-        set_output_ceiling(
-            &mut body,
-            self.max_output_tokens,
-            self.reasoning_effort.as_deref(),
-        );
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if let Some((name, schema)) = &self.response_schema {
             body["response_format"] = response_format(name, schema.clone());
         }
-        self.ep.chat(body).await
+        // Never above what the role was configured to allow: a caller asking
+        // for room it measured against the context window is asking for a
+        // smaller ceiling, never a larger one.
+        let ceiling = ceiling.min(self.max_output_tokens).max(1);
+        let reply = self.ep.chat(body, Some(ceiling)).await?;
+        Ok(Completion {
+            text: reply.text,
+            truncated: reply.truncated,
+        })
     }
 
     fn context_tokens(&self) -> usize {
@@ -579,12 +727,33 @@ impl Completer for HttpCompleter {
 
 pub struct HttpDescriber {
     ep: Endpoint,
+    /// Hard ceiling on output tokens, sent on every call — the same rule the
+    /// other roles follow, and for a stronger reason: what comes back is stored
+    /// as a corpus and segmented, so a reply nothing bounds is a document
+    /// nothing bounds.
+    max_output_tokens: usize,
 }
 
 impl HttpDescriber {
-    pub fn new(model: &str, base_url: &str, api_key: Option<&str>, timeout_secs: u64) -> Self {
+    /// Takes both roles because a vision role without its own `base_url` is the
+    /// synthesize endpoint: it borrows that endpoint's address, key and — since
+    /// it is the same server reading the request — the name it takes the output
+    /// ceiling under.
+    pub fn new(cfg: &crate::config::VisionRole, synth: &SynthesizeRole) -> Self {
+        let (base_url, api_key) = cfg.resolve(synth);
         Self {
-            ep: Endpoint::new(base_url, model, api_key, timeout_secs, "vision"),
+            ep: Endpoint::new(
+                &base_url,
+                &cfg.model,
+                api_key.as_deref(),
+                cfg.timeout_secs,
+                "vision",
+            )
+            // No `reasoning_effort` on this role, so the guess is `max_tokens`
+            // unless the synthesize endpoint it may be borrowing says otherwise;
+            // a hosted reasoning model's 400 corrects it on the first call.
+            .with_ceiling_param(cfg.ceiling_param(synth), None),
+            max_output_tokens: cfg.max_output_tokens,
         }
     }
 }
@@ -607,7 +776,11 @@ impl Describer for HttpDescriber {
             ],
             "temperature": 0.2,
         });
-        self.ep.chat(body).await
+        // A description cut off at the ceiling is still worth storing — it is
+        // prose, and the part that arrived describes what it describes — so the
+        // truncation is logged rather than raised. An empty one is not, and
+        // `chat` says so in terms the operator can act on.
+        Ok(self.ep.chat(body, Some(self.max_output_tokens)).await?.text)
     }
 }
 
@@ -688,10 +861,33 @@ mod tests {
             tokenizer_path: None,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
+            ceiling_param: None,
             structured_output: true,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
             cooldown_secs: None,
+        }
+    }
+    fn ask_cfg(base: String) -> AskRole {
+        AskRole {
+            base_url: base,
+            model: "m".into(),
+            api_key: None,
+            context_tokens: 4096,
+            max_output_tokens: 1024,
+            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            reasoning_effort: None,
+            ceiling_param: None,
+        }
+    }
+    fn vision_cfg(base: Option<String>) -> crate::config::VisionRole {
+        crate::config::VisionRole {
+            model: "vl".into(),
+            base_url: base,
+            api_key: Some("k".into()),
+            timeout_secs: 30,
+            max_output_tokens: 2048,
+            ceiling_param: None,
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {
@@ -840,6 +1036,7 @@ mod tests {
             max_output_tokens: 1024,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
+            ceiling_param: None,
         })
         .complete("s", "u")
         .await
@@ -1062,6 +1259,7 @@ mod tests {
             max_output_tokens: 1024,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
+            ceiling_param: None,
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
@@ -1089,6 +1287,7 @@ mod tests {
                     max_output_tokens: 1024,
                     timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
+                    ceiling_param: None,
                 }),
                 _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
             };
@@ -1125,6 +1324,167 @@ mod tests {
             "a reasoning endpoint was sent max_tokens, which it rejects: {body}"
         );
         assert_eq!(body["reasoning_effort"].as_str(), Some("low"));
+    }
+
+    /// `reasoning_effort` is a guess at which name the endpoint takes, and the
+    /// configuration this project recommends for a local model — suppressing
+    /// thinking with `reasoning_effort = "none"` — is exactly where the guess is
+    /// wrong. A llama.cpp build reads `max_tokens` and ignores what it does not
+    /// know, so guessing wrong there is not a 400 to learn from: it is no
+    /// ceiling at all, which is the unbounded reply this all exists to prevent.
+    #[tokio::test]
+    async fn the_configured_ceiling_name_beats_the_guess() {
+        let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+        let mut cfg = synthesize_cfg(server.uri());
+        cfg.reasoning_effort = Some("none".into());
+        cfg.ceiling_param = Some(CeilingParam::MaxTokens);
+        HttpCompleter::for_judging(&cfg)
+            .complete("s", "u")
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["max_tokens"].as_u64(), Some(2048));
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "the configured name lost to the guess: {body}"
+        );
+        // Still sent: suppressing the thinking is why it was set.
+        assert_eq!(body["reasoning_effort"].as_str(), Some("none"));
+    }
+
+    /// The half of the guess the endpoint can correct. An endpoint that names
+    /// the other parameter in its refusal is telling us which one it takes, and
+    /// re-learning that on every call would mean one wasted 400 per judge call
+    /// forever.
+    #[tokio::test]
+    async fn a_ceiling_refused_by_name_is_retried_under_the_other_and_remembered() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                "Unsupported parameter: 'max_tokens' is not supported with this model. \
+                 Use 'max_completion_tokens' instead.",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"content":"the answer"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        // No `reasoning_effort`, so the guess is `max_tokens` — and wrong.
+        let completer = HttpCompleter::for_judging(&synthesize_cfg(server.uri()));
+        assert_eq!(completer.complete("s", "u").await.unwrap(), "the answer");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2, "the refusal was not retried");
+        let retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(retry["max_completion_tokens"].as_u64(), Some(2048));
+        assert!(
+            retry.get("max_tokens").is_none(),
+            "the retry carried both names: {retry}"
+        );
+
+        // And the next call starts where the first one left off.
+        completer.complete("s", "u").await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3, "the second call was retried again");
+        let second: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(second["max_completion_tokens"].as_u64(), Some(2048));
+    }
+
+    /// A 400 about anything else is not a ceiling-name problem, and retrying it
+    /// under the other name would turn one permanent rejection into two.
+    #[tokio::test]
+    async fn a_refusal_that_is_not_about_the_ceiling_is_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("context length exceeded"))
+            .mount(&server)
+            .await;
+
+        let e = HttpCompleter::for_judging(&synthesize_cfg(server.uri()))
+            .complete("s", "u")
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::InferenceRejected { .. }), "{e}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "an unrelated 400 was retried under the other ceiling name"
+        );
+    }
+
+    /// A reasoning model bills its thinking against the ceiling, so a low
+    /// ceiling and a high effort can be spent before the message content starts.
+    /// That comes back as an empty reply, which read as a transport fault and
+    /// sent the operator looking at the wrong thing.
+    #[tokio::test]
+    async fn an_empty_reply_at_the_ceiling_says_the_ceiling_was_spent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{}, "finish_reason":"length"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let e = HttpCompleter::for_judging(&synthesize_cfg(server.uri()))
+            .complete("s", "u")
+            .await
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("max_output_tokens"),
+            "the error names nothing an operator can act on: {e}"
+        );
+    }
+
+    /// What `finish_reason` is for: a reply the ceiling stopped is not a reply
+    /// the model finished, and only the caller knows what that costs.
+    #[tokio::test]
+    async fn a_reply_stopped_by_the_ceiling_is_reported_as_truncated() {
+        for (reason, want) in [("length", true), ("stop", false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices":[{"message":{"content":"half an ans"}, "finish_reason": reason}]
+                })))
+                .mount(&server)
+                .await;
+
+            let out = HttpCompleter::new(&ask_cfg(server.uri()))
+                .answer("s", "u", 512)
+                .await
+                .unwrap();
+            assert_eq!(out.truncated, want, "finish_reason {reason:?} read wrong");
+        }
+    }
+
+    /// The ceiling a caller asks for is a maximum, not an instruction: `ask`
+    /// derives it from what its prompt actually cost, and the role's own
+    /// configured ceiling still bounds it.
+    #[tokio::test]
+    async fn a_call_may_ask_for_less_room_than_the_role_allows_but_not_more() {
+        for (asked, want) in [(256_usize, 256_u64), (99_999, 1024)] {
+            let server = echoing_server("an answer").await;
+            HttpCompleter::new(&ask_cfg(server.uri()))
+                .answer("s", "u", asked)
+                .await
+                .unwrap();
+            assert_eq!(
+                sent_body(&server).await["max_tokens"].as_u64(),
+                Some(want),
+                "a call asking for {asked} sent the wrong ceiling"
+            );
+        }
     }
 
     /// The link judge shares an endpoint with the duplicate judge and used to
@@ -1186,7 +1546,10 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let d = HttpDescriber::new("vl", &format!("{}/v1", server.uri()), Some("k"), 30);
+        let d = HttpDescriber::new(
+            &vision_cfg(Some(format!("{}/v1", server.uri()))),
+            &synthesize_cfg("http://unused".into()),
+        );
         let out = d
             .describe(b"\xFF\xD8jpegbytes", "Photo taken 2026-08-09")
             .await
@@ -1197,6 +1560,9 @@ mod tests {
         assert_eq!(req.headers.get("authorization").unwrap(), "Bearer k");
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         assert_eq!(body["model"], "vl");
+        // Every completion carries a ceiling, this one most of all: what comes
+        // back is stored as a corpus and segmented from there.
+        assert_eq!(body["max_tokens"].as_u64(), Some(2048));
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], prompt::DESCRIBE_SYSTEM);
         let parts = body["messages"][1]["content"].as_array().unwrap();
@@ -1219,7 +1585,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
             .mount(&server)
             .await;
-        let d = HttpDescriber::new("vl", &server.uri(), None, 30);
+        let mut cfg = vision_cfg(Some(server.uri()));
+        cfg.api_key = None;
+        let d = HttpDescriber::new(&cfg, &synthesize_cfg("http://unused".into()));
         let e = d.describe(b"x", "").await.unwrap_err();
         assert!(matches!(e, Error::Inference { role: "vision", .. }), "{e}");
         assert!(e.retryable());

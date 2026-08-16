@@ -405,6 +405,11 @@ pub struct SynthesizeRole {
     /// is what truncates the answer.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Which name this endpoint takes the output ceiling under. See
+    /// [`CeilingParam`]. Unset means: infer it, then correct the guess from the
+    /// endpoint's own 400.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
     /// Seconds to wait on one call before giving up on it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -486,10 +491,52 @@ pub struct AskRole {
     /// See `SynthesizeRole::reasoning_effort`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// See `SynthesizeRole::ceiling_param`.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
 }
 
 fn default_ask_max_output_tokens() -> usize {
     4096
+}
+
+/// The request field an endpoint takes the output ceiling under.
+///
+/// The two names mean the same ceiling and no endpoint accepts both: OpenAI's
+/// reasoning models answer a `max_tokens` with a 400 naming
+/// `max_completion_tokens`, while a llama.cpp or vLLM build reads `max_tokens`
+/// and silently ignores anything it does not recognise — which is the dangerous
+/// half, because an unrecognised ceiling is no ceiling at all and the reply is
+/// bounded only by the server's own limit.
+///
+/// Left unset, the name is inferred from `reasoning_effort` and then corrected
+/// from the endpoint's 400 if the guess was wrong. That inference is a guess and
+/// not a fact: `reasoning_effort = "none"` is exactly what the local-endpoint
+/// documentation recommends, and a local endpoint wants `max_tokens`. Set this
+/// when the guess is wrong and the endpoint is one of the silent ones, which
+/// have no 400 for the probe to learn from.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CeilingParam {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+impl CeilingParam {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+
+    /// The other name — what a rejected ceiling is retried under.
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::MaxTokens => Self::MaxCompletionTokens,
+            Self::MaxCompletionTokens => Self::MaxTokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -516,10 +563,29 @@ pub struct VisionRole {
     pub api_key: Option<String>,
     #[serde(default = "default_vision_timeout_secs")]
     pub timeout_secs: u64,
+    /// Hard cap on output tokens per description, sent on every call.
+    ///
+    /// A description is markdown for a person and for the segmenter that reads
+    /// it next, so this is a generous bound on the longest one worth waiting
+    /// for — but it must be sent, for the reason every other role sends one: an
+    /// endpoint asked for no ceiling applies its own, which is far larger, and
+    /// a vision model handed a dense screenshot is exactly the kind of caller
+    /// that keeps writing. What it produces is stored as a corpus, so an
+    /// unbounded reply is not merely a slow call.
+    #[serde(default = "default_vision_max_output_tokens")]
+    pub max_output_tokens: usize,
+    /// See `SynthesizeRole::ceiling_param`. Inherited from the synthesize role
+    /// when this one has no endpoint of its own, since then it is that endpoint.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
 }
 
 fn default_vision_timeout_secs() -> u64 {
     120
+}
+
+fn default_vision_max_output_tokens() -> usize {
+    4096
 }
 
 impl VisionRole {
@@ -532,6 +598,18 @@ impl VisionRole {
                 .unwrap_or_else(|| synth.base_url.clone()),
             self.api_key.clone().or_else(|| synth.api_key.clone()),
         )
+    }
+
+    /// Which name to send the output ceiling under. Inherited only when this
+    /// role borrows the synthesize endpoint: a setting about how one server
+    /// reads a request says nothing about a different server.
+    pub fn ceiling_param(&self, synth: &SynthesizeRole) -> Option<CeilingParam> {
+        self.ceiling_param.or_else(|| {
+            self.base_url
+                .is_none()
+                .then_some(synth.ceiling_param)
+                .flatten()
+        })
     }
 }
 
@@ -899,6 +977,36 @@ mod tests {
         assert_eq!(cfg.capture.min_extracted_chars, 200);
     }
 
+    /// The setting exists for the endpoint the guess gets wrong, so the value an
+    /// operator types has to be the value the wire carries. Unset stays unset —
+    /// that is what leaves the guess and its correction in charge.
+    #[test]
+    fn the_ceiling_parameter_is_named_in_config_the_way_it_is_named_on_the_wire() {
+        for (typed, want) in [
+            ("max_tokens", CeilingParam::MaxTokens),
+            ("max_completion_tokens", CeilingParam::MaxCompletionTokens),
+        ] {
+            let p: CeilingParam = serde_json::from_str(&format!("\"{typed}\"")).unwrap();
+            assert_eq!(p, want);
+            assert_eq!(p.as_str(), typed);
+            assert_eq!(p.flipped().flipped(), p);
+            assert_ne!(p.flipped(), p);
+        }
+        // And the two names share no substring, which is what lets a rejection
+        // naming one of them be read unambiguously.
+        assert!(
+            !CeilingParam::MaxCompletionTokens
+                .as_str()
+                .contains(CeilingParam::MaxTokens.as_str())
+        );
+
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.infer.ask.ceiling_param.is_none() && cfg.infer.synthesize.ceiling_param.is_none(),
+            "the example config pins a ceiling name it should be leaving to the guess"
+        );
+    }
+
     #[test]
     fn the_default_timeout_survives_a_slow_local_model() {
         // A segmentation window against a 9B model on one consumer GPU has been
@@ -1139,9 +1247,40 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let v = cfg.infer.vision.as_ref().expect("configured");
         assert_eq!(v.model, "qwen-vl");
         assert_eq!(v.timeout_secs, 120);
+        // Its own ceiling, sent on every call like every other role's.
+        assert_eq!(v.max_output_tokens, 4096);
         let (url, key) = v.resolve(&cfg.infer.synthesize);
         assert_eq!(url, cfg.infer.synthesize.base_url);
         assert_eq!(key, cfg.infer.synthesize.api_key);
+    }
+
+    /// How a request is read is a property of the server reading it, so the
+    /// borrowed name travels exactly as far as the borrowed endpoint does.
+    #[test]
+    fn the_ceiling_name_is_inherited_only_by_a_vision_role_sharing_the_endpoint() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
+        );
+        let mut cfg = Config::load(Some(&p)).unwrap();
+        cfg.infer.synthesize.ceiling_param = Some(CeilingParam::MaxTokens);
+        let synth = cfg.infer.synthesize.clone();
+        let v = cfg.infer.vision.as_mut().expect("configured");
+
+        assert_eq!(v.ceiling_param(&synth), Some(CeilingParam::MaxTokens));
+
+        // Its own endpoint: a different server, and nothing carries over.
+        v.base_url = Some("http://vision:9000/v1".into());
+        assert_eq!(v.ceiling_param(&synth), None);
+
+        // Unless it says so itself, which beats both.
+        v.ceiling_param = Some(CeilingParam::MaxCompletionTokens);
+        assert_eq!(
+            v.ceiling_param(&synth),
+            Some(CeilingParam::MaxCompletionTokens)
+        );
     }
 
     #[test]

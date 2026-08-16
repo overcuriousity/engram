@@ -188,7 +188,7 @@ When you answer "duplicate", the merged text must contain every number, version,
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"verdict": {"relation": "duplicate", "detail": "...", "supersedes": "a", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}}
+{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}}
 
 - relation: one of "duplicate", "replaced", "conflict", "distinct".
 - detail: one short sentence saying why. Always.
@@ -546,6 +546,11 @@ pub fn artifacts_schema() -> serde_json::Value {
 ///
 /// `parse_dedupe` still checks the same conditions. A grammar is only as good as
 /// the endpoint honouring it, and `structured_output` can be switched off.
+///
+/// Every variant requires every property it names, which `strict` demands: a
+/// listed-but-optional property is not a looser schema, it is a rejected one.
+/// `supersedes`'s `pattern` is in the same supported set as the item bounds
+/// `artifacts_schema` already relies on.
 pub fn dedupe_schema() -> serde_json::Value {
     let merged = serde_json::json!({
         "type": "object",
@@ -556,7 +561,13 @@ pub fn dedupe_schema() -> serde_json::Value {
             "tags": {"type": "array", "items": {"type": "string"}},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["text"],
+        // Every field, for the reason `artifacts_schema` requires every field:
+        // a model being told the shape anyway has no reason to omit the tags,
+        // and `strict` makes the rule structural rather than stylistic — a
+        // property a strict schema lists and does not require is a schema the
+        // hosted APIs reject outright, which fails the call rather than
+        // loosening it.
+        "required": ["text", "title", "category", "tags", "caveats"],
         "additionalProperties": false
     });
     serde_json::json!({
@@ -571,7 +582,7 @@ pub fn dedupe_schema() -> serde_json::Value {
                             "detail": {"type": "string"},
                             "merged": merged
                         },
-                        "required": ["relation", "merged"],
+                        "required": ["relation", "detail", "merged"],
                         "additionalProperties": false
                     },
                     {
@@ -591,7 +602,7 @@ pub fn dedupe_schema() -> serde_json::Value {
                             "detail": {"type": "string"},
                             "supersedes": {"type": "string", "pattern": "^[A-Za-z]$"}
                         },
-                        "required": ["relation", "supersedes"],
+                        "required": ["relation", "detail", "supersedes"],
                         "additionalProperties": false
                     },
                     {
@@ -600,7 +611,7 @@ pub fn dedupe_schema() -> serde_json::Value {
                             "relation": {"type": "string", "enum": ["distinct", "conflict"]},
                             "detail": {"type": "string"}
                         },
-                        "required": ["relation"],
+                        "required": ["relation", "detail"],
                         "additionalProperties": false
                     }
                 ]
@@ -951,7 +962,16 @@ mod tests {
                 for field in &required {
                     match *field {
                         "relation" => {}
-                        "merged" => body["merged"] = serde_json::json!({"text": "merged body"}),
+                        "detail" => body["detail"] = serde_json::json!("because"),
+                        "merged" => {
+                            body["merged"] = serde_json::json!({
+                                "text": "merged body",
+                                "title": "t",
+                                "category": "note",
+                                "tags": [],
+                                "caveats": []
+                            })
+                        }
                         // A single letter, which is all `parse_dedupe` reads as
                         // a direction; anything else downgrades to a conflict.
                         "supersedes" => body["supersedes"] = serde_json::json!("a"),
@@ -1017,6 +1037,11 @@ mod tests {
     /// reply above validates against the third variant and the union constrains
     /// nothing. llama.cpp's grammar generator closes objects implicitly and hid
     /// this; a validating gateway does not.
+    ///
+    /// And every property a strict schema names must also be required, which is
+    /// not a style rule: a hosted API answers a strict schema with an optional
+    /// property with a 400, so the judge would not be loosely constrained but
+    /// permanently broken.
     #[test]
     fn every_judge_schema_object_is_closed_and_rooted_in_an_object() {
         fn closed(v: &serde_json::Value, path: &str) {
@@ -1026,9 +1051,26 @@ mod tests {
                     serde_json::json!(false),
                     "{path} is an open object, so it accepts fields it never named"
                 );
+                let required: Vec<&str> = v["required"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| f.as_str())
+                    .collect();
                 for (k, sub) in v["properties"].as_object().into_iter().flatten() {
+                    assert!(
+                        required.contains(&k.as_str()),
+                        "{path}.{k} is named but not required, which a strict schema refuses"
+                    );
                     closed(sub, &format!("{path}.{k}"));
                 }
+            }
+            // Into arrays too: the one array of objects in the set lives here,
+            // and a walker that stops at `properties` never checks it — it would
+            // pass this test while shipping exactly the open object the test
+            // exists to catch.
+            if v.get("items").is_some() {
+                closed(&v["items"], &format!("{path}[]"));
             }
             for (i, sub) in v["anyOf"].as_array().into_iter().flatten().enumerate() {
                 closed(sub, &format!("{path}.anyOf[{i}]"));
