@@ -411,6 +411,8 @@ mod startup_tests {
             feedback: FeedbackConfig::default(),
             capture: CaptureConfig::default(),
             pacing: engram::config::PacingConfig::default(),
+            associate: AssociateConfig::default(),
+            activation: ActivationConfig::default(),
         }
     }
 
