@@ -76,6 +76,11 @@ pub struct Core {
     /// interactive answer: sharing one endpoint put sweep traffic in front of
     /// the user's question and tuned one model for two unrelated tasks.
     pub judge: Arc<dyn Completer>,
+    /// The model that rules on associative links. Same endpoint and same
+    /// settings as `judge`, separate because the response format each judge
+    /// sends is part of the completer: a link asked under the duplicate
+    /// grammar can only answer with a duplicate verdict.
+    pub link_judge: Arc<dyn Completer>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
@@ -146,14 +151,9 @@ impl Core {
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
             judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
+            link_judge: Arc::new(HttpCompleter::for_link_judging(&cfg.infer.synthesize)),
             describer: cfg.infer.vision.as_ref().map(|v| {
-                let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
-                Arc::new(HttpDescriber::new(
-                    &v.model,
-                    &base_url,
-                    api_key.as_deref(),
-                    v.timeout_secs,
-                )) as Arc<dyn Describer>
+                Arc::new(HttpDescriber::new(v, &cfg.infer.synthesize)) as Arc<dyn Describer>
             }),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
@@ -280,6 +280,7 @@ pub mod test_support {
             reranker,
             completer: Arc::new(FakeCompleter::default()),
             judge: Arc::new(FakeCompleter::default()),
+            link_judge: Arc::new(FakeCompleter::default()),
             describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),

@@ -4,9 +4,6 @@ use crate::error::{Error, Result};
 use crate::infer::budget::pack_by_budget;
 use crate::infer::prompt::{ASK_SYSTEM, ask_excerpt, ask_prompt};
 
-/// Reserve part of the context for the answer itself.
-const ANSWER_RESERVE_TOKENS: usize = 1024;
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AskRequest {
     pub q: String,
@@ -26,6 +23,12 @@ pub struct AskResponse {
     /// Retrieved but left out for budget. Reported so a missing citation is
     /// visible rather than silent.
     pub dropped: usize,
+    /// The answer stops where its output ceiling did, not where the model meant
+    /// to. Reported for the same reason `dropped` is: an answer cut off
+    /// mid-sentence is otherwise indistinguishable from a complete one, and the
+    /// fix — a higher `ask.max_output_tokens` — belongs to whoever is reading
+    /// it.
+    pub truncated: bool,
 }
 
 impl Core {
@@ -74,6 +77,7 @@ impl Core {
                 answer: "Nothing in the knowledge base matches that question.".into(),
                 citations: vec![],
                 dropped: 0,
+                truncated: false,
             });
         }
 
@@ -100,12 +104,38 @@ impl Core {
             ));
         }
 
-        let budget = self
+        // Reserve what the completer will ask for, not a constant. The endpoint
+        // counts the prompt and the requested ceiling against one window, so
+        // packing excerpts up to `context - 1024` while the call goes out
+        // demanding `max_output_tokens` of reply is a request the server refuses
+        // outright — and it refuses it on precisely the queries that retrieved
+        // enough to be worth answering.
+        //
+        // The margin comes off the top too. `ceiling_for_prompt` holds back
+        // headroom for the estimate being an estimate, and it holds it back out
+        // of the *reply*: packing up to `max_output_tokens` exactly and then
+        // being charged that margin is how a 32k window with a 2k ceiling ends
+        // up asking for one token of answer. Reserving it here is what makes
+        // the two halves agree.
+        //
+        // Never more than half the window, though. The reserve is configuration
+        // and the window is configuration, and nothing makes the two agree: a
+        // role whose ceiling is its whole context (4096 and 4096, which is an
+        // ordinary shape for a local model) reserves everything, packs nothing,
+        // and answers "too large for the context window" to every question ever
+        // asked without once calling the model. Half a window of excerpts and
+        // half a window of answer is a worse answer than the operator asked for;
+        // no answer is not an answer.
+        let context = self.completer.context_tokens();
+        let reserve = self
             .completer
-            .context_tokens()
+            .max_output_tokens()
+            .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
+            .min(context / 2);
+        let budget = context
             .saturating_sub(self.counter.count(ASK_SYSTEM))
             .saturating_sub(self.counter.count(&req.q))
-            .saturating_sub(ANSWER_RESERVE_TOKENS);
+            .saturating_sub(reserve);
 
         // Highest score first, so what gets cut is what mattered least.
         let kept = pack_by_budget(&blocks, &self.counter, budget);
@@ -120,16 +150,39 @@ impl Core {
                     .into(),
                 citations: vec![],
                 dropped,
+                truncated: false,
             });
         }
 
         let user = ask_prompt(&req.q, &blocks[..kept]);
-        let answer = self.completer.complete(ASK_SYSTEM, &user).await?;
+
+        // The ceiling comes from what the prompt actually cost, not from what
+        // was reserved for it: packing is an estimate made before the excerpts
+        // were chosen, and whatever the window has left over after them is room
+        // the answer may have. Bounded by the configured ceiling, so this only
+        // ever gives back what the reserve above took away — and it keeps the
+        // one invariant the endpoint enforces, that prompt plus ceiling fits the
+        // window, with the margin `ceiling_for_prompt` leaves for the estimate
+        // being an estimate.
+        let spent = self.counter.count(ASK_SYSTEM) + self.counter.count(&user);
+        let ceiling = crate::infer::budget::ceiling_for_prompt(
+            context,
+            spent,
+            self.completer.max_output_tokens(),
+        );
+        let answer = self.completer.answer(ASK_SYSTEM, &user, ceiling).await?;
+        if answer.truncated {
+            tracing::warn!(
+                ceiling,
+                "ask: the answer hit its output ceiling and is cut off"
+            );
+        }
 
         Ok(AskResponse {
-            answer,
+            answer: answer.text,
             citations: hits.into_iter().take(kept).collect(),
             dropped,
+            truncated: answer.truncated,
         })
     }
 }
@@ -161,6 +214,9 @@ mod tests {
         }
         fn context_tokens(&self) -> usize {
             4096
+        }
+        fn max_output_tokens(&self) -> usize {
+            1024
         }
     }
 
@@ -306,6 +362,167 @@ mod tests {
             "a silently dropped citation is worse than a reported one"
         );
         assert!(out.citations.len() < 20);
+    }
+
+    /// Echoes its prompt back and records the ceiling it was handed, which
+    /// together are the whole request the endpoint would have measured.
+    struct Ceilinged {
+        context: usize,
+        max_output: usize,
+        asked_for: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Ceilinged {
+        fn new(context: usize, max_output: usize) -> Self {
+            Self {
+                context,
+                max_output,
+                asked_for: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn ceiling(&self) -> usize {
+            self.asked_for.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Completer for Ceilinged {
+        async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            Ok(user.to_string())
+        }
+        async fn answer(
+            &self,
+            _system: &str,
+            user: &str,
+            ceiling: usize,
+        ) -> Result<crate::infer::Completion> {
+            self.asked_for
+                .store(ceiling, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::infer::Completion {
+                text: user.to_string(),
+                truncated: false,
+            })
+        }
+        fn context_tokens(&self) -> usize {
+            self.context
+        }
+        fn max_output_tokens(&self) -> usize {
+            self.max_output
+        }
+    }
+
+    /// The prompt and the reply are counted against one window by the endpoint,
+    /// so packing excerpts up to a constant reserve while the call demands
+    /// `max_output_tokens` of reply is a request the server refuses — and it
+    /// refuses it on exactly the questions that retrieved enough to be worth
+    /// answering. What is packed has to leave room for what is asked for.
+    ///
+    /// Both directions, in the two shapes an operator actually configures: a
+    /// ceiling that fits comfortably inside its window, and one that eats most
+    /// of it.
+    #[tokio::test]
+    async fn what_is_packed_leaves_room_for_the_reply_that_was_asked_for() {
+        use crate::infer::budget::MAX_HEADROOM_TOKENS;
+
+        for (context, max_output) in [(4096, 3072), (8192, 1024), (4096, 4096), (32768, 2048)] {
+            let completer = std::sync::Arc::new(Ceilinged::new(context, max_output));
+            let mut core = test_core().await;
+            core.completer = completer.clone();
+            // Excerpts sized against the window, so packing actually fills it
+            // in every case — a prompt that leaves the window half empty tests
+            // nothing about what happens when it does not.
+            seed(&core, 20, context / 20).await;
+            let mut r = req("anything");
+            r.limit = Some(20);
+            let out = core.ask(&r).await.unwrap();
+
+            // The echoed prompt is what actually went to the endpoint, and the
+            // recorded ceiling is what the call asked for on top of it.
+            let prompt = core.counter.count(&out.answer) + core.counter.count(ASK_SYSTEM);
+            let ceiling = completer.ceiling();
+            assert!(
+                prompt + ceiling <= context,
+                "at context {context} / ceiling {max_output}: the prompt was {prompt} tokens \
+                 and the call asked for {ceiling} more, which is {} over the window",
+                prompt + ceiling - context
+            );
+            assert!(
+                ceiling > 0 && ceiling <= max_output,
+                "at context {context} / ceiling {max_output}: the call asked for {ceiling}, \
+                 which is not a ceiling the role allows"
+            );
+
+            // And it is a *usable* ceiling, not merely a positive one. The
+            // reserve is what packing set aside for the answer; the answer must
+            // get it back, less the margin held for the estimate. Asserting
+            // only `> 0` let a ceiling of 1 — an empty reply, every time —
+            // through at the very ordinary 32k/2k shape.
+            let floor = max_output.min(context / 2) - MAX_HEADROOM_TOKENS;
+            assert!(
+                ceiling >= floor,
+                "at context {context} / ceiling {max_output}: the call asked for {ceiling}, \
+                 but packing reserved room for at least {floor}"
+            );
+        }
+    }
+
+    /// The reserve is configuration and the window is configuration, and nothing
+    /// makes the two agree. A role whose ceiling is its whole window — 4096 and
+    /// 4096, an ordinary local shape, and what every default lands on — reserved
+    /// everything and packed nothing, so every question ever asked was answered
+    /// "too large for the configured context window" without the model being
+    /// called at all.
+    #[tokio::test]
+    async fn a_ceiling_as_wide_as_its_window_still_answers() {
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(Ceilinged::new(4096, 4096));
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk")).await.unwrap();
+        assert!(
+            !out.citations.is_empty(),
+            "nothing was packed, so nothing was answered: {}",
+            out.answer
+        );
+    }
+
+    /// An answer that stops because it ran out of room reads exactly like one
+    /// that stopped because it was finished, and the difference is the reader's
+    /// to act on.
+    #[tokio::test]
+    async fn an_answer_cut_off_by_its_ceiling_says_so() {
+        struct Truncating;
+        #[async_trait::async_trait]
+        impl crate::infer::Completer for Truncating {
+            async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                Ok("half an ans".into())
+            }
+            async fn answer(
+                &self,
+                _system: &str,
+                _user: &str,
+                _ceiling: usize,
+            ) -> Result<crate::infer::Completion> {
+                Ok(crate::infer::Completion {
+                    text: "half an ans".into(),
+                    truncated: true,
+                })
+            }
+            fn context_tokens(&self) -> usize {
+                4096
+            }
+            fn max_output_tokens(&self) -> usize {
+                1024
+            }
+        }
+
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(Truncating);
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk")).await.unwrap();
+        assert!(
+            out.truncated,
+            "a cut-off answer was reported as a whole one"
+        );
     }
 
     #[tokio::test]

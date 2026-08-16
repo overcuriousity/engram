@@ -543,6 +543,10 @@ struct AnswerTemplate {
     answer: String,
     citations: Vec<RenderedResult>,
     dropped: usize,
+    /// The answer stops where its ceiling did. Shown beside `dropped` for the
+    /// same reason: a cut-off answer is otherwise indistinguishable from a
+    /// finished one.
+    truncated: bool,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -1581,6 +1585,7 @@ async fn ask_submit(
             .map(|(i, h)| render_hit(i, h, &Default::default()))
             .collect(),
         dropped: out.dropped,
+        truncated: out.truncated,
     })
     .into_response())
 }

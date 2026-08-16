@@ -405,6 +405,11 @@ pub struct SynthesizeRole {
     /// is what truncates the answer.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Which name this endpoint takes the output ceiling under. See
+    /// [`CeilingParam`]. Unset means: infer it, then correct the guess from the
+    /// endpoint's own 400.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
     /// Seconds to wait on one call before giving up on it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -474,11 +479,92 @@ pub struct AskRole {
     #[serde(default)]
     pub api_key: Option<String>,
     pub context_tokens: usize,
+    /// Hard cap on output tokens per answer. An answer is prose for a person to
+    /// read, so this is a generous bound on the longest one worth waiting for
+    /// rather than a tuning knob — but it must be sent, because an endpoint
+    /// asked for no ceiling applies its own, and the model's own stopping is
+    /// the only thing between the two.
+    #[serde(default = "default_ask_max_output_tokens")]
+    pub max_output_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// See `SynthesizeRole::reasoning_effort`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// See `SynthesizeRole::ceiling_param`.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
+}
+
+fn default_ask_max_output_tokens() -> usize {
+    4096
+}
+
+/// The request field an endpoint takes the output ceiling under.
+///
+/// The two names mean the same ceiling and no endpoint accepts both: OpenAI's
+/// reasoning models answer a `max_tokens` with a 400 naming
+/// `max_completion_tokens`, while a llama.cpp or vLLM build reads `max_tokens`
+/// and silently ignores anything it does not recognise — which is the dangerous
+/// half, because an unrecognised ceiling is no ceiling at all and the reply is
+/// bounded only by the server's own limit.
+///
+/// Left unset, the name is inferred from `reasoning_effort` and then corrected
+/// from the endpoint's 400 if the guess was wrong. That inference is a guess and
+/// not a fact: `reasoning_effort = "none"` is exactly what the local-endpoint
+/// documentation recommends, and a local endpoint wants `max_tokens`. Set this
+/// when the guess is wrong and the endpoint is one of the silent ones, which
+/// have no 400 for the probe to learn from.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CeilingParam {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+impl CeilingParam {
+    /// The name to send the ceiling under when the operator has not said.
+    ///
+    /// A reasoning model refuses `max_tokens` outright — a 400 naming
+    /// `max_completion_tokens` — and `reasoning_effort` is the only signal
+    /// available that one is on the other end.
+    ///
+    /// The two ways of guessing wrong do not cost the same, which is what
+    /// decides the ambiguous value. Guess `max_completion_tokens` at a local
+    /// endpoint and the field is silently ignored: no ceiling at all, no 400 to
+    /// learn from, and a reply bounded only by the server's own limit. Guess
+    /// `max_tokens` at a reasoning endpoint and it says so, in a 400 the
+    /// transport reads once and remembers. Where the signal is ambiguous, the
+    /// safe guess is the one that self-corrects.
+    ///
+    /// `"none"` is exactly that case. It is what the local-endpoint
+    /// documentation — and `config.example.toml` — recommend for suppressing a
+    /// local model's thinking, and it is *also* a value hosted reasoning models
+    /// accept, so it says nothing either way. Reading it as `max_tokens` costs
+    /// a hosted endpoint one self-correcting 400 and saves a silent local one
+    /// from running with no ceiling at all.
+    pub fn inferred_from(effort: Option<&str>) -> Self {
+        match effort.map(str::trim) {
+            None => Self::MaxTokens,
+            Some(e) if e.eq_ignore_ascii_case("none") => Self::MaxTokens,
+            Some(_) => Self::MaxCompletionTokens,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+
+    /// The other name — what a rejected ceiling is retried under.
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::MaxTokens => Self::MaxCompletionTokens,
+            Self::MaxCompletionTokens => Self::MaxTokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -505,10 +591,29 @@ pub struct VisionRole {
     pub api_key: Option<String>,
     #[serde(default = "default_vision_timeout_secs")]
     pub timeout_secs: u64,
+    /// Hard cap on output tokens per description, sent on every call.
+    ///
+    /// A description is markdown for a person and for the segmenter that reads
+    /// it next, so this is a generous bound on the longest one worth waiting
+    /// for — but it must be sent, for the reason every other role sends one: an
+    /// endpoint asked for no ceiling applies its own, which is far larger, and
+    /// a vision model handed a dense screenshot is exactly the kind of caller
+    /// that keeps writing. What it produces is stored as a corpus, so an
+    /// unbounded reply is not merely a slow call.
+    #[serde(default = "default_vision_max_output_tokens")]
+    pub max_output_tokens: usize,
+    /// See `SynthesizeRole::ceiling_param`. Inherited from the synthesize role
+    /// when this one has no endpoint of its own, since then it is that endpoint.
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
 }
 
 fn default_vision_timeout_secs() -> u64 {
     120
+}
+
+fn default_vision_max_output_tokens() -> usize {
+    4096
 }
 
 impl VisionRole {
@@ -521,6 +626,34 @@ impl VisionRole {
                 .unwrap_or_else(|| synth.base_url.clone()),
             self.api_key.clone().or_else(|| synth.api_key.clone()),
         )
+    }
+
+    /// Which name to send the output ceiling under. Inherited only when this
+    /// role borrows the synthesize endpoint: a setting about how one server
+    /// reads a request says nothing about a different server.
+    pub fn ceiling_param(&self, synth: &SynthesizeRole) -> Option<CeilingParam> {
+        self.ceiling_param.or_else(|| {
+            self.base_url
+                .is_none()
+                .then_some(synth.ceiling_param)
+                .flatten()
+        })
+    }
+
+    /// The effort the ceiling name is inferred from when neither role names it,
+    /// inherited on the same condition and for the same reason as
+    /// [`Self::ceiling_param`].
+    ///
+    /// Without this, a synthesize role that sets `reasoning_effort` and leaves
+    /// `ceiling_param` unset has nothing to inherit, and the two roles guess
+    /// different names for the one server they share. This role never sends
+    /// `reasoning_effort` itself — it is read here only as the signal about how
+    /// that server reads a request.
+    pub fn inherited_reasoning_effort<'a>(&self, synth: &'a SynthesizeRole) -> Option<&'a str> {
+        self.base_url
+            .is_none()
+            .then_some(synth.reasoning_effort.as_deref())
+            .flatten()
     }
 }
 
@@ -608,6 +741,7 @@ impl Config {
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_moved_keys();
+        cfg.warn_on_inferred_ceiling_param();
         Ok(cfg)
     }
 
@@ -817,6 +951,54 @@ impl Config {
         }
     }
 
+    /// The output ceiling's name is a guess whenever `reasoning_effort` is set
+    /// and `ceiling_param` is not, and one of the two ways it can be wrong is
+    /// silent: an endpoint that ignores the field it does not recognise applies
+    /// no ceiling and returns no error, so nothing downstream ever finds out.
+    ///
+    /// Say which way it guessed, at startup, where an operator can compare it
+    /// against the server they know they are running. The 400 that corrects the
+    /// other direction needs no warning — it corrects itself.
+    fn warn_on_inferred_ceiling_param(&self) {
+        let synth = &self.infer.synthesize;
+        let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = vec![
+            (
+                "infer.synthesize",
+                synth.reasoning_effort.as_deref(),
+                synth.ceiling_param,
+            ),
+            (
+                "infer.ask",
+                self.infer.ask.reasoning_effort.as_deref(),
+                self.infer.ask.ceiling_param,
+            ),
+        ];
+        // Vision resolves a name the same way, off values it may have inherited
+        // from synthesize — and it is the role a dropped ceiling costs most,
+        // since what it writes is stored as a corpus and segmented again.
+        if let Some(v) = &self.infer.vision {
+            roles.push((
+                "infer.vision",
+                v.inherited_reasoning_effort(synth),
+                v.ceiling_param(synth),
+            ));
+        }
+        for (role, effort, configured) in roles {
+            let (Some(effort), None) = (effort, configured) else {
+                continue;
+            };
+            tracing::warn!(
+                role,
+                reasoning_effort = effort,
+                guessing = CeilingParam::inferred_from(Some(effort)).as_str(),
+                "{role}.ceiling_param is unset, so the output ceiling's name is inferred from \
+                 reasoning_effort. If this endpoint takes the other name and ignores unknown \
+                 fields — llama.cpp and older vLLM builds do — replies run with no ceiling at \
+                 all and nothing reports it. Set {role}.ceiling_param to say."
+            );
+        }
+    }
+
     /// Secrets belong in the environment. A secret sitting in the config file
     /// is a real risk (it gets committed), so say so loudly rather than
     /// rejecting a config that otherwise works.
@@ -886,6 +1068,36 @@ mod tests {
     fn the_example_config_carries_the_capture_block() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.capture.min_extracted_chars, 200);
+    }
+
+    /// The setting exists for the endpoint the guess gets wrong, so the value an
+    /// operator types has to be the value the wire carries. Unset stays unset —
+    /// that is what leaves the guess and its correction in charge.
+    #[test]
+    fn the_ceiling_parameter_is_named_in_config_the_way_it_is_named_on_the_wire() {
+        for (typed, want) in [
+            ("max_tokens", CeilingParam::MaxTokens),
+            ("max_completion_tokens", CeilingParam::MaxCompletionTokens),
+        ] {
+            let p: CeilingParam = serde_json::from_str(&format!("\"{typed}\"")).unwrap();
+            assert_eq!(p, want);
+            assert_eq!(p.as_str(), typed);
+            assert_eq!(p.flipped().flipped(), p);
+            assert_ne!(p.flipped(), p);
+        }
+        // And the two names share no substring, which is what lets a rejection
+        // naming one of them be read unambiguously.
+        assert!(
+            !CeilingParam::MaxCompletionTokens
+                .as_str()
+                .contains(CeilingParam::MaxTokens.as_str())
+        );
+
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.infer.ask.ceiling_param.is_none() && cfg.infer.synthesize.ceiling_param.is_none(),
+            "the example config pins a ceiling name it should be leaving to the guess"
+        );
     }
 
     #[test]
@@ -1128,9 +1340,92 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let v = cfg.infer.vision.as_ref().expect("configured");
         assert_eq!(v.model, "qwen-vl");
         assert_eq!(v.timeout_secs, 120);
+        // Its own ceiling, sent on every call like every other role's.
+        assert_eq!(v.max_output_tokens, 4096);
         let (url, key) = v.resolve(&cfg.infer.synthesize);
         assert_eq!(url, cfg.infer.synthesize.base_url);
         assert_eq!(key, cfg.infer.synthesize.api_key);
+    }
+
+    /// How a request is read is a property of the server reading it, so the
+    /// borrowed name travels exactly as far as the borrowed endpoint does.
+    #[test]
+    fn the_ceiling_name_is_inherited_only_by_a_vision_role_sharing_the_endpoint() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
+        );
+        let mut cfg = Config::load(Some(&p)).unwrap();
+        cfg.infer.synthesize.ceiling_param = Some(CeilingParam::MaxTokens);
+        let synth = cfg.infer.synthesize.clone();
+        let v = cfg.infer.vision.as_mut().expect("configured");
+
+        assert_eq!(v.ceiling_param(&synth), Some(CeilingParam::MaxTokens));
+
+        // Its own endpoint: a different server, and nothing carries over.
+        v.base_url = Some("http://vision:9000/v1".into());
+        assert_eq!(v.ceiling_param(&synth), None);
+
+        // Unless it says so itself, which beats both.
+        v.ceiling_param = Some(CeilingParam::MaxCompletionTokens);
+        assert_eq!(
+            v.ceiling_param(&synth),
+            Some(CeilingParam::MaxCompletionTokens)
+        );
+    }
+
+    /// The setting is not the only thing a borrowed endpoint has to inherit.
+    /// With `ceiling_param` unset there is nothing explicit to carry, and the
+    /// name is inferred from `reasoning_effort` — so a role that borrows the
+    /// endpoint has to borrow the signal too, or the two guess differently about
+    /// one server.
+    #[test]
+    fn the_effort_the_name_is_guessed_from_travels_with_the_borrowed_endpoint() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
+        );
+        let mut cfg = Config::load(Some(&p)).unwrap();
+        cfg.infer.synthesize.reasoning_effort = Some("high".into());
+        let synth = cfg.infer.synthesize.clone();
+        let v = cfg.infer.vision.as_mut().expect("configured");
+
+        assert_eq!(v.ceiling_param(&synth), None, "nothing explicit to inherit");
+        assert_eq!(v.inherited_reasoning_effort(&synth), Some("high"));
+
+        // Its own address is its own server, and the signal stops there.
+        v.base_url = Some("http://vision:9000/v1".into());
+        assert_eq!(v.inherited_reasoning_effort(&synth), None);
+    }
+
+    /// The ceiling's name is guessed from `reasoning_effort`, and the two ways
+    /// of guessing wrong do not cost the same: a hosted endpoint refuses the
+    /// wrong name in a 400 the transport learns from, while a local one ignores
+    /// it silently and applies no ceiling at all. `"none"` is the value that
+    /// says nothing either way — both kinds accept it, and it is what this
+    /// project recommends for suppressing local thinking — so it has to fall to
+    /// the side that self-corrects.
+    #[test]
+    fn the_ambiguous_effort_is_guessed_the_way_that_corrects_itself() {
+        assert_eq!(CeilingParam::inferred_from(None), CeilingParam::MaxTokens);
+        for ambiguous in ["none", "None", " none "] {
+            assert_eq!(
+                CeilingParam::inferred_from(Some(ambiguous)),
+                CeilingParam::MaxTokens,
+                "{ambiguous} was read as a hosted reasoning endpoint"
+            );
+        }
+        for hosted in ["minimal", "low", "medium", "high"] {
+            assert_eq!(
+                CeilingParam::inferred_from(Some(hosted)),
+                CeilingParam::MaxCompletionTokens,
+                "{hosted}"
+            );
+        }
     }
 
     #[test]

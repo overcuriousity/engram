@@ -76,10 +76,47 @@ pub trait Reranker: Send + Sync {
     -> Result<Vec<(usize, f32)>>;
 }
 
+/// A completion, and whether the ceiling is what ended it.
+pub struct Completion {
+    pub text: String,
+    /// The model did not stop; it ran out of room. What that costs is the
+    /// caller's to decide — an answer says so, a salvageable artifact list does
+    /// not need to.
+    pub truncated: bool,
+}
+
 #[async_trait]
 pub trait Completer: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<String>;
+
+    /// `complete`, with the ceiling this one call may spend and a reply that
+    /// says whether it was hit.
+    ///
+    /// A caller packing a prompt against `context_tokens` knows what the prompt
+    /// actually cost, and therefore knows the largest ceiling that still fits
+    /// the window — which `max_output_tokens` alone cannot express, since a
+    /// role whose ceiling is most of its context leaves nothing to pack and
+    /// answers nothing at all. The ceiling asked for here is a maximum, never a
+    /// minimum: an implementation clamps it to its own.
+    ///
+    /// Defaults to `complete`, because a completer that sends no ceiling of its
+    /// own has nothing to cap and nothing to report.
+    async fn answer(&self, system: &str, user: &str, _ceiling: usize) -> Result<Completion> {
+        Ok(Completion {
+            text: self.complete(system, user).await?,
+            truncated: false,
+        })
+    }
+
     fn context_tokens(&self) -> usize;
+    /// The largest ceiling this completer will send on a call.
+    ///
+    /// Exposed because a caller that packs a prompt against `context_tokens`
+    /// has to leave the reply room in the same window: the endpoint counts
+    /// prompt plus ceiling against the context, and refuses the request when
+    /// the two together exceed it. Reserving less than this is how a request
+    /// that would have fit becomes a 400.
+    fn max_output_tokens(&self) -> usize;
 }
 
 /// Reads a captured image into text. One call per image; the caller has

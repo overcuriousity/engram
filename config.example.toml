@@ -72,13 +72,38 @@ output_ratio = 8.0
 # from being cut off. Unset by default: models that do not reason reject the field.
 # reasoning_effort = "none"
 
+# Which name this endpoint takes the output ceiling under: "max_tokens" or
+# "max_completion_tokens". The two mean the same thing and no endpoint takes
+# both — OpenAI's reasoning models refuse `max_tokens` with a 400 naming the
+# other, and llama.cpp/vLLM read `max_tokens` and silently ignore what they do
+# not recognise.
+#
+# Unset by default, which means: guess from `reasoning_effort`, then correct the
+# guess the first time the endpoint refuses the name. Any effort but "none"
+# implies the hosted spelling; "none" is what a local endpoint is told to
+# suppress its thinking and says nothing either way, so it is read as
+# `max_tokens` — the guess that a hosted endpoint corrects with a 400, rather
+# than the one a local endpoint drops in silence.
+#
+# Set it explicitly wherever the guess would be wrong with no 400 to correct it,
+# which is any endpoint that ignores an unrecognised ceiling rather than
+# refusing it. Startup logs a warning naming the guess whenever this is unset
+# and `reasoning_effort` is not.
+#
+# The name belongs to the server, not to the role: every role pointed at the
+# same base_url and model shares one, and what one role is told beats what
+# another infers. Where two roles are both told, and told different things,
+# startup warns and the first one wins.
+# ceiling_param = "max_tokens"
+
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
 # the endpoint constrains decoding to the shape the parser expects. On by
 # default. A 9B model asked for JSON will otherwise close an array with a brace
 # or omit a required field often enough that windows fail permanently, and the
 # parse error it produces is indistinguishable from a truncated reply. Honoured
 # by llama.cpp, vLLM and the hosted APIs; set false for an endpoint that rejects
-# the field. Governs the dedupe judge too, which runs on this endpoint.
+# the field. Governs both judges too — duplicates and associative links — which
+# run on this endpoint under a schema each.
 # structured_output = true
 # Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
 # is ignored, and engram says so at startup rather than letting the setting
@@ -114,9 +139,28 @@ max_input_tokens = 1024
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768
+# Hard cap on output tokens per answer, sent on every call. Defaults to 4096.
+# Raise it if answers are getting clipped; there is no reason to unset it, since
+# an endpoint asked for no ceiling applies its own — which is far larger, and is
+# the only thing bounding a reply the model has stopped being able to end.
+#
+# It comes out of `context_tokens`: the endpoint measures the prompt and this
+# ceiling against one window, so ask reserves this much and packs excerpts into
+# what is left. Raising it buys longer answers by showing the model fewer
+# excerpts, and `dropped` on the answer says how many.
+#
+# Never more than half the window, though, whatever it is set to: a ceiling as
+# wide as its own context would reserve everything, pack nothing, and answer
+# every question with "too large for the configured context window". The call
+# itself then asks for whatever the packed prompt actually left over, up to this
+# number — and if the answer still runs into it, the answer says so.
+# max_output_tokens = 4096
 # ask is the one interactive inference call, so someone is watching it happen.
 # timeout_secs = 900
 # reasoning_effort = "none"
+# See [infer.synthesize].ceiling_param. Set it here too if this endpoint is one
+# that ignores an unrecognised ceiling rather than refusing it.
+# ceiling_param = "max_tokens"
 
 # Reranking is optional and disabled by default. There is no OpenAI-standard
 # rerank endpoint, so the wire format is configured explicitly.
@@ -136,6 +180,13 @@ context_tokens = 32768
 # base_url = "http://localhost:8002/v1"
 # api_key = ""
 # timeout_secs = 120
+# Hard cap on output tokens per description, sent on every call. Defaults to
+# 4096. What comes back is stored as a corpus and segmented from there, so an
+# endpoint left to apply its own ceiling is a document nobody sized.
+# max_output_tokens = 4096
+# See [infer.synthesize].ceiling_param. Inherited from that role when this block
+# has no base_url of its own, since then it is the same endpoint.
+# ceiling_param = "max_tokens"
 
 # ── Authentication ──────────────────────────────────────────────────────────
 # Exactly one mode is active.
