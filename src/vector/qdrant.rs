@@ -524,6 +524,21 @@ impl QdrantVectors {
             .map(|(_, n)| n))
     }
 
+    /// Whether the collection this instance reads and writes is actually there.
+    ///
+    /// Asked of the alias' target rather than of the alias, because a dangling
+    /// alias — one left pointing at a generation that was dropped — is exactly
+    /// the fault this has to report, and a check that resolved it away would
+    /// call it healthy. No alias row at all is not yet an answer either: a
+    /// collection named exactly like the alias may still be serving, which is
+    /// the pre-alias shape `generations` allows for.
+    async fn collection_is_live(&self) -> Result<bool> {
+        match self.resolve_alias().await? {
+            Some(target) => self.collection_exists(&target).await,
+            None => self.collection_exists(&self.alias).await,
+        }
+    }
+
     async fn collection_exists(&self, name: &str) -> Result<bool> {
         let e: Exists = self
             .call(Method::GET, &format!("/collections/{name}/exists"), None)
@@ -1022,14 +1037,23 @@ impl QdrantVectors {
     /// the collection yet — an artifact captured a moment ago, whose embedding
     /// job has not run. Absent is `None`; everything else is still an error.
     ///
-    /// The distinction has to be made on the message and not on the status
-    /// alone, which is the whole reason this is not two lines at the call site:
-    /// Qdrant answers 404 both for a point it does not hold *and* for a
-    /// collection that does not exist. The second is a store that is broken or
-    /// misconfigured — an alias pointing at a dropped generation, say — and
-    /// reading it as "this artifact has no neighbours" would turn a fault
-    /// affecting every artifact into a silent, permanent answer for each of
-    /// them.
+    /// The distinction cannot be made on the status alone, which is the whole
+    /// reason this is not two lines at the call site: Qdrant answers 404 both
+    /// for a point it does not hold *and* for a collection that does not exist.
+    /// The second is a store that is broken or misconfigured — an alias
+    /// pointing at a dropped generation, say — and reading it as "this artifact
+    /// has no neighbours" would turn a fault affecting every artifact into a
+    /// silent, permanent answer for each of them.
+    ///
+    /// So a 404 whose message does not name the missing point is settled by
+    /// asking whether the collection is there, rather than by reading further
+    /// prose. The message check stays as the fast path because it is right
+    /// today and costs nothing; what it may not be is the *only* thing standing
+    /// between an unembedded artifact and a permanent error, because it is a
+    /// substring of one Qdrant version's wording. Read that way round, a
+    /// reworded message costs one extra request; read the old way round, it
+    /// turned every artifact awaiting its embedding into a `Relate` unit that
+    /// failed and retried at the backoff ceiling forever.
     async fn call_absent_point_as_none<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -1037,7 +1061,9 @@ impl QdrantVectors {
         body: Option<Value>,
     ) -> Result<Option<T>> {
         let (status, text) = self.send(method, path, body).await?;
-        if status == reqwest::StatusCode::NOT_FOUND && text.contains("No point with id") {
+        if status == reqwest::StatusCode::NOT_FOUND
+            && (text.contains("No point with id") || self.collection_is_live().await?)
+        {
             return Ok(None);
         }
         if !status.is_success() {

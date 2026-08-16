@@ -188,6 +188,32 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Put a pair back to `pending` after the action its settlement recorded
+    /// turned out not to have happened.
+    ///
+    /// For a producer that files the decision before carrying it out, which is
+    /// the only ordering that cannot leave an artifact hidden with no row
+    /// explaining it. The cost of that ordering is a settled row over an action
+    /// that then failed, and this is how that is paid back: the pair reopens,
+    /// and the next unit re-derives it.
+    ///
+    /// `from` narrows the write to a row still in the state the caller wrote,
+    /// so a decision that landed in between — a judge's, an operator's — is
+    /// never reopened underneath them.
+    pub async fn unsettle_pair(&self, a: &str, b: &str, from: PairState) -> Result<bool> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending'
+              WHERE a_id = ? AND b_id = ? AND state = ?",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(from.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// The state of the pair between two artifacts, whichever way round they
     /// were filed, or `None` if it was never filed.
     ///
@@ -1022,6 +1048,58 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settlement_whose_action_failed_is_reopened() {
+        // The producer files the decision before carrying it out, because the
+        // other order can leave an artifact hidden with no row explaining it.
+        // This is the payment for that order: the action failed, so the row
+        // saying it happened has to go back, or the pair is settled over two
+        // artifacts that are both still visible and nothing looks again.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_settled_pair(&a, &b, 0.99, PairState::NoConflict)
+            .await
+            .unwrap();
+
+        assert!(
+            s.unsettle_pair(&b, &a, PairState::NoConflict)
+                .await
+                .unwrap(),
+            "the pair did not reopen, and filed either way round is the same pair"
+        );
+        assert_eq!(
+            s.pair_state_between(&a, &b).await.unwrap(),
+            Some(PairState::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopening_leaves_a_decision_that_landed_in_between_alone() {
+        // The narrowing that makes the reopen safe. Between the settlement and
+        // the failure, a judge or an operator can settle the same pair their
+        // own way, and undoing that is the one thing this must never do.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_settled_pair(&a, &b, 0.99, PairState::NoConflict)
+            .await
+            .unwrap();
+        let id = s.pairs_by_state(PairState::NoConflict, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !s.unsettle_pair(&a, &b, PairState::NoConflict)
+                .await
+                .unwrap(),
+            "a decision made in between was reopened underneath it"
+        );
+        assert_eq!(
+            s.pair_state_between(&a, &b).await.unwrap(),
+            Some(PairState::Dismissed)
         );
     }
 

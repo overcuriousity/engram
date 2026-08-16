@@ -122,7 +122,7 @@ fn close_filed_pair(
 /// ingest may delay tidying up; tidying up may not delay an ingest.
 const DEDUPE_SEQ_BASE: i64 = 1_000_000;
 
-fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
+pub(crate) fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
     crate::vector::LifecycleRow {
         artifact_id: c.id.clone(),
         status: c.status,
@@ -248,22 +248,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         tracing::warn!(error = %e, "could not flag merged artifacts that lost a source");
     }
 
-    // Detection is the per-artifact `Relate` unit, armed when an artifact is
-    // indexed. The sweep only backstops that arming: an artifact whose unit
-    // never got a row — the arm failed after the embed committed — is asked
-    // for once here, and the row that leaves is what stops it being asked again.
-    match core.store.list_unrelated_artifact_ids(500).await {
-        Ok(ids) => {
-            for id in ids {
-                if let Err(e) = crate::jobs::relate::arm(core, &id, 0).await {
-                    tracing::warn!(artifact_id = %id, error = %e, "could not arm a relate unit");
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not look for artifacts that were never related")
-        }
-    }
     let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
@@ -1787,24 +1771,6 @@ pub(crate) mod tests {
         seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.superseded, out.judged), (0, 0));
-    }
-
-    #[tokio::test]
-    async fn the_sweep_arms_relate_for_an_indexed_artifact_that_was_never_related() {
-        let core = test_core().await;
-        let ids = seed_related(&core, &[("alpha", [1.0, 0.0])]).await;
-        core.store.mark_embedded(&ids[0], "fake", 0).await.unwrap();
-        run(&core).await.unwrap();
-        assert!(
-            core.store.live_job(Stage::Relate, &ids[0]).await.unwrap(),
-            "the backstop did not arm a relate unit"
-        );
-        // A second sweep does not arm it again: the row now exists.
-        let first = core.store.claim_job().await.unwrap().expect("the unit");
-        assert_eq!(first.stage, Stage::Relate);
-        core.store.complete_job(first.id).await.unwrap();
-        run(&core).await.unwrap();
-        assert!(!core.store.live_job(Stage::Relate, &ids[0]).await.unwrap());
     }
 
     #[tokio::test]

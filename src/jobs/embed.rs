@@ -625,12 +625,17 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
 /// back is how an operator's Restore was undone by an upsert that was already
 /// in flight when they pressed it.
 ///
-/// So the lifecycle half is re-read here, under `lifecycle_lock` and held
-/// across the write, which is what makes "re-read" mean anything: without the
-/// lock a transition can still land between the read and the upsert. This is
-/// also the reason `payload_of`'s deferral rules are not enough on their own —
-/// they defer *active* state, and the write that hides a restored artifact is a
-/// stale *retired* state, which is the half they write.
+/// So the lifecycle half is re-read here under `lifecycle_lock`, and read a
+/// second time under it once the upsert returns. The lock is *not* held across
+/// the write: that write is a network round trip for a whole corpus batch, and
+/// every lifecycle transition in the system shares this mutex — an operator
+/// pressing Restore on one artifact would wait out a Qdrant upsert of a hundred
+/// others it has nothing to do with. What the lock has to exclude is a
+/// transition landing *unnoticed*, and the second read notices it: a payload
+/// that lost the race is rewritten from the row that won, under the lock, before
+/// this returns. This is also the reason `payload_of`'s deferral rules are not
+/// enough on their own — they defer *active* state, and the write that hides a
+/// restored artifact is a stale *retired* state, which is the half they write.
 ///
 /// The marker is the second line. An upsert that fails after the row has moved
 /// leaves the old payload standing against a row that disagrees, and nothing
@@ -643,34 +648,36 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
     if points.is_empty() {
         return Ok(());
     }
-    let _guard = core.lifecycle_lock.lock().await;
-
     let mut marked: Vec<String> = Vec::new();
     let mut gone: Vec<String> = Vec::new();
-    for p in &mut points {
-        let id = p.payload.artifact_id.clone();
-        match core.store.get_artifact(&id).await {
-            Ok(fresh) => {
-                p.payload.status = (fresh.status != ArtifactStatus::Active).then_some(fresh.status);
-                p.payload.superseded = fresh.superseded_by.is_some().then_some(true);
-                p.payload.superseded_by = fresh.superseded_by.clone();
-                if !fresh.in_results() {
-                    core.store.mark_lifecycle_dirty(&id).await?;
-                    marked.push(id);
+    {
+        let _guard = core.lifecycle_lock.lock().await;
+        for p in &mut points {
+            let id = p.payload.artifact_id.clone();
+            match core.store.get_artifact(&id).await {
+                Ok(fresh) => {
+                    p.payload.status =
+                        (fresh.status != ArtifactStatus::Active).then_some(fresh.status);
+                    p.payload.superseded = fresh.superseded_by.is_some().then_some(true);
+                    p.payload.superseded_by = fresh.superseded_by.clone();
+                    if !fresh.in_results() {
+                        core.store.mark_lifecycle_dirty(&id).await?;
+                        marked.push(id);
+                    }
                 }
+                // Deleted while the embedding was in flight. Writing the point
+                // anyway would put a vector in the index that no row explains —
+                // an orphan `heal_store_drift` can only report, never repair,
+                // because SQLite is the source of truth for what exists.
+                Err(Error::NotFound) => {
+                    tracing::info!(
+                        artifact_id = %id,
+                        "artifact was deleted while it was being embedded; dropping its point"
+                    );
+                    gone.push(id);
+                }
+                Err(e) => return Err(e),
             }
-            // Deleted while the embedding was in flight. Writing the point
-            // anyway would put a vector in the index that no row explains —
-            // an orphan `heal_store_drift` can only report, never repair,
-            // because SQLite is the source of truth for what exists.
-            Err(Error::NotFound) => {
-                tracing::info!(
-                    artifact_id = %id,
-                    "artifact was deleted while it was being embedded; dropping its point"
-                );
-                gone.push(id);
-            }
-            Err(e) => return Err(e),
         }
     }
     points.retain(|p| !gone.contains(&p.payload.artifact_id));
@@ -679,8 +686,59 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
         return Ok(());
     }
 
+    // What the payloads are about to say, kept so the second pass can tell a
+    // payload that lost a race from one that is simply current.
+    let written: Vec<(String, ArtifactStatus, Option<String>)> = points
+        .iter()
+        .map(|p| {
+            (
+                p.payload.artifact_id.clone(),
+                p.payload.status.unwrap_or(ArtifactStatus::Active),
+                p.payload.superseded_by.clone(),
+            )
+        })
+        .collect();
     core.vectors.upsert(points).await?;
-    // Only after the write returns. Clearing first would turn a failed upsert
+
+    // The write is done and the lock was not held across it, so a transition
+    // may have landed while it was in flight — and it wrote its payload before
+    // this one, which means this one overwrote it with a value that was already
+    // stale. Reading again under the lock is what catches that: the row cannot
+    // move now, so a row that disagrees with what was just written is the race,
+    // and rewriting the payload from the row settles it.
+    {
+        let _guard = core.lifecycle_lock.lock().await;
+        let mut fix = Vec::new();
+        for (id, status, superseded_by) in &written {
+            match core.store.get_artifact(id).await {
+                Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
+                    // Marked whichever way the row moved, and not only when it
+                    // moved to retired: the point exists now, so a payload left
+                    // disagreeing with an *active* row is drift too, and the
+                    // marker is what leaves the repair pass able to finish this
+                    // if the write below does not.
+                    core.store.mark_lifecycle_dirty(id).await?;
+                    marked.push(id.clone());
+                    fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
+                }
+                Ok(_) => {}
+                // Deleted between the two reads: its point is an orphan, which
+                // is `heal_store_drift`'s to report and no lifecycle write's to
+                // fix.
+                Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !fix.is_empty() {
+            tracing::info!(
+                repaired = fix.len(),
+                "a lifecycle transition landed while these points were being written"
+            );
+            core.vectors.apply_lifecycle(&fix).await?;
+        }
+    }
+
+    // Only after every write returns. Clearing first would turn a failed write
     // into permanent drift that nothing is left to look for.
     core.store.clear_lifecycle_dirty(&marked).await?;
     Ok(())

@@ -152,23 +152,35 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             (b, a)
         };
         if contains_normalized(&long.text, &short.text) {
-            // The rule is deterministic: these two texts satisfy it every time
-            // either artifact is related again. A row that is already settled
-            // is a decision this rule must not re-derive — most importantly a
-            // person's Restore after an earlier hide, which without this check
-            // was undone by the next relate unit, and on the sweep-driven build
-            // by the next tick, every tick.
-            match core.store.pair_state_between(&a.id, &b.id).await? {
-                None | Some(PairState::Pending) => {}
-                Some(state) => {
-                    tracing::debug!(
-                        a = %a.id,
-                        b = %b.id,
-                        state = state.as_str(),
-                        "a duplicated passage is already settled; leaving it"
-                    );
-                    return Ok(false);
-                }
+            // The row first, and the row is also the check. The rule is
+            // deterministic — these two texts satisfy it every time either
+            // artifact is related again — so a row that is already settled
+            // carries a decision this rule must not re-derive, most importantly
+            // a person's Restore after an earlier hide.
+            //
+            // `record_settled_pair` only writes over `pending`, so the write
+            // answers that question itself: `false` means a settled row is
+            // already there and this pair is not ours to act on. Asking first
+            // and writing after the hide left two windows, and the second one
+            // mattered — a crash between the hide and the row left the artifact
+            // hidden with nothing recording why. It was then invisible to the
+            // `in_results` guard above, so nothing re-derived it, and invisible
+            // to this check, so the next relate unit after an operator pressed
+            // Restore hid it again: exactly the failure this row exists to
+            // prevent. Written first, a crash in the same window leaves a
+            // settled row over a duplicate that is still visible, which costs a
+            // listing and hides nothing.
+            if !core
+                .store
+                .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
+                .await?
+            {
+                tracing::debug!(
+                    a = %a.id,
+                    b = %b.id,
+                    "a duplicated passage is already settled; leaving it"
+                );
+                return Ok(false);
             }
             if crate::jobs::try_supersede(
                 core,
@@ -178,13 +190,22 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             )
             .await
             {
-                // Closed as the cluster pass closes its rows: settled, nothing
-                // here for a person, and the record that keeps a later relate
-                // unit from hiding it again once someone has restored it.
-                core.store
-                    .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
-                    .await?;
                 return Ok(short.id == a.id);
+            }
+            // The hide did not happen, so the row saying it did must not stand:
+            // it would leave this pair settled over two artifacts that are both
+            // still visible, and nothing would ever look at it again.
+            if let Err(e) = core
+                .store
+                .unsettle_pair(&a.id, &b.id, PairState::NoConflict)
+                .await
+            {
+                tracing::warn!(
+                    a = %a.id,
+                    b = %b.id,
+                    error = %e,
+                    "could not reopen a pair whose supersede failed; it stays settled"
+                );
             }
             return Ok(false);
         }
