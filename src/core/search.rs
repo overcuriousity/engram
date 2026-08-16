@@ -1,7 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::feedback::Origin;
+use crate::store::feedback::{Door, Origin};
 use crate::vector::{SearchFilter, SearchHit};
 use std::collections::HashMap;
 
@@ -742,7 +742,15 @@ impl Core {
         // After the truncate and after capture, so an association can only ever
         // add: it is outside `limit`, outside the recorded pool, and outside the
         // retrieval count. See `Touch::shown`.
-        if self.associate.enabled {
+        //
+        // Gated on the door, not on `captured()` — that predicate means
+        // "recorded for relevance feedback", an unrelated idea that happens
+        // to select the same four doors today. `Ask` is excluded because it
+        // synthesises an answer from `results` as excerpts; text that never
+        // matched the question must not become source material. `Judge` is
+        // excluded because its query is composed in full knowledge of the
+        // answer and needs a clean pool to label, not a widened one.
+        if self.associate.enabled && !matches!(door, Door::Ask | Door::Judge) {
             let recalled = self.associated(&results).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
@@ -1854,6 +1862,54 @@ mod tests {
         );
         assert_eq!(out[1].artifact_id, b);
         assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ask_and_judge_never_receive_an_association_but_ui_does() {
+        // `ask` feeds `results` to the model as excerpts to synthesise an
+        // answer from; text that never matched the question must not become
+        // source material. `judge` composes its query in full knowledge of
+        // the answer and needs a clean pool to label. Both are excluded by
+        // door, not by `captured()` — that predicate means something
+        // unrelated (recorded for relevance feedback) that happens to select
+        // the same four doors today. One door alone would not prove the
+        // gate is door-shaped rather than coincidental, so this checks both
+        // an excluded door and an included one against the same link.
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+
+        let ask_out = core.search(&query, Door::Ask).await.unwrap();
+        assert_eq!(
+            ask_out.len(),
+            1,
+            "ask received an association: {ask_out:?}"
+        );
+
+        let judge_out = core.search(&query, Door::Judge).await.unwrap();
+        assert_eq!(
+            judge_out.len(),
+            1,
+            "judge received an association: {judge_out:?}"
+        );
+
+        let ui_out = core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(
+            ui_out.len(),
+            2,
+            "ui did not receive the association: {ui_out:?}"
+        );
+        assert_eq!(ui_out[1].via.as_deref(), Some(a.as_str()));
     }
 
     #[tokio::test]

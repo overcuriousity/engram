@@ -2550,16 +2550,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_association_cannot_make_the_answer_look_worse_than_it_was() {
-        // `all_weak` is a statement about how well the *query* was answered. An
-        // associated hit did not answer the query at all, so counting it either
-        // way would put a warning over a good list, or take one off a bad one.
+    async fn an_unlinked_search_shows_no_association() {
+        // Nothing was linked, so there is nothing to recall. This only pins
+        // the absence of the section on a corpus with no links — the
+        // `all_weak` invariant itself is proven separately below, since this
+        // search never has an association present to prove it against.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["alpha text"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
 
         let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         assert!(!body.contains("Recalled by association"), "{body}");
+    }
+
+    fn ranked(weak: bool) -> RenderedResult {
+        RenderedResult {
+            artifact_id: "r1".into(),
+            title: "The ranked hit".into(),
+            html: String::new(),
+            snippet: "a snippet".into(),
+            category: None,
+            tags: vec![],
+            corpus_id: "c1".into(),
+            rank: if weak { String::new() } else { "#1".into() },
+            weak,
+            primed: false,
+            via_title: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn an_association_cannot_make_the_answer_look_worse_than_it_was() {
+        // `all_weak` is a statement about how well the *query* was answered. An
+        // associated hit did not answer the query at all, so its presence must
+        // not move this verdict either way. Proven both directions: a weak
+        // ranked answer still warns with an association beside it, and a good
+        // ranked answer stays silent with one beside it too.
+        let weak_with_association = ResultsTemplate {
+            results: vec![ranked(true)],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: true,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = weak_with_association.render().unwrap();
+        assert!(
+            body.contains("Nothing matches closely"),
+            "an association hid a real warning: {body}"
+        );
+
+        let good_with_association = ResultsTemplate {
+            results: vec![ranked(false)],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = good_with_association.render().unwrap();
+        assert!(
+            !body.contains("Nothing matches closely"),
+            "an association manufactured a warning: {body}"
+        );
+    }
+
+    #[test]
+    fn a_primed_hit_gets_a_small_marker() {
+        let mut r = ranked(false);
+        r.primed = true;
+        let body = ResultsTemplate {
+            results: vec![r],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(body.contains("primed"), "{body}");
     }
 
     #[test]
