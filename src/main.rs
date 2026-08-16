@@ -297,6 +297,8 @@ async fn main() -> anyhow::Result<()> {
         engram::core::background::spawn_retention_ticker(core.clone(), shutdown_rx.clone());
     let dedupe = engram::core::background::spawn_dedupe_ticker(core.clone(), shutdown_rx.clone());
     let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
+    let associate =
+        engram::core::background::spawn_associate_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for them too, rather than
     // leaving tasks the runtime drops mid-enqueue.
@@ -304,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
     handles.push(retention);
     handles.push(dedupe);
     handles.push(repair);
+    handles.push(associate);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
