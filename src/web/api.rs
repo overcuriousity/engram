@@ -577,14 +577,12 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Superseded, 100)
             .await?,
-        // Merge verdicts recorded while autonomy is off. Their own key for
-        // the same reason they are their own state: a consumer counting
-        // `contradictions` must not see pairs the model judged complementary.
-        "merge_proposals": st
-            .core
-            .store
-            .pairs_by_state(PairState::WouldMerge, 100)
-            .await?,
+        // Retired, and permanently empty: `would_merge` was a verdict a person
+        // confirmed, every verdict is acted on now, and the migration rewrites
+        // the rows that carried it. Emitted anyway — a client indexing this key
+        // breaks on a response that drops it, and an empty list already says
+        // "nothing here to act on" in the language the rest of this reads.
+        "merge_proposals": serde_json::Value::Array(vec![]),
         "pairs": st
             .core
             .store
@@ -777,7 +775,6 @@ async fn patch_artifact(
             .set_payload(&crate::vector::VectorPayload {
                 artifact_id: chunk.id.clone(),
                 corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
-                provenance: Some(chunk.provenance.as_str().to_string()),
                 text: chunk.text.clone(),
                 title: chunk.title.clone(),
                 category: chunk.category.clone(),
@@ -864,6 +861,8 @@ pub(crate) mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    use crate::web::test_support::{FilePart, a_png, app_with_token, json_of, multipart};
+
     async fn app_and_token() -> (axum::Router, String) {
         let (app, token, _core) = app_token_and_core().await;
         (app, token)
@@ -874,26 +873,43 @@ pub(crate) mod tests {
     }
 
     /// Wrap a core a test has already adjusted — feedback switched on, say —
-    /// in the real router. Factored out rather than duplicated so there stays
-    /// one way to build a test app, and it is the one the binary builds.
+    /// in the real router.
     pub async fn app_from_core(
         core: crate::core::Core,
     ) -> (axum::Router, String, crate::core::Core) {
-        let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1")
+        let handle = core.clone();
+        let (app, token) = app_with_token(core).await;
+        (app, token, handle)
+    }
+
+    #[tokio::test]
+    async fn the_consolidation_report_still_carries_every_key_it_ever_had() {
+        // `would_merge` is a retired verdict and the migration rewrites those
+        // rows to `pending`, so `merge_proposals` is now always empty — which
+        // is a reason to stop filling it, not a reason to stop emitting it. A
+        // client indexing the key breaks on a response that omits it, and an
+        // empty list says "nothing to act on" in the language it already reads.
+        let (app, token) = app_and_token().await;
+
+        let res = app
+            .oneshot(get("/api/v1/consolidation", Some(&token)))
             .await
             .unwrap();
-        let state_core = core.clone();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), token, state_core)
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_of(res).await;
+        for key in [
+            "superseded",
+            "contradictions",
+            "supersede_proposals",
+            "merge_proposals",
+            "pairs",
+        ] {
+            assert!(
+                body.get(key).is_some_and(|v| v.is_array()),
+                "the report dropped `{key}`: {body}"
+            );
+        }
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {
@@ -924,17 +940,6 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    async fn json_of(res: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
-    }
-
-    /// A minimal multipart body. Hand-rolled rather than pulling a builder in
-    /// for three tests.
-    /// `mime` of `None` omits the part's `Content-Type` header entirely, which
-    /// is legal and which a client may well do.
     fn post_file(
         uri: &str,
         token: &str,
@@ -942,28 +947,17 @@ pub(crate) mod tests {
         mime: Option<&str>,
         body: &[u8],
     ) -> Request<Body> {
-        const B: &str = "engramtestboundary";
-        let mut buf: Vec<u8> = Vec::new();
-        let typed = match mime {
-            Some(m) => format!("Content-Type: {m}\r\n"),
-            None => String::new(),
-        };
-        buf.extend_from_slice(
-            format!(
-                "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
-                 {typed}\r\n"
-            )
-            .as_bytes(),
-        );
-        buf.extend_from_slice(body);
-        buf.extend_from_slice(format!("\r\n--{B}--\r\n").as_bytes());
-        Request::builder()
-            .uri(uri)
-            .method("POST")
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", format!("multipart/form-data; boundary={B}"))
-            .body(Body::from(buf))
-            .unwrap()
+        multipart(
+            uri,
+            token,
+            &[],
+            &[FilePart {
+                field: "file",
+                filename,
+                mime,
+                body,
+            }],
+        )
     }
 
     /// Like `post_file`, with text fields sent before the file part.
@@ -976,53 +970,41 @@ pub(crate) mod tests {
         mime: Option<&str>,
         body: &[u8],
     ) -> Request<Body> {
-        const B: &str = "engramtestboundary";
-        let mut buf: Vec<u8> = Vec::new();
-        for (k, v) in fields {
-            buf.extend_from_slice(
-                format!("--{B}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
-                    .as_bytes(),
-            );
-        }
-        let typed = match mime {
-            Some(m) => format!("Content-Type: {m}\r\n"),
-            None => String::new(),
-        };
-        buf.extend_from_slice(
-            format!(
-                "--{B}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\n{typed}\r\n"
-            )
-            .as_bytes(),
-        );
-        buf.extend_from_slice(body);
-        buf.extend_from_slice(format!("\r\n--{B}--\r\n").as_bytes());
-        Request::builder()
-            .uri(uri)
-            .method("POST")
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", format!("multipart/form-data; boundary={B}"))
-            .body(Body::from(buf))
-            .unwrap()
+        multipart(
+            uri,
+            token,
+            fields,
+            &[FilePart {
+                field: field_name,
+                filename,
+                mime,
+                body,
+            }],
+        )
     }
 
     /// Two parts under the same file field, which no browser form sends and
     /// no handler should guess about.
     fn post_two_files(uri: &str, token: &str, field_name: &str, mime: &str) -> Request<Body> {
-        const B: &str = "engramtestboundary";
-        let mut buf = String::new();
-        for (name, body) in [("a", "first"), ("b", "second")] {
-            buf.push_str(&format!(
-                "--{B}\r\nContent-Disposition: form-data; name=\"{field_name}\"; filename=\"{name}.txt\"\r\nContent-Type: {mime}\r\n\r\n{body}\r\n"
-            ));
-        }
-        buf.push_str(&format!("--{B}--\r\n"));
-        Request::builder()
-            .uri(uri)
-            .method("POST")
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", format!("multipart/form-data; boundary={B}"))
-            .body(Body::from(buf))
-            .unwrap()
+        multipart(
+            uri,
+            token,
+            &[],
+            &[
+                FilePart {
+                    field: field_name,
+                    filename: "a.txt",
+                    mime: Some(mime),
+                    body: b"first",
+                },
+                FilePart {
+                    field: field_name,
+                    filename: "b.txt",
+                    mime: Some(mime),
+                    body: b"second",
+                },
+            ],
+        )
     }
 
     #[tokio::test]
@@ -1042,16 +1024,6 @@ pub(crate) mod tests {
             assert!(err.contains("one file"), "{uri}: {err}");
         }
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
-    }
-
-    fn a_png() -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        let img = ImageBuffer::from_fn(24, 12, |x, _| Rgb([x as u8 * 10, 0, 0]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
     }
 
     #[tokio::test]

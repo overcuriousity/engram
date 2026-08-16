@@ -50,50 +50,94 @@ pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
         )
 }
 
-async fn post_json(
+/// One configured endpoint: where to post, as whom, and which role a failure
+/// is reported under.
+pub(crate) struct Endpoint {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
     role: &'static str,
-    c: &reqwest::Client,
-    url: String,
-    api_key: Option<&str>,
-    body: serde_json::Value,
-) -> Result<serde_json::Value> {
-    let mut req = c.post(&url).json(&body);
-    if let Some(k) = api_key {
-        req = req.bearer_auth(k);
-    }
-    let started = std::time::Instant::now();
-    let res = req.send().await.map_err(|e| Error::Inference {
-        role,
-        detail: e.to_string(),
-    })?;
-    let status = res.status();
-    tracing::debug!(role, %status, ms = started.elapsed().as_millis(), "inference call");
+}
 
-    if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
-        // Truncate: an upstream error page can be megabytes, and this string
-        // ends up in a job's last_error column.
-        let detail: String = body.chars().take(400).collect();
-        let detail = format!("HTTP {status}: {detail}");
-        return Err(if permanent_upstream_status(status) {
-            Error::InferenceRejected { role, detail }
-        } else {
-            Error::Inference { role, detail }
-        });
+impl Endpoint {
+    fn new(
+        base_url: &str,
+        model: &str,
+        api_key: Option<&str>,
+        timeout_secs: u64,
+        role: &'static str,
+    ) -> Self {
+        Self {
+            client: client(timeout_secs),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(str::to_string),
+            role,
+        }
     }
-    res.json().await.map_err(|e| Error::Inference {
-        role,
-        detail: e.to_string(),
-    })
+
+    async fn post_json(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        let role = self.role;
+        let mut req = self.client.post(url(&self.base_url, path)).json(&body);
+        if let Some(k) = &self.api_key {
+            req = req.bearer_auth(k);
+        }
+        let started = std::time::Instant::now();
+        let res = req.send().await.map_err(|e| Error::Inference {
+            role,
+            detail: e.to_string(),
+        })?;
+        let status = res.status();
+        tracing::debug!(role, %status, ms = started.elapsed().as_millis(), "inference call");
+
+        if !status.is_success() {
+            let body = res.text().await.unwrap_or_default();
+            // Truncate: an upstream error page can be megabytes, and this string
+            // ends up in a job's last_error column.
+            let detail: String = body.chars().take(400).collect();
+            let detail = format!("HTTP {status}: {detail}");
+            return Err(if permanent_upstream_status(status) {
+                Error::InferenceRejected { role, detail }
+            } else {
+                Error::Inference { role, detail }
+            });
+        }
+        res.json().await.map_err(|e| Error::Inference {
+            role,
+            detail: e.to_string(),
+        })
+    }
+
+    /// One chat completion; `body` carries everything but `model`. Logs the
+    /// cost of every call — on local hardware a window takes minutes, and the
+    /// log is what tells a long wait from a hang. `finish_reason` is what tells
+    /// a truncated reply from a model that wrote bad JSON of its own accord.
+    async fn chat(&self, mut body: serde_json::Value) -> Result<String> {
+        body["model"] = json!(self.model);
+        let started = std::time::Instant::now();
+        let v = self.post_json("chat/completions", body).await?;
+        tracing::info!(
+            role = self.role,
+            ms = started.elapsed().as_millis(),
+            tokens = v["usage"]["completion_tokens"].as_u64(),
+            finish_reason = v["choices"][0]["finish_reason"].as_str(),
+            "completion finished"
+        );
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Inference {
+                role: self.role,
+                detail: "no message content".into(),
+            })
+    }
 }
 
 // ── Synthesizer ──────────────────────────────────────────────────────────────────
 
 pub struct HttpSynthesizer {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
+    ep: Endpoint,
     budget: SynthesisBudget,
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
@@ -103,10 +147,13 @@ pub struct HttpSynthesizer {
 impl HttpSynthesizer {
     pub fn new(cfg: &SynthesizeRole) -> Self {
         Self {
-            client: client(cfg.timeout_secs),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-            api_key: cfg.api_key.clone(),
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "chunk",
+            ),
             budget: SynthesisBudget {
                 context_tokens: cfg.context_tokens,
                 max_output_tokens: cfg.max_output_tokens,
@@ -136,7 +183,6 @@ impl HttpSynthesizer {
     /// calls that want prose rather than JSON — titles — pass `None`.
     async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
         let mut body = json!({
-            "model": self.model,
             "messages": messages,
             "max_tokens": self.budget.max_output_tokens,
             "temperature": 0.2,
@@ -147,30 +193,7 @@ impl HttpSynthesizer {
         if let Some(name) = schema.filter(|_| self.structured_output) {
             body["response_format"] = response_format(name, prompt::artifacts_schema());
         }
-        // Segmentation is the slow half of ingest on local hardware — minutes
-        // per window, not seconds. Logging the cost of each call is what makes
-        // a long wait distinguishable from a hang.
-        let started = std::time::Instant::now();
-        let v = post_json(
-            "chunk",
-            &self.client,
-            url(&self.base_url, "chat/completions"),
-            self.api_key.as_deref(),
-            body,
-        )
-        .await?;
-        tracing::info!(
-            ms = started.elapsed().as_millis(),
-            tokens = v["usage"]["completion_tokens"].as_u64(),
-            "synthesizer call finished"
-        );
-        v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Inference {
-                role: "chunk",
-                detail: "no message content".into(),
-            })
+        self.ep.chat(body).await
     }
 }
 
@@ -235,10 +258,7 @@ impl Synthesizer for HttpSynthesizer {
 // ── Embedder ─────────────────────────────────────────────────────────────────
 
 pub struct HttpEmbedder {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
+    ep: Endpoint,
     dim: usize,
     max_input_tokens: usize,
 }
@@ -246,10 +266,13 @@ pub struct HttpEmbedder {
 impl HttpEmbedder {
     pub fn new(cfg: &EmbedRole) -> Self {
         Self {
-            client: client(cfg.timeout_secs),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-            api_key: cfg.api_key.clone(),
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "embed",
+            ),
             dim: cfg.dim,
             max_input_tokens: cfg.max_input_tokens,
         }
@@ -267,18 +290,11 @@ impl Embedder for HttpEmbedder {
         // absent field through as null and the backend rejects it. Sending it
         // explicitly costs nothing and keeps those endpoints usable.
         let body = json!({
-            "model": self.model,
+            "model": self.ep.model,
             "input": texts,
             "encoding_format": "float",
         });
-        let v = post_json(
-            "embed",
-            &self.client,
-            url(&self.base_url, "embeddings"),
-            self.api_key.as_deref(),
-            body,
-        )
-        .await?;
+        let v = self.ep.post_json("embeddings", body).await?;
 
         let data = v["data"].as_array().ok_or_else(|| Error::Inference {
             role: "embed",
@@ -329,7 +345,7 @@ impl Embedder for HttpEmbedder {
         self.dim
     }
     fn model(&self) -> &str {
-        &self.model
+        &self.ep.model
     }
     fn max_input_tokens(&self) -> usize {
         self.max_input_tokens
@@ -339,20 +355,20 @@ impl Embedder for HttpEmbedder {
 // ── Reranker ─────────────────────────────────────────────────────────────────
 
 pub struct HttpReranker {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
+    ep: Endpoint,
     style: RerankStyle,
 }
 
 impl HttpReranker {
     pub fn new(cfg: &RerankRole) -> Self {
         Self {
-            client: client(cfg.timeout_secs),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-            api_key: cfg.api_key.clone(),
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "rerank",
+            ),
             style: cfg.style,
         }
     }
@@ -372,21 +388,14 @@ impl Reranker for HttpReranker {
             RerankStyle::Tei => ("rerank", json!({ "query": query, "texts": docs })),
             RerankStyle::Cohere => (
                 "rerank",
-                json!({ "model": self.model, "query": query, "documents": docs, "top_n": top_n }),
+                json!({ "model": self.ep.model, "query": query, "documents": docs, "top_n": top_n }),
             ),
             RerankStyle::Vllm => (
                 "v1/rerank",
-                json!({ "model": self.model, "query": query, "documents": docs, "top_n": top_n }),
+                json!({ "model": self.ep.model, "query": query, "documents": docs, "top_n": top_n }),
             ),
         };
-        let v = post_json(
-            "rerank",
-            &self.client,
-            url(&self.base_url, path),
-            self.api_key.as_deref(),
-            body,
-        )
-        .await?;
+        let v = self.ep.post_json(path, body).await?;
 
         // TEI replies with a bare array; Cohere and vLLM wrap it in `results`.
         let arr = v
@@ -431,32 +440,28 @@ fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
 // ── Completer ────────────────────────────────────────────────────────────────
 
 pub struct HttpCompleter {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
+    ep: Endpoint,
     context_tokens: usize,
     reasoning_effort: Option<String>,
     /// The JSON Schema this role's replies must satisfy, sent as a response
     /// format so the endpoint constrains decoding. `None` for the ask role,
     /// whose answer is prose for a person to read.
     response_schema: Option<(&'static str, serde_json::Value)>,
-    /// Which configured role this completer speaks for, so a failure names the
-    /// endpoint the operator has to go and look at.
-    role: &'static str,
 }
 
 impl HttpCompleter {
     pub fn new(cfg: &AskRole) -> Self {
         Self {
-            client: client(cfg.timeout_secs),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-            api_key: cfg.api_key.clone(),
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "ask",
+            ),
             context_tokens: cfg.context_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: None,
-            role: "ask",
         }
     }
 
@@ -469,16 +474,18 @@ impl HttpCompleter {
     /// puts sweep traffic in front of an interactive request.
     pub fn for_judging(cfg: &SynthesizeRole) -> Self {
         Self {
-            client: client(cfg.timeout_secs),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-            api_key: cfg.api_key.clone(),
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "judge",
+            ),
             context_tokens: cfg.context_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: cfg
                 .structured_output
                 .then(|| ("verdict", prompt::dedupe_schema())),
-            role: "judge",
         }
     }
 }
@@ -487,7 +494,6 @@ impl HttpCompleter {
 impl Completer for HttpCompleter {
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
         let mut body = json!({
-            "model": self.model,
             "messages": [
                 {"role":"system","content": system},
                 {"role":"user","content": user}
@@ -500,34 +506,7 @@ impl Completer for HttpCompleter {
         if let Some((name, schema)) = &self.response_schema {
             body["response_format"] = response_format(name, schema.clone());
         }
-        let started = std::time::Instant::now();
-        let v = post_json(
-            self.role,
-            &self.client,
-            url(&self.base_url, "chat/completions"),
-            self.api_key.as_deref(),
-            body,
-        )
-        .await?;
-        // `finish_reason` is the only thing that tells a truncated reply from a
-        // model that wrote bad JSON of its own accord: both arrive here as
-        // unparsable text, and the two have opposite fixes. Logged for every
-        // call rather than only the failures, so the normal shape of a reply is
-        // on the record to compare a failure against.
-        tracing::info!(
-            role = self.role,
-            ms = started.elapsed().as_millis(),
-            tokens = v["usage"]["completion_tokens"].as_u64(),
-            finish_reason = v["choices"][0]["finish_reason"].as_str(),
-            "completer call finished"
-        );
-        v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Inference {
-                role: self.role,
-                detail: "no message content".into(),
-            })
+        self.ep.chat(body).await
     }
 
     fn context_tokens(&self) -> usize {
@@ -538,19 +517,13 @@ impl Completer for HttpCompleter {
 // ── Describer ────────────────────────────────────────────────────────────────
 
 pub struct HttpDescriber {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key: Option<String>,
+    ep: Endpoint,
 }
 
 impl HttpDescriber {
     pub fn new(model: &str, base_url: &str, api_key: Option<&str>, timeout_secs: u64) -> Self {
         Self {
-            client: client(timeout_secs),
-            base_url: base_url.to_string(),
-            model: model.to_string(),
-            api_key: api_key.map(str::to_string),
+            ep: Endpoint::new(base_url, model, api_key, timeout_secs, "vision"),
         }
     }
 }
@@ -564,7 +537,6 @@ impl Describer for HttpDescriber {
             base64::engine::general_purpose::STANDARD.encode(image_jpeg)
         );
         let body = json!({
-            "model": self.model,
             "messages": [
                 {"role": "system", "content": prompt::DESCRIBE_SYSTEM},
                 {"role": "user", "content": [
@@ -574,27 +546,7 @@ impl Describer for HttpDescriber {
             ],
             "temperature": 0.2,
         });
-        let started = std::time::Instant::now();
-        let v = post_json(
-            "vision",
-            &self.client,
-            url(&self.base_url, "chat/completions"),
-            self.api_key.as_deref(),
-            body,
-        )
-        .await?;
-        tracing::info!(
-            ms = started.elapsed().as_millis(),
-            tokens = v["usage"]["completion_tokens"].as_u64(),
-            "vision call finished"
-        );
-        v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Inference {
-                role: "vision",
-                detail: "no message content".into(),
-            })
+        self.ep.chat(body).await
     }
 }
 
@@ -916,42 +868,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedder_asks_for_float_encoding_explicitly() {
-        // A litellm proxy in front of a llama.cpp-style server forwards the
-        // absent field as null, and the backend answers 500 with
-        // "type must be string, but is null". Every embed call fails against
-        // such an endpoint unless the field is sent.
+    async fn embedder_sends_float_encoding_and_orders_results_by_index() {
+        // `encoding_format` is sent explicitly: a litellm proxy in front of a
+        // llama.cpp-style server forwards the absent field as null and the
+        // backend answers 500. And `index` is authoritative over array position.
         use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .and(body_partial_json(
-                serde_json::json!({"encoding_format": "float"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]}),
-            ))
-            .mount(&server)
-            .await;
-
-        let out = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["x".into()])
-            .await
-            .unwrap();
-        assert_eq!(out[0], vec![1.0, 0.0, 0.0, 0.0]);
-    }
-
-    #[tokio::test]
-    async fn embedder_sends_a_batch_and_orders_results_by_index() {
-        let server = MockServer::start().await;
-        // Deliberately out of order: the API contract is that `index` is
-        // authoritative, not array position.
         let reply = serde_json::json!({"data":[
             {"index":1,"embedding":[1.0,0.0,0.0,0.0]},
             {"index":0,"embedding":[0.0,1.0,0.0,0.0]}
         ]});
         Mock::given(method("POST"))
             .and(path("/embeddings"))
+            .and(body_partial_json(
+                serde_json::json!({"encoding_format": "float"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(reply))
             .mount(&server)
             .await;
@@ -999,114 +930,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reranker_tei_style_returns_sorted_index_score_pairs() {
-        let server = MockServer::start().await;
-        let reply = serde_json::json!([{"index":2,"score":0.9},{"index":0,"score":0.4}]);
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Tei,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into(), "b".into(), "c".into()], 2)
-            .await
-            .unwrap();
-        assert_eq!(out[0].0, 2);
-        assert_eq!(out.len(), 2);
+    async fn the_reranker_reads_both_wire_shapes_and_drops_bad_indexes() {
+        // TEI answers a bare list of {index, score}; Cohere wraps
+        // {index, relevance_score} in `results`. Either way the caller gets
+        // (index, score) best first, and an index outside the batch is dropped
+        // rather than panicking on `results.get(idx)`.
+        type Case = (RerankStyle, serde_json::Value, usize, Vec<(usize, f32)>);
+        let cases: [Case; 3] = [
+            (
+                RerankStyle::Tei,
+                serde_json::json!([{"index":2,"score":0.9},{"index":0,"score":0.4}]),
+                3,
+                vec![(2, 0.9), (0, 0.4)],
+            ),
+            (
+                RerankStyle::Cohere,
+                serde_json::json!({"results":[
+                    {"index":1,"relevance_score":0.8},
+                    {"index":0,"relevance_score":0.95}
+                ]}),
+                2,
+                vec![(0, 0.95), (1, 0.8)],
+            ),
+            (
+                RerankStyle::Tei,
+                serde_json::json!([{"index":99,"score":0.9},{"index":0,"score":0.4}]),
+                1,
+                vec![(0, 0.4)],
+            ),
+        ];
+        for (style, reply, docs, want) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/rerank"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+                .mount(&server)
+                .await;
+            let cfg = RerankRole {
+                base_url: server.uri(),
+                model: "r".into(),
+                api_key: None,
+                style,
+                timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            };
+            let batch: Vec<String> = (0..docs).map(|i| format!("d{i}")).collect();
+            let out = HttpReranker::new(&cfg)
+                .rerank("q", &batch, 5)
+                .await
+                .unwrap();
+            assert_eq!(out, want);
+        }
     }
 
     #[tokio::test]
-    async fn reranker_cohere_style_reads_relevance_score_and_results_wrapper() {
-        let server = MockServer::start().await;
-        let reply = serde_json::json!({"results":[
-            {"index":1,"relevance_score":0.8},
-            {"index":0,"relevance_score":0.95}
-        ]});
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Cohere,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into(), "b".into()], 5)
-            .await
-            .unwrap();
-        assert_eq!(out[0].0, 0, "highest relevance_score must come first");
-        assert_eq!(out.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn reranker_drops_out_of_range_indexes() {
-        let server = MockServer::start().await;
-        // A malformed index must not panic on the caller's `results.get(idx)`.
-        let reply = serde_json::json!([{"index":99,"score":0.9},{"index":0,"score":0.4}]);
-        Mock::given(method("POST"))
-            .and(path("/rerank"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .mount(&server)
-            .await;
-
-        let cfg = RerankRole {
-            base_url: server.uri(),
-            model: "r".into(),
-            api_key: None,
-            style: RerankStyle::Tei,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-        };
-        let out = HttpReranker::new(&cfg)
-            .rerank("q", &["a".into()], 5)
-            .await
-            .unwrap();
-        assert_eq!(out, vec![(0, 0.4)]);
-    }
-
-    #[tokio::test]
-    async fn completer_returns_message_content() {
+    async fn completer_returns_message_content_and_tolerates_a_trailing_slash() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "choices":[{"message":{"content":"the answer"}}]
-            })))
-            .mount(&server)
-            .await;
-        let cfg = AskRole {
-            base_url: server.uri(),
-            model: "m".into(),
-            api_key: None,
-            context_tokens: 4096,
-            timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
-            reasoning_effort: None,
-        };
-        assert_eq!(
-            HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
-            "the answer"
-        );
-    }
-
-    #[tokio::test]
-    async fn base_url_with_a_trailing_slash_does_not_double_up() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices":[{"message":{"content":"ok"}}]
             })))
             .mount(&server)
             .await;
@@ -1120,7 +1002,7 @@ mod tests {
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
-            "ok"
+            "the answer"
         );
     }
 

@@ -47,8 +47,8 @@ impl Core {
         // No per-source cap: an answer often lives in one document, and
         // withholding its paragraphs to keep the citation list varied would
         // make the answer worse, not fairer.
-        let hits = self
-            .search_capped(
+        let (hits, _) = self
+            .search_with(
                 &SearchQuery {
                     q: req.q.clone(),
                     limit: req.limit.unwrap_or(8),
@@ -264,7 +264,7 @@ mod tests {
         // no answer. Caveats are not in the vector payload, so this asserts the
         // store lookup that puts them back.
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::EchoCompleter);
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter { reply: None });
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
             .store

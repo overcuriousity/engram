@@ -495,56 +495,14 @@ fn extract_json(body: &str) -> &str {
     }
 }
 
-/// Recover the artifact objects a truncated response did finish.
+/// Recover the artifact objects a truncated or malformed reply still got right.
 ///
-/// A small local model told to rewrite a segment routinely runs out of output
-/// budget mid-list, and the segment it was working on is otherwise lost: the
-/// parse fails, a repair call costs another minute or more on consumer
-/// hardware, and that reply is just as likely to be cut off. The objects
-/// before the cut are complete and correct, so scan the array and keep every
-/// one that closed.
-///
-/// Returns `None` when nothing complete can be salvaged.
-fn salvage_truncated(json: &str) -> Option<String> {
-    let start = json.find("\"artifacts\"")?;
-    let open = json[start..].find('[')? + start;
-
-    let bytes = json.as_bytes();
-    let (mut depth, mut in_string, mut escaped) = (0i32, false, false);
-    let mut last_complete: Option<usize> = None;
-    for (i, &b) in bytes.iter().enumerate().skip(open + 1) {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    last_complete = Some(i);
-                }
-            }
-            b']' if !in_string && depth == 0 => break,
-            _ => {}
-        }
-    }
-
-    let end = last_complete?;
-    Some(format!("{}]}}", &json[..=end]))
-}
-
-/// Recover the artifact objects a *malformed* reply still got right.
-///
-/// Truncation is the tidy failure: everything before the cut is valid, so
-/// `salvage_truncated` can repair the envelope and reparse. A bad object in the
-/// middle is the untidy one — a missing comma, an unescaped quote in a passage
-/// that itself quotes something — and it fails the whole list however complete
-/// the rest is. Losing nine good artifacts to one bad one is the worst trade
-/// in the write path: it costs a segment of someone's corpus, and re-running
-/// it means minutes of a local model's time for a reply just as likely to
+/// A small local model routinely runs out of output budget mid-list, or drops
+/// a comma, or leaves a quote unescaped in a passage that itself quotes
+/// something — and any of those fails the whole list however complete the
+/// rest is. Losing nine good artifacts to one bad one is the worst trade in
+/// the write path: it costs a segment of someone's corpus, and re-running it
+/// means minutes of a local model's time for a reply just as likely to
 /// stumble in the same place.
 ///
 /// So parse the objects one at a time and keep the ones that stand up. A fault
@@ -603,45 +561,29 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     let env: Envelope = match serde_json::from_str(json) {
         Ok(env) => env,
         Err(e) => {
-            // Salvage before giving up: a truncated list still holds whole
-            // artifacts, and asking a slow model to try again is expensive.
-            let salvaged = salvage_truncated(json)
-                .and_then(|repaired| serde_json::from_str::<Envelope>(&repaired).ok());
-            match salvaged {
-                Some(env) => {
-                    tracing::warn!(
-                        error = %e,
-                        artifacts = env.artifacts.len(),
-                        "synthesizer output was cut off; keeping the artifacts it finished"
-                    );
-                    env
-                }
-                // Not a clean cut, so read the list object by object and keep
-                // whatever stands up on its own.
-                None => {
-                    let objects = salvage_objects(json);
-                    if objects.is_empty() {
-                        // The parser's complaint names an offset into a reply
-                        // nobody kept, which is not enough to tell a truncated
-                        // list from a bad escape from prose where JSON was
-                        // asked for. Debug rather than warn: this is model
-                        // output, so it carries corpus text, and it belongs in
-                        // a log only when someone has gone looking.
-                        tracing::debug!(
-                            error = %e,
-                            raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
-                            "synthesizer output could not be parsed or salvaged"
-                        );
-                        return Err(Error::MalformedLlmOutput(e.to_string()));
-                    }
-                    tracing::warn!(
-                        error = %e,
-                        artifacts = objects.len(),
-                        "synthesizer output was malformed; keeping the artifacts that parsed"
-                    );
-                    Envelope { artifacts: objects }
-                }
+            // Salvage before giving up: read the list object by object and
+            // keep whatever stands up on its own. Asking a slow model to try
+            // again is expensive.
+            let objects = salvage_objects(json);
+            if objects.is_empty() {
+                // The parser's complaint names an offset into a reply nobody
+                // kept, which is not enough to tell a truncated list from a
+                // bad escape from prose where JSON was asked for. Debug rather
+                // than warn: this is model output, so it carries corpus text,
+                // and it belongs in a log only when someone has gone looking.
+                tracing::debug!(
+                    error = %e,
+                    raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
+                    "synthesizer output could not be parsed or salvaged"
+                );
+                return Err(Error::MalformedLlmOutput(e.to_string()));
             }
+            tracing::warn!(
+                error = %e,
+                artifacts = objects.len(),
+                "synthesizer output was cut off or malformed; keeping the artifacts that parsed"
+            );
+            Envelope { artifacts: objects }
         }
     };
 

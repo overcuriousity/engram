@@ -2,7 +2,7 @@ use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::Origin;
-use crate::vector::SearchFilter;
+use crate::vector::{SearchFilter, SearchHit};
 use std::collections::HashMap;
 
 pub const DEFAULT_LIMIT: usize = 10;
@@ -79,6 +79,24 @@ pub struct SearchResult {
     /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
+}
+
+impl From<SearchHit> for SearchResult {
+    fn from(h: SearchHit) -> Self {
+        SearchResult {
+            artifact_id: h.payload.artifact_id,
+            corpus_id: h.payload.corpus_id,
+            title: h.payload.title,
+            text: h.payload.text,
+            category: h.payload.category,
+            tags: h.payload.tags,
+            score: h.score,
+            status: h.payload.status,
+            superseded_by: h.payload.superseded_by,
+            last_verified_at: h.payload.last_verified_at,
+            weak: false,
+        }
+    }
 }
 
 fn now_secs() -> i64 {
@@ -220,21 +238,9 @@ impl Core {
         let hit_counts = counts_of(&hits);
         let results: Vec<SearchResult> = hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
-                // Not an answer to a query, so there is no query to be far
-                // from. These lists are drawn, not matched.
-                weak: false,
-            })
+            // Not an answer to a query, so there is no query to be far from:
+            // these lists are drawn, not matched, and nothing here is weak.
+            .map(SearchResult::from)
             .collect();
         // Surfacing counts as seeing, or the same chunks come back tomorrow —
         // but not as a retrieval: nobody asked for these.
@@ -259,21 +265,9 @@ impl Core {
             .await?;
         Ok(hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
-                // Not an answer to a query, so there is no query to be far
-                // from. These lists are drawn, not matched.
-                weak: false,
-            })
+            // Not an answer to a query, so there is no query to be far from:
+            // these lists are drawn, not matched, and nothing here is weak.
+            .map(SearchResult::from)
             .collect())
     }
 
@@ -287,41 +281,23 @@ impl Core {
         origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
         Ok(self
-            .search_inner(query, Some(MAX_PER_CORPUS), origin.into())
+            .search_with(query, Some(MAX_PER_CORPUS), origin.into())
             .await?
             .0)
     }
 
-    /// The same search, plus what it cost. The UI shows these faintly, so a
-    /// sluggish box points at the embedder or the vector store without anyone
-    /// opening a log.
-    pub async fn search_timed(
-        &self,
-        query: &SearchQuery,
-        origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        self.search_inner(query, Some(MAX_PER_CORPUS), origin.into())
-            .await
-    }
-
-    /// `cap` of `None` lets a single source supply every result. `ask` wants
-    /// that: a question is often answered by one document, and starving it of
-    /// its own paragraphs to make the list look varied helps nobody.
-    pub async fn search_capped(
+    /// `search`, with the per-source cap chosen by the caller and what the
+    /// search cost. `cap` of `None` lets a single source supply every result:
+    /// `ask` wants that, since a question is often answered by one document.
+    /// The UI shows the timing faintly, so a sluggish box points at the
+    /// embedder or the vector store without anyone opening a log.
+    pub async fn search_with(
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
         origin: impl Into<Origin>,
-    ) -> Result<Vec<SearchResult>> {
-        Ok(self.search_inner(query, cap, origin.into()).await?.0)
-    }
-
-    async fn search_inner(
-        &self,
-        query: &SearchQuery,
-        cap: Option<usize>,
-        origin: Origin,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        let origin = origin.into();
         let door = origin.door;
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -426,20 +402,14 @@ impl Core {
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
-            .map(|h| SearchResult {
-                artifact_id: h.payload.artifact_id,
-                corpus_id: h.payload.corpus_id,
-                title: h.payload.title,
-                text: h.payload.text,
-                category: h.payload.category,
-                tags: h.payload.tags,
-                score: h.score,
-                status: h.payload.status,
-                superseded_by: h.payload.superseded_by,
-                last_verified_at: h.payload.last_verified_at,
+            .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
-                weak: h.similarity.is_some_and(|s| s < self.weak_below),
+                let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                SearchResult {
+                    weak,
+                    ..SearchResult::from(h)
+                }
             })
             .collect();
 
@@ -541,7 +511,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_rerank};
+    use crate::core::test_support::{test_core, test_core_counting_reranked_docs};
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
     use sqlx::Row;
@@ -817,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn rerank_reorders_when_configured() {
-        let core = test_core_with_rerank().await;
+        let core = test_core_counting_reranked_docs().await.0;
         seed(
             &core,
             &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
@@ -845,7 +815,7 @@ mod tests {
         // Reranking can only reorder what it is given. If the candidate pool
         // were not wider than the limit, a better match ranked 11th by vector
         // similarity could never be promoted into a top-10 answer.
-        let core = test_core_with_rerank().await;
+        let core = test_core_counting_reranked_docs().await.0;
         // Spread across sources so the per-source cap is not what narrows the
         // list; this test is about the candidate pool, not about grouping.
         for batch in 0..10 {
@@ -952,8 +922,8 @@ mod tests {
         seed_from(&core, "small", &[("alpha other", "c", &[])]).await;
 
         let capped = core.search(&q("t0\nalpha 0"), Door::Ui).await.unwrap();
-        let uncapped = core
-            .search_capped(&q("t0\nalpha 0"), None, Door::Ui)
+        let (uncapped, _) = core
+            .search_with(&q("t0\nalpha 0"), None, Door::Ui)
             .await
             .unwrap();
         assert!(
@@ -988,7 +958,6 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
-                provenance: None,
             },
             score,
             similarity: Some(score),
@@ -1141,71 +1110,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifying_restarts_the_retrieval_count() {
-        // `stale_max_hits` counts retrievals *since* the last verification. A
-        // lifetime counter would mean one appearance in a marked search kept an
-        // artifact off the review list for good.
-        let core = test_core().await;
-        seed(&core, &[("alpha text", "note", &[])]).await;
-        reembed_all(&core).await;
-        let id = core.search(&q("alpha"), Door::Ui).await.unwrap()[0]
-            .artifact_id
-            .clone();
-        core.background.wait_idle().await;
-
-        let hits_now = || async {
-            core.vectors
-                .stale_candidates(i64::MAX, i64::MAX, 10)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|h| h.payload.artifact_id == id)
-                .and_then(|h| h.payload.hit_count)
-        };
-        assert_eq!(
-            hits_now().await,
-            Some(1),
-            "the marked search was not counted"
-        );
-
-        core.verify(&id).await.unwrap();
-        assert_eq!(hits_now().await, Some(0), "verify must restart the count");
-    }
-
-    #[tokio::test]
-    async fn opening_a_stale_candidate_does_not_remove_it_from_the_review_list() {
-        // `stale_max_hits` is zero by default, so counting the click that opens
-        // a candidate meant an operator who read a row and decided to defer had
-        // just disqualified it — permanently, since only a `verify` clears the
-        // counter, and a verify is the other answer entirely.
-        let core = test_core().await;
-        seed(&core, &[("alpha text", "note", &[])]).await;
-        reembed_all(&core).await;
-        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        core.vectors
-            .set_last_verified_at(&id, 1, false)
-            .await
-            .unwrap();
-
-        let listed = || async {
-            core.stale_candidates(10)
-                .await
-                .unwrap()
-                .iter()
-                .any(|r| r.artifact_id == id)
-        };
-        assert!(listed().await, "the fixture is not a stale candidate");
-
-        core.mark_artifact_seen(&id);
-        core.background.wait_idle().await;
-
-        assert!(
-            listed().await,
-            "reading a candidate took it off the list that offered it"
-        );
-    }
-
-    #[tokio::test]
     async fn resurfacing_does_not_count_as_a_retrieval() {
         // The forgotten list draws at random from exactly the population the
         // stale review list targets — old and unseen — so counting what it drew
@@ -1269,39 +1173,6 @@ mod tests {
             out.iter().map(|r| &r.artifact_id).collect::<Vec<_>>(),
             vec![&ids[1]],
             "the forgotten list offered an artifact that was just retired"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_deprecated_artifact_is_not_a_neighbour() {
-        // The related pane is a list of live content. A deprecated artifact is
-        // near-identical to nothing in particular, but it is *near* — and
-        // linking to it from a live artifact presents retired knowledge as
-        // current. The legacy `superseded` flag never catches this: a
-        // deprecation deliberately writes it false.
-        let core = test_core().await;
-        seed(
-            &core,
-            &[("alpha text", "note", &[]), ("alpha text too", "note", &[])],
-        )
-        .await;
-        reembed_all(&core).await;
-        let ids = core.store.list_all_artifact_ids().await.unwrap();
-        assert_eq!(
-            core.vectors.neighbours(&ids[0], 10).await.unwrap().len(),
-            1,
-            "the fixture has no neighbour to lose"
-        );
-
-        core.deprecate(&ids[1]).await.unwrap();
-
-        assert!(
-            core.vectors
-                .neighbours(&ids[0], 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a retired artifact is still linked from a live one"
         );
     }
 

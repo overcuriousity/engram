@@ -191,23 +191,15 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let differing = crate::infer::facts::differing_values(&texts);
 
     let permit = core.gate.background().await;
-    let reply = match core
+    let reply = core
         .judge
         .complete(
             crate::infer::prompt::DEDUPE_SYSTEM,
             &crate::infer::prompt::dedupe_prompt(&shown, &differing, p.judge_attempts),
         )
-        .await
-    {
-        Ok(r) => {
-            permit.succeeded();
-            r
-        }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
-    };
+        .await;
+    permit.finished();
+    let reply = reply?;
 
     let verdict = match crate::infer::prompt::parse_dedupe(&reply) {
         Ok(v) => v,
@@ -384,53 +376,29 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .iter()
                 .partition(|pr| pr.a_id == obsolete || pr.b_id == obsolete);
 
-            if core.consolidate.autonomous {
-                // The side effect FIRST. A failure here leaves every pair
-                // pending, so the unit retries under the queue's backoff — the
-                // reverse order left the verdict recorded on the pairs but
-                // never applied, permanently, because run() skips a component
-                // whose seed is no longer Pending.
-                core.supersede(&obsolete, &winner).await?;
-                tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
-                for pr in &touching {
-                    // As the manual apply settles it (`apply_pair_supersede_ui`):
-                    // done, with the model's reasoning kept as the record of
-                    // why. Leaving it Superseded listed the applied replacement
-                    // as awaiting confirmation forever, behind Keep buttons
-                    // that could only return a validation error against the
-                    // already-superseded side.
-                    core.store
-                        .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
-                        .await?;
-                }
-            } else {
-                // Proposal mode: nothing is hidden, the pair carries the
-                // direction and an operator confirms via "apply supersede".
-                for pr in &touching {
-                    core.store
-                        .set_pair_superseded(pr.id, &obsolete, s.detail.as_deref())
-                        .await?;
-                }
-                tracing::info!(obsolete = %obsolete, "proposed a replacement, pending confirmation");
+            // The side effect FIRST. A failure here leaves every pair
+            // pending, so the unit retries under the queue's backoff — the
+            // reverse order left the verdict recorded on the pairs but never
+            // applied, because run() skips a component whose seed is no
+            // longer Pending.
+            core.supersede(&obsolete, &winner).await?;
+            tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
+            for pr in &touching {
+                // Done, with the model's reasoning kept as the record of why.
+                // Leaving it Superseded listed the applied replacement as
+                // awaiting confirmation forever.
+                core.store
+                    .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
+                    .await?;
             }
 
             // Both sides of these pairs survived. Writing the direction on
-            // them named an artifact the pair does not contain — and Ops
-            // rendered an "apply supersede" button for it, one that would hide
-            // a third artifact on the strength of a question about two others.
-            // Not left pending either: the roots this verdict was drawn from
-            // are unchanged, so re-arming would build the identical prompt and
-            // receive the identical answer forever. An unanswered question
-            // goes where the others go: to a person.
-            //
-            // Past tense only where the supersede actually ran. In proposal
-            // mode it may yet be rejected, and a record asserting it happened
-            // would outlive the rejection.
-            let survivor_detail = if core.consolidate.autonomous {
-                format!("{obsolete} was superseded; these two were not separated")
-            } else {
-                format!("superseding {obsolete} was proposed; these two were not separated")
-            };
+            // them would name an artifact the pair does not contain. Not left
+            // pending either: the roots are unchanged, so re-arming would
+            // build the identical prompt and receive the identical answer
+            // forever. An unanswered question goes to a person.
+            let survivor_detail =
+                format!("{obsolete} was superseded; these two were not separated");
             for pr in &survivors {
                 core.store
                     .set_pair_state(pr.id, PairState::Contradiction, Some(&survivor_detail))
@@ -443,20 +411,6 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .merged
                 .as_ref()
                 .expect("interpret keeps this or downgrades to Conflict");
-            if !core.consolidate.autonomous {
-                // Recorded, not applied. Reading the verdicts before letting the
-                // system act on them is the cheapest evidence available about
-                // whether the contract holds on real data, and it is the only
-                // reason the switch is a switch rather than a leap. Its own
-                // state rather than Contradiction: filing a mergeable pair
-                // among genuine conflicts made the UI claim the two disagree,
-                // and steered the operator toward hiding a side the model
-                // judged complementary. The draft is discarded — once autonomy
-                // is on, the unit re-judges and merges then.
-                return settle_all(core, &s.pairs, PairState::WouldMerge, s.detail.as_deref())
-                    .await;
-            }
-
             // Every member, not just the roots. A merged member is not its own
             // root, and `finish` hides what the lineage names — so passing only
             // the roots would leave that earlier merge active and near-identical
@@ -521,7 +475,6 @@ mod tests {
         // question and tuned one model for two unrelated jobs. The pair here
         // must be ruled on without the ask model being touched at all.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
@@ -545,7 +498,6 @@ mod tests {
         // for fan-in it does not have, and C's text is shown to the model as
         // an original.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.merge_max_roots = 2;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -584,47 +536,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_proposed_supersede_is_not_recorded_as_a_done_one() {
-        // Proposal mode: the supersede is a proposal an operator may reject.
-        // The sibling pair's record must not assert an event that has not
-        // happened.
-        let mut core = test_core().await;
-        core.consolidate.autonomous = false;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"replaced","supersedes":"a","detail":"a is stale"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("engram needs Rust 1.21.4 to build.", [1.0, 0.0]),
-                ("engram needs Rust 1.30.0 to build.", [0.93, 0.37]),
-                ("engram builds with stable Rust.", [0.90, 0.44]),
-            ],
-        )
-        .await;
-        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        queue_pair(&core, &ids[1], &ids[2]).await;
-
-        run(&core, &seed_pair.to_string()).await.unwrap();
-
-        let contradictions = core
-            .store
-            .pairs_by_state(PairState::Contradiction, 10)
-            .await
-            .unwrap();
-        assert_eq!(contradictions.len(), 1, "the survivor pair escalates");
-        let detail = contradictions[0].detail.clone().unwrap_or_default();
-        assert!(
-            !detail.contains("was superseded"),
-            "the record asserts a supersession that is only proposed: {detail}"
-        );
-        // Nothing was hidden in proposal mode.
-        for id in &ids {
-            assert!(core.store.get_artifact(id).await.unwrap().in_results());
-        }
-    }
-
     async fn disagreeing(core: &Core) -> Vec<String> {
         seed(
             core,
@@ -644,7 +555,6 @@ mod tests {
         // and it no longer merely flags them — a merge would grind a reference
         // document into one paragraph that describes none of its subjects.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"two different filesystems"}"#.into(),
         ]));
@@ -695,7 +605,6 @@ mod tests {
         // job. This is the one queue that expects a human, and autonomy does not
         // empty it.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
         ]));
@@ -729,7 +638,6 @@ mod tests {
         // the path by which the fidelity thesis keeps holding under autonomy —
         // so the prompt prefers it and this pins that the code does too.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));
@@ -757,47 +665,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replacement_is_only_proposed_while_autonomy_is_off() {
-        // The observation window. Switched off, the pass still asks and still
-        // records what it would have done -- which is the whole point: an
-        // operator can read the verdicts before granting the authority to act
-        // on them, rather than switching autonomy on blind.
-        let mut core = test_core().await;
-        core.consolidate.autonomous = false;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
-        ]));
-        let ids = disagreeing(&core).await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        let found = core
-            .store
-            .pairs_by_state(PairState::Superseded, 10)
-            .await
-            .unwrap();
-        assert_eq!(found.len(), 1, "the direction was not recorded");
-        assert_eq!(found[0].obsolete_id.as_deref(), Some(ids[0].as_str()));
-        assert!(
-            core.store
-                .get_artifact(&ids[0])
-                .await
-                .unwrap()
-                .superseded_by
-                .is_none(),
-            "a proposal hid an artifact without being asked to"
-        );
-    }
-
-    #[tokio::test]
     async fn a_pair_of_two_survivors_is_not_closed_with_someone_elses_direction() {
         // Three artifacts, two pairs, and one of the three named obsolete. The
         // pair that holds it has a direction; the pair of the other two does
         // not, and stamping the same `obsolete_id` on it put an artifact it does
         // not contain behind an "apply supersede" button in Ops.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"the first is stale"}"#.into(),
         ]));
@@ -850,7 +723,6 @@ mod tests {
         // the same letter lands on the merge, which was never shown and never
         // named. Under autonomy that hides the wrong artifact outright.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"b","detail":"b is the stale one"}"#.into(),
         ]));
@@ -910,7 +782,6 @@ mod tests {
         // rather than being applied. Guessing here means hiding an artifact for
         // no stated reason.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         let ids = disagreeing(&core).await;
         // `now()` is second-grained, so two rows inserted in one test would tie,
         // and a tie is meant to pass the guard. Force b strictly newer.
@@ -952,7 +823,6 @@ mod tests {
         // The loss check, from the unit's side. "the merge would have lost
         // 1.21.4" is a line an operator can act on; "verification failed" is not.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"engram needs Rust 1.30.0 to build.","tags":[],"caveats":[]}}"#
@@ -1035,7 +905,6 @@ mod tests {
         // which is what an artifact is defined to be. Past the cap the honest
         // answer is to stop, not to write something nobody asked for.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.consolidate.merge_max_roots = 2;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
         core.judge = completer.clone();
@@ -1140,7 +1009,6 @@ mod tests {
         // record a merged artifact as root_id — paraphrase drift, one
         // generation per merge, which the lineage design exists to prevent.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
         core.judge = completer.clone();
         let ids = disagreeing(&core).await;
@@ -1187,7 +1055,6 @@ mod tests {
         // IGNORE and Dismissed appears on no list, so the surviving
         // duplication became invisible forever.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
@@ -1224,7 +1091,6 @@ mod tests {
         // as "awaiting confirmation" — with Keep buttons that could only
         // return a validation error against the already-superseded side.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
         ]));
@@ -1268,7 +1134,6 @@ mod tests {
         // settled, and run()'s Pending guard made the error permanent: the
         // verdict was recorded on the pairs yet never applied.
         let mut core = test_core().await;
-        core.consolidate.autonomous = true;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"c","detail":"superseded by the merge"}"#.into(),
         ]));
@@ -1327,45 +1192,5 @@ mod tests {
                 .is_empty(),
             "the component was left pending"
         );
-    }
-
-    #[tokio::test]
-    async fn with_autonomy_off_a_duplicate_verdict_is_filed_as_would_merge() {
-        // It used to be filed as Contradiction, so the UI said "These two
-        // disagree" about a pair the model judged complementary, and offered
-        // only the lossy keep-one buttons for it.
-        let mut core = test_core().await;
-        core.consolidate.autonomous = false;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"engram needs Rust 1.21.4 and 1.30.0 to build.","tags":[],"caveats":[]}}"#
-                .into(),
-        ]));
-        let ids = disagreeing(&core).await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        let found = core
-            .store
-            .pairs_by_state(PairState::WouldMerge, 10)
-            .await
-            .unwrap();
-        assert_eq!(found.len(), 1, "the verdict must land as its own state");
-        assert_eq!(found[0].detail.as_deref(), Some("same claim"));
-        assert!(
-            core.store
-                .pairs_by_state(PairState::Contradiction, 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a mergeable pair was filed among genuine conflicts"
-        );
-        // Recorded, not applied: no merge written, nothing hidden.
-        for id in &ids {
-            let c = core.store.get_artifact(id).await.unwrap();
-            assert!(c.superseded_by.is_none());
-        }
-        assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
     }
 }

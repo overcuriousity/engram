@@ -75,17 +75,13 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     }
 
     // Paced like every other inference call. `split_into_artifact_jobs` can
-    // leave hundreds of these behind for one document, and against a dead
-    // endpoint an ungated path spends a timeout apiece without any of those
-    // failures ever reaching the breaker.
+    // leave hundreds of these behind for one document.
     let permit = core.gate.background().await;
-    match embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await {
-        Ok(()) => permit.succeeded(),
+    let outcome = embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await;
+    permit.finished();
+    match outcome {
+        Ok(()) => {}
         Err(e) if input_too_large(&e) => {
-            // Refused, not failed: the endpoint answered. Counting this toward
-            // the breaker let a handful of oversize chunks stop every
-            // background call in the system.
-            permit.refused();
             // The endpoint's real ceiling is lower than the configured one, so
             // halving the configured limit would change nothing. Halve what the
             // chunk actually measures instead: that shrinks on every refusal
@@ -103,10 +99,7 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
             // this split has to succeed whatever the text looks like.
             return split_oversize(core, &chunk, smaller, true).await;
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     }
     match &chunk.corpus_id {
         Some(corpus_id) => settle_corpus(core, corpus_id).await,
@@ -166,21 +159,17 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     }
 
     let permit = core.gate.background().await;
-    match embed_batch(core, &batch[..take], texts[..take].to_vec()).await {
-        Ok(()) => permit.succeeded(),
+    let outcome = embed_batch(core, &batch[..take], texts[..take].to_vec()).await;
+    permit.finished();
+    match outcome {
+        Ok(()) => {}
         // One oversize chunk fails the whole batch, and the batch cannot say
         // which. Per-chunk jobs isolate it, and that path splits it.
         Err(e) if input_too_large(&e) => {
-            // Refused, not failed: the endpoint answered, and what it answered
-            // is about one chunk in this batch rather than about the endpoint.
-            permit.refused();
             tracing::warn!(corpus_id, error = %e, "batch held a chunk the endpoint will not take; isolating");
             return split_into_artifact_jobs(core, corpus_id).await;
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     }
 
     // Settling only once nothing is left. Whether to come back for another
@@ -276,7 +265,7 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
             payload: payload_of(c),
         })
         .collect();
-    core.vectors.upsert(points).await?;
+    upsert_with_current_lifecycle(core, points).await?;
 
     for c in chunks {
         mark_indexed(core, c).await?;
@@ -309,12 +298,9 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // artifact that is already indexed, and returning their errors from here
     // would have failed the embed job for exactly the reason the arming exists
     // to avoid — buying the same embedding twice to retry a step that costs
-    // nothing. Both have a backstop: the sweep re-finds an unarmed artifact's
-    // pairs through `near_pairs`, and an unfinished merge through
+    // nothing. Both have a backstop in the sweep: an artifact with no relate
+    // row is armed there, and an unfinished merge is found through
     // `merged_with_active_roots`.
-    //
-    // This is what makes duplicate detection complete rather than sampled; see
-    // the module header of `jobs::relate`.
     if let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await {
         tracing::warn!(
             artifact_id = %chunk.id,
@@ -404,17 +390,13 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         "oversize chunk has nothing left to cut on; embedding as-is"
     );
     let permit = core.gate.background().await;
-    let vectors = match core.embedder.embed(std::slice::from_ref(&chunk.text)).await {
-        Ok(v) => {
-            permit.succeeded();
-            v
-        }
-        // Refused, not failed: the endpoint answered. This arm no longer tests
-        // `budget`, because a refusal we cannot act on is still a refusal —
-        // reporting it as a sick endpoint was how a single untouchable chunk
-        // could hold the breaker open on every retry of it.
+    let embedded = core.embedder.embed(std::slice::from_ref(&chunk.text)).await;
+    permit.finished();
+    let vectors = match embedded {
+        Ok(v) => v,
+        // Refused, not failed: the endpoint answered. This arm does not test
+        // `budget`, because a refusal we cannot act on is still a refusal.
         Err(e) if input_too_large(&e) => {
-            permit.refused();
             // Still nothing to cut with when the title alone fills the limit:
             // `split_by_lines` at a budget of zero puts every line in a part of
             // its own and then falls to the 64-character floor, which shreds the
@@ -429,18 +411,17 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
             }
             return Err(e);
         }
-        Err(e) => {
-            permit.failed(&e);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
-    core.vectors
-        .upsert(vec![VectorPoint {
+    upsert_with_current_lifecycle(
+        core,
+        vec![VectorPoint {
             vector: vectors.into_iter().next().unwrap(),
             sparse: crate::vector::sparse::encode_document(&chunk.text),
             payload: payload_of(chunk),
-        }])
-        .await?;
+        }],
+    )
+    .await?;
     mark_indexed(core, chunk).await?;
     match &chunk.corpus_id {
         Some(corpus_id) => settle_corpus(core, corpus_id).await,
@@ -601,12 +582,9 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
     VectorPayload {
         artifact_id: chunk.id.clone(),
         // A merged artifact belongs to no corpus and carries the empty string
-        // here. `provenance` below is what tells the two apart — a corpus
-        // filter genuinely should not match an artifact that belongs to none,
-        // and `restore_artifact` reads the kind rather than guessing what an
-        // empty id meant.
+        // here: a corpus filter genuinely should not match an artifact that
+        // belongs to none.
         corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
-        provenance: Some(chunk.provenance.as_str().to_string()),
         text: chunk.text.clone(),
         title: chunk.title.clone(),
         category: chunk.category.clone(),
@@ -617,43 +595,153 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // chunk look forgotten.
         last_seen_at: None,
         hit_count: None,
-        // Retired state is written; active state is deferred. The asymmetry is
-        // the point.
-        //
-        // Deferring unconditionally loses the state outright on a *first*
-        // embed: there is no stored value to carry forward, so an artifact
-        // deprecated while its embed job was still pending — the detail page
-        // offers the button whatever the embed state — lands as a point with no
-        // `status` at all and is back in ordinary results. Nothing notices until
-        // the next sweep's `repair_lifecycle_drift`, and nothing ever does if
-        // consolidation is disabled.
-        //
-        // Writing unconditionally has the opposite failure: `false`/`active` on
-        // every re-embed would revive an artifact the sweep hid, because the row
-        // is read here before the embedding call and an operator can retire the
-        // artifact while that call is in flight.
-        //
-        // Writing only the retired values takes neither. SQLite is the source of
-        // truth (`set_superseded_by` maintains `status` alongside
-        // `superseded_by`), so a row that says retired is a fact worth writing;
-        // a row that says active cannot distinguish "still active" from "stale
-        // read", so it defers to the stored value as before.
+        // Retired state is written; active state is deferred. Deferring both
+        // loses a deprecation made while the first embed was pending; writing
+        // both would revive an artifact the sweep hid while the embedding call
+        // was in flight, since the row is read before it. A row that says
+        // retired is a fact; a row that says active cannot tell "still active"
+        // from "stale read", so it defers to the stored value.
         superseded: (chunk.superseded_by.is_some()).then_some(true),
         status: (chunk.status != ArtifactStatus::Active).then_some(chunk.status),
-        // Written, not deferred: a brand-new point has no stored stamp to carry
-        // forward, and the scoring formula reads a missing `last_verified_at`
-        // as epoch — so leaving it unset would rank every freshly ingested
-        // artifact as maximally stale and put it straight on the
-        // deprecation-review list. SQLite is the source of truth here (set at
-        // insert, updated by `Core::verify`), so this is the current value.
-        // The `created_at` fallback covers any row written before the column
-        // existed.
+        // Written, not deferred: a new point has no stored stamp, and the
+        // scoring formula reads a missing stamp as epoch — maximally stale.
         last_verified_at: chunk.last_verified_at.or(Some(chunk.created_at)),
-        // Same rule as `status` directly above, and it has to be the same rule:
-        // a point that says superseded while naming no winner is a hidden
-        // artifact whose replacement the UI cannot show.
+        // The same rule as `status`: a point that says superseded while naming
+        // no winner is a hidden artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
     }
+}
+
+/// Upsert points whose payloads were built from rows read before the embedding
+/// call returned.
+///
+/// Everything in a payload except the lifecycle fields describes the text that
+/// was embedded, so the row as it was read is exactly the right source for it —
+/// the vector and the payload have to agree about which text they are. The
+/// lifecycle fields are the one exception, because they say nothing about the
+/// text and everything about what has happened to the artifact since: an
+/// embedding call takes minutes, and `supersede`, `deprecate`, `reactivate` and
+/// `unsupersede` can all land inside that window. Writing the read-time values
+/// back is how an operator's Restore was undone by an upsert that was already
+/// in flight when they pressed it.
+///
+/// So the lifecycle half is re-read here under `lifecycle_lock`, and read a
+/// second time under it once the upsert returns. The lock is *not* held across
+/// the write: that write is a network round trip for a whole corpus batch, and
+/// every lifecycle transition in the system shares this mutex — an operator
+/// pressing Restore on one artifact would wait out a Qdrant upsert of a hundred
+/// others it has nothing to do with. What the lock has to exclude is a
+/// transition landing *unnoticed*, and the second read notices it: a payload
+/// that lost the race is rewritten from the row that won, under the lock, before
+/// this returns. This is also the reason `payload_of`'s deferral rules are not
+/// enough on their own — they defer *active* state, and the write that hides a
+/// restored artifact is a stale *retired* state, which is the half they write.
+///
+/// The marker is the second line. An upsert that fails after the row has moved
+/// leaves the old payload standing against a row that disagrees, and nothing
+/// else in the system would notice, so `lifecycle_dirty` is set before the
+/// write and cleared only once it is acknowledged — the same protocol
+/// `unsupersede` uses, for the same reason. Only retired artifacts are marked:
+/// an active row behind a payload that never arrived is a point that does not
+/// exist yet, which is not drift but an artifact waiting to be embedded.
+async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>) -> Result<()> {
+    if points.is_empty() {
+        return Ok(());
+    }
+    let mut marked: Vec<String> = Vec::new();
+    let mut gone: Vec<String> = Vec::new();
+    {
+        let _guard = core.lifecycle_lock.lock().await;
+        for p in &mut points {
+            let id = p.payload.artifact_id.clone();
+            match core.store.get_artifact(&id).await {
+                Ok(fresh) => {
+                    p.payload.status =
+                        (fresh.status != ArtifactStatus::Active).then_some(fresh.status);
+                    p.payload.superseded = fresh.superseded_by.is_some().then_some(true);
+                    p.payload.superseded_by = fresh.superseded_by.clone();
+                    if !fresh.in_results() {
+                        core.store.mark_lifecycle_dirty(&id).await?;
+                        marked.push(id);
+                    }
+                }
+                // Deleted while the embedding was in flight. Writing the point
+                // anyway would put a vector in the index that no row explains —
+                // an orphan `heal_store_drift` can only report, never repair,
+                // because SQLite is the source of truth for what exists.
+                Err(Error::NotFound) => {
+                    tracing::info!(
+                        artifact_id = %id,
+                        "artifact was deleted while it was being embedded; dropping its point"
+                    );
+                    gone.push(id);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    points.retain(|p| !gone.contains(&p.payload.artifact_id));
+    if points.is_empty() {
+        core.store.clear_lifecycle_dirty(&marked).await?;
+        return Ok(());
+    }
+
+    // What the payloads are about to say, kept so the second pass can tell a
+    // payload that lost a race from one that is simply current.
+    let written: Vec<(String, ArtifactStatus, Option<String>)> = points
+        .iter()
+        .map(|p| {
+            (
+                p.payload.artifact_id.clone(),
+                p.payload.status.unwrap_or(ArtifactStatus::Active),
+                p.payload.superseded_by.clone(),
+            )
+        })
+        .collect();
+    core.vectors.upsert(points).await?;
+
+    // The write is done and the lock was not held across it, so a transition
+    // may have landed while it was in flight — and it wrote its payload before
+    // this one, which means this one overwrote it with a value that was already
+    // stale. Reading again under the lock is what catches that: the row cannot
+    // move now, so a row that disagrees with what was just written is the race,
+    // and rewriting the payload from the row settles it.
+    {
+        let _guard = core.lifecycle_lock.lock().await;
+        let mut fix = Vec::new();
+        for (id, status, superseded_by) in &written {
+            match core.store.get_artifact(id).await {
+                Ok(fresh) if fresh.status != *status || fresh.superseded_by != *superseded_by => {
+                    // Marked whichever way the row moved, and not only when it
+                    // moved to retired: the point exists now, so a payload left
+                    // disagreeing with an *active* row is drift too, and the
+                    // marker is what leaves the repair pass able to finish this
+                    // if the write below does not.
+                    core.store.mark_lifecycle_dirty(id).await?;
+                    marked.push(id.clone());
+                    fix.push(crate::jobs::consolidate::lifecycle_row_of(&fresh));
+                }
+                Ok(_) => {}
+                // Deleted between the two reads: its point is an orphan, which
+                // is `heal_store_drift`'s to report and no lifecycle write's to
+                // fix.
+                Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !fix.is_empty() {
+            tracing::info!(
+                repaired = fix.len(),
+                "a lifecycle transition landed while these points were being written"
+            );
+            core.vectors.apply_lifecycle(&fix).await?;
+        }
+    }
+
+    // Only after every write returns. Clearing first would turn a failed write
+    // into permanent drift that nothing is left to look for.
+    core.store.clear_lifecycle_dirty(&marked).await?;
+    Ok(())
 }
 
 /// Advance the parent source once no chunk is still pending: `ready` if every
@@ -679,6 +767,112 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_upsert_landing_after_a_restore_does_not_hide_the_artifact_again() {
+        // The row is read before the embedding call and the call can take
+        // minutes, so by the time the upsert lands the lifecycle fields in hand
+        // may describe a state an operator has since reversed. Writing them
+        // back hides an artifact whose row says active — and because no
+        // lifecycle mutator ran, no `lifecycle_dirty` marker exists and
+        // `repair_lifecycle_drift` never looks at it. The artifact is out of
+        // search, off every Ops list, and reachable by no button.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        // What a re-embed job read before it called the embedder.
+        let stale = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(stale.superseded_by.is_some(), "the fixture is not hidden");
+
+        core.unsupersede(&ids[0]).await.unwrap();
+        embed_batch(
+            &core,
+            std::slice::from_ref(&stale),
+            vec![embed_text(&stale)],
+        )
+        .await
+        .unwrap();
+
+        let hits = core
+            .vectors
+            .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.payload.artifact_id == ids[0]),
+            "a stale embed hid an artifact an operator had restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_deleted_while_it_embedded_leaves_no_point_behind() {
+        // The other thing that can happen across an embedding call. A point
+        // whose row is gone is an orphan `heal_store_drift` can only report —
+        // SQLite is the source of truth for what exists, so nothing may rebuild
+        // the row and nothing may delete the vector, and the operator is left
+        // reconciling two stores by hand. Not writing it is the whole fix.
+        let core = crate::core::test_support::test_core().await;
+        let (_, ids) = corpus_with_pending_chunks(&core, 1).await;
+        let stale = core.store.get_artifact(&ids[0]).await.unwrap();
+
+        core.store.delete_artifact(&ids[0]).await.unwrap();
+        embed_batch(
+            &core,
+            std::slice::from_ref(&stale),
+            vec![embed_text(&stale)],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !core
+                .vectors
+                .all_artifact_ids()
+                .await
+                .unwrap()
+                .contains(&ids[0]),
+            "the embed wrote a point for an artifact that no longer exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_embed_of_a_hidden_artifact_leaves_no_lifecycle_marker_behind() {
+        // The marker is set before the upsert so that a failed write is drift
+        // something still knows to look for. Left standing after a write that
+        // succeeded, it makes `repair_lifecycle_drift` rewrite the same payload
+        // on every sweep, forever — write amplification behind an end state
+        // that is permanently correct, which is the shape of bug nothing
+        // complains about.
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])],
+        )
+        .await;
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        let hidden = core.store.get_artifact(&ids[0]).await.unwrap();
+
+        embed_batch(
+            &core,
+            std::slice::from_ref(&hidden),
+            vec![embed_text(&hidden)],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the re-embed left a marker on a base the two stores agree about"
+        );
+    }
 
     /// A corpus with `n` chunks, none of them embedded yet.
     async fn corpus_with_pending_chunks(core: &Core, n: usize) -> (String, Vec<String>) {
@@ -1122,68 +1316,9 @@ mod tests {
         assert!(chunks.len() > 1, "got {} chunks", chunks.len());
     }
 
-    #[tokio::test]
-    async fn a_size_refusal_does_not_hold_the_rest_of_the_queue() {
-        // Three unsplittable oversize chunks — code blocks, tables, the exact
-        // thing `split_oversize`'s hard path exists for — used to be three
-        // consecutive transport failures. At the default `breaker_after` that
-        // opened the breaker and stopped synthesis, judging and embedding alike
-        // for the whole probe window, against an endpoint that was answering
-        // every request it was given.
-        let mut core = crate::core::test_support::test_core().await;
-        core.gate = std::sync::Arc::new(
-            crate::infer::gate::InferenceGate::new(std::time::Duration::ZERO)
-                .with_breaker(1, std::time::Duration::from_secs(60)),
-        );
-        core.embedder = std::sync::Arc::new(crate::infer::fake::StrictEmbedder::new(
-            crate::core::test_support::TEST_DIM,
-            200,
-        ));
-
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let body = (0..40)
-            .map(|i| format!("paragraph {i} with a good deal of filler text in it"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let made = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[NewArtifact {
-                    ordinal: 0,
-                    text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: Some(0),
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap();
-
-        // The configured limit is the lie; the endpoint's is what bites.
-        run_with_limit(&core, &made[0].id, 8192).await.unwrap();
-
-        // Asked in real time rather than on a paused clock: building a `Core`
-        // opens a pool, and a pool acquired under `start_paused` waits on a
-        // timer that never fires. An open breaker would hold this for the whole
-        // probe window, so a short timeout tells the two apart.
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                core.gate.background()
-            )
-            .await
-            .is_ok(),
-            "a chunk the endpoint refused opened the breaker"
-        );
-    }
-
     #[test]
     fn splitting_by_lines_always_returns_something_smaller() {
-        let counter = crate::infer::budget::TokenCounter::Estimate;
+        let counter = crate::infer::budget::TokenCounter;
         // A single line far over the limit, with no whitespace to cut on.
         let blob = "x".repeat(4000);
         let parts = split_by_lines(&blob, 100, &counter);
@@ -1278,9 +1413,7 @@ mod tests {
     #[tokio::test]
     async fn the_per_chunk_path_is_paced_like_every_other_call() {
         // `split_into_artifact_jobs` can leave hundreds of these behind for one
-        // document. Ungated they ran back to back at the endpoint, and against a
-        // dead one they each spent a timeout without a single failure ever
-        // reaching the breaker that exists to stop exactly that.
+        // document. Ungated they ran back to back at the endpoint.
         let core = test_core().await;
         let (_src, ids) = seed(&core, &["one"]).await;
 
@@ -1294,7 +1427,7 @@ mod tests {
             "the per-chunk embed path went straight to the endpoint"
         );
 
-        permit.succeeded();
+        permit.finished();
         run(&core, &ids[0]).await.unwrap();
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().embed_state,

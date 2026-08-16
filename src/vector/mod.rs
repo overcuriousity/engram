@@ -51,17 +51,6 @@ pub struct VectorPayload {
     /// without a second lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
-    /// `captured` or `merged`, mirroring `Chunk::provenance`.
-    ///
-    /// Carried here for one reason that is not cosmetic: `restore_artifact`
-    /// rebuilds a SQLite row from this payload, and `corpus_id` is the empty
-    /// string for a merged artifact. Without the kind, a restore cannot tell a
-    /// merged artifact from a captured one whose corpus id was lost, and would
-    /// write the wrong sort of row back. Omitted when unset, like the fields
-    /// above, so a point written before this existed reads as `captured` — the
-    /// right default, since no merge can predate the column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,17 +129,6 @@ pub struct Facets {
     pub tags: Vec<FacetCount>,
 }
 
-/// Two artifacts the index says are close, and how close.
-///
-/// `a` sorts before `b` so the same pair found from either end is one value —
-/// the sweep would otherwise queue it twice and supersede the loser twice.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NearPair {
-    pub a: String,
-    pub b: String,
-    pub score: f32,
-}
-
 /// One artifact to stamp as shown, and the `hit_count` the caller already read
 /// for it.
 ///
@@ -218,17 +196,6 @@ pub struct LifecycleRow {
     pub status: ArtifactStatus,
     pub superseded_by: Option<String>,
     pub last_verified_at: i64,
-}
-
-impl NearPair {
-    pub fn new(x: &str, y: &str, score: f32) -> NearPair {
-        let (a, b) = if x <= y { (x, y) } else { (y, x) };
-        NearPair {
-            a: a.to_string(),
-            b: b.to_string(),
-            score,
-        }
-    }
 }
 
 #[async_trait]
@@ -316,11 +283,6 @@ pub trait VectorStore: Send + Sync {
     /// (its payload will not parse as a chunk), and it is left alone rather than
     /// deleted: nothing here knows what it is.
     async fn unstamped_count(&self) -> Result<u64>;
-    /// Artifact ids whose payload says deprecated or superseded, capped at
-    /// `limit`. The sweep compares these against SQLite — the source of truth —
-    /// to repair drift left by a half-applied lifecycle change in either
-    /// direction.
-    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>>;
     /// What these artifacts' payloads currently say about their lifecycle. Ids
     /// with no point are absent from the answer.
     ///
@@ -341,11 +303,7 @@ pub trait VectorStore: Send + Sync {
     /// not an engram point and nothing can be said about it.
     async fn all_artifact_ids(&self) -> Result<Vec<String>>;
     /// The full stored payloads for these ids. Ids with no point are absent
-    /// from the answer.
-    ///
-    /// This is what the heal restores an artifact row from, so unlike
-    /// `lifecycle_of` it has to hand back everything the payload holds — the
-    /// text, the title, the tags — not just the lifecycle fields.
+    /// from the answer. What the lifecycle backfill stamps an orphan point from.
     async fn payloads_of(
         &self,
         artifact_ids: &[String],
@@ -367,21 +325,6 @@ pub trait VectorStore: Send + Sync {
     /// no embedding call, because the query is a point that is already in the
     /// index. The artifact itself is never among its own neighbours.
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>>;
-    /// Pairs of artifacts closer than `min_score`, best first, over a sample of
-    /// the collection. Anything not active is excluded — a resolved pair
-    /// re-found every sweep is a review queue that never empties, and a
-    /// deprecated artifact must never win a supersession and hide a live one.
-    ///
-    /// This is one round trip, not one query per point: `sample` points are
-    /// drawn and each contributes at most `per_point` neighbours. A sweep over
-    /// a base of any size therefore costs a bounded amount rather than growing
-    /// with the collection.
-    async fn near_pairs(
-        &self,
-        sample: usize,
-        per_point: usize,
-        min_score: f32,
-    ) -> Result<Vec<NearPair>>;
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
     async fn count(&self) -> Result<u64>;

@@ -225,20 +225,6 @@ fn verified_payload(at: i64, reset_hits: bool) -> Value {
     p
 }
 
-/// Qdrant's distance-matrix reply. The ids are point ids, not artifact ids,
-/// which is why `near_pairs` follows this with a payload lookup.
-#[derive(Deserialize)]
-struct MatrixPairs {
-    pairs: Vec<MatrixPair>,
-}
-
-#[derive(Deserialize)]
-struct MatrixPair {
-    a: Value,
-    b: Value,
-    score: f32,
-}
-
 /// The schema every generation is created with.
 fn collection_body(dim: usize) -> Value {
     json!({
@@ -536,6 +522,21 @@ impl QdrantVectors {
             .filter_map(|n| generation_number(&self.alias, &n).map(|g| (g, n)))
             .max_by_key(|(g, _)| *g)
             .map(|(_, n)| n))
+    }
+
+    /// Whether the collection this instance reads and writes is actually there.
+    ///
+    /// Asked of the alias' target rather than of the alias, because a dangling
+    /// alias — one left pointing at a generation that was dropped — is exactly
+    /// the fault this has to report, and a check that resolved it away would
+    /// call it healthy. No alias row at all is not yet an answer either: a
+    /// collection named exactly like the alias may still be serving, which is
+    /// the pre-alias shape `generations` allows for.
+    async fn collection_is_live(&self) -> Result<bool> {
+        match self.resolve_alias().await? {
+            Some(target) => self.collection_exists(&target).await,
+            None => self.collection_exists(&self.alias).await,
+        }
     }
 
     async fn collection_exists(&self, name: &str) -> Result<bool> {
@@ -1019,6 +1020,69 @@ impl QdrantVectors {
         path: &str,
         body: Option<Value>,
     ) -> Result<T> {
+        let (status, text) = self.send(method, path, body).await?;
+        if !status.is_success() {
+            // The path is part of the message because several requests can fail
+            // the same way, and "which one" is the first thing anyone reading
+            // the log needs.
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        decode(path, &text)
+    }
+
+    /// `call`, for a request naming one point that may legitimately not be in
+    /// the collection yet — an artifact captured a moment ago, whose embedding
+    /// job has not run. Absent is `None`; everything else is still an error.
+    ///
+    /// The distinction cannot be made on the status alone, which is the whole
+    /// reason this is not two lines at the call site: Qdrant answers 404 both
+    /// for a point it does not hold *and* for a collection that does not exist.
+    /// The second is a store that is broken or misconfigured — an alias
+    /// pointing at a dropped generation, say — and reading it as "this artifact
+    /// has no neighbours" would turn a fault affecting every artifact into a
+    /// silent, permanent answer for each of them.
+    ///
+    /// So a 404 whose message does not name the missing point is settled by
+    /// asking whether the collection is there, rather than by reading further
+    /// prose. The message check stays as the fast path because it is right
+    /// today and costs nothing; what it may not be is the *only* thing standing
+    /// between an unembedded artifact and a permanent error, because it is a
+    /// substring of one Qdrant version's wording. Read that way round, a
+    /// reworded message costs one extra request; read the old way round, it
+    /// turned every artifact awaiting its embedding into a `Relate` unit that
+    /// failed and retried at the backoff ceiling forever.
+    async fn call_absent_point_as_none<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<T>> {
+        let (status, text) = self.send(method, path, body).await?;
+        if status == reqwest::StatusCode::NOT_FOUND
+            && (text.contains("No point with id") || self.collection_is_live().await?)
+        {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        decode(path, &text).map(Some)
+    }
+
+    /// The round trip both of the above are built on: everything up to, but not
+    /// including, the decision about what a non-success status means.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(reqwest::StatusCode, String)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.api_key {
             req = req.header("api-key", k);
@@ -1030,22 +1094,16 @@ impl QdrantVectors {
         let res = req.send().await.map_err(|e| Error::Vector(e.to_string()))?;
         let status = res.status();
         let text = res.text().await.map_err(|e| Error::Vector(e.to_string()))?;
-
-        if !status.is_success() {
-            // The path is part of the message because several requests can fail
-            // the same way, and "which one" is the first thing anyone reading
-            // the log needs.
-            return Err(Error::Vector(format!(
-                "{path}: {}",
-                describe_failure(status, &text)
-            )));
-        }
-
-        let env: Envelope<T> = serde_json::from_str(&text)
-            .map_err(|e| Error::Vector(format!("unreadable response from {path}: {e}")))?;
-        env.result
-            .ok_or_else(|| Error::Vector(format!("{path} returned no result")))
+        Ok((status, text))
     }
+}
+
+/// Unwrap Qdrant's envelope, which every successful response carries.
+fn decode<T: DeserializeOwned>(path: &str, text: &str) -> Result<T> {
+    let env: Envelope<T> = serde_json::from_str(text)
+        .map_err(|e| Error::Vector(format!("unreadable response from {path}: {e}")))?;
+    env.result
+        .ok_or_else(|| Error::Vector(format!("{path} returned no result")))
 }
 
 #[async_trait]
@@ -1276,37 +1334,6 @@ impl VectorStore for QdrantVectors {
             )
             .await?;
         Ok(res.count)
-    }
-
-    async fn non_active_ids(&self, limit: usize) -> Result<Vec<String>> {
-        // `point_uuid` is one-way, so the artifact id has to come out of the
-        // payload rather than the point id.
-        let page: ScrollResult = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/scroll", self.alias),
-                Some(json!({
-                    "filter": { "should": [
-                        { "key": "status", "match": { "value": "deprecated" } },
-                        { "key": "status", "match": { "value": "superseded" } },
-                        { "key": "superseded", "match": { "value": true } },
-                    ] },
-                    "limit": limit,
-                    "with_payload": ["artifact_id"],
-                    "with_vector": false,
-                })),
-            )
-            .await?;
-        Ok(page
-            .points
-            .iter()
-            .filter_map(|p| {
-                p.payload
-                    .get("artifact_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect())
     }
 
     async fn payloads_of(
@@ -1846,21 +1873,32 @@ impl VectorStore for QdrantVectors {
             ] },
             "with_payload": true,
         });
+        // Absent is an empty list; unreachable, misconfigured or refused is an
+        // error. Only the first is an ordinary state — a freshly captured
+        // artifact whose embedding job has not run yet — and the detail pane
+        // loses its related list rather than failing to open.
+        //
+        // Everything else has to propagate, because this is what `jobs::relate`
+        // reads and relate is the only duplicate detector in the system. A
+        // failure reported as an empty list is a unit that completes having
+        // filed nothing, leaves a job row behind, and is therefore never asked
+        // again: that artifact's duplicates are never merged and never
+        // superseded, permanently and silently. Failing instead hands it to the
+        // queue's backoff, which retries it once the store is back.
         let res: QueryResult = match self
-            .call(
+            .call_absent_point_as_none(
                 Method::POST,
                 &format!("/collections/{}/points/query", self.alias),
                 Some(body),
             )
-            .await
+            .await?
         {
-            Ok(r) => r,
-            // An artifact whose embedding job has not run yet is not in the
-            // collection, and Qdrant answers that with an error. It is an
-            // ordinary state for a freshly captured artifact, so the detail
-            // pane loses its related list rather than failing to open.
-            Err(e) => {
-                tracing::warn!(artifact_id, error = %e, "no neighbours for this artifact");
+            Some(r) => r,
+            None => {
+                tracing::debug!(
+                    artifact_id,
+                    "not in the collection yet; no neighbours to list"
+                );
                 return Ok(vec![]);
             }
         };
@@ -1878,106 +1916,6 @@ impl VectorStore for QdrantVectors {
         Ok(hits)
     }
 
-    async fn near_pairs(
-        &self,
-        sample: usize,
-        per_point: usize,
-        min_score: f32,
-    ) -> Result<Vec<super::NearPair>> {
-        // Anything not active is excluded at the source. Superseded points
-        // would hand the sweep pairs it has already resolved, on every single
-        // run. Deprecated points are worse than redundant: the sweep's `keeper`
-        // picks the newest member of a cluster, so a newer artifact an operator
-        // retired would *win* against a live older one and hide it — leaving
-        // one artifact deprecated, the other superseded, and the knowledge in
-        // neither reachable by search. `supersede` would also overwrite the
-        // operator's `deprecated` status with `superseded` on the way past.
-        let res: MatrixPairs = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/search/matrix/pairs", self.alias),
-                Some(json!({
-                    "sample": sample,
-                    "limit": per_point,
-                    "using": DENSE,
-                    "filter": { "must_not": [
-                        { "key": "status", "match": { "value": "superseded" } },
-                        { "key": "status", "match": { "value": "deprecated" } },
-                        { "key": "superseded", "match": { "value": true } }
-                    ] },
-                })),
-            )
-            .await?;
-
-        let mut ids: Vec<&str> = Vec::new();
-        for p in &res.pairs {
-            if p.score < min_score {
-                continue;
-            }
-            // Ids come back as JSON strings for UUID points. Anything else is a
-            // point this collection did not get from engram.
-            let (Some(a), Some(b)) = (p.a.as_str(), p.b.as_str()) else {
-                continue;
-            };
-            ids.push(a);
-            ids.push(b);
-        }
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        ids.sort_unstable();
-        ids.dedup();
-
-        // `point_uuid` is one-way, so the artifact id has to come back from the
-        // payload. One retrieve for the whole sweep, asking for the single key
-        // rather than dragging every candidate's text across the wire.
-        //
-        // `call` already unwraps the `result` envelope, so this deserializes
-        // straight into the point list — reaching for `result` again here is
-        // what made every lookup miss and the sweep return nothing at all.
-        let found: Vec<ScrolledPoint> = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points", self.alias),
-                Some(json!({ "ids": ids, "with_payload": ["artifact_id"], "with_vector": false })),
-            )
-            .await?;
-        let mut by_uuid: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for p in &found {
-            let (Some(uuid), Some(aid)) = (
-                p.id.as_str(),
-                p.payload.get("artifact_id").and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            by_uuid.insert(uuid.to_string(), aid.to_string());
-        }
-
-        let mut out: Vec<super::NearPair> = res
-            .pairs
-            .iter()
-            .filter(|p| p.score >= min_score)
-            .filter_map(|p| {
-                let a = by_uuid.get(p.a.as_str()?)?;
-                let b = by_uuid.get(p.b.as_str()?)?;
-                // A point cannot be a duplicate of itself, however the matrix
-                // reports it. The matrix also reports (a,b) and (b,a) as
-                // separate rows, which `NearPair::new` plus the dedup below
-                // collapse into one.
-                (a != b).then(|| super::NearPair::new(a, b, p.score))
-            })
-            .collect();
-        out.sort_by(|x, y| {
-            y.score
-                .total_cmp(&x.score)
-                .then_with(|| x.a.cmp(&y.a))
-                .then_with(|| x.b.cmp(&y.b))
-        });
-        out.dedup_by(|x, y| x.a == y.a && x.b == y.b);
-        Ok(out)
-    }
-
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
     }
@@ -1986,6 +1924,33 @@ impl VectorStore for QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn neighbours_reports_an_unreachable_store_rather_than_no_neighbours() {
+        // `jobs::relate` is the only duplicate detector there is, and a job row
+        // survives its completion — so a unit that runs while Qdrant is down
+        // and answers "no neighbours" is not a retry, it is a permanent
+        // verdict. That artifact's duplicates are never merged and never
+        // superseded, and nothing asks about it again. An empty list has to
+        // mean "asked, and there are none".
+        let v = QdrantVectors::connect(&VectorConfig {
+            // Nothing listens here, so the round trip fails before any status.
+            url: "http://127.0.0.1:1".into(),
+            collection: "engram".into(),
+            api_key: None,
+            recency_weight: 0.05,
+            recency_half_life_days: 180,
+            pinned_boost: 0.15,
+            weak_below: 0.35,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            v.neighbours("any-artifact", 5).await.is_err(),
+            "a store that could not be reached was reported as an artifact with no duplicates"
+        );
+    }
 
     #[test]
     fn facet_hits_become_chips_ordered_by_count() {
@@ -2108,24 +2073,6 @@ mod tests {
         assert_eq!(
             normalize_base("http://localhost:6333"),
             "http://localhost:6333"
-        );
-    }
-
-    #[test]
-    fn matrix_pairs_deserialise_from_qdrant_shape() {
-        let res: MatrixPairs = serde_json::from_value(json!({
-            "pairs": [ { "a": 1, "b": 2, "score": 0.97 } ]
-        }))
-        .unwrap();
-        assert_eq!(res.pairs.len(), 1);
-        assert!((res.pairs[0].score - 0.97).abs() < 1e-6);
-    }
-
-    #[test]
-    fn a_pair_is_canonically_ordered() {
-        assert_eq!(
-            super::super::NearPair::new("z", "a", 0.9),
-            super::super::NearPair::new("a", "z", 0.9)
         );
     }
 

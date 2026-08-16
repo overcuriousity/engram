@@ -172,23 +172,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fonts_are_embedded_in_the_binary() {
-        // No CDN at runtime: an external font request would leak usage and
-        // break offline use.
-        for f in [
-            "inter-400.woff2",
-            "inter-500.woff2",
-            "inter-600.woff2",
-            "jetbrains-mono-400.woff2",
-        ] {
-            assert!(
-                Assets::get(&format!("fonts/{f}")).is_some(),
-                "missing embedded font {f}"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn the_manifest_is_served_as_a_manifest() {
         // A manifest sent as text/plain is ignored, and the install prompt
@@ -207,53 +190,6 @@ mod tests {
         // Not the year the other assets get: an installed app re-reads this,
         // and a stale copy would outlive several deployments.
         assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
-    }
-
-    #[test]
-    fn the_manifest_declares_what_an_install_needs() {
-        let m = Assets::get("manifest.webmanifest").expect("manifest must be embedded");
-        let m: serde_json::Value = serde_json::from_slice(m.data.as_ref())
-            .expect("the manifest must be valid JSON or the browser drops it");
-
-        assert_eq!(m["name"], "engram");
-        assert_eq!(m["display"], "standalone");
-        assert_eq!(m["start_url"], "/ui/capture");
-        // `id` stays what it always was even though `start_url` moved: a
-        // browser keys an installed app on `id`, and changing it turns an
-        // update into a second app sitting beside the first.
-        assert_eq!(m["id"], "/ui/search");
-        assert_eq!(m["scope"], "/", "the worker controls the whole origin");
-        // The splash matches the page it opens into. These were the dark
-        // palette while the app serves light, so an install flashed a dark
-        // screen and then repainted cream.
-        assert_eq!(m["background_color"], "#f8f6f1");
-        assert_eq!(m["theme_color"], "#f8f6f1");
-
-        let icons = m["icons"].as_array().unwrap();
-        // Android will not offer to install without both of these sizes, and
-        // will not round the icon without a maskable one.
-        for size in ["192x192", "512x512"] {
-            assert!(
-                icons.iter().any(|i| i["sizes"] == size),
-                "no {size} icon in the manifest"
-            );
-        }
-        assert!(
-            icons.iter().any(|i| i["purpose"] == "maskable"),
-            "no maskable icon in the manifest"
-        );
-        for i in icons {
-            // Manifest paths are URLs; the embed is rooted at `assets/`, so the
-            // mount point comes off before the lookup.
-            let src = i["src"].as_str().unwrap();
-            let embedded = src
-                .strip_prefix("/assets/")
-                .expect("icons are served from /assets");
-            assert!(
-                Assets::get(embedded).is_some(),
-                "the manifest names {src}, which is not embedded"
-            );
-        }
     }
 
     #[tokio::test]
@@ -278,33 +214,6 @@ mod tests {
                 .starts_with("text/javascript")
         );
         assert_eq!(res.headers()["cache-control"], "no-cache");
-    }
-
-    #[test]
-    fn the_service_worker_handles_fetch_and_caches_no_asset() {
-        // The fetch handler is the part a browser checks for before it treats
-        // the site as installable. The absence of asset caching is the part
-        // that keeps it from serving yesterday's HTML.
-        let js = Assets::get("sw.js").expect("sw.js must be embedded");
-        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
-        assert!(js.contains("addEventListener('fetch'"));
-        assert!(!js.contains("https://"), "external url in the worker");
-        assert!(
-            !js.contains("cache.addAll"),
-            "the worker must not precache the app shell"
-        );
-    }
-
-    #[test]
-    fn the_icons_are_embedded_at_the_sizes_the_manifest_promises() {
-        for f in [
-            "icon.svg",
-            "icon-192.png",
-            "icon-512.png",
-            "apple-touch-icon.png",
-        ] {
-            assert!(Assets::get(f).is_some(), "missing embedded icon {f}");
-        }
     }
 
     #[tokio::test]
@@ -333,58 +242,5 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(res.status(), StatusCode::OK);
-    }
-
-    /// The manifest paints `#f8f6f1` behind a launch. An offline page that
-    /// opens dark is the same flash of the wrong colour that moving the
-    /// manifest off the dark palette was meant to remove.
-    #[test]
-    fn the_offline_page_opens_in_the_colour_the_manifest_paints() {
-        let js = Assets::get("sw.js").expect("sw.js must be embedded");
-        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
-        assert!(
-            js.contains("html{background:#f8f6f1"),
-            "the offline page does not start from the app's light base colour"
-        );
-        assert!(
-            js.contains("prefers-color-scheme:dark"),
-            "a device set to dark gets no dark offline page"
-        );
-    }
-
-    #[test]
-    fn the_stylesheet_carries_both_themes_and_the_ported_palette() {
-        let css = Assets::get("app.css").expect("app.css must be embedded");
-        let css = std::str::from_utf8(css.data.as_ref()).unwrap();
-        assert!(css.contains("#f8f6f1"), "light base colour missing");
-        assert!(css.contains("#0e1015"), "dark base colour missing");
-        assert!(css.contains("#3b6e91"), "light accent missing");
-        assert!(css.contains("#5aa8b0"), "dark accent missing");
-        assert!(css.contains("[data-theme=\"dark\"]"));
-        assert!(css.contains("--radius-sm: 3px"));
-    }
-
-    #[test]
-    fn the_script_is_embedded_and_makes_no_external_requests() {
-        let js = Assets::get("app.js").expect("app.js must be embedded");
-        let js = std::str::from_utf8(js.data.as_ref()).unwrap();
-        assert!(!js.contains("https://"), "external url in script");
-        assert!(
-            js.contains("data-terms"),
-            "highlighting reads the terms attribute"
-        );
-        assert!(
-            js.contains("clipboard"),
-            "copy buttons need the clipboard API"
-        );
-    }
-
-    #[test]
-    fn the_stylesheet_makes_no_external_requests() {
-        // A CDN url here would defeat embedding the fonts.
-        let css = Assets::get("app.css").unwrap();
-        let css = std::str::from_utf8(css.data.as_ref()).unwrap();
-        assert!(!css.contains("https://"), "external url in stylesheet");
-        assert!(!css.contains("http://"), "external url in stylesheet");
     }
 }

@@ -7,6 +7,8 @@ pub mod judge;
 pub mod markdown;
 pub mod pair;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod ui;
 
 use axum::Router;

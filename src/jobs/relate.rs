@@ -1,18 +1,9 @@
 //! What else is this artifact already saying?
 //!
-//! Duplicate detection used to be a sampled sweep: `consolidate.sample` points
-//! drawn per run, pairs computed only *within* that draw, so both members of a
-//! pair had to land in the same sample. The probability of that is (sample/N)²
-//! and it decays quadratically — at five thousand artifacts a given pair waits
-//! about a week, at a hundred thousand it waits years. No amount of judging
-//! fixes a pair the detector never hands over.
-//!
-//! This asks the opposite question. One artifact, its own neighbours, one
-//! query. `VectorStore::neighbours` addresses the point by id, so the vector is
-//! looked up in the index and no embedding call is paid, and it already
-//! excludes superseded and deprecated points. Coverage becomes 1, independent
-//! of N, at the cost of one round trip per artifact — which under this
-//! project's economics is free.
+//! One artifact, its own neighbours, one query. `VectorStore::neighbours`
+//! addresses the point by id, so the vector is looked up in the index and no
+//! embedding call is paid, and it already excludes superseded and deprecated
+//! points. Coverage is 1, independent of N, at one round trip per artifact.
 //!
 //! Completeness argument: for a pair (X, Y), the member embedded **second**
 //! finds the other. When X's unit runs, Y is either already indexed — X finds
@@ -28,7 +19,9 @@
 
 use crate::core::Core;
 use crate::error::Result;
+use crate::store::artifacts::Chunk;
 use crate::store::jobs::Stage;
+use crate::store::pairs::PairState;
 
 /// Queue a neighbour query for this artifact.
 ///
@@ -83,11 +76,154 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         };
         // Warn and carry on, as the sweep does. One unwritable pair row is no
         // reason to drop the other neighbours, and the next run finds it again.
-        if let Err(e) = crate::jobs::classify::classify_pair(core, &me, &other, similarity).await {
-            tracing::warn!(a = %me.id, b = %other.id, error = %e, "could not classify a neighbour");
+        match classify_pair(core, &me, &other, similarity).await {
+            // `me` was the contained side and is now hidden. It is read once,
+            // before the loop, so every later neighbour would be judged against
+            // a status that is no longer true — `Core::supersede` re-reads both
+            // sides and refuses the second attempt, so nothing is corrupted, but
+            // each remaining neighbour costs a round trip and a warning about an
+            // ordinary outcome. A hidden artifact has no duplicates worth
+            // recording; that is the same rule the top of this function applies.
+            Ok(true) => {
+                tracing::debug!(artifact_id, "hidden as a duplicate; leaving its neighbours");
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(a = %me.id, b = %other.id, error = %e, "could not classify a neighbour")
+            }
         }
     }
     Ok(())
+}
+
+/// Is the whole of one artifact inside the other, whitespace aside?
+///
+/// Not a similarity — containment. A score says two texts are alike; this says
+/// one of them adds nothing, which is the only ground on which a pair below
+/// `auto_supersede` is hidden without asking anyone.
+fn contains_normalized(long: &str, short: &str) -> bool {
+    let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    !short.trim().is_empty() && n(long).contains(&n(short))
+}
+
+/// Turn one scored pair into one decision. Nothing here calls a model: every
+/// rule is local, and the two that settle a pair outright — containment, and
+/// the `auto_supersede` band — are why most near pairs cost nothing at all.
+///
+/// Returns whether `a` itself was hidden by the decision, which is the caller's
+/// signal that the artifact it is scanning neighbours for is no longer live.
+async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<bool> {
+    if a.id == b.id {
+        return Ok(false);
+    }
+    // Only two live artifacts have a question worth a queue slot, a model call,
+    // or a supersede. A retired artifact must not win against a live one, and a
+    // pair that is already resolved has nothing left to decide.
+    if [a, b].iter().any(|c| !c.in_results()) {
+        return Ok(false);
+    }
+
+    // The free band. Filed, not acted on: resolving pairs one at a time leaves A
+    // pointing at a B that is itself hidden, and following that chain is
+    // something no page and no reader can do. The sweep's union-find groups
+    // these rows first and then picks one survivor per cluster.
+    if score >= core.consolidate.auto_supersede {
+        core.store
+            .record_settled_pair(&a.id, &b.id, score, PairState::NearIdentical)
+            .await?;
+        return Ok(false);
+    }
+
+    // One synthesis call emitting the same passage twice: the shorter text is
+    // wholly inside the longer, and both came out of the same document. That is
+    // a defect in one artifact rather than two sources saying different things,
+    // and nothing is lost by hiding it — the survivor says everything it said,
+    // Ops lists it, and one press undoes it.
+    //
+    // Same corpus is the whole of the condition. Two documents that share a
+    // sentence are two sources, and hiding one of those on a 0.9 similarity is
+    // exactly what `auto_supersede` refuses to do. A merged artifact has no
+    // corpus, so `is_some` also keeps two merges from matching on `None == None`.
+    if a.corpus_id.is_some() && a.corpus_id == b.corpus_id {
+        let (long, short) = if a.text.len() >= b.text.len() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        if contains_normalized(&long.text, &short.text) {
+            // The row first, and the row is also the check. The rule is
+            // deterministic — these two texts satisfy it every time either
+            // artifact is related again — so a row that is already settled
+            // carries a decision this rule must not re-derive, most importantly
+            // a person's Restore after an earlier hide.
+            //
+            // `record_settled_pair` only writes over `pending`, so the write
+            // answers that question itself: `false` means a settled row is
+            // already there and this pair is not ours to act on. Asking first
+            // and writing after the hide left two windows, and the second one
+            // mattered — a crash between the hide and the row left the artifact
+            // hidden with nothing recording why. It was then invisible to the
+            // `in_results` guard above, so nothing re-derived it, and invisible
+            // to this check, so the next relate unit after an operator pressed
+            // Restore hid it again: exactly the failure this row exists to
+            // prevent. Written first, a crash in the same window leaves a
+            // settled row over a duplicate that is still visible, which costs a
+            // listing and hides nothing.
+            if !core
+                .store
+                .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
+                .await?
+            {
+                tracing::debug!(
+                    a = %a.id,
+                    b = %b.id,
+                    "a duplicated passage is already settled; leaving it"
+                );
+                return Ok(false);
+            }
+            if crate::jobs::try_supersede(
+                core,
+                &short.id,
+                &long.id,
+                "a passage one synthesis call emitted twice",
+            )
+            .await
+            {
+                return Ok(short.id == a.id);
+            }
+            // The hide did not happen, so the row saying it did must not stand:
+            // it would leave this pair settled over two artifacts that are both
+            // still visible, and nothing would ever look at it again.
+            if let Err(e) = core
+                .store
+                .unsettle_pair(&a.id, &b.id, PairState::NoConflict)
+                .await
+            {
+                tracing::warn!(
+                    a = %a.id,
+                    b = %b.id,
+                    error = %e,
+                    "could not reopen a pair whose supersede failed; it stays settled"
+                );
+            }
+            return Ok(false);
+        }
+    }
+
+    // Everything else is a question for the dedupe pass.
+    //
+    // `may_disagree` used to gate this, filing a pair with no differing values
+    // as `NoConflict` and leaving both artifacts in every result set. That was
+    // right for the question it was written for — "do these two contradict?" —
+    // and is backwards for deduplication: a pair stating the same values in
+    // different words is the *cleanest* thing there is to merge, and the old
+    // rule made it the one case the model was never shown.
+    //
+    // It survives as a prior in the prompt and as the input to the merge
+    // verification. It is no longer an admission gate. See the design, §6.5.
+    core.store.record_pair(&a.id, &b.id, score).await?;
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -95,14 +231,11 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
-    use crate::store::pairs::PairState;
 
     #[tokio::test]
     async fn an_artifact_finds_its_duplicate_the_moment_it_is_embedded() {
-        // The sweep samples `sample` points and needs both members of a pair in
-        // the same draw, so coverage decays as (sample/N)² — at 100k artifacts
-        // a given pair waits years. Asking one artifact for its own neighbours
-        // costs one Qdrant query, no embedding call, and is exact.
+        // Asking one artifact for its own neighbours costs one Qdrant query,
+        // no embedding call, and is exact.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -260,5 +393,154 @@ mod tests {
             .unwrap();
 
         run(&core, &made[0].id).await.unwrap();
+    }
+    async fn pair_of(core: &Core, ids: &[String]) -> (Chunk, Chunk) {
+        (
+            core.store.get_artifact(&ids[0]).await.unwrap(),
+            core.store.get_artifact(&ids[1]).await.unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_no_differing_values_is_queued_not_closed() {
+        // The polarity change. `may_disagree` admits a pair only when both
+        // sides state values AND those values differ, which is backwards for
+        // deduplication: the pairs it discarded are the cleanest merge
+        // candidates. Two artifacts at 0.93 saying the same thing in different
+        // words used to be filed "nothing to decide", and both stayed in every
+        // result set forever.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let (a, b) = pair_of(&core, &ids).await;
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_at_auto_supersede_is_filed_for_the_cluster_pass() {
+        // It must not reach the dedupe queue: that band is answered by a rule
+        // that costs nothing. It must also not be superseded here — pairwise
+        // resolution is what `Clusters` exists to avoid, because A loses to B
+        // and B then loses to C, leaving A pointing at something hidden.
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let (a, b) = pair_of(&core, &ids).await;
+
+        classify_pair(&core, &a, &b, 0.999).await.unwrap();
+        for id in &ids {
+            assert!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_none(),
+                "the pair was resolved pairwise instead of being filed"
+            );
+        }
+        assert!(core.store.pairs_to_judge(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pair_naming_a_hidden_artifact_is_skipped() {
+        let core = test_core().await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.deprecate(&ids[0]).await.unwrap();
+        let (a, b) = pair_of(&core, &ids).await;
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_hidden_by_its_first_neighbour_stops_there() {
+        // `me` is read once, before the loop. The first neighbour that contains
+        // it hides it, and every neighbour after that would be judged against a
+        // status that is no longer true: `Core::supersede` re-reads both sides
+        // and refuses, so the row is never wrong, but the attempt costs a round
+        // trip and logs a warning about an entirely ordinary outcome.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem.", [1.0, 0.0]),
+                ("Mount the filesystem. Then write.", [0.94, 0.34]),
+                ("Attach the volume before writing.", [0.92, 0.39]),
+            ],
+        )
+        .await;
+
+        run(&core, &ids[0]).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[1].as_str()),
+            "the contained artifact should have been hidden by its nearest neighbour"
+        );
+        // The third neighbour is near but contains nothing, so on the stale
+        // read it reaches `record_pair` and files a question about an artifact
+        // that is already hidden — a pair no one will ever be asked to settle.
+        assert!(
+            core.store
+                .pair_state_between(&ids[0], &ids[2])
+                .await
+                .unwrap()
+                .is_none(),
+            "the scan should have stopped at the neighbour that hid it"
+        );
+    }
+
+    #[tokio::test]
+    async fn recording_the_same_pair_twice_changes_nothing() {
+        // Both producers find the same pair, and the sweep re-finds it on every
+        // run. If the second recording counted, the tallies would grow forever
+        // and a dismissed pair would come back.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let (a, b) = pair_of(&core, &ids).await;
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+        classify_pair(&core, &b, &a, 0.93).await.unwrap();
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

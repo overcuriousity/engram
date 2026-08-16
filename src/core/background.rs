@@ -124,6 +124,126 @@ pub fn spawn_consolidation_ticker(
     })
 }
 
+/// How often the repair pass runs. A constant rather than a setting: this is
+/// what keeps a crashed capture from staying half-finished, which is not a
+/// preference, and the one knob it could plausibly borrow —
+/// `consolidate.interval_hours` — has no meaning in the configuration this pass
+/// exists to survive.
+const REPAIR_INTERVAL_HOURS: u64 = 1;
+
+/// How often the two stores are compared. Deliberately not the repair cadence:
+/// every other pass is either marker-driven or a walk over SQLite, while this
+/// one scrolls the entire vector collection over the network and scans
+/// `artifacts` whole, twice. Nothing produces store drift on its own — it takes
+/// a crash between two writes, or a restore of one side from a backup — so
+/// looking hourly costs a full pass over both stores twenty-four times a day to
+/// find, on almost every base, nothing.
+const STORE_DRIFT_INTERVAL_HOURS: u64 = 24;
+
+/// Finish what a crash left half-done, now and every `REPAIR_INTERVAL_HOURS`,
+/// and compare the two stores every `STORE_DRIFT_INTERVAL_HOURS`.
+///
+/// Its own ticker, and behind no setting at all. These four passes used to ride
+/// on the consolidation sweep, where `consolidate.enabled = false` stopped the
+/// ticker before its loop and so stopped them too: a corpus left `segmenting`
+/// by a crash stayed stuck, an artifact whose winner was deleted stayed hidden
+/// from search and from every page that could put it back, and a lifecycle
+/// write that reached one store and not the other stayed torn — with nothing
+/// but the sweep to notice, and the sweep switched off. None of that is
+/// duplicate hygiene, and none of it is something an operator asks to keep by
+/// turning duplicate hygiene off.
+pub fn spawn_repair_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
+        let mut tick = tokio::time::interval(period);
+        // Not from now: start already reconciles the two stores, on both of its
+        // branches — directly when there is no backfill to run, and as the last
+        // step of the backfill when there is. An interval that fired
+        // immediately would scroll the whole collection a second time for an
+        // answer the process just computed.
+        let drift_period = std::time::Duration::from_secs(STORE_DRIFT_INTERVAL_HOURS * 3600);
+        let mut drift_tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + drift_period, drift_period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => repair_once(&core).await,
+                _ = drift_tick.tick() => reconcile_stores_once(&core).await,
+            }
+        }
+        tracing::info!("repair ticker stopped");
+    })
+}
+
+/// One pass. Each step warns and the next still runs: they are independent, each
+/// is retried on the next tick, and each is most likely to fail on exactly the
+/// base that needs it most.
+pub(crate) async fn repair_once(core: &crate::core::Core) {
+    if let Err(e) = crate::jobs::reconcile::run(core).await {
+        tracing::warn!(error = %e, "could not finish interrupted captures; retrying on the next pass");
+    }
+    // A hidden artifact pointing at nothing is invisible to search and to every
+    // page that could put it back, and nothing else would notice.
+    if let Err(e) = core.heal_dangling_supersessions().await {
+        tracing::warn!(
+            error = %e,
+            "could not restore every artifact whose winner was deleted; retrying on the next pass"
+        );
+    }
+    // The marker pass is cheap, complete for every lifecycle write this system
+    // makes, and does not grow with the base.
+    if let Err(e) = crate::jobs::consolidate::repair_lifecycle_drift(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not finish interrupted lifecycle writes; retrying on the next pass"
+        );
+    }
+    // Duplicate detection is the per-artifact `Relate` unit, armed when an
+    // artifact is indexed. This backstops that arming: an artifact whose unit
+    // never got a row — the arm failed after the embed committed — is asked for
+    // once here, and the row that leaves is what stops it being asked again.
+    //
+    // Here rather than on the sweep, where it was, for the reason everything
+    // else in this pass is here: arming fails on its own, without the sweep's
+    // involvement, and the sweep is behind a setting. An operator who turns
+    // duplicate hygiene off is asking for no *judgements*; the artifact that
+    // lost its unit to a crash would never be asked about again even after they
+    // turned it back on, because a `Relate` row is the only record that it was
+    // ever asked.
+    match core.store.list_unrelated_artifact_ids(500).await {
+        Ok(ids) => {
+            for id in ids {
+                if let Err(e) = crate::jobs::relate::arm(core, &id, 0).await {
+                    tracing::warn!(artifact_id = %id, error = %e, "could not arm a relate unit");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for artifacts that were never related")
+        }
+    }
+}
+
+/// Compare what SQLite says exists against what the vector store holds.
+///
+/// Split out of `repair_once` and given a much longer period because it is the
+/// one repair whose cost is a function of the whole base rather than of what
+/// went wrong: a full scroll of the collection and two full scans of
+/// `artifacts`, every time, on a base with nothing to fix.
+pub(crate) async fn reconcile_stores_once(core: &crate::core::Core) {
+    if let Err(e) = core.heal_store_drift().await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile which artifacts the two stores hold; retrying on the next pass"
+        );
+    }
+}
+
 /// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after.
 ///
 /// Its own ticker rather than a passenger on the consolidation sweep, which is
@@ -175,7 +295,7 @@ pub fn spawn_retention_ticker(
 /// hardware can actually sustain.
 ///
 /// What it does not do is cap units in flight. A unit the queue cannot get
-/// through — an open breaker, a dead endpoint — would then block every other
+/// through — a dead endpoint — would then block every other
 /// pair permanently, which is the head-of-line blocking the per-pair units were
 /// introduced to remove. `live_job` skips a pair whose unit is already queued,
 /// and the ordering in `pairs_to_judge` keeps a pair that keeps failing from
@@ -252,6 +372,93 @@ mod tests {
         assert!(
             core.store.claim_job().await.unwrap().is_none(),
             "a disabled sweep must not be queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_capture_is_repaired_with_the_sweep_switched_off() {
+        // The coupling this ticker exists to break. These passes used to run
+        // inside the consolidation sweep, and the sweep's ticker returns before
+        // its loop when `enabled` is false — so no sweep was ever queued, the
+        // passes never ran, and a corpus left half-segmented by a crash stayed
+        // that way for as long as duplicate hygiene was switched off.
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.enabled = false;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    crate::store::segments::NewSegment {
+                        start_line: 1,
+                        end_line: 10,
+                        text: "first window",
+                        carry_lines: 0,
+                    },
+                    crate::store::segments::NewSegment {
+                        start_line: 11,
+                        end_line: 20,
+                        text: "second window",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+
+        repair_once(&core).await;
+
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the unfinished window should have been re-armed");
+        assert_eq!(job.stage, crate::store::jobs::Stage::SegmentWindow);
+        assert_eq!(
+            job.target_id,
+            crate::jobs::window::unit_target(&src.id, 1),
+            "the window that never ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_indexed_artifact_that_was_never_related_is_armed_with_the_sweep_off() {
+        // The backstop used to sit inside the consolidation sweep, behind its
+        // `enabled` check, while the arming it backstops is allowed to fail
+        // silently. On a base with duplicate hygiene switched off, an artifact
+        // whose `relate::arm` failed after its embed committed was therefore
+        // never related — and never would be, because a `Relate` row is the
+        // only record that it was ever asked.
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.enabled = false;
+        let ids = crate::jobs::consolidate::tests::seed(&core, &[("alpha", [1.0, 0.0])]).await;
+        core.store.mark_embedded(&ids[0], "fake", 0).await.unwrap();
+
+        repair_once(&core).await;
+
+        assert!(
+            core.store
+                .live_job(crate::store::jobs::Stage::Relate, &ids[0])
+                .await
+                .unwrap(),
+            "the backstop did not arm a relate unit"
+        );
+        // A second pass does not arm it again: the row now exists.
+        let first = core.store.claim_job().await.unwrap().expect("the unit");
+        assert_eq!(first.stage, crate::store::jobs::Stage::Relate);
+        core.store.complete_job(first.id).await.unwrap();
+        repair_once(&core).await;
+        assert!(
+            !core
+                .store
+                .live_job(crate::store::jobs::Stage::Relate, &ids[0])
+                .await
+                .unwrap()
         );
     }
 

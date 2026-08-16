@@ -12,13 +12,6 @@ path = "src/lib.rs"
 name = "engram"
 path = "src/main.rs"
 
-# Freezes the evaluation corpus into chunks.json by running the real segmenter
-# once. Not part of the server; it exists so a benchmark run costs no
-# completions and two runs rank exactly the same text.
-[[bin]]
-name = "eval-prepare"
-path = "src/bin/eval_prepare.rs"
-
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }
@@ -37,7 +30,6 @@ sha2 = "0.11"
 hex = "0.4"
 anyhow = "1"
 async-trait = "0.1.92"
-tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"

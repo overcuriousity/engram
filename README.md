@@ -177,11 +177,11 @@ the file — the loader warns if it finds one.
 | `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
 | `vector.pinned_boost` | Extra score for an artifact tagged `pinned`. Default 0.15. |
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
-| `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, optional `tokenizer_path`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
+| `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
 | `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
-| `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `sample`, `per_point`, `interval_hours`, `autonomous`, `dedupe_interval_mins`, `max_dedupe_per_tick`, `merge_max_roots`. |
+| `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`, `merge_max_roots`. |
 | `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |

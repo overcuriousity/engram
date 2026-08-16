@@ -200,9 +200,6 @@ mod tests {
             md.contains("## Read-only first"),
             "the h2 must survive as a markdown heading, got:\n{md}"
         );
-        assert!(crate::infer::split::is_heading_for_test(
-            "## Read-only first"
-        ));
     }
 
     #[test]

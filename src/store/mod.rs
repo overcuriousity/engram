@@ -181,6 +181,11 @@ impl Store {
         sqlx::query("DELETE FROM jobs WHERE stage = 'judge'")
             .execute(&self.pool)
             .await?;
+        // Verdicts recorded while acting was switched off. There is no such
+        // switch now, so they go back to the judge and are acted on.
+        sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
+            .execute(&self.pool)
+            .await?;
 
         let mut missing = Vec::new();
         for (table, columns) in schema_columns(SCHEMA) {
@@ -210,10 +215,7 @@ impl Store {
         Ok(())
     }
 
-    /// Fresh in-memory database with the schema applied. For the tests, and
-    /// for tooling whose output is a file rather than a running instance —
-    /// `eval-prepare` segments a corpus and writes JSON, and has no reason to
-    /// leave a database behind.
+    /// Fresh in-memory database with the schema applied, for the tests.
     pub async fn memory() -> Result<Store> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
@@ -286,6 +288,59 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_would_merge_verdict_from_before_is_reopened_on_upgrade() {
+        // Verdicts recorded while acting was switched off. There is no such
+        // switch now: every verdict is acted on, so these go back to pending
+        // and are judged again — never left stranded in a state nothing reads.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let ids = store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "a".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "b".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .record_pair(&ids[0].id, &ids[1].id, 0.9)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifact_pairs SET state = 'would_merge'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+
+        let states: Vec<String> = sqlx::query_scalar("SELECT state FROM artifact_pairs")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(states, vec!["pending".to_string()]);
+    }
 
     #[tokio::test]
     async fn a_deployed_base_gains_source_url_without_being_recreated() {

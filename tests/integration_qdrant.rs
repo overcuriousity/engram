@@ -58,7 +58,6 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             status: None,
             last_verified_at: None,
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -782,7 +781,6 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             status: None,
             last_verified_at: None,
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -984,7 +982,6 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             // scores, so it has to set the field the formula actually uses.
             last_verified_at: Some(ts),
             superseded_by: None,
-            provenance: None,
         },
     }
 }
@@ -1450,6 +1447,24 @@ async fn neighbours_come_back_ranked_and_never_include_the_artifact_itself() {
 
 #[tokio::test]
 #[ignore]
+async fn neighbours_of_a_collection_that_is_gone_is_an_error() {
+    // Qdrant answers 404 for a missing collection too, and that one is a broken
+    // store rather than an artifact waiting its turn: an alias left pointing at
+    // a dropped generation fails this way for *every* artifact. Reported as an
+    // empty list it would retire the whole duplicate detector silently.
+    let v = QdrantVectors::connect(&cfg("engram_it_neighbours_no_collection"))
+        .await
+        .unwrap();
+    v.drop_collection().await.unwrap();
+
+    assert!(
+        v.neighbours("anything", 5).await.is_err(),
+        "a collection that does not exist was reported as an artifact with no duplicates"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
     // The query asks for one extra so the seed can be removed without
     // shortening the list; the caller must still get exactly what it asked for.
@@ -1476,9 +1491,10 @@ async fn neighbours_are_capped_at_the_limit_after_the_seed_is_dropped() {
 #[tokio::test]
 #[ignore]
 async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
-    // Qdrant answers a query for an absent point with an error. The pane treats
+    // Qdrant answers a query for an absent point with a 404. The pane treats
     // that as an empty list, because an artifact awaiting its embed job is an
-    // ordinary state rather than a failure.
+    // ordinary state rather than a failure — and it is the *only* failure that
+    // gets that treatment, which is what the sibling test above pins down.
     let v = fresh("engram_it_no_neighbours", 4).await;
     v.upsert(vec![point(
         "a",
@@ -1495,32 +1511,8 @@ async fn an_artifact_that_was_never_embedded_has_no_neighbours() {
 
 // ── Consolidation ───────────────────────────────────────────────────────────
 //
-// The distance-matrix API and the payload flag it feeds. Both are Qdrant-side
-// behaviour that the in-memory store can only approximate: `near_pairs` speaks
-// to `/points/search/matrix/pairs` (Qdrant 1.12+) and has to map point ids back
-// to artifact ids through a payload lookup, and the superseded filter has to
-// keep matching points written before the key existed at all.
-
-#[tokio::test]
-#[ignore]
-async fn near_pairs_finds_the_close_pair_over_the_real_matrix_api() {
-    let v = fresh("engram_it_near_pairs", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-        point("c", "s1", vec![0.0, 0.0, 1.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-
-    let pairs = v.near_pairs(100, 5, 0.9).await.unwrap();
-    assert_eq!(pairs.len(), 1, "expected one close pair, got {pairs:?}");
-    // Artifact ids, not point uuids: the mapping back through the payload is
-    // the part of this that cannot be unit-tested.
-    assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("a", "b"));
-    assert!(pairs[0].score >= 0.9, "{pairs:?}");
-    v.drop_collection().await.unwrap();
-}
+// The superseded filter has to keep matching points written before the key
+// existed at all.
 
 #[tokio::test]
 #[ignore]
@@ -1562,35 +1554,8 @@ async fn a_superseded_point_is_offered_neither_as_forgotten_nor_as_related() {
 
 #[tokio::test]
 #[ignore]
-async fn near_pairs_skips_a_deprecated_point() {
-    // A deprecated artifact in the sweep can win its cluster on being newer and
-    // hide a live one — and `set_superseded_by` would overwrite the operator's
-    // deprecation with `superseded` while doing it.
-    let v = fresh("engram_it_near_pairs_deprecated", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
-
-    v.set_lifecycle("b", ArtifactStatus::Deprecated, None)
-        .await
-        .unwrap();
-    assert!(
-        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
-        "a deprecated artifact is still a consolidation candidate"
-    );
-    v.drop_collection().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
 async fn the_backfill_stamps_every_point_in_one_request() {
-    // What startup runs when it finds unstamped points, and what the sweep's
-    // drift repair reuses. Both directions of the repair need `non_active_ids`
-    // to report what the payloads actually say.
+    // What startup runs when it finds unstamped points.
     let v = fresh("engram_it_backfill", 4).await;
     v.upsert(vec![
         point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
@@ -1618,7 +1583,6 @@ async fn the_backfill_stamps_every_point_in_one_request() {
     .unwrap();
 
     assert_eq!(v.unstamped_count().await.unwrap(), 0);
-    assert_eq!(v.non_active_ids(100).await.unwrap(), vec!["b".to_string()]);
     // The deprecation reached search, which is the whole point of the pass.
     let hits = v
         .search(
@@ -1670,28 +1634,6 @@ async fn payload_indexes_are_added_to_a_collection_that_already_exists() {
     assert!(
         indexed().await,
         "an existing collection never got the index this release filters on"
-    );
-    v.drop_collection().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn near_pairs_skips_what_has_already_been_superseded() {
-    // Otherwise every sweep re-finds the pair it resolved last time, and the
-    // review queue never empties.
-    let v = fresh("engram_it_near_pairs_skip", 4).await;
-    v.upsert(vec![
-        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "procedure"),
-        point("b", "s1", vec![0.99, 0.01, 0.0, 0.0], &[], "procedure"),
-    ])
-    .await
-    .unwrap();
-    assert_eq!(v.near_pairs(100, 5, 0.9).await.unwrap().len(), 1);
-
-    v.set_superseded("b", true).await.unwrap();
-    assert!(
-        v.near_pairs(100, 5, 0.9).await.unwrap().is_empty(),
-        "a resolved pair came back"
     );
     v.drop_collection().await.unwrap();
 }
@@ -1997,10 +1939,8 @@ async fn the_stale_queue_is_the_same_list_twice_and_stalest_first() {
 
 #[tokio::test]
 #[ignore]
-async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
-    // What `Core::heal_store_drift` restores an artifact from. Unlike
-    // `lifecycle_of` it has to carry the text, title, tags and category, or the
-    // restored row is an empty artifact with the right id.
+async fn payloads_of_reads_the_whole_payload_and_skips_missing_points() {
+    // What the lifecycle backfill stamps an orphan point from.
     let v = fresh("engram_it_payloads_of", 4).await;
     v.upsert(vec![point(
         "a",
@@ -2032,11 +1972,7 @@ async fn payloads_of_returns_everything_needed_to_rebuild_a_row() {
     assert_eq!(p.category.as_deref(), Some("procedure"));
     assert_eq!(p.tags, vec!["t1".to_string(), "t2".to_string()]);
     assert_eq!(p.created_at, 42);
-    assert_eq!(
-        p.status,
-        Some(ArtifactStatus::Deprecated),
-        "a restored artifact would come back active and searchable"
-    );
+    assert_eq!(p.status, Some(ArtifactStatus::Deprecated));
     v.drop_collection().await.unwrap();
 }
 

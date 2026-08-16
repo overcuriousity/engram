@@ -264,7 +264,6 @@ impl Store {
             near_dupe_of,
             near_dupe_score,
             source_url: source_url.map(str::to_string),
-            // A capture, not a placeholder. See `ensure_restored_corpus`.
             restored_at: None,
             metadata: metadata.clone(),
         };
@@ -286,47 +285,6 @@ impl Store {
         }
         tx.commit().await?;
         Ok(Insertion::Created(src))
-    }
-
-    /// Insert the placeholder parent a restored artifact needs, if it is not
-    /// already there. Returns whether a row was created.
-    ///
-    /// `artifacts.corpus_id` is NOT NULL and references this table, so an
-    /// artifact whose corpus row is gone — the whole-database-lost case this
-    /// exists for — cannot be restored without one. Everything here is derived
-    /// rather than invented where that is possible at all: the id is the one the
-    /// vector payload named, and `raw_text` is the restored artifacts joined,
-    /// which is genuinely all of that document still in the system.
-    ///
-    /// `content_hash` is seeded from the id rather than from `raw_text` because
-    /// the column is UNIQUE and this is not a capture: two stubs whose artifacts
-    /// happen to hold identical text are still two different sources, and
-    /// hashing the reconstructed text would make the second insert fail. Seeding
-    /// from the id also keeps a stub from ever colliding with a real capture of
-    /// the same text, which would silently attach these artifacts to it.
-    ///
-    /// `Partial` is the honest status: some of this source is present, and how
-    /// much is unknowable. `shingles` stays empty so the near-duplicate
-    /// comparison skips it — the reconstructed text is not the document, and
-    /// letting it be compared would report near-duplicates that do not exist.
-    pub async fn ensure_restored_corpus(&self, id: &str, raw_text: &str) -> Result<bool> {
-        let at = now();
-        let res = sqlx::query(
-            "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at, shingles, restored_at)
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, '', ?)
-             ON CONFLICT(id) DO NOTHING",
-        )
-        .bind(id)
-        .bind(raw_text)
-        .bind("restored:vector-store")
-        .bind(content_hash(format!("restored:{id}")))
-        .bind(CorpusStatus::Partial.as_str())
-        .bind(at)
-        .bind(at)
-        .bind(at)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
     }
 
     pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {
@@ -411,24 +369,12 @@ impl Store {
 
     /// How much of this source ended up inside a chunk. Written once every
     /// window has resolved; a low number means the segmenter dropped part of
-    /// the document, which nothing used to notice.
-    pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: f64) -> Result<()> {
+    /// the document. `None` forgets what the last run measured, so the next
+    /// one is measured against its own windows — and is what the
+    /// reconciliation sweep reads as "this document never finished".
+    pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: Option<f64>) -> Result<()> {
         sqlx::query("UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?")
             .bind(coverage)
-            .bind(now())
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Forget what the last run measured, so the next one is measured against
-    /// its own windows. Also what the reconciliation sweep reads as "this
-    /// document never finished": a stale value there is indistinguishable from a
-    /// document that finished cleanly, which is the wrong answer for a source
-    /// whose windows are being thrown away and re-cut.
-    pub async fn clear_corpus_coverage(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET coverage = NULL, updated_at = ? WHERE id = ?")
             .bind(now())
             .bind(corpus_id)
             .execute(&self.pool)

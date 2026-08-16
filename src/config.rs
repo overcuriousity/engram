@@ -62,29 +62,17 @@ impl Default for CaptureConfig {
 /// roles each honouring their own cooldown still interleave into unbroken work.
 /// One gap in front of all of them is the only version of this setting that
 /// means what it says.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct PacingConfig {
     /// Minimum seconds between the end of one background call and the start of
     /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
     /// and the pacer exists to protect the GPU from batch work, not from them.
     pub cooldown_secs: u64,
-    /// Consecutive transport failures before background calls are held.
-    /// Unreadable model output does not count — the endpoint answered. Zero
-    /// disables the breaker, as zero disables the cooldown above.
-    pub breaker_after: usize,
-    /// How long to hold them for before letting one through to probe.
-    pub breaker_probe_secs: u64,
-}
-
-impl Default for PacingConfig {
-    fn default() -> Self {
-        Self {
-            cooldown_secs: 0,
-            breaker_after: 3,
-            breaker_probe_secs: 60,
-        }
-    }
+    /// Retired. The turn serialises calls and the job queue backs off.
+    pub breaker_after: Option<usize>,
+    /// Retired.
+    pub breaker_probe_secs: Option<u64>,
 }
 
 /// Recording real searches so they can be judged later.
@@ -143,20 +131,10 @@ pub struct ConsolidateConfig {
     /// artifacts about one subsystem sit around 0.88 routinely, and superseding
     /// at that score destroys knowledge rather than duplication.
     pub auto_supersede: f32,
-    /// Points sampled from the collection per sweep by the matrix API.
-    pub sample: usize,
-    /// Neighbours considered per sampled point.
+    /// Neighbours considered per artifact when it looks for duplicates.
     pub per_point: usize,
     /// How often the sweep is queued.
     pub interval_hours: u64,
-    /// Whether the dedupe pass may act on what it decides: superseding where
-    /// one artifact plainly replaces another, and writing a merged artifact
-    /// where each side carries something the other lacks.
-    ///
-    /// With this off the verdicts are still recorded, so the queue can be read
-    /// before the system is allowed to act on it. A value conflict is escalated
-    /// to a person either way.
-    pub autonomous: bool,
     /// How often the dedupe ticker arms units, in minutes.
     ///
     /// Its own ticker rather than a passenger on the sweep. `max_judgements`
@@ -203,6 +181,10 @@ pub struct ConsolidateConfig {
     /// Retired. A number per 24-hour tick was a budget only while the sweep was
     /// the only producer of pairs; see `max_dedupe_per_tick`, which is a rate.
     pub max_judgements: Option<usize>,
+    /// Retired. Detection is per artifact now, not a sampled sweep.
+    pub sample: Option<usize>,
+    /// Retired. Every verdict is acted on; every merge and supersede has undo.
+    pub autonomous: Option<bool>,
 }
 
 impl Default for ConsolidateConfig {
@@ -212,10 +194,8 @@ impl Default for ConsolidateConfig {
             near_dupe_min: 0.90,
             review_min: 0.88,
             auto_supersede: 0.95,
-            sample: 2000,
             per_point: 5,
             interval_hours: 24,
-            autonomous: true,
             dedupe_interval_mins: 15,
             max_dedupe_per_tick: 5,
             merge_max_roots: 8,
@@ -223,6 +203,8 @@ impl Default for ConsolidateConfig {
             stale_max_hits: 0,
             judge: None,
             max_judgements: None,
+            sample: None,
+            autonomous: None,
         }
     }
 }
@@ -329,6 +311,7 @@ pub struct SynthesizeRole {
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub output_ratio: f32,
+    /// Retired: budgets use the character estimate.
     #[serde(default)]
     pub tokenizer_path: Option<String>,
     /// Sent as `reasoning_effort` when set. A reasoning model spends output
@@ -546,12 +529,10 @@ impl Config {
     /// A retired key still says what its operator wanted, and is honoured where
     /// something current can carry it.
     ///
-    /// `judge` gated whether the dedupe pass was asked anything at all. Ignoring
-    /// it would have been the worst possible reading of `judge = false`: that
+    /// `judge` gated whether the dedupe pass was asked anything at all. That
     /// file is the record of an operator declining the one stage that spends
-    /// inference and hides artifacts, and an upgrade that dropped the key would
-    /// have handed them `autonomous = true` on the strength of it. So it is
-    /// carried to the setting that means the same thing now.
+    /// inference and hides artifacts, so it is carried to the setting that
+    /// means the same thing now.
     ///
     /// `max_judgements` has no successor to carry to — a count per tick and a
     /// rate are not the same quantity — so it is only named.
@@ -562,8 +543,7 @@ impl Config {
                 tracing::warn!(
                     "consolidate.judge has been retired; reading judge = false as \
                      max_dedupe_per_tick = 0, which is what stops the dedupe pass \
-                     asking anything now. consolidate.autonomous, separately, decides \
-                     whether an answer is acted on."
+                     asking anything now."
                 );
             }
             Some(true) => tracing::warn!(
@@ -579,6 +559,19 @@ impl Config {
                 per_tick = self.consolidate.max_dedupe_per_tick,
                 "consolidate.max_judgements has been retired and is being ignored; \
                  the budget is a rate now — see dedupe_interval_mins and max_dedupe_per_tick"
+            );
+        }
+        if self.consolidate.sample.is_some() {
+            tracing::warn!(
+                "consolidate.sample has been retired and is being ignored; every artifact \
+                 looks for its own duplicates when it is indexed"
+            );
+        }
+        if self.consolidate.autonomous.is_some() {
+            tracing::warn!(
+                "consolidate.autonomous has been retired and is being ignored; every verdict \
+                 is acted on, and every merge and supersede has an undo. \
+                 max_dedupe_per_tick = 0 is what stops the pass asking"
             );
         }
     }
@@ -662,6 +655,18 @@ impl Config {
     /// an operator discover the pacing they configured has been off since the
     /// upgrade.
     fn warn_on_moved_keys(&self) {
+        if self.pacing.breaker_after.is_some() || self.pacing.breaker_probe_secs.is_some() {
+            tracing::warn!(
+                "pacing.breaker_after / breaker_probe_secs have been retired and are being \
+                 ignored; one background call runs at a time and a failing unit backs off"
+            );
+        }
+        if self.infer.synthesize.tokenizer_path.is_some() {
+            tracing::warn!(
+                "infer.synthesize.tokenizer_path has been retired and is being ignored; \
+                 token budgets use the character estimate"
+            );
+        }
         if self.infer.synthesize.cooldown_secs.is_some() {
             tracing::warn!(
                 "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \
@@ -896,12 +901,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     }
 
     #[test]
-    fn an_operator_who_switched_the_judge_off_does_not_get_autonomy_instead() {
+    fn an_operator_who_switched_the_judge_off_is_still_not_asked() {
         // `judge = false` is the record of someone declining the one stage that
-        // spends inference and hides artifacts. The key was retired and the
-        // struct takes its defaults, so ignoring it would read that file as
-        // consent to `autonomous = true` — arriving by upgrade, from a config
-        // that says the opposite. It is carried to the key that stops the asking.
+        // spends inference and hides artifacts. It is carried to the key that
+        // stops the asking.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[consolidate]\njudge = false\n"));

@@ -123,7 +123,7 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
     };
 
     let cov = crate::infer::verify::content_coverage(&src.raw_text, &made);
-    core.store.set_corpus_coverage(corpus_id, cov).await?;
+    core.store.set_corpus_coverage(corpus_id, Some(cov)).await?;
     Ok(cov)
 }
 
@@ -154,44 +154,21 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         );
     }
 
-    // Armed rather than called. Naming is a model call like any other, and
-    // making it here would put it inside whichever window happened to finish
-    // last — uncounted, unpaced, and in front of work the queue had ordered.
-    //
-    // Named at all only now: the artifact titles are the cheapest description
-    // of what the document turned out to be about, and they only exist once its
-    // windows have run. A name given at capture is left alone — someone chose it.
-    //
-    // Armed once, and never again. Settling runs afresh every time a window
-    // resolves, so a document with one window the model will not read settles
-    // on every failed retry of it — and re-arming here would reset the title
-    // unit's attempts each time and spend another `MAX_ATTEMPTS` calls on a name
-    // that has already been given up on, forever. That is the exact opposite of
-    // what makes this the one unit allowed to stop asking.
-    //
-    // The one way back is an operator's reprocess, which deletes the row — the
-    // rule is about repeated settles of one document, not about refusing a
-    // person who asked for another try.
+    // Naming is armed, not called, and armed once: settling runs afresh every
+    // time a window resolves, and re-arming would reset the title unit's
+    // attempts and spend another `MAX_ATTEMPTS` on a name already given up
+    // on. An operator's reprocess deletes the row and is the one way back. A
+    // name given at capture is left alone — someone chose it.
     if src.title_hint.is_none() && !core.store.has_job(Stage::Title, corpus_id).await? {
         core.store
             .enqueue(Stage::Title, "corpus", corpus_id)
             .await?;
     }
 
-    // One job for the whole source: every chunk was just written, and embedding
-    // them together is one inference call instead of `chunks.len()`.
-    //
-    // Idle-only, because settling runs afresh every time a window resolves and
-    // this is reached on every one of them. Re-arming a *running* embed job puts
-    // it back in the queue for a second worker while the first is still inside
-    // the embedder — two workers embedding the same batch, and whichever
-    // finishes second closing the row the other's `rearm_if_more` had just
-    // re-armed, leaving the corpus half-embedded. Re-arming a *pending* one is
-    // quieter and no better: it winds `attempts` and `run_after` back every
-    // thirty seconds, so a dead embedder is hammered with no backoff, and resets
-    // the `seq` that `rearm_if_more` climbs. A job already queued will pick up
-    // the chunks this settle just wrote; only one that already finished needs
-    // arming again.
+    // One job for the whole source, idle-only. Re-arming a *running* embed
+    // puts a second worker inside the same batch; re-arming a *pending* one
+    // winds `attempts`, `run_after` and `seq` back on every settle. A job
+    // already queued picks up the chunks this settle wrote.
     core.store
         .rearm_idle_seq(Stage::Embed, "corpus", corpus_id, 0)
         .await?;
@@ -227,22 +204,17 @@ pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
         .collect();
 
     let permit = core.gate.background().await;
-    match core.synthesizer.title(&src.raw_text, &titles).await {
+    let named = core.synthesizer.title(&src.raw_text, &titles).await;
+    permit.finished();
+    match named {
         Ok(Some(t)) => {
-            permit.succeeded();
             core.store.set_title_hint(corpus_id, &t).await?;
             Ok(())
         }
         // The synthesizer has no opinion about titles. Not a failure, and not
         // worth another call.
-        Ok(None) => {
-            permit.succeeded();
-            Ok(())
-        }
-        Err(e) => {
-            permit.failed(&e);
-            Err(e)
-        }
+        Ok(None) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -308,7 +280,7 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::core::test_support::test_core;
     use crate::store::corpora::CorpusStatus;
 
     #[tokio::test]
@@ -656,7 +628,10 @@ mod tests {
         // A synthesizer that fails every call cannot produce artifacts either,
         // so naming is exercised through `finish` on a corpus that already has
         // them: the state a real failure leaves behind.
-        let failing = test_core_with_failing_synthesizer().await;
+        let mut failing = test_core().await;
+        failing.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let hurt = failing
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
@@ -1056,9 +1031,10 @@ Then run sync.";
     #[tokio::test]
     async fn a_paraphrased_literal_is_re_segmented_once_and_then_accepted() {
         let mut core = test_core().await;
-        let synthesizer = std::sync::Arc::new(
-            crate::infer::fake::ParaphrasingSynthesizer::recovering("oflag=sync "),
-        );
+        let synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
+            "oflag=sync ",
+            false,
+        ));
         core.synthesizer = synthesizer.clone();
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
@@ -1075,9 +1051,10 @@ Then run sync.";
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::ParaphrasingSynthesizer::persistent("oflag=sync "),
-        );
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
+            "oflag=sync ",
+            true,
+        ));
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         segment_all(&core, &out.id).await;
@@ -1109,7 +1086,8 @@ Then run sync.";
         // Where the chunk still reproduces its source, the real span can be
         // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::LyingSpanSynthesizer);
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: true });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -1136,7 +1114,8 @@ Then run sync.";
         // model call on a whole segment. The span falls back to the window and
         // the reader is none the wiser.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::HallucinatingSynthesizer);
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: false });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await

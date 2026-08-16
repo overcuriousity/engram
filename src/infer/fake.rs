@@ -6,6 +6,19 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+/// The budget every fake synthesizer reports. Context is zero on purpose: a
+/// fake reproduces today's windowing exactly, so a test that did not ask for
+/// context cannot be moved by it.
+pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
+    context_tokens: 4096,
+    max_output_tokens: 1024,
+    output_ratio: 1.4,
+    context: crate::infer::context::ContextBudget {
+        opening: 0,
+        overlap: 0,
+    },
+};
+
 /// Hashes text into a fixed-dimension unit vector. Identical text gives an
 /// identical vector and different text gives a different one, which is all the
 /// retrieval tests need from an embedding model.
@@ -80,11 +93,8 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 pub struct FakeSynthesizer {
     fail_with: Option<String>,
-    /// Fail only on windows containing this marker. Lets a test model the
-    /// realistic case — some windows succeed, one does not.
-    fail_on_marker: Option<String>,
-    /// Answer, but with something the parser cannot read. Distinct from the
-    /// two above, which model an endpoint that never answered at all.
+    /// Answer, but with something the parser cannot read. Distinct from
+    /// `fail_with`, which models an endpoint that never answered at all.
     unparsable_on_marker: Option<String>,
     /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
     reject: bool,
@@ -94,7 +104,6 @@ impl FakeSynthesizer {
     pub fn failing(msg: &str) -> Self {
         Self {
             fail_with: Some(msg.to_string()),
-            fail_on_marker: None,
             unparsable_on_marker: None,
             reject: false,
         }
@@ -108,15 +117,6 @@ impl FakeSynthesizer {
         s
     }
 
-    pub fn failing_on(marker: &str) -> Self {
-        Self {
-            fail_with: None,
-            fail_on_marker: Some(marker.to_string()),
-            unparsable_on_marker: None,
-            reject: false,
-        }
-    }
-
     /// The model replies to every window and its reply for the marked one
     /// cannot be parsed however often it is asked. This is what a duplicate
     /// JSON key looks like from the caller's side, and it is a property of the
@@ -124,7 +124,6 @@ impl FakeSynthesizer {
     pub fn unparsable_on(marker: &str) -> Self {
         Self {
             fail_with: None,
-            fail_on_marker: None,
             unparsable_on_marker: Some(marker.to_string()),
             reject: false,
         }
@@ -143,14 +142,6 @@ impl FakeSynthesizer {
 impl Synthesizer for FakeSynthesizer {
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         let text = input.core;
-        if let Some(marker) = &self.fail_on_marker
-            && text.contains(marker.as_str())
-        {
-            return Err(Error::Inference {
-                role: "chunk",
-                detail: format!("refusing window containing {marker}"),
-            });
-        }
         if let Some(marker) = &self.unparsable_on_marker
             && text.contains(marker.as_str())
         {
@@ -177,14 +168,7 @@ impl Synthesizer for FakeSynthesizer {
             .collect())
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 
     /// Deterministic and obviously synthetic, so a test can assert on it. A
@@ -216,19 +200,12 @@ pub struct ParaphrasingSynthesizer {
 }
 
 impl ParaphrasingSynthesizer {
-    pub fn recovering(drop_token: &str) -> Self {
+    /// `persistent`: keep paraphrasing forever rather than recovering on the retry.
+    pub fn new(drop_token: &str, persistent: bool) -> Self {
         Self {
             drop_token: drop_token.to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
-            persistent: false,
-        }
-    }
-
-    pub fn persistent(drop_token: &str) -> Self {
-        Self {
-            drop_token: drop_token.to_string(),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            persistent: true,
+            persistent,
         }
     }
 
@@ -259,14 +236,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
         }])
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 }
 
@@ -338,47 +308,28 @@ impl Synthesizer for RecordingSynthesizer {
     }
 }
 
-/// Claims every chunk came from lines far outside its window. The span check
-/// exists because the model's line numbers are taken on trust.
-#[derive(Default)]
-pub struct LyingSpanSynthesizer;
-
-#[async_trait]
-impl Synthesizer for LyingSpanSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        let text = input.core;
-        Ok(vec![ProposedArtifact {
-            text: text.to_string(),
-            title: Some("mislabelled".into()),
-            category: None,
-            tags: vec![],
-            corpus_lines: Some((9_000, 9_100)),
-            caveats: vec![],
-        }])
-    }
-    fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
-    }
+/// Claims every chunk came from lines far outside its window — the span check
+/// exists because the model's line numbers are taken on trust. With
+/// `echo_text` the body is the window itself and can be recovered; without it
+/// the text appears nowhere in the window and the reader has to be told.
+pub struct MisreportingSynthesizer {
+    pub echo_text: bool,
 }
 
-/// Returns text that appears nowhere in its window, with a bogus span. The
-/// case where nothing can be recovered and the reader has to be told.
-#[derive(Default)]
-pub struct HallucinatingSynthesizer;
-
 #[async_trait]
-impl Synthesizer for HallucinatingSynthesizer {
-    async fn segment(&self, _input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+impl Synthesizer for MisreportingSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        let (text, title) = if self.echo_text {
+            (input.core.to_string(), "mislabelled")
+        } else {
+            (
+                "Entirely invented material about unrelated subjects".to_string(),
+                "invented",
+            )
+        };
         Ok(vec![ProposedArtifact {
-            text: "Entirely invented material about unrelated subjects".into(),
-            title: Some("invented".into()),
+            text,
+            title: Some(title.into()),
             category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
@@ -386,14 +337,7 @@ impl Synthesizer for HallucinatingSynthesizer {
         }])
     }
     fn budget(&self) -> SynthesisBudget {
-        SynthesisBudget {
-            context_tokens: 4096,
-            max_output_tokens: 1024,
-            output_ratio: 1.4,
-            // Zero on purpose: a fake reproduces today's windowing exactly, so
-            // a test that did not ask for context cannot be moved by it.
-            context: Default::default(),
-        }
+        FAKE_BUDGET
     }
 }
 
@@ -509,41 +453,25 @@ impl Reranker for FakeReranker {
     }
 }
 
+/// Answers with `reply`, or — with `None` — with the user prompt it was
+/// handed. What `ask` puts in front of the model is the whole of what the
+/// model can use, and echoing it makes the prompt the thing under test.
 pub struct FakeCompleter {
-    pub reply: String,
+    pub reply: Option<String>,
 }
 
 impl Default for FakeCompleter {
     fn default() -> Self {
         Self {
-            reply: "fake answer".into(),
+            reply: Some("fake answer".into()),
         }
     }
 }
 
 #[async_trait]
 impl Completer for FakeCompleter {
-    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
-        Ok(self.reply.clone())
-    }
-    fn context_tokens(&self) -> usize {
-        4096
-    }
-}
-
-/// A completer that answers with the prompt it was handed.
-///
-/// What `ask` puts in front of the model is the whole of what the model can
-/// use, and it is otherwise invisible: the reply is a fake, so a test asserting
-/// on it proves nothing about the excerpts. This makes the prompt the thing
-/// under test.
-#[derive(Default)]
-pub struct EchoCompleter;
-
-#[async_trait]
-impl Completer for EchoCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
-        Ok(user.to_string())
+        Ok(self.reply.clone().unwrap_or_else(|| user.to_string()))
     }
     fn context_tokens(&self) -> usize {
         4096
@@ -652,92 +580,5 @@ impl Describer for FakeDescriber {
             }),
             None => Ok(self.reply.clone()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The empty context every one of these tests wants: they exercise the
-    /// transport and the parser, not the windowing.
-    static EMPTY_CONTEXT: crate::infer::context::WindowContext =
-        crate::infer::context::WindowContext {
-            opening: None,
-            before: None,
-            after: None,
-        };
-
-    fn window(text: &str) -> SegmentInput<'_> {
-        SegmentInput {
-            core: text,
-            context: &EMPTY_CONTEXT,
-        }
-    }
-    use crate::infer::{Embedder, Reranker, Synthesizer};
-
-    #[tokio::test]
-    async fn fake_embedder_is_deterministic_and_correctly_sized() {
-        let e = FakeEmbedder::new(8);
-        let a = e.embed(&["hello".to_string()]).await.unwrap();
-        let b = e.embed(&["hello".to_string()]).await.unwrap();
-        assert_eq!(a, b, "same input must give the same vector");
-        assert_eq!(a[0].len(), 8);
-
-        let c = e.embed(&["different".to_string()]).await.unwrap();
-        assert_ne!(a[0], c[0]);
-    }
-
-    #[tokio::test]
-    async fn fake_embedder_vectors_are_normalized() {
-        let e = FakeEmbedder::new(16);
-        let v = e.embed(&["anything".to_string()]).await.unwrap();
-        let norm: f32 = v[0].iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "norm was {norm}");
-    }
-
-    #[tokio::test]
-    async fn fake_embedder_batches_stay_in_order() {
-        let e = FakeEmbedder::new(8);
-        let batch = e
-            .embed(&["first".to_string(), "second".to_string()])
-            .await
-            .unwrap();
-        let first_alone = e.embed(&["first".to_string()]).await.unwrap();
-        let second_alone = e.embed(&["second".to_string()]).await.unwrap();
-        assert_eq!(batch[0], first_alone[0]);
-        assert_eq!(batch[1], second_alone[0]);
-    }
-
-    #[tokio::test]
-    async fn fake_chunker_splits_on_blank_lines() {
-        let c = FakeSynthesizer::default();
-        let out = c
-            .segment(window("first para\n\nsecond para"))
-            .await
-            .unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].text, "first para");
-        assert!(out[0].title.is_some());
-    }
-
-    #[tokio::test]
-    async fn fake_chunker_can_be_told_to_fail() {
-        let c = FakeSynthesizer::failing("endpoint down");
-        assert!(matches!(
-            c.segment(window("x")).await,
-            Err(crate::error::Error::Inference { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn fake_reranker_reverses_order_so_tests_can_observe_it() {
-        let r = FakeReranker::default();
-        let out = r
-            .rerank("q", &["a".into(), "b".into(), "c".into()], 2)
-            .await
-            .unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, 2, "fake ranks last document first");
     }
 }

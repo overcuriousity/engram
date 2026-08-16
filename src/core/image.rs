@@ -209,6 +209,10 @@ pub fn exif_to_json(exif: &exif::Exif) -> serde_json::Value {
         out.insert("gps".into(), gps);
     }
 
+    // Everything else the file carried, unread. The named fields above are the
+    // ones something acts on; these are kept because ingest is the only moment
+    // they exist — the original is not stored, so a lens, an exposure or the
+    // software that wrote the file is gone for good the instant it is dropped.
     let mut tags = serde_json::Map::new();
     for f in exif.fields() {
         if f.ifd_num != In::PRIMARY {
@@ -234,6 +238,7 @@ pub fn exif_to_json(exif: &exif::Exif) -> serde_json::Value {
     if !tags.is_empty() {
         out.insert("tags".into(), tags.into());
     }
+
     serde_json::Value::Object(out)
 }
 

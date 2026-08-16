@@ -19,7 +19,7 @@
   --radius-lg: 10px;
 }
 
-:root, [data-theme="light"] {
+:root {
   --color-bg-base: #f8f6f1;
   --color-bg-surface: #f2f0ea;
   --color-bg-elevated: #ffffff;
@@ -53,38 +53,40 @@
   color-scheme: light;
 }
 
-[data-theme="dark"] {
-  --color-bg-base: #0e1015;
-  --color-bg-surface: #14171d;
-  --color-bg-elevated: #1b1e26;
-  --color-bg-overlay: #22252f;
-  --color-bg-hover: #262a34;
-  --color-bg-active: #2d3140;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-base: #0e1015;
+    --color-bg-surface: #14171d;
+    --color-bg-elevated: #1b1e26;
+    --color-bg-overlay: #22252f;
+    --color-bg-hover: #262a34;
+    --color-bg-active: #2d3140;
 
-  --color-fg-primary: #e2e4ec;
-  --color-fg-secondary: #8b8fa8;
-  --color-fg-muted: #7d82a0;
-  --color-fg-disabled: #3a3d50;
+    --color-fg-primary: #e2e4ec;
+    --color-fg-secondary: #8b8fa8;
+    --color-fg-muted: #7d82a0;
+    --color-fg-disabled: #3a3d50;
 
-  --color-border: #232636;
-  --color-border-strong: #2e3244;
-  --color-border-subtle: #191c26;
+    --color-border: #232636;
+    --color-border-strong: #2e3244;
+    --color-border-subtle: #191c26;
 
-  --color-accent: #5aa8b0;
-  --color-accent-dim: rgba(90, 168, 176, 0.15);
-  --color-accent-muted: rgba(90, 168, 176, 0.35);
-  --color-accent-fg: #0e1015;
+    --color-accent: #5aa8b0;
+    --color-accent-dim: rgba(90, 168, 176, 0.15);
+    --color-accent-muted: rgba(90, 168, 176, 0.35);
+    --color-accent-fg: #0e1015;
 
-  --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
-  --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
-  --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
-  --color-info: #5e9ed6;    --color-info-dim: rgba(94, 158, 214, 0.15);
+    --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
+    --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
+    --color-info: #5e9ed6;    --color-info-dim: rgba(94, 158, 214, 0.15);
 
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.6);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.8);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.8);
 
-  color-scheme: dark;
+    color-scheme: dark;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -382,7 +384,7 @@ body { overflow-x: hidden; }
 /* ── Reading aids: highlighting, clamping, copying ───────────────────────── */
 
 mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; padding: 0 1px; }
-[data-theme="dark"] mark { background: var(--color-warning-dim); }
+@media (prefers-color-scheme: dark) { mark { background: var(--color-warning-dim); } }
 
 .clampable.is-clamped { max-height: 14rem; overflow: hidden; position: relative; }
 .clampable.is-clamped::after {
@@ -619,6 +621,11 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 .progress span { display: block; height: 100%; background: var(--color-accent); }
 .misses { max-width: 52rem; margin-bottom: 1.25rem; }
 .misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; }
+/* The rest of what the camera wrote. Folded, and smaller than the facts above
+   it, because it is a reference to fall back on rather than something to read. */
+.exif-all { margin-top: 0.75rem; font-size: 0.8125rem; }
+.exif-all summary { cursor: pointer; }
+.exif-all table { margin-top: 0.5rem; }
 /* The line after a verdict. Quiet by design — its job is to say what was just
    learned, not to congratulate. */
 .judge-flash { margin: 0 0 1rem; font-size: 0.875rem; color: var(--color-fg-secondary); }

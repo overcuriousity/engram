@@ -1,9 +1,8 @@
 //! Writing the evaluation corpus straight out of the live database.
 //!
-//! Cheaper and steadier than `eval-prepare`: the artifacts have already been
-//! synthesised, so this costs no completions, and it keeps their production
-//! ids — which means re-exporting does not invalidate the pairs the way
-//! re-freezing does. The queries come from searches actually made, and the
+//! The artifacts have already been synthesised, so this costs no completions,
+//! and it keeps their production ids — which means re-exporting does not
+//! invalidate the pairs. The queries come from searches actually made, and the
 //! expectations from verdicts actually given.
 
 use crate::eval::{EvalPair, FrozenArtifact, save_artifacts, save_pairs};

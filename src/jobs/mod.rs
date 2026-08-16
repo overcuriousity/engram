@@ -1,4 +1,3 @@
-pub mod classify;
 pub mod consolidate;
 pub mod dedupe;
 pub mod describe;
@@ -18,6 +17,25 @@ use tracing::Instrument;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A job still marked `running` after this long belonged to a process that died.
 pub const STUCK_AFTER_SECS: i64 = 600;
+
+/// Supersede `loser` by `winner`, and carry on if it cannot be done.
+///
+/// `supersede` refuses a side that is no longer active, and every caller here
+/// read those statuses a moment ago — so an operator deprecating one in
+/// between is an ordinary race, not a reason to fail the caller's whole
+/// sweep or unit. Returns whether it happened.
+pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &str) -> bool {
+    match core.supersede(loser, winner).await {
+        Ok(()) => {
+            tracing::info!(superseded = %loser, by = %winner, why);
+            true
+        }
+        Err(e) => {
+            tracing::warn!(superseded = %loser, by = %winner, error = %e, "could not hide {why}; it stays active");
+            false
+        }
+    }
+}
 
 /// Claim and run at most one job. Returns false when the queue is empty, which
 /// is the loop's signal to sleep.
@@ -77,26 +95,15 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // A pair the model will not judge stays pending, and a later
-                // sweep decides again whether it is worth asking about. Holding
-                // a unit at the six-hour ceiling for it would keep re-asking a
-                // question the sweep may no longer want answered.
-                //
-                // That later decision is `pairs_to_judge`'s
-                // `MAX_UNREADABLE_JUDGEMENTS` test. Without one, closing the
-                // unit here is not a hand-off but a loop: the next sweep finds
-                // the pair pending with no live job and arms it for another
-                // `MAX_ATTEMPTS`, forever.
-                (Stage::Dedupe, _) if exhausted => {
-                    tracing::warn!(error = %e, "could not judge this pair; leaving it for a later sweep");
-                    core.store.complete_job(job.id).await?;
-                }
-                // A name is decoration and the corpus already has its fallback,
-                // so this is the one unit that stops asking. Everything else
+                // The two units that stop asking. A name is decoration and the
+                // corpus already has its fallback. A pair the model will not
+                // judge stays pending, and `pairs_to_judge` orders it behind
+                // the ones that have been asked less, so a later sweep decides
+                // again whether it is worth asking about. Everything else
                 // stays queued at the backoff ceiling, because everything else
                 // carries knowledge that would otherwise be lost.
-                (Stage::Title, _) if exhausted => {
-                    tracing::warn!(error = %e, "could not name this corpus; leaving it unnamed");
+                (Stage::Dedupe | Stage::Title, _) if exhausted => {
+                    tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
                 }
                 // The photo is stored, so nothing is lost by stopping — but a
@@ -138,14 +145,10 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     park_failed_if_still_there(core, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
-                // Kept armed like every other failed unit, but at the *unit's*
-                // own attempt count rather than at the constant. Passing
-                // `MAX_ATTEMPTS` pinned the delay at its value for ever, so a
-                // window the endpoint refuses outright would poll it every 32
-                // seconds until someone noticed — far harder than a window it
-                // merely could not reach, which backs off to six hours. The
-                // floor stays, so the first refusal still waits out the whole
-                // ordinary budget rather than retrying in two seconds.
+                // Kept armed at the unit's own attempt count, floored at
+                // `MAX_ATTEMPTS`: the first refusal waits out the ordinary
+                // budget, and later ones keep backing off rather than pinning
+                // the delay at one value for ever.
                 _ => {
                     core.store
                         .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())
@@ -250,10 +253,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::test_support::{
-        test_core, test_core_with_embedder, test_core_with_failing_synthesizer,
-        test_core_with_rejecting_synthesizer,
-    };
+    use crate::core::test_support::test_core;
     use crate::infer::fake::FakeEmbedder;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
@@ -261,7 +261,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_embed_the_endpoint_rejects_is_retried_chunk_by_chunk() {
-        let core = test_core_with_embedder(Arc::new(FakeEmbedder::rejecting("HTTP 413"))).await;
+        let mut core = test_core().await;
+        core.embedder = Arc::new(FakeEmbedder::rejecting("HTTP 413"));
         let src = core
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
@@ -302,7 +303,10 @@ mod tests {
     /// merely failed to reach it — the wrong way round.
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
-        let core = test_core_with_rejecting_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
+            "HTTP 400: context length exceeded",
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -383,7 +387,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
-        let core = test_core_with_failing_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to

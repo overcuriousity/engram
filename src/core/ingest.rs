@@ -1,7 +1,9 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::corpora::{CorpusStatus, Followup, Insertion, NearDuplicate, content_hash};
+use crate::store::corpora::{
+    Corpus, CorpusStatus, Followup, Insertion, NearDuplicate, content_hash,
+};
 use crate::store::jobs::Stage;
 use crate::store::now;
 
@@ -36,22 +38,16 @@ pub struct IngestOutcome {
     pub near_duplicate: Option<NearDuplicate>,
 }
 
-/// What one pass of `Core::heal_store_drift` put back.
-///
-/// Reported rather than merely logged because "the stores agreed" and "the
-/// stores disagreed and were repaired" are different facts, and a repair that
-/// fires on every sweep over a base in agreement is a bug that hides behind a
-/// correct end state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct StoreDrift {
-    /// Artifact rows rebuilt from a surviving vector payload.
-    pub rows_restored: usize,
-    /// Placeholder corpus rows written because a restored artifact's source was
-    /// not stored either.
-    pub corpora_restored: usize,
-    /// Artifacts whose row claimed `done` but had no point, re-queued for
-    /// embedding.
-    pub points_requeued: usize,
+impl IngestOutcome {
+    /// The answer for text or bytes already stored: the corpus that has them.
+    fn existing(c: &Corpus) -> Self {
+        IngestOutcome {
+            id: c.id.clone(),
+            status: c.status.clone(),
+            duplicate: true,
+            near_duplicate: None,
+        }
+    }
 }
 
 /// What an operator decided about a parked capture.
@@ -158,12 +154,7 @@ impl Core {
 
         if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
-            return Ok(IngestOutcome {
-                id: existing.id,
-                status: existing.status,
-                duplicate: true,
-                near_duplicate: None,
-            });
+            return Ok(IngestOutcome::existing(&existing));
         }
 
         // Computed once, before the insert, so the same signature answers "is
@@ -208,12 +199,7 @@ impl Core {
             // moment earlier.
             Insertion::Existing(existing) => {
                 tracing::info!(corpus_id = %existing.id, "concurrent duplicate ingest, returning the stored source");
-                return Ok(IngestOutcome {
-                    id: existing.id,
-                    status: existing.status,
-                    duplicate: true,
-                    near_duplicate: None,
-                });
+                return Ok(IngestOutcome::existing(&existing));
             }
         };
 
@@ -284,12 +270,7 @@ impl Core {
         let hash = content_hash(&bytes);
         if let Some(existing) = self.store.find_by_hash(&hash).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate image, returning existing source");
-            return Ok(IngestOutcome {
-                id: existing.id,
-                status: existing.status,
-                duplicate: true,
-                near_duplicate: None,
-            });
+            return Ok(IngestOutcome::existing(&existing));
         }
         // Decoding, EXIF, the preview and its re-encode are a synchronous walk
         // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
@@ -350,12 +331,7 @@ impl Core {
         {
             Insertion::Created(src) => src,
             Insertion::Existing(existing) => {
-                return Ok(IngestOutcome {
-                    id: existing.id,
-                    status: existing.status,
-                    duplicate: true,
-                    near_duplicate: None,
-                });
+                return Ok(IngestOutcome::existing(&existing));
             }
         };
         tracing::info!(
@@ -677,9 +653,9 @@ impl Core {
     /// logged and skipped rather than abandoning every artifact after it —
     /// a single missing row must not be what keeps a base unbackfilled.
     ///
-    /// Finishes with `heal_store_drift`, so a point whose row is gone gets the
-    /// row back and is stamped by the next pass, rather than sitting unstamped
-    /// forever and re-triggering this one on every start.
+    /// A point whose row is gone is stamped from what its own payload says,
+    /// so it does not sit unstamped forever and re-trigger this on every
+    /// start; `heal_store_drift` then reports it.
     pub async fn backfill_lifecycle(&self) -> Result<usize> {
         const BATCH: usize = 256;
         let ids = self.store.list_all_artifact_ids().await?;
@@ -704,61 +680,52 @@ impl Core {
             n += rows.len();
             tracing::info!(done = n, total, "lifecycle backfill progress");
         }
-        self.heal_store_drift().await?;
-        // The two-sided scan runs here and nowhere else. It is O(hidden
-        // artifacts), which autonomous merging makes grow without bound, so it
-        // stopped being something the sweep can afford on every tick — but a
-        // backfill is exactly the moment to catch drift with no SQLite write
-        // behind it: a payload edited out of band, or a base that predates
-        // `lifecycle_dirty` and therefore has interrupted writes nothing marked.
-        match crate::jobs::consolidate::full_lifecycle_reconcile(self).await {
-            Ok(0) => {}
-            Ok(fixed) => tracing::info!(fixed, "reconciled lifecycle drift the marker never saw"),
-            Err(e) => tracing::warn!(error = %e, "could not run the full lifecycle reconcile"),
+        // Orphan points: stamp them as they stand, so the count this pass is
+        // triggered by can reach zero. Nothing about them is invented.
+        let has_row: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let orphans: Vec<String> = self
+            .vectors
+            .all_artifact_ids()
+            .await?
+            .into_iter()
+            .filter(|id| !has_row.contains(id.as_str()))
+            .collect();
+        if !orphans.is_empty() {
+            let rows: Vec<crate::vector::LifecycleRow> = self
+                .vectors
+                .payloads_of(&orphans)
+                .await?
+                .into_values()
+                .map(|p| crate::vector::LifecycleRow {
+                    artifact_id: p.artifact_id,
+                    status: p.status.unwrap_or(ArtifactStatus::Active),
+                    superseded_by: p.superseded_by,
+                    last_verified_at: p.last_verified_at.unwrap_or(p.created_at),
+                })
+                .collect();
+            self.vectors.apply_lifecycle(&rows).await?;
         }
+        self.heal_store_drift().await?;
         tracing::info!(n, "backfilled lifecycle fields into the vector store");
         Ok(n)
     }
 
-    /// Make the two stores agree about which artifacts exist, by restoring
-    /// whichever side is missing one — never by deleting.
+    /// Notice when the two stores disagree about which artifacts exist.
     ///
-    /// The two stores hold complementary halves of the same artifact and are
-    /// written separately, so either can end up with an entry the other lacks: a
-    /// crash between the two writes, a restore of one store from a backup taken
-    /// at a different moment, an operator pointing a process at the wrong
-    /// `store.path`. Each direction has its own repair, and neither destroys
-    /// anything:
+    /// They hold complementary halves of the same artifact and are written
+    /// separately, so either can end up with an entry the other lacks: a crash
+    /// between the two writes, a restore of one store from a backup taken at a
+    /// different moment, an operator pointing a process at the wrong
+    /// `store.path`. A row that says `embedded` with no point is sent back
+    /// through the pipeline that writes it. A point with no row is only
+    /// reported: SQLite is the source of truth, and the fix is to restore both
+    /// stores from the same moment, not to rebuild rows out of payloads.
     ///
-    /// - A point with no row rebuilds the row from the payload (see
-    ///   `Store::restore_artifact`) and queues a re-embed. The vector store
-    ///   carries the text, the title, the tags and the lifecycle stamps, so the
-    ///   artifact comes back searchable and correctly retired if it was retired.
-    /// - A row that says `done` with no point queues a re-embed, which writes
-    ///   the point through the ordinary pipeline. A row still `pending` is not
-    ///   drift at all — it is every artifact that was just ingested.
-    ///
-    /// Deleting used to be this method's whole job, and it was a loaded gun. It
-    /// ran unconditionally from the backfill, which startup spawns in the
-    /// background, so a process started against an empty or wrong SQLite file
-    /// found every point orphaned and emptied the collection — no confirmation,
-    /// no dry run, and nothing to reindex from afterwards, because the vectors
-    /// were the last copy. Restoring is the safe direction of the same repair:
-    /// the worst a wrong `store.path` can now do is fill that database with the
-    /// artifacts it was missing.
-    ///
-    /// What this costs is that a deletion interrupted between its two writes
-    /// comes back instead of finishing. That is the deliberate trade — an
-    /// artifact that reappears is a nuisance an operator can fix with the delete
-    /// button, and an artifact that is gone is gone. See `Core::delete_artifact`
-    /// for the deliberate path.
-    ///
-    /// The read order matters. The point list is read *first* and the row list
-    /// second, so an artifact captured while this runs is either absent from the
-    /// scroll or present in the newer row list — never mistaken for an orphan
-    /// point and restored on top of itself.
-    pub async fn heal_store_drift(&self) -> Result<StoreDrift> {
-        use std::collections::{BTreeMap, HashSet};
+    /// The point list is read *first* and the row list second, so an artifact
+    /// captured while this runs is either absent from the scroll or present in
+    /// the newer row list — never mistaken for an orphan.
+    pub async fn heal_store_drift(&self) -> Result<()> {
+        use std::collections::HashSet;
 
         let points = self.vectors.all_artifact_ids().await?;
         let rows = self.store.list_all_artifact_ids().await?;
@@ -767,146 +734,47 @@ impl Core {
         let has_row: HashSet<&str> = rows.iter().map(String::as_str).collect();
         let has_point: HashSet<&str> = points.iter().map(String::as_str).collect();
 
-        let mut out = StoreDrift::default();
-
-        // Vector store has it, SQLite does not: rebuild the row.
-        let orphan_points: Vec<String> = points
+        let orphan_points = points
             .iter()
             .filter(|id| !has_row.contains(id.as_str()))
-            .cloned()
-            .collect();
-        if !orphan_points.is_empty() {
-            let payloads = self.vectors.payloads_of(&orphan_points).await?;
-            // Grouped by corpus so a placeholder parent, if one is needed, is
-            // written once and holds every artifact restored under it rather
-            // than only whichever happened to come first.
-            let mut by_corpus: BTreeMap<&str, Vec<&crate::vector::VectorPayload>> = BTreeMap::new();
-            for id in &orphan_points {
-                match payloads.get(id) {
-                    Some(p) => by_corpus.entry(p.corpus_id.as_str()).or_default().push(p),
-                    // The point was there for the id scroll and gone for the
-                    // retrieve, or its payload does not parse as a chunk.
-                    // Neither is an error and neither is restorable.
-                    None => tracing::debug!(
-                        artifact_id = %id,
-                        "no readable payload for an artifact the vector store listed"
-                    ),
-                }
-            }
-            for (corpus_id, group) in by_corpus {
-                if self.store.get_corpus(corpus_id).await.is_err() {
-                    let joined = group
-                        .iter()
-                        .map(|p| p.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    if self
-                        .store
-                        .ensure_restored_corpus(corpus_id, &joined)
-                        .await?
-                    {
-                        out.corpora_restored += 1;
-                        tracing::info!(
-                            corpus_id,
-                            artifacts = group.len(),
-                            "the source of a restored artifact was not stored; \
-                             wrote a placeholder so the artifact has a parent"
-                        );
-                    }
-                }
-                for p in group {
-                    // A payload with no `provenance` key predates merging, and
-                    // nothing that predates merging is merged — so `captured` is
-                    // the right reading rather than a guess.
-                    let provenance = p
-                        .provenance
-                        .as_deref()
-                        .map(crate::store::artifacts::Provenance::parse)
-                        .unwrap_or(crate::store::artifacts::Provenance::Captured);
-                    let restored = crate::store::artifacts::RestoredArtifact {
-                        id: p.artifact_id.clone(),
-                        // A merged artifact carries "" here, which is not a
-                        // corpus that exists; writing it would fail the foreign
-                        // key. The kind above is what says which case this is.
-                        corpus_id: match provenance {
-                            crate::store::artifacts::Provenance::Merged => None,
-                            crate::store::artifacts::Provenance::Captured => {
-                                Some(p.corpus_id.clone())
-                            }
-                        },
-                        provenance,
-                        text: p.text.clone(),
-                        title: p.title.clone(),
-                        category: p.category.clone(),
-                        tags: p.tags.clone(),
-                        created_at: p.created_at,
-                        // A payload with no `status` key predates lifecycle
-                        // tracking, which every filter reads as active — so the
-                        // restored row has to say the same thing, or the heal
-                        // would quietly retire artifacts on an unbackfilled base.
-                        status: p.status.unwrap_or(ArtifactStatus::Active),
-                        last_verified_at: p.last_verified_at,
-                        superseded_by: p.superseded_by.clone(),
-                    };
-                    if self.store.restore_artifact(&restored).await? {
-                        out.rows_restored += 1;
-                        // A payload records neither `source_count` nor lineage
-                        // rows, so a restored merge definitionally cannot
-                        // support its provenance claim — and
-                        // `merged_missing_a_source` (0 > 0) will never say so.
-                        // Said here instead, with the flag that pass would
-                        // have set. `roots_of` already refuses to hand such a
-                        // merge back as its own root; this is the half an
-                        // operator sees.
-                        if provenance == crate::store::artifacts::Provenance::Merged {
-                            self.store
-                                .set_artifact_flags(
-                                    &p.artifact_id,
-                                    &["orphaned_source".to_string()],
-                                    Some(
-                                        "restored from the index; the record of its \
-                                         sources was lost",
-                                    ),
-                                )
-                                .await?;
-                        }
-                        self.store
-                            .enqueue(Stage::Embed, "artifact", &p.artifact_id)
-                            .await?;
-                    }
-                }
-            }
+            .count();
+        if orphan_points > 0 {
+            tracing::warn!(
+                orphan_points,
+                "the vector store holds artifacts SQLite does not; restore both stores from the same snapshot"
+            );
         }
 
-        // SQLite says the vector was written and the vector store has nothing:
-        // send it back through the pipeline that writes it.
+        let mut requeued = 0usize;
         for id in embedded
             .iter()
             .filter(|id| !has_point.contains(id.as_str()))
         {
-            self.store.enqueue(Stage::Embed, "artifact", id).await?;
-            out.points_requeued += 1;
+            // Idle-only. This runs on every sweep, so `enqueue` — which re-arms
+            // whatever state it finds — would wind a unit that is failing
+            // against a dead endpoint back to zero attempts every tick. Its
+            // backoff would never climb, and the queue's backoff is what stands
+            // in for a circuit breaker here: see `infer::gate`.
+            self.store
+                .rearm_idle_seq(Stage::Embed, "artifact", id, 0)
+                .await?;
+            requeued += 1;
         }
-
-        if out.rows_restored > 0 || out.points_requeued > 0 {
+        if requeued > 0 {
             tracing::info!(
-                rows_restored = out.rows_restored,
-                corpora_restored = out.corpora_restored,
-                points_requeued = out.points_requeued,
-                "the two stores disagreed about which artifacts exist; restored both ways"
+                requeued,
+                "artifacts SQLite calls embedded had no point; re-queued"
             );
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Delete an artifact from both stores, on purpose.
     ///
-    /// The vector point goes first. `heal_store_drift` restores a row from a
-    /// surviving point, so deleting the row first would mean an interrupted
-    /// delete is undone by the very next heal; this way the interrupted state is
-    /// a row whose point is gone, which the heal answers by re-embedding — the
-    /// artifact survives intact instead of half-existing, and pressing delete
-    /// again finishes it.
+    /// The vector point goes first, so an interrupted delete leaves a row
+    /// whose point is gone — which `heal_store_drift` answers by re-embedding,
+    /// so the artifact survives intact instead of half-existing, and pressing
+    /// delete again finishes it.
     pub async fn delete_artifact(&self, id: &str) -> Result<()> {
         self.store.get_artifact(id).await?;
         self.vectors
@@ -1021,7 +889,7 @@ impl Core {
         // stuck in `segmenting` for good — nothing resolves again to trigger
         // `settle`, and the one sweep that repairs it has been told there is
         // nothing to repair.
-        self.store.clear_corpus_coverage(id).await?;
+        self.store.set_corpus_coverage(id, None).await?;
         // And the units that name those windows, which outlive them. Planning
         // arms idle-only, so a unit still queued from the run being replaced
         // would carry its attempts into the rerun — the person who asked for
@@ -1133,11 +1001,10 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, StoreDrift,
+        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE,
     };
-    use crate::core::test_support::{test_core, test_core_with_failing_synthesizer};
+    use crate::core::test_support::test_core;
     use crate::error::Error;
-    use crate::store::artifacts::EmbedState;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
 
@@ -1450,7 +1317,10 @@ mod tests {
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
-        core.store.set_corpus_coverage(&out.id, 0.87).await.unwrap();
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.87))
+            .await
+            .unwrap();
 
         core.reprocess(&out.id, Stage::Synthesize).await.unwrap();
 
@@ -1742,7 +1612,10 @@ mod tests {
     async fn ingest_is_not_blocked_by_a_dead_chunker() {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
-        let core = test_core_with_failing_synthesizer().await;
+        let mut core = test_core().await;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
     }
@@ -1825,7 +1698,6 @@ mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
-                    provenance: None,
                 },
             }])
             .await
@@ -1930,7 +1802,6 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
-                provenance: None,
             },
         }
     }
@@ -2010,108 +1881,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_point_whose_row_is_gone_gets_its_row_back() {
-        // This used to delete the point. The backfill it ran from is spawned at
-        // startup whenever anything is unstamped, so a process pointed at an
-        // empty or wrong sqlite file found every point orphaned and emptied the
-        // collection — with the vectors being the last copy, there was nothing
-        // left to reindex from.
-        let core = test_core().await;
-        let (corpus, artifact) = one_artifact(&core).await;
-        core.vectors
-            .upsert(vec![point(&artifact, &corpus), point("gone", &corpus)])
-            .await
-            .unwrap();
-
-        let drift = core.heal_store_drift().await.unwrap();
-
-        assert_eq!(drift.rows_restored, 1, "{drift:?}");
-        assert_eq!(
-            core.vectors.all_artifact_ids().await.unwrap().len(),
-            2,
-            "the heal deleted a point instead of restoring its row"
-        );
-        let back = core.store.get_artifact("gone").await.unwrap();
-        assert_eq!(back.text, "t");
-        assert_eq!(back.corpus_id.as_deref(), Some(corpus.as_str()));
-        assert_eq!(
-            back.embed_state,
-            EmbedState::Pending,
-            "a restored row must be re-embedded: the stored vector may be from \
-             another model, and nothing else would ever check"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_merge_restored_from_the_index_is_flagged_as_orphaned() {
-        // `restore_artifact` cannot recreate lineage rows and leaves
-        // `source_count` at 0, so `merged_missing_a_source` (0 > 0) never
-        // fires and nothing ever flagged the restored merge — it stood as a
-        // merge with no record of its sources, silently.
-        let core = test_core().await;
-        let mut p = point("lost-merge", "");
-        p.payload.provenance = Some("merged".into());
-        core.vectors.upsert(vec![p]).await.unwrap();
-
-        let drift = core.heal_store_drift().await.unwrap();
-
-        assert_eq!(drift.rows_restored, 1, "{drift:?}");
-        let back = core.store.get_artifact("lost-merge").await.unwrap();
-        assert!(
-            back.flags.iter().any(|f| f == "orphaned_source"),
-            "a restored merge must say it cannot support its provenance claim"
-        );
-    }
-
-    #[tokio::test]
-    async fn restoring_an_artifact_whose_corpus_is_also_gone_writes_a_marked_placeholder() {
-        // The whole-database-lost case. `artifacts.corpus_id` is NOT NULL and
-        // references `corpora`, so without a parent the restore cannot happen at
-        // all — and a placeholder that did not say it was one would present
-        // reconstructed fragments as a captured document.
-        let core = test_core().await;
-        core.vectors
-            .upsert(vec![point("orphan", "corpus-that-never-existed")])
-            .await
-            .unwrap();
-
-        let drift = core.heal_store_drift().await.unwrap();
-
-        assert_eq!(drift.rows_restored, 1, "{drift:?}");
-        assert_eq!(drift.corpora_restored, 1, "{drift:?}");
-        let stub = core
-            .store
-            .get_corpus("corpus-that-never-existed")
-            .await
-            .unwrap();
-        assert!(
-            stub.restored_at.is_some(),
-            "the placeholder is indistinguishable from a real capture"
-        );
-        assert_eq!(stub.raw_text, "t", "the stub holds what was recoverable");
-    }
-
-    #[tokio::test]
-    async fn healing_twice_changes_nothing_the_second_time() {
-        // The heal runs at startup and on every consolidation sweep, so a pass
-        // that keeps finding work on a base already in agreement is a permanent
-        // background rewrite — and, with `restore_artifact` keeping the original
-        // id, the way to get that wrong is to mint a new one and orphan the
-        // point all over again.
-        let core = test_core().await;
-        let (corpus, _) = one_artifact(&core).await;
-        core.vectors
-            .upsert(vec![point("gone", &corpus)])
-            .await
-            .unwrap();
-
-        core.heal_store_drift().await.unwrap();
-        let second = core.heal_store_drift().await.unwrap();
-
-        assert_eq!(second, StoreDrift::default(), "the heal is not idempotent");
-    }
-
-    #[tokio::test]
     async fn a_row_that_claims_it_is_embedded_with_no_point_is_requeued() {
         // The other direction. A row still `pending` is not drift — that is
         // every artifact that was just captured — so only a row claiming `done`
@@ -2124,12 +1893,80 @@ mod tests {
             .await
             .unwrap();
 
-        let drift = core.heal_store_drift().await.unwrap();
+        core.heal_store_drift().await.unwrap();
 
-        assert_eq!(drift.points_requeued, 1, "{drift:?}");
+        assert!(
+            core.store.live_job(Stage::Embed, &artifact).await.unwrap(),
+            "the row was not sent back through the embed pipeline"
+        );
         assert!(
             core.store.get_artifact(&artifact).await.is_ok(),
             "the heal deleted the row instead of re-embedding it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drift_repair_leaves_a_retrying_embed_units_backoff_alone() {
+        // The sweep runs this every tick, and a unit that is failing against a
+        // dead endpoint is `pending` with `run_after` in the future. Re-arming
+        // it unconditionally winds `attempts` back to zero, so the backoff
+        // never climbs and the sweep hands the same dead endpoint another
+        // full-timeout call on every tick, forever. The queue's backoff is the
+        // only thing standing in for the circuit breaker, and this is what
+        // used to reset it.
+        let core = test_core().await;
+        let (_, artifact) = one_artifact(&core).await;
+        core.store
+            .mark_embedded(&artifact, "some-model", 0)
+            .await
+            .unwrap();
+        core.heal_store_drift().await.unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Embed);
+        core.store
+            .fail_job(job.id, job.attempts, "endpoint down")
+            .await
+            .unwrap();
+        let before: (i64, i64) =
+            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
+                .bind(job.id)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert!(before.0 > 0 && before.1 > 0, "the unit is not backing off");
+
+        core.heal_store_drift().await.unwrap();
+
+        let after: (i64, i64) = sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
+            .bind(job.id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "the drift repair cleared a retrying unit's backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_point_whose_row_is_gone_is_reported_and_left_alone() {
+        // SQLite is the source of truth; a point with no row is drift to be
+        // restored from a snapshot, not a row to be rebuilt from a payload —
+        // and never a point to delete, since the vectors may be the last copy.
+        let core = test_core().await;
+        let (corpus, artifact) = one_artifact(&core).await;
+        core.vectors
+            .upsert(vec![point(&artifact, &corpus), point("gone", &corpus)])
+            .await
+            .unwrap();
+
+        core.heal_store_drift().await.unwrap();
+
+        assert_eq!(core.vectors.all_artifact_ids().await.unwrap().len(), 2);
+        assert!(
+            core.store.get_artifact("gone").await.is_err(),
+            "a row was invented"
         );
     }
 
@@ -2138,28 +1975,20 @@ mod tests {
         // Everything just ingested has a row and no point. Treating that as
         // drift would re-queue the entire backlog on every sweep.
         let core = test_core().await;
-        one_artifact(&core).await;
+        let (_, artifact) = one_artifact(&core).await;
+        core.heal_store_drift().await.unwrap();
 
-        let drift = core.heal_store_drift().await.unwrap();
-
-        assert_eq!(drift, StoreDrift::default(), "{drift:?}");
-    }
-
-    fn a_png() -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        let img = ImageBuffer::from_fn(40, 20, |x, _| Rgb([(x * 6) as u8, 0, 0]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
+        assert!(
+            !core.store.live_job(Stage::Embed, &artifact).await.unwrap(),
+            "the backlog was re-queued"
+        );
     }
 
     #[tokio::test]
     async fn an_image_capture_stores_the_original_and_queues_describe_without_calling_the_model() {
         let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
         let core = crate::core::test_support::test_core_with_describer(describer.clone()).await;
-        let bytes = a_png();
+        let bytes = a_seeded_png(7);
         let out = core
             .ingest_image(ImageCapture {
                 bytes: bytes.clone(),
@@ -2183,7 +2012,7 @@ mod tests {
         assert_eq!(src.metadata["note"], "the kitchen whiteboard");
         assert_eq!(src.metadata["file"]["name"], "IMG_1.png");
         assert_eq!(src.metadata["file"]["mime"], "image/png");
-        assert_eq!(src.metadata["file"]["width"], 40);
+        assert_eq!(src.metadata["file"]["width"], 16);
 
         let a = core
             .store
@@ -2206,37 +2035,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_same_photo_twice_is_a_duplicate_before_any_model_call() {
-        let core = crate::core::test_support::test_core().await;
-        let first = core
-            .ingest_image(ImageCapture {
-                bytes: a_png(),
-                filename: None,
-                title_hint: None,
-                note: None,
-            })
-            .await
-            .unwrap();
-        let again = core
-            .ingest_image(ImageCapture {
-                bytes: a_png(),
-                filename: None,
-                title_hint: None,
-                note: None,
-            })
-            .await
-            .unwrap();
-        assert!(again.duplicate);
-        assert_eq!(again.id, first.id);
-        assert_eq!(core.store.list_corpora(10, 0).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
     async fn without_a_vision_role_the_image_door_is_closed() {
         let core = crate::core::test_support::test_core_without_vision().await;
         let e = core
             .ingest_image(ImageCapture {
-                bytes: a_png(),
+                bytes: a_seeded_png(7),
                 filename: None,
                 title_hint: None,
                 note: None,

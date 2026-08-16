@@ -94,9 +94,6 @@ output_ratio = 8.0
 # prompt, so a smaller window and proportionally more calls per corpus. Set
 # either to 0 to turn that half off.
 # context_overlap_tokens = 150
-# Optional path to a tokenizer.json for exact token counting. Without it,
-# budgets fall back to a conservative characters/3.5 estimate.
-# tokenizer_path = "/models/qwen/tokenizer.json"
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
@@ -186,24 +183,16 @@ review_min = 0.88
 # subsystem sit around 0.88 routinely, and hiding at that score costs knowledge
 # rather than duplication. Ops lists what was hidden, with an undo.
 auto_supersede = 0.95
-# Points drawn per sweep, and neighbours considered per point. The sweep is one
-# round trip whose cost these two numbers bound, rather than a query per point.
-sample = 2000
+# Neighbours considered per artifact when it looks for duplicates.
 per_point = 5
 interval_hours = 24
-# Let the dedupe pass act on what it decides: superseding where one stored
+# The dedupe pass acts on what it decides: superseding where one stored
 # artifact plainly replaces another, and writing one merged artifact where each
-# side carries something the other lacks. On by default.
-#
-# Turning it off does not stop the pass asking — the verdicts are recorded
-# either way, so you can read what it would have done before letting it do it.
-# `max_dedupe_per_tick = 0` is what switches the model off entirely.
-#
-# A disagreement about a value is never settled this way. It goes to the review
-# queue on Capture, because deciding which of two facts is current is the
-# judgement a model is worst at. Nothing is deleted, no merge that would drop a
-# number, command or path is written, and every merge has an undo on Ops.
-autonomous = true
+# side carries something the other lacks. A disagreement about a value is never
+# settled this way. It goes to the review queue on Capture, because deciding
+# which of two facts is current is the judgement a model is worst at. Nothing
+# is deleted, no merge that would drop a number, command or path is written,
+# and every merge has an undo on Ops.
 # How often the dedupe pass arms model calls, and how many per tick. Together
 # these are a rate — twenty an hour by default — and a rate is the right shape
 # because the fixed quantity is what the hardware gets through, not how big the
@@ -269,14 +258,6 @@ sweep_hours = 6
 # disables pacing. A question asked through `ask` ignores it: someone is
 # waiting, and the pacer is there to protect the GPU from batch work.
 cooldown_secs = 0
-# Consecutive transport failures before background calls are held back, and how
-# long to hold them for before letting one through to probe. Output the parser
-# cannot read does not count: the endpoint answered, and the window's own text
-# is the problem. Zero disables the breaker. Once it has tripped, the single
-# call let through after the probe window re-trips it immediately if it fails
-# too; a call that succeeds closes it.
-breaker_after = 3
-breaker_probe_secs = 60
 
 [capture]
 # The upload, paste-a-link and extension doors.

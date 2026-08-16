@@ -296,7 +296,7 @@ renamed to match what it does.
 |---|---|
 | `src/jobs/judge.rs` | `src/jobs/dedupe.rs` |
 | `Stage::Judge` | `Stage::Dedupe` |
-| `consolidate.judge` | `consolidate.autonomous` |
+| `consolidate.judge` | retired; `max_dedupe_per_tick = 0` stops the asking |
 | `JUDGE_SYSTEM` | `DEDUPE_SYSTEM` |
 
 ### 6.1 Four outcomes
@@ -421,23 +421,15 @@ gen 2:  component {M1, c}
 Information loss stays exactly one generation deep, permanently. This is the
 whole reason lineage is stored as a closure.
 
-### 6.7 The configuration switch
+### 6.7 Acting on a verdict
 
-`consolidate.autonomous`, **default `true`**:
-
-- **false** — verdicts are recorded only, which is today's behaviour. `replaced`
-  is filed as a proposal for an operator. No merge is written.
-- **true** — `replaced` and `duplicate` are applied directly. `conflict` and
-  `Oversized` go to Ops. The operator keeps undo and the conflict queue, and
-  nothing else.
-
-The switch changes **who presses the button**, never what the model is asked.
-That makes the transition observable: an operator can run with `false`, read the
-recorded verdicts, and then let the system act.
-
-Defaulting to `true` means a fresh installation merges without being asked. The
-verification in §6.4 and the recovery paths in §8 are what carry that default;
-they are not optional refinements.
+Every verdict is acted on: `replaced` and `duplicate` are applied directly,
+`conflict` and `Oversized` go to a person. The operator keeps undo and the
+conflict queue. The verification in §6.4 and the recovery paths in §8 are what
+carry that; they are not optional refinements. (An `autonomous` switch existed
+during the roll-out — verdicts recorded, nothing applied — and was retired once
+the contract had been observed on real data; a base carrying `would_merge`
+rows from that period has them re-opened on upgrade.)
 
 ## 7. Ops surface
 
@@ -538,7 +530,7 @@ Unchanged — the existing mechanism fits without adaptation.
   return the same unreadable bytes five times.
 - At `MAX_UNREADABLE_JUDGEMENTS` the asking stops, the component stays `pending`
   and therefore on the Ops list. No merge is left half-applied.
-- Endpoint down → `gate.background()`, breaker, no merges. Because the write path
+- Endpoint down → `gate.background()`, the queue's backoff, no merges. Because the write path
   begins only **after** a successful and verified reply, an outage cannot produce
   a partial merge.
 
@@ -554,7 +546,6 @@ The fixed quantity in this system is neither the base nor the sweep — it is
 
 ```toml
 [consolidate]
-autonomous            = true
 dedupe_interval_mins  = 15   # own ticker, independent of the 24h sweep
 max_dedupe_per_tick   = 5    # => ceiling of 20 calls/hour
 merge_max_roots       = 8
@@ -568,7 +559,7 @@ with the rhythm of duplicate discovery.
 Two existing rules are explicitly **not** touched:
 
 - **No cap on in-flight units.** `src/jobs/consolidate.rs:455–461` explains why:
-  a unit the queue cannot get through — open breaker, dead endpoint — would under
+  a unit the queue cannot get through — a dead endpoint — would under
   an in-flight cap block every other pair permanently. That is exactly the
   head-of-line blocking the units were introduced to remove. The protection stays
   `live_job` plus the ordering in `pairs_to_judge`.
@@ -586,10 +577,8 @@ enabled               = true
 near_dupe_min         = 0.90
 review_min            = 0.88
 auto_supersede        = 0.95
-sample                = 2000
 per_point             = 5
 interval_hours        = 24
-autonomous            = true   # replaces `judge`
 dedupe_interval_mins  = 15
 max_dedupe_per_tick   = 5      # replaces `max_judgements`
 merge_max_roots       = 8

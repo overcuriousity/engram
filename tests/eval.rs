@@ -58,8 +58,8 @@ async fn evaluate_retrieval() {
             let why = c.err().map(|e| e.to_string()).unwrap_or_default()
                 + &p.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
-                "no evaluation corpus at {} ({}). Set ENGRAM_EVAL_DIR and run \
-                 `cargo run --bin eval-prepare` first.",
+                "no evaluation corpus at {} ({}). Run `engram --export-eval <dir>` \
+                 and set ENGRAM_EVAL_DIR to it.",
                 dir.display(),
                 why.trim()
             );
@@ -71,13 +71,13 @@ async fn evaluate_retrieval() {
 
     let known: std::collections::HashSet<&str> = artifacts.iter().map(|c| c.id.as_str()).collect();
     // A pair naming an id no artifact has is not a hard case, it is a stale pair
-    // left behind by a re-run of eval-prepare. Scored as a miss it would look
+    // left behind by an artifact deleted since the export. Scored as a miss it would look
     // like a ranking problem forever.
     for p in &pairs {
         assert!(
             known.contains(p.expect.as_str()),
             "pair {:?} expects artifact {} which is not in artifacts.json; \
-             re-check the pairs after re-running eval-prepare",
+             re-export with `engram --export-eval`",
             p.query,
             p.expect
         );
@@ -114,8 +114,8 @@ async fn evaluate_retrieval() {
             include_deprecated: false,
             include_superseded: false,
         };
-        let results = core
-            .search_capped(&q, cap, engram::store::feedback::Door::Ui)
+        let (results, _) = core
+            .search_with(&q, cap, engram::store::feedback::Door::Ui)
             .await
             .expect("search failed");
         // `pair.expect` names a frozen id; the store being searched knows that
@@ -319,7 +319,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         completer: Arc::new(engram::infer::fake::FakeCompleter::default()),
         judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
         describer: None,
-        counter: Arc::new(engram::infer::budget::TokenCounter::Estimate),
+        counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
             engram::core::QUERY_CACHE_CAPACITY,
@@ -351,8 +351,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         include_deprecated: false,
         include_superseded: false,
     };
-    let results = core
-        .search_capped(&q, None, engram::store::feedback::Door::Judge)
+    let (results, _) = core
+        .search_with(&q, None, engram::store::feedback::Door::Judge)
         .await
         .unwrap();
 

@@ -1,11 +1,8 @@
 //! How the right-hand pane gets at the text a chunk claims to come from.
 //!
-//! A trait rather than a function because the answer depends on what the
-//! source is. A text source is answered by `TextLines`; an image source by
-//! `ImageTranscript`, whose lines are the model's reading of the picture. A
-//! PDF source will implement the same trait — its label reads `page 42` and
-//! its lines come from extracted text — and nothing in the pane needs to know
-//! which implementation answered.
+//! A text source is answered by its lines; an image source by the model's
+//! reading of the picture, labelled as such. A PDF source would be one more
+//! arm of `slice`, its label reading `page 42`.
 
 use crate::store::artifacts::CorpusSpan;
 use crate::store::corpora::Corpus;
@@ -30,74 +27,57 @@ pub struct CorpusSlice {
     pub label: String,
 }
 
-pub trait CorpusView {
-    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice;
-}
+/// The lines of `source` around `span`, labelled for the pane. Without a span
+/// the opening of the source is shown as context.
+pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
+    // An image corpus's lines are the model's reading of the picture, and the
+    // label says so: a span into a transcription is a claim about what the
+    // model wrote, not about what the photo shows.
+    let transcript = source.origin == crate::core::ingest::ORIGIN_IMAGE;
+    let all: Vec<&str> = source.raw_text.lines().collect();
+    let total = all.len() as i64;
 
-pub struct TextLines;
-
-impl CorpusView for TextLines {
-    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
-        let all: Vec<&str> = source.raw_text.lines().collect();
-        let total = all.len() as i64;
-
-        let Some(span) = span else {
-            return CorpusSlice {
-                lines: all
-                    .iter()
-                    .enumerate()
-                    .take(HEADLESS_PREVIEW_LINES)
-                    .map(|(i, t)| CorpusLine {
-                        number: i as i64 + 1,
-                        text: (*t).to_string(),
-                        in_span: false,
-                    })
-                    .collect(),
-                label: "corpus".into(),
-            };
-        };
-
-        let start = (span.start_line - context as i64).max(1);
-        let end = (span.end_line + context as i64).min(total);
-        let lines = (start..=end)
-            .filter_map(|n| {
-                all.get((n - 1) as usize).map(|t| CorpusLine {
-                    number: n,
+    let Some(span) = span else {
+        return CorpusSlice {
+            lines: all
+                .iter()
+                .enumerate()
+                .take(HEADLESS_PREVIEW_LINES)
+                .map(|(i, t)| CorpusLine {
+                    number: i as i64 + 1,
                     text: (*t).to_string(),
-                    in_span: n >= span.start_line && n <= span.end_line,
+                    in_span: false,
                 })
-            })
-            .collect();
-
-        CorpusSlice {
-            lines,
-            label: format!("lines {}–{}", span.start_line, span.end_line),
-        }
-    }
-}
-
-/// An image corpus: the lines are the model's reading of the picture, and the
-/// label says so, because a span into a transcription is a claim about what
-/// the model wrote, not about what the photo shows.
-pub struct ImageTranscript;
-
-impl CorpusView for ImageTranscript {
-    fn slice(&self, source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
-        let mut s = TextLines.slice(source, span, context);
-        s.label = match span {
-            Some(sp) => format!("transcription lines {}–{}", sp.start_line, sp.end_line),
-            None => "transcription".into(),
+                .collect(),
+            label: if transcript {
+                "transcription"
+            } else {
+                "corpus"
+            }
+            .into(),
         };
-        s
-    }
-}
+    };
 
-/// The view for a source. This is where a PDF source will branch too.
-pub fn for_corpus(source: &Corpus) -> Box<dyn CorpusView> {
-    if source.origin == crate::core::ingest::ORIGIN_IMAGE {
-        Box::new(ImageTranscript)
-    } else {
-        Box::new(TextLines)
+    let start = (span.start_line - context as i64).max(1);
+    let end = (span.end_line + context as i64).min(total);
+    let lines = (start..=end)
+        .filter_map(|n| {
+            all.get((n - 1) as usize).map(|t| CorpusLine {
+                number: n,
+                text: (*t).to_string(),
+                in_span: n >= span.start_line && n <= span.end_line,
+            })
+        })
+        .collect();
+
+    CorpusSlice {
+        lines,
+        label: format!(
+            "{}lines {}–{}",
+            if transcript { "transcription " } else { "" },
+            span.start_line,
+            span.end_line
+        ),
     }
 }
 
@@ -114,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn the_slice_marks_the_span_and_carries_context_around_it() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6").await;
-        let slice = TextLines.slice(
+        let slice = slice(
             &src,
             Some(&CorpusSpan {
                 start_line: 3,
@@ -138,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_without_a_span_gets_the_head_of_the_source() {
         let src = a_corpus("l1\nl2\nl3").await;
-        let slice = TextLines.slice(&src, None, 1);
+        let slice = slice(&src, None, 1);
         assert_eq!(slice.label, "corpus");
         assert!(slice.lines.iter().all(|l| !l.in_span));
         assert_eq!(slice.lines.len(), 3);
@@ -147,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn a_span_past_the_end_clamps_instead_of_panicking() {
         let src = a_corpus("l1\nl2").await;
-        let slice = TextLines.slice(
+        let slice = slice(
             &src,
             Some(&CorpusSpan {
                 start_line: 5,
@@ -184,9 +164,8 @@ mod tests {
             .await
             .unwrap();
         let src = s.get_corpus(&src.id).await.unwrap();
-        let view = for_corpus(&src);
         assert_eq!(
-            view.slice(
+            slice(
                 &src,
                 Some(&CorpusSpan {
                     start_line: 2,
@@ -197,6 +176,6 @@ mod tests {
             .label,
             "transcription lines 2–2"
         );
-        assert_eq!(view.slice(&src, None, 0).label, "transcription");
+        assert_eq!(slice(&src, None, 0).label, "transcription");
     }
 }

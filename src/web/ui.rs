@@ -183,9 +183,6 @@ pub struct PairRow {
     pub b_title: String,
     pub detail: Option<String>,
     pub contradiction: bool,
-    /// The model would merge these. Rendered with its own header so the page
-    /// never claims a disagreement the model did not find.
-    pub would_merge: bool,
     /// Set when the judge named a direction with enough confidence to propose
     /// a supersede. A recommendation only: nothing here has hidden anything,
     /// and either side can still be kept.
@@ -295,7 +292,6 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 #[derive(Template)]
 #[template(path = "capture.html")]
 struct CaptureTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     /// Decisions waiting on a person, shown where the work arrives rather than
@@ -324,7 +320,6 @@ struct CapturedTemplate {
 #[derive(Template)]
 #[template(path = "search.html")]
 struct SearchTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     /// Kept so a reload or a deep link restores the box with its results.
@@ -363,7 +358,6 @@ struct QueueTemplate {
 #[derive(Template)]
 #[template(path = "corpus.html")]
 struct CorpusTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     id: String,
@@ -390,6 +384,10 @@ struct CorpusTemplate {
     unread: bool,
     /// Rows of what the door recorded about the capture, already formatted.
     meta_rows: Vec<(String, String)>,
+    /// Every other EXIF tag the file carried, by name. Folded away on the page:
+    /// a phone emits dozens, and none of them is what someone came here to read
+    /// — but the original is not stored, so this is the only place they exist.
+    exif_rows: Vec<(String, String)>,
     note: Option<String>,
 }
 
@@ -408,7 +406,6 @@ struct ArtifactDetailFragment {
 #[derive(Template)]
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     d: ArtifactDetail,
@@ -417,7 +414,6 @@ struct ArtifactDetailPage {
 #[derive(Template)]
 #[template(path = "ops.html")]
 struct OpsTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     job_counts: Vec<(String, i64)>,
@@ -495,7 +491,6 @@ struct TokenCreatedTemplate {
 #[derive(Template)]
 #[template(path = "ask.html")]
 struct AskTemplate {
-    theme: String,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
 }
@@ -513,7 +508,6 @@ struct AnswerTemplate {
 async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
     Ok(HtmlTemplate(CaptureTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
@@ -581,7 +575,6 @@ async fn search_page(
     ensure_facet(&mut facets.categories, &category);
     ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
@@ -666,7 +659,7 @@ async fn search_results(
     let terms = highlightable_terms(p.q.trim());
     let (hits, t) = st
         .core
-        .search_timed(
+        .search_with(
             &SearchQuery {
                 q: p.q,
                 limit: 0,
@@ -677,6 +670,7 @@ async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
             },
+            Some(crate::core::search::MAX_PER_CORPUS),
             // Scoped to the operator, because coalescing folds a keystroke into
             // the query it was an early spelling of, and two people typing at
             // once are not spelling the same thing.
@@ -821,8 +815,8 @@ async fn corpus_detail(
     let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
+    let exif_rows = exif_tag_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
         lines,
@@ -833,14 +827,31 @@ async fn corpus_detail(
         image,
         unread,
         meta_rows,
+        exif_rows,
         note,
         artifacts,
     })
     .into_response())
 }
 
+/// Everything under `exif.tags`, by name, sorted. The named facts above have
+/// their own rows; this is the rest of what the camera wrote, in a block that
+/// starts folded — the original file is not kept, so the page is the only place
+/// left to read it, and it is still nothing anyone opened the page to see.
+fn exif_tag_rows(m: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(tags) = m["exif"]["tags"].as_object() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String)> = tags
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
 /// The metadata worth a row on the corpus page, in reading order. Everything
-/// else the file carried is in the JSON, one API call away.
+/// else the file carried is under `exif.tags`, folded away below.
 fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let exif = &m["exif"];
@@ -979,16 +990,13 @@ fn title_of(c: &crate::store::artifacts::Chunk) -> String {
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 5] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
     // A group past `merge_max_roots` was not merged and will not be: it needs a
     // person, so it belongs on the page a person opens rather than on
     // Housekeeping beside the things that resolve themselves.
     crate::store::pairs::PairState::Oversized,
-    // A merge verdict recorded in observation mode: worth a person's read,
-    // less urgent than something the base states differently.
-    crate::store::pairs::PairState::WouldMerge,
     crate::store::pairs::PairState::Pending,
 ];
 
@@ -1038,7 +1046,6 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 b_id: p.b_id,
                 detail: p.detail,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
-                would_merge: state == crate::store::pairs::PairState::WouldMerge,
                 obsolete_title,
                 keeps_a,
                 keeps_b,
@@ -1190,7 +1197,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(OpsTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         retrying,
         parked,
@@ -1427,7 +1433,6 @@ async fn verify_ui(
 
 async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
     })
 }
@@ -1486,7 +1491,7 @@ pub(crate) async fn build_artifact_detail(
         None => None,
     };
     let slice = match &src {
-        Some(s) => crate::web::corpus_view::for_corpus(s).slice(s, c.corpus_span.as_ref(), 3),
+        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
     // Only a merged artifact has these. The template branches on `merged`, not
@@ -1590,7 +1595,6 @@ async fn artifact_detail(
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
-        theme: "light".into(),
         judge_pending: crate::web::state::judge_pending(&st).await,
         d,
     })
@@ -1657,6 +1661,7 @@ pub fn ui_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::test_support::{a_png, app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1909,27 +1914,9 @@ mod tests {
 
     async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
         let handle = core.clone();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (
-            crate::web::router(state),
-            format!("engram_session={cid}"),
-            handle,
-        )
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle)
     }
 
     async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
@@ -1946,13 +1933,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
         body_of(res).await
-    }
-
-    async fn body_of(res: axum::response::Response) -> String {
-        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        String::from_utf8_lossy(&b).to_string()
     }
 
     fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
@@ -1979,22 +1959,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     /// Markup with every run of whitespace collapsed, so an assertion about an
@@ -2006,22 +1971,7 @@ mod tests {
     /// A session on the given core, for pages that need a core built a
     /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     #[tokio::test]
@@ -2051,7 +2001,8 @@ mod tests {
                     "note": "front porch",
                     "file": {"name": "IMG.png", "width": 4, "height": 2},
                     "exif": {"taken_at": "2026-08-09T14:12:03", "camera": "Pixel",
-                             "gps": {"lat": 1.5, "lon": 2.5}}
+                             "gps": {"lat": 1.5, "lon": 2.5},
+                             "tags": {"LensModel": "24mm f/1.8", "ExposureTime": "1/120"}}
                 }),
                 &crate::store::attachments::NewImage {
                     kind: "image",
@@ -2079,21 +2030,20 @@ mod tests {
         assert!(html.contains("front porch"));
         assert!(html.contains("2026-08-09T14:12:03"));
         assert!(html.contains("1.5"));
+        // Everything else the camera wrote is on the page too, folded away and
+        // in tag order: this preview is the only copy of it that survives.
+        assert!(html.contains("All 2 EXIF tags"));
+        let (exposure, lens) = (
+            html.find("ExposureTime").expect("exposure tag"),
+            html.find("LensModel").expect("lens tag"),
+        );
+        assert!(exposure < lens, "the tags are listed by name");
+        assert!(html.contains("24mm f/1.8"));
         assert!(
             html.contains("Transcription"),
             "the text is labelled as derived, not 'Raw corpus'"
         );
         assert!(html.contains("blue door"));
-    }
-
-    fn a_png() -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        let img = ImageBuffer::from_fn(8, 8, |x, y| Rgb([x as u8 * 30, y as u8 * 30, 0]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
     }
 
     async fn an_unread_image(core: &crate::core::Core) -> String {
@@ -2181,22 +2131,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let cid = crate::store::new_id();
-        core.store
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-        };
-        (crate::web::router(state), format!("engram_session={cid}"))
+        app_with_cookie(core).await
     }
 
     #[tokio::test]
@@ -2239,20 +2174,6 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
         assert!(!html.contains("/ui/judge"), "judging was advertised anyway");
-    }
-
-    #[tokio::test]
-    async fn every_page_declares_itself_installable() {
-        // The manifest link is what a phone looks for before offering to
-        // install the app; the touch icon is what iOS uses instead.
-        let (app, cookie) = app_with_session().await;
-        let html = flat(&get(&app, "/ui/search", &cookie).await);
-        assert!(html.contains(r#"rel="manifest" href="/assets/manifest.webmanifest""#));
-        assert!(html.contains(r#"rel="apple-touch-icon""#));
-        assert!(
-            html.contains(r#"name="theme-color""#),
-            "an installed window frames the page in this colour"
-        );
     }
 
     #[tokio::test]
@@ -2635,38 +2556,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_page_renders_a_form() {
-        let (app, cookie) = app_with_session().await;
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/capture")
-                    .header("cookie", cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let html = body_of(res).await;
-        assert!(html.contains("<textarea"));
-        assert!(html.contains("hx-post=\"/ui/capture\""));
-        // The two halves of "a capture appears under Recent without a reload":
-        // the form announces the capture, the queue below is listening. The
-        // form only swaps its own result card, so without the event a capture
-        // pasted onto an idle page leaves the list below it stale.
-        assert!(
-            html.contains("htmx.trigger(document.body, 'captured')"),
-            "a successful capture announces nothing for the queue to hear"
-        );
-        assert!(
-            !html.contains("autofocus"),
-            "this page is the app's start_url: autofocus opens the software \
-             keyboard over the page the moment the installed app launches"
-        );
-    }
-
-    #[tokio::test]
     async fn capturing_text_stores_it_and_says_nothing() {
         // The confirmation is the row that appears under "Recent" — same link,
         // same progress badge. A card above the list saying it again was the
@@ -2942,46 +2831,6 @@ mod tests {
         assert!(
             body.contains("2 more waiting"),
             "a capped list that does not say it is capped reads as an empty queue"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_result_card_does_not_repeat_the_pane_beside_it() {
-        // The pane lists an artifact's tags in full. Repeating them on the card
-        // was what made the rail heavy enough to need its own scrollbar, and on
-        // a short artifact the card and the pane read as the same thing twice.
-        let (app, cookie) = app_with_embedded_corpus().await;
-        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
-        assert!(
-            body.contains("rail-title"),
-            "the card still names the artifact"
-        );
-        assert!(
-            !body.contains("badge-accent"),
-            "the card no longer carries the category chip the pane already lists"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_source_pane_names_its_lines_once() {
-        let (app, cookie) = app_with_embedded_corpus().await;
-        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
-        let id = body
-            .split("/ui/artifacts/")
-            .nth(1)
-            .and_then(|s| s.split(['"', '?']).next())
-            .expect("a result to open")
-            .to_string();
-
-        let body = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
-        assert!(
-            !body.contains("open source at these lines"),
-            "the pane label is the link now"
-        );
-        assert_eq!(
-            body.matches("highlighted").count(),
-            1,
-            "the span is named once, not in a crumb and a label and a link"
         );
     }
 

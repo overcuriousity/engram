@@ -17,13 +17,6 @@ fn is_heading(line: &str) -> bool {
     t.starts_with('#') && t.trim_start_matches('#').starts_with(' ')
 }
 
-/// The splitter's own heading rule, for tests elsewhere that must assert
-/// against it rather than against a second copy of it that can drift.
-#[cfg(test)]
-pub fn is_heading_for_test(line: &str) -> bool {
-    is_heading(line)
-}
-
 /// Split `text` into windows that each fit `segment_tokens`.
 ///
 /// Boundary preference is headings, then blank lines, then a hard cut. Each
@@ -187,7 +180,7 @@ mod tests {
 
     #[test]
     fn short_text_is_a_single_window() {
-        let w = split_into_segments("just a line", &TokenCounter::Estimate, 1000);
+        let w = split_into_segments("just a line", &TokenCounter, 1000);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].text, "just a line");
         assert_eq!(w[0].start_line, 1);
@@ -196,7 +189,7 @@ mod tests {
     #[test]
     fn splits_on_headings_before_blank_lines() {
         let text = "## A\nalpha content here\n\n## B\nbeta content here\n\n## C\ngamma content";
-        let w = split_into_segments(text, &TokenCounter::Estimate, 12);
+        let w = split_into_segments(text, &TokenCounter, 12);
         assert!(w.len() >= 2);
         assert!(
             w[1].text.starts_with("## "),
@@ -208,7 +201,7 @@ mod tests {
     #[test]
     fn windows_carry_one_heading_of_overlap() {
         let text = "## A\n".to_string() + &"alpha ".repeat(50) + "\n\n## B\n" + &"beta ".repeat(50);
-        let w = split_into_segments(&text, &TokenCounter::Estimate, 40);
+        let w = split_into_segments(&text, &TokenCounter, 40);
         assert!(w.len() >= 2);
         for win in &w[1..] {
             assert!(
@@ -225,7 +218,7 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter::Estimate, 30);
+        let w = split_into_segments(&text, &TokenCounter, 30);
         assert_eq!(w[0].start_line, 1);
         assert_eq!(w.last().unwrap().end_line, 100);
         for pair in w.windows(2) {
@@ -242,13 +235,13 @@ mod tests {
             .map(|i| format!("prose line number {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter::Estimate, 50);
+        let w = split_into_segments(&text, &TokenCounter, 50);
         assert!(w.len() > 1, "unstructured text must still be windowed");
         for win in &w {
             assert!(
-                TokenCounter::Estimate.count(&win.text) <= 50 * 2,
+                TokenCounter.count(&win.text) <= 50 * 2,
                 "window badly over budget: {} tokens",
-                TokenCounter::Estimate.count(&win.text)
+                TokenCounter.count(&win.text)
             );
         }
     }
@@ -259,7 +252,7 @@ mod tests {
         // line. Returning it as a single window sent it to the model whole,
         // where it overflowed the context and retried with growing backoff
         // forever, because a job has no terminal state.
-        let counter = TokenCounter::Estimate;
+        let counter = TokenCounter;
         let blob = "word ".repeat(4000);
         assert!(!blob.contains('\n'), "the point is that there are no lines");
 
@@ -286,7 +279,7 @@ mod tests {
         // numbers from, so every window after the blob claimed lines the
         // document does not have — and those numbers are what an artifact's
         // corpus_span is clamped into and rendered from.
-        let counter = TokenCounter::Estimate;
+        let counter = TokenCounter;
         let mut lines = vec!["word ".repeat(2000)];
         for i in 1..=40 {
             lines.push(format!("ordinary line {i} with a few words on it"));
@@ -326,7 +319,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter::Estimate, 60);
+        let w = split_into_segments(&text, &TokenCounter, 60);
         let joined = w
             .iter()
             .map(|x| x.text.clone())
@@ -354,6 +347,6 @@ mod tests {
 
     #[test]
     fn empty_input_produces_nothing() {
-        assert!(split_into_segments("   \n  ", &TokenCounter::Estimate, 100).is_empty());
+        assert!(split_into_segments("   \n  ", &TokenCounter, 100).is_empty());
     }
 }

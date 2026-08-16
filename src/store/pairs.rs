@@ -65,13 +65,6 @@ pub enum PairState {
     /// sources is no longer one atomic piece of knowledge, which is what an
     /// artifact is defined to be.
     Oversized,
-    /// The model answered "duplicate" while autonomy is off. Recorded so an
-    /// operator can read the verdicts before letting the system act on them;
-    /// the merged draft is not kept, and flipping autonomy on lets a later
-    /// unit re-judge and merge. Its own state rather than `Contradiction`,
-    /// because filing a mergeable pair among genuine conflicts made the UI
-    /// claim a disagreement the model did not find.
-    WouldMerge,
 }
 
 impl PairState {
@@ -84,7 +77,6 @@ impl PairState {
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
-            PairState::WouldMerge => "would_merge",
         }
     }
     pub fn parse(s: &str) -> PairState {
@@ -95,7 +87,6 @@ impl PairState {
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
-            "would_merge" => PairState::WouldMerge,
             _ => PairState::Pending,
         }
     }
@@ -195,6 +186,50 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
+    }
+
+    /// Put a pair back to `pending` after the action its settlement recorded
+    /// turned out not to have happened.
+    ///
+    /// For a producer that files the decision before carrying it out, which is
+    /// the only ordering that cannot leave an artifact hidden with no row
+    /// explaining it. The cost of that ordering is a settled row over an action
+    /// that then failed, and this is how that is paid back: the pair reopens,
+    /// and the next unit re-derives it.
+    ///
+    /// `from` narrows the write to a row still in the state the caller wrote,
+    /// so a decision that landed in between — a judge's, an operator's — is
+    /// never reopened underneath them.
+    pub async fn unsettle_pair(&self, a: &str, b: &str, from: PairState) -> Result<bool> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending'
+              WHERE a_id = ? AND b_id = ? AND state = ?",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(from.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// The state of the pair between two artifacts, whichever way round they
+    /// were filed, or `None` if it was never filed.
+    ///
+    /// For a producer that is about to act on a pair without asking anyone:
+    /// a row that is no longer `pending` carries a decision — the judge's, a
+    /// person's, or an earlier automatic hide that a person then undid — and a
+    /// local rule that re-derives the same answer must not overrule it.
+    pub async fn pair_state_between(&self, a: &str, b: &str) -> Result<Option<PairState>> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM artifact_pairs WHERE a_id = ? AND b_id = ?")
+                .bind(a)
+                .bind(b)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(state.as_deref().map(PairState::parse))
     }
 
     pub async fn get_pair(&self, id: i64) -> Result<ArtifactPair> {
@@ -331,20 +366,6 @@ impl Store {
         .bind(merged_id)
         .execute(&self.pool)
         .await?;
-        Ok(res.rows_affected())
-    }
-
-    /// Hand every recorded would-merge verdict back to the judge queue.
-    ///
-    /// `would_merge` exists only as a note taken while autonomy is off — the
-    /// draft was discarded, so there is nothing to apply directly; the unit
-    /// re-judges and merges at the queue's own pace. The detail is kept: it is
-    /// the model's recorded reasoning, and `pending` reads it never.
-    pub async fn reopen_would_merge_pairs(&self) -> Result<u64> {
-        let res =
-            sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
-                .execute(&self.pool)
-                .await?;
         Ok(res.rows_affected())
     }
 
@@ -1031,6 +1052,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_settlement_whose_action_failed_is_reopened() {
+        // The producer files the decision before carrying it out, because the
+        // other order can leave an artifact hidden with no row explaining it.
+        // This is the payment for that order: the action failed, so the row
+        // saying it happened has to go back, or the pair is settled over two
+        // artifacts that are both still visible and nothing looks again.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_settled_pair(&a, &b, 0.99, PairState::NoConflict)
+            .await
+            .unwrap();
+
+        assert!(
+            s.unsettle_pair(&b, &a, PairState::NoConflict)
+                .await
+                .unwrap(),
+            "the pair did not reopen, and filed either way round is the same pair"
+        );
+        assert_eq!(
+            s.pair_state_between(&a, &b).await.unwrap(),
+            Some(PairState::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopening_leaves_a_decision_that_landed_in_between_alone() {
+        // The narrowing that makes the reopen safe. Between the settlement and
+        // the failure, a judge or an operator can settle the same pair their
+        // own way, and undoing that is the one thing this must never do.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_settled_pair(&a, &b, 0.99, PairState::NoConflict)
+            .await
+            .unwrap();
+        let id = s.pairs_by_state(PairState::NoConflict, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Dismissed, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !s.unsettle_pair(&a, &b, PairState::NoConflict)
+                .await
+                .unwrap(),
+            "a decision made in between was reopened underneath it"
+        );
+        assert_eq!(
+            s.pair_state_between(&a, &b).await.unwrap(),
+            Some(PairState::Dismissed)
+        );
+    }
+
+    #[tokio::test]
     async fn a_merged_settlement_records_which_merge_answered_it() {
         let s = Store::memory().await.unwrap();
         let (a, b) = two_artifacts(&s).await;
@@ -1076,24 +1149,5 @@ mod tests {
         let p = s.get_pair(id).await.unwrap();
         assert_eq!(p.state, PairState::Contradiction);
         assert_eq!(p.merged_into, None);
-    }
-
-    #[tokio::test]
-    async fn would_merge_is_a_state_of_its_own() {
-        let s = Store::memory().await.unwrap();
-        let (a, b) = two_artifacts(&s).await;
-        s.record_pair(&a, &b, 0.91).await.unwrap();
-        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::WouldMerge, Some("same claim"))
-            .await
-            .unwrap();
-        assert_eq!(
-            s.pairs_by_state(PairState::WouldMerge, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(PairState::parse("would_merge"), PairState::WouldMerge);
     }
 }

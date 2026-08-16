@@ -58,6 +58,16 @@
     {% for r in meta_rows %}<tr><td class="muted">{{ r.0 }}</td><td>{{ r.1 }}</td></tr>{% endfor %}
   </table>
   {% endif %}
+  {# Folded: dozens of rows nobody came here for, and the only copy there is —
+     the original file is not stored, only this preview and what it carried. #}
+  {% if !exif_rows.is_empty() %}
+  <details class="exif-all">
+    <summary class="muted">All {{ exif_rows.len() }} EXIF tags</summary>
+    <table class="meta">
+      {% for r in exif_rows %}<tr><td class="muted">{{ r.0 }}</td><td>{{ r.1 }}</td></tr>{% endfor %}
+    </table>
+  </details>
+  {% endif %}
 </div>
 {% else if let Some(n) = note %}
 <p><b>Note:</b> {{ n }}</p>
