@@ -550,6 +550,30 @@ impl Describer for HttpDescriber {
     }
 }
 
+/// One cheap reachability check per role at startup. Failure is a warning, not
+/// a fatal error: ingest is designed to survive a dead inference endpoint.
+pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
+    let c = client(crate::config::DEFAULT_TIMEOUT_SECS);
+    let mut req = c.get(url(base_url, "models"));
+    if let Some(k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    match req.timeout(std::time::Duration::from_secs(5)).send().await {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(role, "inference endpoint reachable");
+            true
+        }
+        Ok(r) => {
+            tracing::warn!(role, status = %r.status(), "inference endpoint responded with an error");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(role, error = %e, "inference endpoint unreachable");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
