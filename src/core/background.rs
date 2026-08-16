@@ -124,6 +124,74 @@ pub fn spawn_consolidation_ticker(
     })
 }
 
+/// How often the repair pass runs. A constant rather than a setting: this is
+/// what keeps a crashed capture from staying half-finished, which is not a
+/// preference, and the one knob it could plausibly borrow —
+/// `consolidate.interval_hours` — has no meaning in the configuration this pass
+/// exists to survive.
+const REPAIR_INTERVAL_HOURS: u64 = 1;
+
+/// Finish what a crash left half-done, now and every `REPAIR_INTERVAL_HOURS`.
+///
+/// Its own ticker, and behind no setting at all. These four passes used to ride
+/// on the consolidation sweep, where `consolidate.enabled = false` stopped the
+/// ticker before its loop and so stopped them too: a corpus left `segmenting`
+/// by a crash stayed stuck, an artifact whose winner was deleted stayed hidden
+/// from search and from every page that could put it back, and a lifecycle
+/// write that reached one store and not the other stayed torn — with nothing
+/// but the sweep to notice, and the sweep switched off. None of that is
+/// duplicate hygiene, and none of it is something an operator asks to keep by
+/// turning duplicate hygiene off.
+pub fn spawn_repair_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => repair_once(&core).await,
+            }
+        }
+        tracing::info!("repair ticker stopped");
+    })
+}
+
+/// One pass. Each step warns and the next still runs: they are independent, each
+/// is retried on the next tick, and each is most likely to fail on exactly the
+/// base that needs it most.
+pub(crate) async fn repair_once(core: &crate::core::Core) {
+    if let Err(e) = crate::jobs::reconcile::run(core).await {
+        tracing::warn!(error = %e, "could not finish interrupted captures; retrying on the next pass");
+    }
+    // A hidden artifact pointing at nothing is invisible to search and to every
+    // page that could put it back, and nothing else would notice.
+    if let Err(e) = core.heal_dangling_supersessions().await {
+        tracing::warn!(
+            error = %e,
+            "could not restore every artifact whose winner was deleted; retrying on the next pass"
+        );
+    }
+    // The marker pass is cheap, complete for every lifecycle write this system
+    // makes, and does not grow with the base.
+    if let Err(e) = crate::jobs::consolidate::repair_lifecycle_drift(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not finish interrupted lifecycle writes; retrying on the next pass"
+        );
+    }
+    if let Err(e) = core.heal_store_drift().await {
+        tracing::warn!(
+            error = %e,
+            "could not reconcile which artifacts the two stores hold; retrying on the next pass"
+        );
+    }
+}
+
 /// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after.
 ///
 /// Its own ticker rather than a passenger on the consolidation sweep, which is
@@ -252,6 +320,57 @@ mod tests {
         assert!(
             core.store.claim_job().await.unwrap().is_none(),
             "a disabled sweep must not be queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_capture_is_repaired_with_the_sweep_switched_off() {
+        // The coupling this ticker exists to break. These passes used to run
+        // inside the consolidation sweep, and the sweep's ticker returns before
+        // its loop when `enabled` is false — so no sweep was ever queued, the
+        // passes never ran, and a corpus left half-segmented by a crash stayed
+        // that way for as long as duplicate hygiene was switched off.
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.enabled = false;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    crate::store::segments::NewSegment {
+                        start_line: 1,
+                        end_line: 10,
+                        text: "first window",
+                        carry_lines: 0,
+                    },
+                    crate::store::segments::NewSegment {
+                        start_line: 11,
+                        end_line: 20,
+                        text: "second window",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+
+        repair_once(&core).await;
+
+        let job = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the unfinished window should have been re-armed");
+        assert_eq!(job.stage, crate::store::jobs::Stage::SegmentWindow);
+        assert_eq!(
+            job.target_id,
+            crate::jobs::window::unit_target(&src.id, 1),
+            "the window that never ran"
         );
     }
 

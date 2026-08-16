@@ -168,7 +168,7 @@ const DRIFT_REPAIR_BATCH: usize = 5_000;
 /// Returns how many artifacts it rewrote, which is a number worth asserting on:
 /// a repair that fires on a base in agreement is a bug that hides behind a
 /// correct end state.
-async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
+pub(crate) async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     // Under the same lock as every lifecycle transition: the repair reads
     // rows, writes payloads and clears markers, and interleaving that with a
     // payload-first reveal is exactly the sequence that hides an artifact
@@ -195,35 +195,26 @@ async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
-    // Finish what was started before looking for duplicates: a sweep over a
-    // half-ingested corpus is judging a base that is not there yet. This is
-    // capture-pipeline repair, not duplicate hygiene, so it is not behind
-    // `enabled` — the same reason retention has its own ticker.
-    crate::jobs::reconcile::run(core).await?;
-
     let cfg = &core.consolidate;
     if !cfg.enabled {
         return Ok(Outcome::default());
     }
 
+    // Finish what was started before looking for duplicates: a sweep over a
+    // half-ingested corpus is judging a base that is not there yet. The repair
+    // ticker runs this too, and is the one that guarantees it runs at all —
+    // this call is here for the precondition, not for the repair, which is why
+    // switching the sweep off no longer switches capture repair off with it.
+    crate::jobs::reconcile::run(core).await?;
+
     // Repairs. None may take the sweep with it: each is retried every sweep,
     // and each is most likely to fail on exactly the base that needs it most.
-    // A hidden artifact pointing at nothing is invisible to search and to
-    // every page that could put it back, and nothing else would notice.
-    if let Err(e) = core.heal_dangling_supersessions().await {
-        tracing::warn!(
-            error = %e,
-            "could not restore every artifact whose winner was deleted; retrying on the next sweep"
-        );
-    }
-    // The marker pass is cheap, complete for every lifecycle write this
-    // system makes, and does not grow with the base.
-    if let Err(e) = repair_lifecycle_drift(core).await {
-        tracing::warn!(
-            error = %e,
-            "could not finish interrupted lifecycle writes; retrying on the next sweep"
-        );
-    }
+    //
+    // What is left here is merge repair, and only that: a merge exists only
+    // because this sweep made one, so a base with the sweep switched off grows
+    // no new unfinished merges. Everything that can go wrong without the sweep's
+    // involvement moved to `background::repair_once`.
+    //
     // A merge whose process died between indexing and hiding what it replaced.
     // Invisible to everything else: complete from the artifact side, absent
     // from the pair side, and only a join across the lineage says otherwise.
@@ -255,12 +246,6 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // can no longer support, and saying so beats quietly showing one fewer.
     if let Err(e) = crate::jobs::merge::flag_orphans(core).await {
         tracing::warn!(error = %e, "could not flag merged artifacts that lost a source");
-    }
-    if let Err(e) = core.heal_store_drift().await {
-        tracing::warn!(
-            error = %e,
-            "could not reconcile which artifacts the two stores hold; retrying on the next sweep"
-        );
     }
 
     // Detection is the per-artifact `Relate` unit, armed when an artifact is
@@ -638,9 +623,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_sweep_finishes_a_supersession_whose_payload_write_was_lost() {
+    async fn the_repair_pass_finishes_a_supersession_whose_payload_write_was_lost() {
         // The row and the payload cannot be written atomically. A crash between
-        // them used to be permanent: the next sweep skipped the artifact
+        // them used to be permanent: the next pass skipped the artifact
         // because its row said hidden, so the flag never landed and the
         // artifact stayed listed as hidden on Ops while every search returned
         // it, forever.
@@ -651,7 +636,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        run(&core).await.unwrap();
+        crate::core::background::repair_once(&core).await;
 
         let hits = core
             .vectors
@@ -728,7 +713,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_sweep_finishes_a_deprecation_whose_payload_write_was_lost() {
+    async fn the_repair_pass_finishes_a_deprecation_whose_payload_write_was_lost() {
         // Row written, payload not: Ops lists the artifact as deprecated while
         // every search still returns it, and the only button that row offers is
         // "Reactivate". Nothing used to notice — the old self-heal branch fired
@@ -740,7 +725,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        run(&core).await.unwrap();
+        crate::core::background::repair_once(&core).await;
 
         let hits = core
             .vectors
@@ -811,7 +796,7 @@ pub(crate) mod tests {
             .delete_artifacts(std::slice::from_ref(&keeper))
             .await
             .unwrap();
-        run(&core).await.unwrap();
+        crate::core::background::repair_once(&core).await;
 
         assert!(
             core.store
@@ -1802,45 +1787,6 @@ pub(crate) mod tests {
         seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
         let out = run(&core).await.unwrap();
         assert_eq!((out.superseded, out.judged), (0, 0));
-    }
-
-    #[tokio::test]
-    async fn the_repair_sweep_runs_even_when_duplicate_hygiene_is_off() {
-        let mut core = test_core().await;
-        core.consolidate.enabled = false;
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        core.store
-            .upsert_segments(
-                &src.id,
-                &[
-                    crate::store::segments::NewSegment {
-                        start_line: 1,
-                        end_line: 10,
-                        text: "first window",
-                        carry_lines: 0,
-                    },
-                    crate::store::segments::NewSegment {
-                        start_line: 11,
-                        end_line: 20,
-                        text: "second window",
-                        carry_lines: 0,
-                    },
-                ],
-            )
-            .await
-            .unwrap();
-        core.store
-            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
-            .await
-            .unwrap();
-        run(&core).await.unwrap();
-        let job = core
-            .store
-            .claim_job()
-            .await
-            .unwrap()
-            .expect("reconcile armed the unfinished window");
-        assert_eq!(job.stage, crate::store::jobs::Stage::SegmentWindow);
     }
 
     #[tokio::test]
