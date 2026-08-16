@@ -116,7 +116,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
   superseded_by    TEXT,
   caveats          TEXT NOT NULL DEFAULT '[]',
   status           TEXT NOT NULL DEFAULT 'active',
-  last_verified_at INTEGER
+  last_verified_at INTEGER,
+  activation       REAL    NOT NULL DEFAULT 1.0,
+  -- Current accessibility above is raised by being captured, retrieved,
+  -- opened and confirmed; read through the same lazy decay as a link's
+  -- weight. In SQLite rather than the vector payload because the query path
+  -- already needs one SQLite read for links, and the same read returns this
+  -- — one crossing.
+  activated_at     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);

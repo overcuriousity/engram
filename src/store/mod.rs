@@ -112,6 +112,12 @@ impl Store {
             // Arrived with image capture. Every corpus predating it recorded
             // nothing beyond its text, which is what the empty object says.
             ("corpora", "metadata", "TEXT NOT NULL DEFAULT '{}'"),
+            // Arrived with associative memory. Both have defaults that are the
+            // truth about an artifact captured before it existed — full
+            // accessibility, no stamp — and the stamp is backfilled below from
+            // `created_at`, which is when it was in fact last activated.
+            ("artifacts", "activation", "REAL NOT NULL DEFAULT 1.0"),
+            ("artifacts", "activated_at", "INTEGER NOT NULL DEFAULT 0"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -185,6 +191,13 @@ impl Store {
         // Verdicts recorded while acting was switched off. There is no such
         // switch now, so they go back to the judge and are acted on.
         sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
+            .execute(&self.pool)
+            .await?;
+        // The one default an append cannot state: `activated_at` has to be the
+        // artifact's own creation time, not zero. Left at zero every artifact
+        // predating this column reads as decayed to nothing since 1970 — the
+        // whole base equally inaccessible, which is the opposite of the truth.
+        sqlx::query("UPDATE artifacts SET activated_at = created_at WHERE activated_at = 0")
             .execute(&self.pool)
             .await?;
 
@@ -504,6 +517,53 @@ mod tests {
         let got = store.get_artifact(&made[0].id).await.unwrap();
         assert_eq!(got.provenance, artifacts::Provenance::Captured);
         assert_eq!(got.source_count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_base_captured_before_activation_gains_it_with_a_real_stamp() {
+        // The append can only state a constant, and zero is the wrong stamp:
+        // it reads as an artifact last reached in 1970. The backfill is what
+        // makes the column true of a base that predates it.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        store
+            .insert_artifacts(
+                &src.id,
+                &[artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "alpha".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        for stmt in [
+            "ALTER TABLE artifacts DROP COLUMN activation",
+            "ALTER TABLE artifacts DROP COLUMN activated_at",
+        ] {
+            sqlx::query(stmt)
+                .execute(&store.pool)
+                .await
+                .expect("the fixture needs an artifacts table from before activation");
+        }
+
+        store
+            .migrate()
+            .await
+            .expect("migrate refused a base captured before activation");
+
+        let (value, stamp): (f64, i64) =
+            sqlx::query_as("SELECT activation, activated_at FROM artifacts")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!((value - 1.0).abs() < 1e-9);
+        assert!(stamp > 0, "activated_at was left at the epoch");
     }
 
     #[tokio::test]

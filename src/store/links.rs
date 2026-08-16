@@ -522,6 +522,74 @@ impl Store {
         .unwrap_or(0))
     }
 
+    /// Each artifact's stored activation and the stamp it was true at.
+    ///
+    /// One statement for the whole candidate list: this is on the query path,
+    /// and fifty round trips to answer one search is exactly the layer crossing
+    /// the design promises not to be. The SQL is built only from `?`
+    /// placeholders — one per id, never a value — so nothing from a request
+    /// reaches the statement text.
+    pub async fn activation_of(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, (f64, i64)>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id, activation, activated_at FROM artifacts WHERE id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    (
+                        r.get::<f64, _>("activation"),
+                        r.get::<i64, _>("activated_at"),
+                    ),
+                )
+            })
+            .collect())
+    }
+
+    /// Raise the accessibility of these artifacts, folding the decay in.
+    ///
+    /// Read-then-write per artifact rather than one arithmetic UPDATE, for the
+    /// same reason `bump_link` does it: the decay is an exponential, and not
+    /// every SQLite build ships the math functions to express one in SQL.
+    pub async fn bump_activation(
+        &self,
+        ids: &[String],
+        delta: f64,
+        half_life_days: f64,
+        at: i64,
+    ) -> Result<()> {
+        if ids.is_empty() || delta == 0.0 {
+            return Ok(());
+        }
+        let current = self.activation_of(ids).await?;
+        for id in ids {
+            let Some((value, stamp)) = current.get(id).copied() else {
+                continue;
+            };
+            sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
+                .bind(decayed(value, stamp, at, half_life_days) + delta)
+                .bind(at)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The three numbers Ops shows.
     pub async fn link_counts(&self) -> Result<LinkCounts> {
         Ok(LinkCounts {
@@ -1001,5 +1069,47 @@ mod tests {
             .unwrap();
         assert_eq!(store.record_link_judge_attempt(&a, &b).await.unwrap(), 1);
         assert_eq!(store.record_link_judge_attempt(&b, &a).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_artifact_starts_fully_activated_and_stamped() {
+        // Left unstamped, every artifact in the base reads as having decayed
+        // since 1970 — equally inaccessible, which is the opposite of true.
+        let store = Store::memory().await.unwrap();
+        let (a, _) = two(&store).await;
+        let act = store.activation_of(std::slice::from_ref(&a)).await.unwrap();
+        let (value, stamp) = act
+            .get(&a)
+            .copied()
+            .expect("an artifact carries activation");
+        assert!((value - 1.0).abs() < 1e-9);
+        assert!(stamp > 0, "activated_at was never set at insert");
+    }
+
+    #[tokio::test]
+    async fn a_bump_folds_the_decay_in_like_a_link_does() {
+        let store = Store::memory().await.unwrap();
+        let (a, _) = two(&store).await;
+        sqlx::query("UPDATE artifacts SET activation = 4.0, activated_at = 0 WHERE id = ?")
+            .bind(&a)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .bump_activation(std::slice::from_ref(&a), 1.0, 14.0, 14 * 86_400)
+            .await
+            .unwrap();
+
+        let (value, stamp) = store.activation_of(std::slice::from_ref(&a)).await.unwrap()[&a];
+        assert!((value - 3.0).abs() < 1e-6, "value was {value}");
+        assert_eq!(stamp, 14 * 86_400);
+    }
+
+    #[tokio::test]
+    async fn bumping_nothing_is_not_a_write() {
+        let store = Store::memory().await.unwrap();
+        store.bump_activation(&[], 1.0, 14.0, 0).await.unwrap();
+        assert!(store.activation_of(&[]).await.unwrap().is_empty());
     }
 }
