@@ -79,6 +79,12 @@ pub struct SearchResult {
     /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
+    /// This hit moved up because it is more accessible than the ones it passed
+    /// — recently and often reached. Bounded by `associate.prime_lift`, never
+    /// past rank 1, and said out loud wherever it happened: nothing about the
+    /// order is silent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primed: bool,
 }
 
 impl From<SearchHit> for SearchResult {
@@ -95,6 +101,7 @@ impl From<SearchHit> for SearchResult {
             superseded_by: h.payload.superseded_by,
             last_verified_at: h.payload.last_verified_at,
             weak: false,
+            primed: false,
         }
     }
 }
@@ -148,6 +155,65 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
                 h.payload.artifact_id.clone(),
                 h.payload.hit_count.unwrap_or(0),
             )
+        })
+        .collect()
+}
+
+/// Move hits up on activation, within hard bounds.
+///
+/// Rank-based rather than score-based: hybrid scores are fused ranks and mean
+/// nothing across queries, while "moved up two places" means the same thing
+/// every time. The activation is normalised within this one list, so `margin` is
+/// a fraction of the most accessible hit here rather than an absolute weight —
+/// which is what makes one default work for a list of ones and a list of
+/// hundreds.
+///
+/// Index 0 is untouchable and index 1 cannot move, because moving it would
+/// displace rank 1. An exact match is never buried.
+fn prime(
+    results: Vec<SearchResult>,
+    activation: &HashMap<String, f64>,
+    margin: f64,
+    lift: usize,
+) -> Vec<SearchResult> {
+    if lift == 0 || results.len() < 3 {
+        return results;
+    }
+    let max = activation.values().copied().fold(0.0f64, f64::max);
+    if max <= 0.0 {
+        return results;
+    }
+    let mut rows: Vec<(SearchResult, f64, usize)> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let a = activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max;
+            (r, a, i)
+        })
+        .collect();
+
+    // Bottom-up: a row's climb must be earned by its own margin over its own
+    // original neighbour, never borrowed from a gap another row's earlier
+    // climb happened to open beneath it. Processing the lowest-ranked
+    // candidate first means every later (higher-ranked) row still sees its
+    // true original predecessor before deciding whether to move.
+    for i in (2..rows.len()).rev() {
+        let mut j = i;
+        let mut moved = 0;
+        while j > 1 && moved < lift && rows[j].1 - rows[j - 1].1 > margin {
+            rows.swap(j - 1, j);
+            j -= 1;
+            moved += 1;
+        }
+    }
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(pos, (mut r, _, was))| {
+            // Only a climb is priming. A hit that was passed did not move up,
+            // and labelling it would say something untrue about it.
+            r.primed = pos < was;
+            r
         })
         .collect()
 }
@@ -222,6 +288,35 @@ impl Core {
                 tracing::warn!(error = %e, "could not record that a chunk was opened");
             }
         });
+    }
+
+    /// Each artifact's activation, already decayed to now.
+    ///
+    /// The one SQLite read the query path takes. It can only add: a failure is
+    /// one warning and an empty map, and everything downstream then behaves
+    /// exactly as it did before any of this existed.
+    async fn activation_now(&self, ids: &[String]) -> HashMap<String, f64> {
+        let at = now_secs();
+        match self.store.activation_of(ids).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(id, (value, stamp))| {
+                    (
+                        id,
+                        crate::store::links::decayed(
+                            value,
+                            stamp,
+                            at,
+                            self.activation.half_life_days,
+                        ),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read activation; results are unprimed");
+                HashMap::new()
+            }
+        }
     }
 
     /// A random handful of chunks that have not surfaced in a month.
@@ -443,6 +538,21 @@ impl Core {
                 // order is still a usable answer.
                 Err(e) => tracing::warn!(error = %e, "rerank failed; returning vector order"),
             }
+        }
+
+        // Before capture and before the truncate, so the pool that is recorded
+        // is the order the searcher was actually shown — a judged rank has to
+        // be a rank that happened. Bounded by `prime_lift` and never past rank
+        // 1, so this can reorder near-ties and nothing else.
+        if self.associate.enabled && self.associate.prime_lift > 0 {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let activation = self.activation_now(&ids).await;
+            results = prime(
+                results,
+                &activation,
+                self.associate.prime_margin,
+                self.associate.prime_lift,
+            );
         }
 
         // Recorded here, where the list is still wider than the answer and the
@@ -1174,6 +1284,111 @@ mod tests {
             vec![&ids[1]],
             "the forgotten list offered an artifact that was just retired"
         );
+    }
+
+    fn ranked(ids: &[&str]) -> Vec<SearchResult> {
+        ids.iter()
+            .map(|id| SearchResult {
+                artifact_id: (*id).into(),
+                corpus_id: "c".into(),
+                title: None,
+                text: String::new(),
+                category: None,
+                tags: vec![],
+                score: 0.5,
+                status: None,
+                superseded_by: None,
+                last_verified_at: None,
+                weak: false,
+                primed: false,
+            })
+            .collect()
+    }
+
+    fn order(rs: &[SearchResult]) -> Vec<&str> {
+        rs.iter().map(|r| r.artifact_id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_hit_climbs_at_most_two_places_and_never_past_the_first() {
+        // Rank-based rather than score-based on purpose: hybrid scores are
+        // fused ranks and mean nothing across queries, while "moved up two
+        // places" means the same thing every time — and can be tested here.
+        let act = HashMap::from([("d".to_string(), 4.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed, "the hit that moved must say so");
+        assert!(!out[2].primed, "the hit it passed did not move up");
+    }
+
+    #[test]
+    fn the_most_active_hit_cannot_displace_an_exact_match() {
+        let act = HashMap::from([("b".to_string(), 9.0)]);
+        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "b", "c"]);
+        assert!(out.iter().all(|r| !r.primed));
+    }
+
+    #[test]
+    fn a_lift_of_zero_turns_priming_off_entirely() {
+        let act = HashMap::from([("d".to_string(), 4.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 0);
+        assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn activation_that_is_merely_higher_does_not_move_anything() {
+        // The margin is what keeps this from reshuffling every list: two hits
+        // that are both somewhat active stay in the order the ranking gave.
+        let act = HashMap::from([("c".to_string(), 4.0), ("d".to_string(), 3.6)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        assert_eq!(
+            order(&out),
+            vec!["a", "c", "b", "d"],
+            "only c clears the margin"
+        );
+    }
+
+    #[tokio::test]
+    async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
+        let mut core = test_core().await;
+        core.associate.prime_lift = 2;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = {
+            let mut off = core.clone();
+            off.associate.prime_lift = 0;
+            off.search(&q("alpha text about it"), Door::Ui)
+                .await
+                .unwrap()
+        };
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+        assert!(plain.iter().all(|r| !r.primed));
+
+        // The one at the bottom is the one people actually keep confirming.
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let primed = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        let moved = primed.iter().position(|r| r.artifact_id == bottom).unwrap();
+        assert!(
+            moved < plain.len() - 1,
+            "activation did not reach the ranked list at all"
+        );
+        assert!(primed[moved].primed, "a hit that moved must say so");
+        assert_ne!(primed[0].artifact_id, bottom, "rank 1 was displaced");
     }
 
     async fn captured_events(core: &crate::core::Core) -> i64 {

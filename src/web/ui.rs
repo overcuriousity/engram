@@ -2430,6 +2430,7 @@ mod tests {
             superseded_by: None,
             last_verified_at: None,
             weak,
+            primed: false,
         };
 
         let loose = render_hit(0, result(true));
