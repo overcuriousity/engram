@@ -170,6 +170,17 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
 ///
 /// Index 0 is untouchable and index 1 cannot move, because moving it would
 /// displace rank 1. An exact match is never buried.
+///
+/// Every row's destination is decided against the ORIGINAL ordering in one
+/// pass, then the list is reordered once. An earlier attempt did this by
+/// repeatedly swapping adjacent rows in place, insertion-sort style — but
+/// once a row swaps, the array no longer records which row already spent its
+/// budget: a later position, reached by a *different* row after an earlier
+/// row moved through it, got a fresh budget for free. On a five-element list
+/// with only the last row activated and `lift = 2`, that let it climb three
+/// places instead of two, and on a longer list the overrun only grows. Here
+/// every comparison reads from an activation snapshot untouched by any move,
+/// so no row can ever borrow a gap another row's move opened.
 fn prime(
     results: Vec<SearchResult>,
     activation: &HashMap<String, f64>,
@@ -183,36 +194,54 @@ fn prime(
     if max <= 0.0 {
         return results;
     }
-    let mut rows: Vec<(SearchResult, f64, usize)> = results
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let a = activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max;
-            (r, a, i)
-        })
+    let n = results.len();
+    // Normalised once, against the original list, and never touched again.
+    let acts: Vec<f64> = results
+        .iter()
+        .map(|r| activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max)
         .collect();
 
-    // Bottom-up: a row's climb must be earned by its own margin over its own
-    // original neighbour, never borrowed from a gap another row's earlier
-    // climb happened to open beneath it. Processing the lowest-ranked
-    // candidate first means every later (higher-ranked) row still sees its
-    // true original predecessor before deciding whether to move.
-    for i in (2..rows.len()).rev() {
-        let mut j = i;
-        let mut moved = 0;
-        while j > 1 && moved < lift && rows[j].1 - rows[j - 1].1 > margin {
-            rows.swap(j - 1, j);
-            j -= 1;
-            moved += 1;
+    // For each row, how many of its original predecessors — walked nearest
+    // first — it beats by strictly more than `margin`, stopping at the first
+    // it does not beat, capped at `lift`, and floored so the target index
+    // can never fall below 1: rank 1 is never displaced. Rows 0 and 1 never
+    // move, so the walk only starts at index 2.
+    let mut climb = vec![0usize; n];
+    for (i, slot) in climb.iter_mut().enumerate().skip(2) {
+        let mut c = 0usize;
+        while c < lift {
+            let predecessor = i - c - 1;
+            if predecessor < 1 || acts[i] - acts[predecessor] <= margin {
+                break;
+            }
+            c += 1;
         }
+        *slot = c;
     }
 
-    rows.into_iter()
+    // One stable sort by destination decides the final order. The secondary
+    // key is load-bearing: without it, a climbing row sorts behind the row
+    // it was meant to pass, because its original index is larger.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| {
+        let target = i - climb[i];
+        let climbed = climb[i] > 0;
+        (target, u8::from(!climbed), i)
+    });
+
+    let mut slots: Vec<Option<SearchResult>> = results.into_iter().map(Some).collect();
+    order
+        .into_iter()
         .enumerate()
-        .map(|(pos, (mut r, _, was))| {
-            // Only a climb is priming. A hit that was passed did not move up,
-            // and labelling it would say something untrue about it.
-            r.primed = pos < was;
+        .map(|(pos, i)| {
+            let mut r = slots[i]
+                .take()
+                .expect("each original index used exactly once");
+            // Only a climb is priming: this is exactly the row that ended up
+            // at a lower index than it started at. A hit that was merely
+            // displaced by another row's climb did not move up, and
+            // labelling it would say something untrue about it.
+            r.primed = pos < i;
             r
         })
         .collect()
@@ -1347,6 +1376,31 @@ mod tests {
             vec!["a", "c", "b", "d"],
             "only c clears the margin"
         );
+    }
+
+    #[test]
+    fn a_hit_climbs_exactly_the_lift_and_no_further_however_long_the_list_is() {
+        // An insertion-sort-style implementation can let a row that already
+        // spent its climb budget be mistaken for a fresh row once something
+        // else moves through the position it landed on. Five elements is
+        // enough to expose that: `e` should climb exactly two, not three.
+        let act = HashMap::from([("e".to_string(), 1.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
+        let moved = order(&out).iter().position(|id| *id == "e").unwrap();
+        assert_eq!(moved, 4 - 2, "e must climb exactly prime_lift positions");
+        assert!(out[moved].primed);
+    }
+
+    #[test]
+    fn the_lift_bound_holds_on_a_longer_list_too() {
+        // Same shape, stretched to seven: the last row must still land
+        // exactly `lift` positions up, at index 4 rather than index 1.
+        let act = HashMap::from([("g".to_string(), 1.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d", "e", "f", "g"]), &act, 0.5, 2);
+        let moved = order(&out).iter().position(|id| *id == "g").unwrap();
+        assert_eq!(moved, 4, "g must land at index 4, not be pulled to index 1");
+        assert_eq!(6 - moved, 2, "the climb must equal prime_lift exactly");
     }
 
     #[tokio::test]
