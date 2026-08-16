@@ -28,14 +28,31 @@ working. Approved 2026-08-15.
 
 ### Tier 1 — dead code + two bug fixes (~150 lines)
 Delete: `FakeSynthesizer::failing_on`, `verify::span_is_plausible`,
-`openai::probe` + its four `main.rs` call sites, `Error::Duplicate`,
-`split::is_heading_for_test` (+ its one assertion), the EXIF `tags` catch-all
-in `core/image.rs` (never read), `StoreDrift` counters (log line stays),
-`src/bin/eval_prepare.rs` + Cargo target + the three error strings in
-`tests/eval.rs` naming it.
-Fix: `reconcile::run` moves above the `consolidate.enabled` early return in
-`consolidate::run`; the hard-coded `theme: "light"` field and
-`data-theme` attribute go so `prefers-color-scheme` applies.
+`Error::Duplicate`, `split::is_heading_for_test` (+ its one assertion),
+`StoreDrift` counters (log line stays), `src/bin/eval_prepare.rs` + Cargo
+target + the three error strings in `tests/eval.rs` naming it.
+Fix: the `consolidate.enabled` gate stops capture repair (see the correction
+below); the hard-coded `theme: "light"` field and `data-theme` attribute go so
+`prefers-color-scheme` applies.
+
+**Corrected after review (PR #16).** Three Tier 1 items were wrong and did not
+ship as designed:
+
+- `openai::probe` was listed as uncalled. It is called, four times, by
+  `startup_checks`, and it is the only boot-time report of an unreachable
+  inference endpoint. It stays.
+- The EXIF `tags` catch-all was listed as never read. Nothing read it *back*
+  because nothing displayed it — but ingest is the only moment those tags
+  exist, the original file is never stored, and deleting the catch-all deleted
+  them permanently. It stays, and the corpus page now shows it.
+- Moving `reconcile::run` above the `enabled` early return in
+  `consolidate::run` fixes nothing: that function is only reached through a
+  `Consolidate` job, and `spawn_consolidation_ticker` returns before its loop
+  when `enabled` is false, so no such job is ever queued. The four passes that
+  are capture repair rather than duplicate hygiene — reconcile, dangling
+  supersessions, torn lifecycle writes, store drift — moved to their own
+  hourly ticker behind no setting. Merge repair stays on the sweep, which is
+  the only thing that creates merges.
 Left alone (touch a deployed DB): `Stage::Enrich` alias arm, `query_vec` /
 `vec_dim` / `via_id` write-only columns, `main.rs` upgrade flags.
 
@@ -87,8 +104,15 @@ b. `full_lifecycle_reconcile(_scanning)`, `DRIFT_SCAN`,
    `list_non_active_artifacts`, `VectorStore::non_active_ids` go.
 c. `heal_store_drift` → count + `warn!`. `RestoredArtifact`,
    `restore_artifact`, `ensure_restored_corpus`, `payloads_of`,
-   `all_artifact_ids`, `VectorPayload.provenance`, the "restored" badge go;
-   `restored_at` column stays.
+   `all_artifact_ids`, `VectorPayload.provenance` go; the "restored" badge and
+   the `restored_at` column stay, because a deployed base may already hold
+   placeholder corpora.
+
+   *This is the one change here that can cost data an operator still has.* An
+   artifact whose SQLite row is lost is no longer recoverable: the vector-store
+   payload still holds its text, title, tags and lifecycle stamps, and nothing
+   reads them back. The warning is the whole recovery story, and restoring both
+   stores from the same snapshot is the supported answer.
 d. `consolidate.autonomous`, `PairState::WouldMerge`, `reopen_would_merge_pairs`
    go; a one-line migration flips existing `would_merge` rows to `pending`.
 e. `tokenizers` dep, `TokenCounter::Exact`, `tokenizer_path` go.
