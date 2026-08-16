@@ -972,12 +972,22 @@ mod tests {
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
 
         core.search(&q("alpha"), Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let after = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
         assert!(after > before, "a retrieval raised nothing");
     }
 
@@ -990,7 +1000,12 @@ mod tests {
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
 
         let mut query = q("alpha");
         query.mark = false;
@@ -998,7 +1013,11 @@ mod tests {
         core.background.wait_idle().await;
 
         assert_eq!(
-            core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0,
+            core.store
+                .activation_of(std::slice::from_ref(&id))
+                .await
+                .unwrap()[&id]
+                .0,
             before
         );
     }
@@ -1016,13 +1035,22 @@ mod tests {
             .unwrap();
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
 
         core.resurface(10).await.unwrap();
         core.background.wait_idle().await;
 
         assert_eq!(
-            core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0,
+            core.store
+                .activation_of(std::slice::from_ref(&id))
+                .await
+                .unwrap()[&id]
+                .0,
             before
         );
     }
@@ -1032,12 +1060,22 @@ mod tests {
         let core = test_core().await;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
-        let before = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
 
         core.mark_artifact_seen(&id);
         core.background.wait_idle().await;
 
-        let after = core.store.activation_of(std::slice::from_ref(&id)).await.unwrap()[&id].0;
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
         assert!((after - before - core.activation.opened).abs() < 1e-6);
         assert!(core.activation.opened < core.activation.retrieved);
     }
@@ -1890,11 +1928,7 @@ mod tests {
         query.limit = 1;
 
         let ask_out = core.search(&query, Door::Ask).await.unwrap();
-        assert_eq!(
-            ask_out.len(),
-            1,
-            "ask received an association: {ask_out:?}"
-        );
+        assert_eq!(ask_out.len(), 1, "ask received an association: {ask_out:?}");
 
         let judge_out = core.search(&query, Door::Judge).await.unwrap();
         assert_eq!(
