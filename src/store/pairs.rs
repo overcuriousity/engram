@@ -155,6 +155,37 @@ impl Store {
         Ok(res.rows_affected() > 0)
     }
 
+    /// File a pair for review, saying where it came from.
+    ///
+    /// `record_pair` with a `detail`, for the one producer that is not the
+    /// similarity sweep: a link the judge found to be a disguised duplicate has
+    /// no cosine behind it, so its `score` is genuinely zero and the detail is
+    /// what explains the row on a page that otherwise renders a percentage.
+    ///
+    /// `INSERT OR IGNORE`, like `record_pair`: a pair an operator already
+    /// dismissed must not be re-filed by a link.
+    pub async fn record_pair_with_detail(
+        &self,
+        a: &str,
+        b: &str,
+        score: f32,
+        detail: &str,
+    ) -> Result<bool> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?)",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(score as f64)
+        .bind(detail)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// File a pair that is already answered. Returns whether this changed
     /// anything.
     ///

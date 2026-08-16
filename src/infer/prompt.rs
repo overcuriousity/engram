@@ -248,6 +248,53 @@ pub fn dedupe_prompt(
     s
 }
 
+/// Two knowledge artifacts keep being retrieved by the same searches, and this
+/// call says what that means, in one line a reader would find useful.
+pub const LINK_SYSTEM: &str = r#"Two knowledge artifacts keep being retrieved by the same searches. You say what that means, in one line a reader would find useful.
+
+Choose exactly one:
+
+- "related" — being needed together makes sense: one is the configuration and the other its failure mode, one is the procedure and the other the tool it needs, one explains why the other is done. Say what the relation is, in the reader's own terms, in one sentence.
+- "unrelated" — the searches that returned both were about something else, and there is no connection worth showing. A shared word is not a connection.
+- "duplicate" — they say the same thing in different words. Only this, and not "related", when neither adds anything the other lacks.
+
+Judge the relation between the artifacts, not their similarity. Two texts that share no vocabulary at all can be strongly related; two that read alike can be about different subjects.
+
+Reply with JSON only, no commentary, in exactly this shape:
+
+{"relation": "related", "reason": "..."}
+
+- relation: one of "related", "unrelated", "duplicate".
+- reason: one sentence. For "related" it is shown to the reader beside the link, so write it for them and not about the task."#;
+
+/// Two artifacts, and the questions that kept returning both.
+///
+/// The cues are the evidence. Without them this asks whether two arbitrary texts
+/// are related, which is a worse question with a worse answer: what is being
+/// judged is why these two keep being *needed at once*.
+///
+/// `attempt` is in the prompt for the same reason it is in `dedupe_prompt`: the
+/// endpoint caches by exact prompt text, and a retry of a reply the parser could
+/// not read would otherwise re-read the same unreadable bytes. Zero adds
+/// nothing, so a first ask stays byte-identical between runs.
+pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i64) -> String {
+    let mut s = String::new();
+    if attempt > 0 {
+        s.push_str(&format!("(attempt {})\n", attempt + 1));
+    }
+    s.push_str(&format!(
+        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
+        a.0, a.1, b.0, b.1
+    ));
+    if !cues.is_empty() {
+        s.push_str(&format!(
+            "\n\nBoth were returned by these searches: {}.",
+            cues.join("; ")
+        ));
+    }
+    s
+}
+
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
 say so plainly rather than guessing. Cite excerpts by their number. \
@@ -486,7 +533,7 @@ pub fn dedupe_schema() -> serde_json::Value {
 
 /// Models wrap JSON in fences and preface it with prose no matter what the
 /// prompt says, so slice from the first `{` to the last `}` before parsing.
-fn extract_json(body: &str) -> &str {
+pub(crate) fn extract_json(body: &str) -> &str {
     let start = body.find('{');
     let end = body.rfind('}');
     match (start, end) {
@@ -668,6 +715,27 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
+        // The binding queries are the evidence. Without them the model is being
+        // asked whether two arbitrary texts are related, which is a different
+        // and much worse question than why these two keep being needed at once.
+        let p = link_prompt(
+            ("Mounting E01 images", "ewfmount /dev/..."),
+            ("Loop device limits", "max_loop=64"),
+            &["mount forensic image".into()],
+            0,
+        );
+        assert!(p.contains("Mounting E01 images"));
+        assert!(p.contains("max_loop=64"));
+        assert!(p.contains("mount forensic image"));
+        assert!(
+            !p.contains("attempt"),
+            "a first ask must stay cache-identical"
+        );
+        assert!(link_prompt(("a", "b"), ("c", "d"), &[], 2).contains("attempt 3"));
+    }
 
     #[test]
     fn context_blocks_are_fenced_and_labelled_as_context_only() {

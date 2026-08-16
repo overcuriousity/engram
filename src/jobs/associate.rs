@@ -245,9 +245,169 @@ async fn shown_candidates(core: &Core, event_id: &str) -> Result<Vec<String>> {
     .await?)
 }
 
+use crate::error::Error;
+use crate::store::links::LinkState;
+
+/// Unreadable replies after which a link is shelved rather than asked forever.
+pub const MAX_UNREADABLE_LINK_JUDGEMENTS: i64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkVerdict {
+    Related,
+    Unrelated,
+    /// The two say the same thing and the embedding failed to notice.
+    Duplicate,
+}
+
+/// A reply that cannot be read is an error, not a verdict.
+///
+/// Defaulting to `unrelated` would quietly close real relations; defaulting to
+/// `related` would show the reader a line the model never wrote. Failing leaves
+/// the link `learning` — still visible, still binding — and the unit retries
+/// under the queue's backoff with a prompt that differs by its attempt number.
+pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        relation: String,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let r: Raw = serde_json::from_str(crate::infer::prompt::extract_json(body)).map_err(|e| {
+        Error::MalformedLlmOutput(format!("link reply was not the expected JSON: {e}"))
+    })?;
+    let verdict = match r.relation.as_str() {
+        "related" => LinkVerdict::Related,
+        "unrelated" => LinkVerdict::Unrelated,
+        "duplicate" => LinkVerdict::Duplicate,
+        other => {
+            return Err(Error::MalformedLlmOutput(format!(
+                "link reply named no relation this understands: {other}"
+            )));
+        }
+    };
+    Ok((verdict, r.reason.unwrap_or_default()))
+}
+
 /// One link, one call. `target` is `"<a_id>|<b_id>"`.
 pub async fn judge(core: &Core, target: &str) -> Result<()> {
-    let _ = (core, target);
+    let (a_id, b_id) = target.split_once('|').ok_or(Error::NotFound)?;
+    let Some(link) = core.store.get_link(a_id, b_id).await? else {
+        // Pruned, or one side deleted, while the unit waited out a backoff.
+        return Ok(());
+    };
+    if link.state != LinkState::Learning {
+        // Answered by an operator's dismissal, or by a sweep that reopened and
+        // a sibling unit that then settled it.
+        return Ok(());
+    }
+    let a = core.store.get_artifact(&link.a_id).await?;
+    let b = core.store.get_artifact(&link.b_id).await?;
+    // Re-checked here and not only when the unit was armed: a side can be
+    // superseded or deprecated while this waits, and spending the scarcest
+    // thing in the system on an artifact nobody will be shown buys nothing.
+    if !a.in_results() || !b.in_results() {
+        return Ok(());
+    }
+
+    let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
+    let permit = core.gate.background().await;
+    let reply = core
+        .judge
+        .complete(
+            crate::infer::prompt::LINK_SYSTEM,
+            &crate::infer::prompt::link_prompt(
+                (a.title.as_deref().unwrap_or("untitled"), &a.text),
+                (b.title.as_deref().unwrap_or("untitled"), &b.text),
+                &cues,
+                link.judge_attempts,
+            ),
+        )
+        .await;
+    permit.finished();
+    // A call the endpoint never answered says nothing about the link: it stays
+    // `learning`, stays visible, and the queue backs the unit off.
+    let reply = reply?;
+
+    let revs = Some((a.embed_rev, b.embed_rev));
+    let (verdict, reason) = match parse_link(&reply) {
+        Ok(v) => v,
+        Err(e) => {
+            // Counted only here, because this is the only failure that says
+            // anything about the link itself.
+            let attempts = core
+                .store
+                .record_link_judge_attempt(&link.a_id, &link.b_id)
+                .await?;
+            if attempts >= MAX_UNREADABLE_LINK_JUDGEMENTS {
+                tracing::warn!(
+                    target,
+                    attempts,
+                    "shelving a link the model will not answer for"
+                );
+                core.store
+                    .set_link_state(
+                        &link.a_id,
+                        &link.b_id,
+                        LinkState::Unrelated,
+                        Some("unreadable"),
+                        revs,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            tracing::warn!(
+                target,
+                attempts,
+                reply_len = reply.len(),
+                error = %e,
+                "link reply unreadable"
+            );
+            return Err(e);
+        }
+    };
+
+    match verdict {
+        LinkVerdict::Related => {
+            core.store
+                .set_link_state(
+                    &link.a_id,
+                    &link.b_id,
+                    LinkState::Related,
+                    Some(&reason),
+                    revs,
+                )
+                .await?;
+        }
+        LinkVerdict::Unrelated => {
+            core.store
+                .set_link_state(
+                    &link.a_id,
+                    &link.b_id,
+                    LinkState::Unrelated,
+                    Some(&reason),
+                    revs,
+                )
+                .await?;
+        }
+        LinkVerdict::Duplicate => {
+            // Handed over rather than acted on: consolidation owns every
+            // decision that hides an artifact, with its own guards and its own
+            // undo. The score is zero because no cosine was ever measured —
+            // that is what `detail` is there to explain on the review page.
+            core.store
+                .record_pair_with_detail(&link.a_id, &link.b_id, 0.0, "link")
+                .await?;
+            core.store
+                .set_link_state(
+                    &link.a_id,
+                    &link.b_id,
+                    LinkState::Related,
+                    Some("same content; handed to consolidation"),
+                    revs,
+                )
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -725,7 +885,12 @@ mod tests {
                 .unwrap()
         );
 
-        // A second sweep must not wind the queued unit's attempts back.
+        // A second sweep must not wind the queued unit's attempts back. (The
+        // guard that actually prevents re-arming here is `rearm_idle_seq`'s own
+        // `WHERE jobs.state = 'done'` SQL condition, src/store/jobs.rs:189 —
+        // not the `live_job` check above, which this assertion does not
+        // isolate. What this pins is real regardless: a second sweep must not
+        // wind a queued unit's attempts back.)
         run(&core).await.unwrap();
         let mut seen = 0;
         while let Some(j) = core.store.claim_job().await.unwrap() {
@@ -780,6 +945,189 @@ mod tests {
     fn a_link_names_itself_the_same_way_round_however_it_is_armed() {
         assert_eq!(link_target("b", "a"), link_target("a", "b"));
         assert_eq!(link_target("a", "b"), "a|b");
+    }
+
+    #[test]
+    fn a_verdict_is_read_out_of_the_reply_and_an_unreadable_one_is_an_error() {
+        let (v, why) =
+            parse_link(r#"{"relation":"related","reason":"both about mounting"}"#).unwrap();
+        assert_eq!(v, LinkVerdict::Related);
+        assert_eq!(why, "both about mounting");
+        assert_eq!(
+            parse_link(r#"{"relation":"duplicate","reason":"same thing"}"#)
+                .unwrap()
+                .0,
+            LinkVerdict::Duplicate
+        );
+        assert!(parse_link("I think they are related!").is_err());
+        assert!(parse_link(r#"{"relation":"maybe","reason":"x"}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_related_verdict_names_the_relation_and_stops_the_decay() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"related","reason":"the config and its errors"}"#.into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.reason.as_deref(), Some("the config and its errors"));
+        assert_eq!(l.judged_rev_a, Some(0));
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_verdict_is_stored_so_it_is_not_asked_again() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"unrelated","reason":"a coincidence of retrieval"}"#.into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            LinkState::Unrelated
+        );
+        // ...and it is never armed again, however strong it becomes.
+        run(&core).await.unwrap();
+        assert!(
+            !core
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::LinkJudge,
+                    &link_target(&ids[0], &ids[1])
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disguised_duplicate_is_handed_to_consolidation_and_still_shown() {
+        // The embedding failed to notice; the reader should still see the
+        // connection while dedupe decides what to do about it.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"duplicate","reason":"the same procedure twice"}"#.into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let pair = core
+            .store
+            .pair_state_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .expect("consolidation was never told");
+        assert_eq!(pair, crate::store::pairs::PairState::Pending);
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, LinkState::Related);
+        assert!(l.reason.as_deref().unwrap().contains("consolidation"));
+    }
+
+    #[tokio::test]
+    async fn three_unreadable_replies_shelve_the_link_rather_than_asking_forever() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("no idea, sorry".into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        let target = link_target(&ids[0], &ids[1]);
+
+        for _ in 0..2 {
+            assert!(
+                judge(&core, &target).await.is_err(),
+                "an unreadable reply is an error"
+            );
+            assert_eq!(
+                core.store
+                    .get_link(&ids[0], &ids[1])
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                LinkState::Learning,
+                "the link stays visible while it is still being asked about"
+            );
+        }
+        judge(&core, &target).await.unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, LinkState::Unrelated);
+        assert_eq!(l.reason.as_deref(), Some("unreadable"));
+    }
+
+    #[tokio::test]
+    async fn a_link_that_has_already_been_answered_costs_no_call() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(&ids[0], &ids[1], LinkState::Dismissed, None, None)
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            LinkState::Dismissed
+        );
     }
 
     #[tokio::test]
