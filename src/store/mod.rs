@@ -5,6 +5,7 @@ pub mod corpora;
 pub mod feedback;
 pub mod jobs;
 pub mod lineage;
+pub mod links;
 pub mod pairs;
 pub mod segments;
 pub mod shingle;
