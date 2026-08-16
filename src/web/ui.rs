@@ -384,6 +384,10 @@ struct CorpusTemplate {
     unread: bool,
     /// Rows of what the door recorded about the capture, already formatted.
     meta_rows: Vec<(String, String)>,
+    /// Every other EXIF tag the file carried, by name. Folded away on the page:
+    /// a phone emits dozens, and none of them is what someone came here to read
+    /// — but the original is not stored, so this is the only place they exist.
+    exif_rows: Vec<(String, String)>,
     note: Option<String>,
 }
 
@@ -811,6 +815,7 @@ async fn corpus_detail(
     let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
+    let exif_rows = exif_tag_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
@@ -822,14 +827,31 @@ async fn corpus_detail(
         image,
         unread,
         meta_rows,
+        exif_rows,
         note,
         artifacts,
     })
     .into_response())
 }
 
+/// Everything under `exif.tags`, by name, sorted. The named facts above have
+/// their own rows; this is the rest of what the camera wrote, in a block that
+/// starts folded — the original file is not kept, so the page is the only place
+/// left to read it, and it is still nothing anyone opened the page to see.
+fn exif_tag_rows(m: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(tags) = m["exif"]["tags"].as_object() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String)> = tags
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
 /// The metadata worth a row on the corpus page, in reading order. Everything
-/// else the file carried is in the JSON, one API call away.
+/// else the file carried is under `exif.tags`, folded away below.
 fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let exif = &m["exif"];
@@ -1979,7 +2001,8 @@ mod tests {
                     "note": "front porch",
                     "file": {"name": "IMG.png", "width": 4, "height": 2},
                     "exif": {"taken_at": "2026-08-09T14:12:03", "camera": "Pixel",
-                             "gps": {"lat": 1.5, "lon": 2.5}}
+                             "gps": {"lat": 1.5, "lon": 2.5},
+                             "tags": {"LensModel": "24mm f/1.8", "ExposureTime": "1/120"}}
                 }),
                 &crate::store::attachments::NewImage {
                     kind: "image",
@@ -2007,6 +2030,15 @@ mod tests {
         assert!(html.contains("front porch"));
         assert!(html.contains("2026-08-09T14:12:03"));
         assert!(html.contains("1.5"));
+        // Everything else the camera wrote is on the page too, folded away and
+        // in tag order: this preview is the only copy of it that survives.
+        assert!(html.contains("All 2 EXIF tags"));
+        let (exposure, lens) = (
+            html.find("ExposureTime").expect("exposure tag"),
+            html.find("LensModel").expect("lens tag"),
+        );
+        assert!(exposure < lens, "the tags are listed by name");
+        assert!(html.contains("24mm f/1.8"));
         assert!(
             html.contains("Transcription"),
             "the text is labelled as derived, not 'Raw corpus'"

@@ -621,6 +621,11 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 .progress span { display: block; height: 100%; background: var(--color-accent); }
 .misses { max-width: 52rem; margin-bottom: 1.25rem; }
 .misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; }
+/* The rest of what the camera wrote. Folded, and smaller than the facts above
+   it, because it is a reference to fall back on rather than something to read. */
+.exif-all { margin-top: 0.75rem; font-size: 0.8125rem; }
+.exif-all summary { cursor: pointer; }
+.exif-all table { margin-top: 0.5rem; }
 /* The line after a verdict. Quiet by design — its job is to say what was just
    learned, not to congratulate. */
 .judge-flash { margin: 0 0 1rem; font-size: 0.875rem; color: var(--color-fg-secondary); }
