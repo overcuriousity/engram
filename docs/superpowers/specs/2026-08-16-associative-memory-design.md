@@ -249,6 +249,15 @@ Rank-based rather than score-based on purpose: hybrid scores are fused ranks
 and mean nothing across queries, while "moved up two places" means the same
 thing every time and can be tested with a table.
 
+Held off the `Ask` and `Judge` doors, the same two association is held off, for
+the same reason in a different shape. `ask` never shows this list to anyone: it
+turns the head of it into excerpts and, when they do not all fit the context
+window, keeps a prefix and drops the tail on the stated grounds that the tail
+matched the question least. Reordering by accessibility makes that untrue, and
+the excerpt dropped is then the one that answered best — a silent change to the
+answer on a path where nobody can see what was cut. `judge` needs the pool it
+labels to be the pool the ranking produced.
+
 ### 6.2 Association
 
 For the top `associate.spread_from` (3) ranked hits, fetch their links with
@@ -258,6 +267,13 @@ result list. Up to `associate.spread_max` (3) are appended after the ranked
 hits, outside `limit`, each carrying `via: <artifact_id>` and, for a judged
 link, `reason`. They are `Touch::shown`, not retrieved (§5.4), and not
 recorded as candidates (§5.2).
+
+An association obeys the caller's own narrowing. `tags` and `category` are a
+statement about what the searcher will accept, not a hint to the ranker, so a
+recalled artifact that fails either is dropped rather than appended — otherwise
+narrowing a search to one category hands back rows from every other one. Being
+outside `limit` is deliberate and is documented on the API parameter: a client
+that wants only what it asked for filters on `via`.
 
 One hop only. Spreading further is what a graph view would be for, and there
 is none.
@@ -374,10 +390,17 @@ moves.
 
 Additive schema (`ADD COLUMN`, two new tables). Feature off until
 `feedback.enabled`; existing installs see nothing change until they opt in.
-No backfill of links from the historical log — the watermarks start at the
-first sweep, and the log is a record, not a curriculum. (An operator who wants
-the history replayed sets `associate.events_after = 0` in `meta`; documented,
-not automated.)
+No backfill of links from the historical log — the log is a record, not a
+curriculum. An absent watermark reads as the epoch, so the migration that adds
+`artifacts.activated_at` to an existing base seeds both watermarks to the
+moment of adoption in the same breath as the `activated_at` backfill: those two
+fixups belong to the one boot that adopts the feature, not to every boot.
+Without the seeding, a base that has been recording searches for months folds
+that entire log in on its first tick — thousands of pairs at once, every one of
+them stamped with the sweep's clock and therefore undecayed, feeding priming and
+the judge queue from a past nobody asked to relive. (An operator who *wants* the
+history replayed sets `associate.events_after = 0` in `meta`; documented, not
+automated.)
 
 ## 12. Risks
 

@@ -12,22 +12,34 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
     if results.is_empty() {
         return "No matches in the knowledge base.".to_string();
     }
+    let mut rank = 0;
     results
         .iter()
-        .enumerate()
-        .map(|(i, r)| {
+        .map(|r| {
             let title = r.title.clone().unwrap_or_else(|| "Untitled".into());
             let tags = if r.tags.is_empty() {
                 String::new()
             } else {
                 format!(" · {}", r.tags.join(", "))
             };
+            // An agent reads this as a ranked list unless it is told
+            // otherwise, and a bare ordinal is the strongest ranking signal
+            // there is. An associated hit did not compete for a place, so it
+            // gets no number at all rather than one that continues the count.
+            let heading = if r.via.is_none() {
+                rank += 1;
+                format!("### {rank}. {title}")
+            } else {
+                format!("### {title}")
+            };
+            let how = match (&r.via, &r.reason) {
+                (Some(_), Some(why)) => format!("recalled beside the answer — {why}"),
+                (Some(_), None) => "recalled beside the answer".to_string(),
+                (None, _) => format!("score {:.3}", r.score),
+            };
             format!(
-                "### {}. {title}\n_score {:.3}{tags} · corpus: {}_\n\n{}",
-                i + 1,
-                r.score,
-                r.corpus_id,
-                r.text
+                "{heading}\n_{how}{tags} · corpus: {}_\n\n{}",
+                r.corpus_id, r.text
             )
         })
         .collect::<Vec<_>>()
@@ -263,5 +275,40 @@ mod tests {
         let text = format_search_results(&[]);
         assert!(!text.trim().is_empty());
         assert!(text.to_lowercase().contains("no match"));
+    }
+
+    fn hit(id: &str, via: Option<&str>) -> SearchResult {
+        SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: Some(id.into()),
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            via: via.map(str::to_string),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn an_associated_result_says_it_was_recalled_rather_than_ranked() {
+        // Straight into an agent's context: without this the extra result reads
+        // as the fourth-best match for the query, which it is not.
+        let out = format_search_results(&[hit("ranked", None), hit("recalled", Some("ranked"))]);
+        assert!(out.contains("recalled beside"), "{out}");
+
+        // A bare ordinal is the strongest ranking signal there is: an agent
+        // reads a numbered list as ranked unless told otherwise. The ranked
+        // hit keeps its number; the associated one gets none, rather than a
+        // number that continues the count as if it had competed for one.
+        assert!(out.contains("### 1. ranked"), "{out}");
+        assert!(out.contains("### recalled"), "{out}");
+        assert!(!out.contains("### 2"), "{out}");
     }
 }

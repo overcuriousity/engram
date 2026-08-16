@@ -1,3 +1,4 @@
+pub mod associate;
 pub mod consolidate;
 pub mod dedupe;
 pub mod describe;
@@ -67,6 +68,9 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
         // The sweep looks at the whole collection, so it ignores the target.
         (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
+        // The sweep looks at the whole collection, so it ignores the target.
+        (Stage::Associate, _) => associate::run(core).await,
+        (Stage::LinkJudge, _) => associate::judge(core, &job.target_id).await,
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,

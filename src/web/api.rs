@@ -594,6 +594,20 @@ async fn consolidation(
 #[derive(serde::Deserialize)]
 pub struct SearchParams {
     pub q: String,
+    /// How many *ranked* hits to return. The response can be longer than this:
+    /// with `[associate]` on, up to `associate.spread_max` further artifacts
+    /// are appended — ones the query never matched, recalled because they are
+    /// linked to what it did match. Every such row carries `via` (the ranked
+    /// hit it was recalled beside) and a `score` of 0, so a client that wants
+    /// only what it asked for can drop them by that field. They obey `tags` and
+    /// `category` like any other row.
+    ///
+    /// They do *not* obey the two `include_*` flags: an associated row is always
+    /// an active, unsuperseded artifact, whatever those are set to. Nothing here
+    /// was asked for by name — association is a spread out of what the query did
+    /// match — and a retired artifact recalled that way would be competing with
+    /// the very successor that retired it. A deprecation audit gets what it
+    /// needs from the ranked hits, where both flags do apply.
     pub limit: Option<usize>,
     pub tags: Option<String>,
     pub category: Option<String>,

@@ -345,10 +345,35 @@ body { overflow-x: hidden; }
 }
 .pane { min-width: 0; }
 
+/* Association is a second list on the same page, not a continuation of the
+   first: the rule and label are what keep a reader from reading straight
+   through and treating a recalled hit as the next-best answer. */
+.assoc-rule {
+  margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border-subtle);
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+}
+.rail-why { font-size: 0.8125rem; color: var(--color-fg-muted); margin-top: 0.25rem; }
+
 /* Neighbours under the artifact. Narrower than the rail on purpose: this is a
    way out of the pane, not a second set of results competing with it. */
 .related { display: flex; flex-direction: column; gap: 0.375rem; }
 .related .rail-item { padding: 0.5rem 0.625rem; }
+
+/* Same shape as `.rail-row`: the dismiss control sits beside the link rather
+   than inside it, revealed on hover or focus. `.muted` is the same-corpus
+   case — two passages of one document needing each other is not the finding
+   that a cross-corpus pair is, so it recedes instead of competing for
+   attention. */
+.seen-row { position: relative; }
+.seen-row .rail-item { padding-right: 2.75rem; }
+.seen-row .rail-del {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.seen-row:hover .rail-del, .seen-row .rail-del:focus-within { opacity: 1; }
+@media (hover: none) { .seen-row .rail-del { opacity: 1; } }
+.seen-row.muted .rail-item { opacity: 0.75; }
 
 /* ── Filter chips ────────────────────────────────────────────────────────── */
 

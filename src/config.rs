@@ -16,6 +16,10 @@ pub struct Config {
     pub pacing: PacingConfig,
     #[serde(default)]
     pub capture: CaptureConfig,
+    #[serde(default)]
+    pub associate: AssociateConfig,
+    #[serde(default)]
+    pub activation: ActivationConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -111,6 +115,87 @@ impl Default for FeedbackConfig {
             coalesce_secs: 15,
             retain_days: 0,
             sweep_hours: 6,
+        }
+    }
+}
+
+/// Links learned from co-retrieval, and what they are allowed to do.
+///
+/// Every threshold here is a weight in the same units: one co-appearance is
+/// `+1`, one confirmed answer is `+2`, and a half-life of thirty days is what
+/// makes those numbers mean "lately" rather than "ever".
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct AssociateConfig {
+    /// Requires `feedback.enabled`. Without recorded searches there is nothing
+    /// to learn from, and that combination is a warning at startup.
+    pub enabled: bool,
+    pub interval_mins: u64,
+    pub half_life_days: f64,
+    /// Decayed weight under which a `learning` link is deleted.
+    pub prune_below: f64,
+    /// Decayed weight at which a link is worth showing.
+    pub show_min: f64,
+    /// ...and at which it is worth one model call.
+    pub judge_min: f64,
+    /// Distinct binding questions a link needs before it is judged. One question
+    /// asked six times is one question.
+    pub judge_min_queries: i64,
+    pub judge_per_sweep: i64,
+    /// How many of the top ranked hits are asked what they are linked to.
+    pub spread_from: usize,
+    /// How many associated hits may be appended, outside `limit`.
+    pub spread_max: usize,
+    /// How much more activated a hit must be than the one above it to pass it.
+    /// Normalised within one result list, so this is a fraction, not a weight.
+    pub prime_margin: f64,
+    /// Positions a hit may climb. `0` turns priming off.
+    pub prime_lift: usize,
+}
+
+impl Default for AssociateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_mins: 30,
+            half_life_days: 30.0,
+            prune_below: 0.5,
+            show_min: 2.0,
+            judge_min: 4.0,
+            judge_min_queries: 3,
+            judge_per_sweep: 10,
+            spread_from: 3,
+            spread_max: 3,
+            prime_margin: 0.5,
+            prime_lift: 2,
+        }
+    }
+}
+
+/// How accessible an artifact is, and what raises it.
+///
+/// Being surfaced *because* of activation raises nothing: `resurface` and
+/// association both leave it alone. Loops that reinforce themselves are the
+/// failure mode of this whole idea, and they are closed by construction.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ActivationConfig {
+    pub half_life_days: f64,
+    /// Returned by a search the caller marked as seen.
+    pub retrieved: f64,
+    /// Opened in the detail pane.
+    pub opened: f64,
+    /// Judged the answer to a real question. The strong signal.
+    pub confirmed: f64,
+}
+
+impl Default for ActivationConfig {
+    fn default() -> Self {
+        Self {
+            half_life_days: 14.0,
+            retrieved: 1.0,
+            opened: 0.5,
+            confirmed: 3.0,
         }
     }
 }
@@ -629,6 +714,55 @@ impl Config {
             );
             self.consolidate.merge_max_roots = d;
         }
+        // The association widths multiply each other on the search path to
+        // size one SQL `LIMIT`, and `interval_mins` is multiplied by sixty to
+        // make a `Duration`. None of the three has a ceiling that comes from
+        // anywhere else, so it is stated here: past these, the number has
+        // stopped describing a search someone would run or a rhythm someone
+        // would wait for, and the arithmetic is the only thing still reading
+        // it. Clamped rather than refused — an oversized width is a typo, not
+        // a config that destroys anything.
+        const MAX_SPREAD_FROM: usize = 64;
+        const MAX_SPREAD_MAX: usize = 64;
+        const MAX_PRIME_LIFT: usize = 64;
+        // A year. Longer than this and the ticker fires once and effectively
+        // never again, which the operator can say by setting `enabled = false`.
+        const MAX_INTERVAL_MINS: u64 = 525_600;
+        for (name, value, ceiling) in [
+            (
+                "associate.spread_from",
+                &mut self.associate.spread_from,
+                MAX_SPREAD_FROM,
+            ),
+            (
+                "associate.spread_max",
+                &mut self.associate.spread_max,
+                MAX_SPREAD_MAX,
+            ),
+            (
+                "associate.prime_lift",
+                &mut self.associate.prime_lift,
+                MAX_PRIME_LIFT,
+            ),
+        ] {
+            if *value > ceiling {
+                tracing::warn!(
+                    setting = name,
+                    configured = *value,
+                    using = ceiling,
+                    "association width is far past anything a result list can use; capping it"
+                );
+                *value = ceiling;
+            }
+        }
+        if self.associate.interval_mins > MAX_INTERVAL_MINS {
+            tracing::warn!(
+                configured = self.associate.interval_mins,
+                using = MAX_INTERVAL_MINS,
+                "associate.interval_mins is longer than a year; capping it"
+            );
+            self.associate.interval_mins = MAX_INTERVAL_MINS;
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.
@@ -672,6 +806,13 @@ impl Config {
                 "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \
                  being ignored; pacing is one gap in front of one endpoint now, so it can no \
                  longer be set per role"
+            );
+        }
+        if self.associate.enabled && !self.feedback.enabled {
+            tracing::warn!(
+                "associate.enabled has no effect while feedback.enabled is false: links are \
+                 learned from recorded searches, and none are being recorded. Recording queries \
+                 is a privacy decision, so it keeps its own switch."
             );
         }
     }
@@ -1022,5 +1163,37 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "example config must show the vision block"
         );
         assert!(text.contains("image_max_bytes"));
+    }
+
+    #[test]
+    fn the_association_defaults_are_the_documented_ones() {
+        let a = AssociateConfig::default();
+        assert!(a.enabled);
+        assert_eq!(a.interval_mins, 30);
+        assert_eq!(a.half_life_days, 30.0);
+        assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
+        assert_eq!((a.spread_from, a.spread_max), (3, 3));
+        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 2));
+        let v = ActivationConfig::default();
+        assert_eq!(v.half_life_days, 14.0);
+        assert_eq!((v.retrieved, v.opened, v.confirmed), (1.0, 0.5, 3.0));
+    }
+
+    #[test]
+    fn a_config_with_no_association_block_still_gets_one() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert!(cfg.associate.enabled);
+        // ...and the feature is inert regardless, because there is nothing to
+        // learn from until searches are recorded.
+        assert!(!cfg.feedback.enabled);
+    }
+
+    #[test]
+    fn the_example_config_carries_the_association_block() {
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert_eq!(cfg.associate.spread_max, 3);
     }
 }

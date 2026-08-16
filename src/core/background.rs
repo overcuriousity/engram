@@ -332,6 +332,54 @@ pub fn spawn_dedupe_ticker(
     })
 }
 
+/// The association sweep's job target. A constant rather than an artifact id:
+/// the sweep replays the whole log, and `UNIQUE(stage, target_id)` then bounds
+/// the queue to one of them however often the ticker fires.
+pub const ASSOCIATE_TARGET: &str = "collection";
+
+/// Queue an association sweep now and every `associate.interval_mins` after.
+///
+/// Its own ticker, like retention and dedupe: the rhythm of replaying a search
+/// log has nothing to do with the rhythm of duplicate discovery, and coupling
+/// the two is how switching one feature off silently switches another one off.
+///
+/// Returns before its loop when there is nothing to learn from — either the
+/// feature is off, or searches are not being recorded, which is the same thing.
+pub fn spawn_associate_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !core.associating() {
+            tracing::info!("association sweep disabled");
+            return;
+        }
+        // Saturating: the operand is operator-typed, and a wrap here would turn
+        // a very long configured interval into a very short one — a sweep
+        // hammering the queue is the opposite of what was asked for.
+        let period =
+            std::time::Duration::from_secs(core.associate.interval_mins.max(1).saturating_mul(60));
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    if let Err(e) = core
+                        .store
+                        .enqueue(crate::store::jobs::Stage::Associate, "collection", ASSOCIATE_TARGET)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "could not queue the association sweep");
+                    }
+                }
+            }
+        }
+        tracing::info!("association ticker stopped");
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +615,77 @@ mod tests {
             .expect("the ticker queued nothing");
         assert_eq!(j.stage, crate::store::jobs::Stage::Consolidate);
         assert_eq!(j.target_id, CONSOLIDATE_TARGET);
+    }
+
+    #[tokio::test]
+    async fn the_association_sweep_never_stacks_up_in_the_queue() {
+        // `jobs` is unique on (stage, target), so a ticker firing while a
+        // sweep is still queued must collapse onto the same row rather than
+        // stacking sweeps behind a slow one.
+        let core = crate::core::test_support::test_core().await;
+        for _ in 0..3 {
+            core.store
+                .enqueue(
+                    crate::store::jobs::Stage::Associate,
+                    "collection",
+                    ASSOCIATE_TARGET,
+                )
+                .await
+                .unwrap();
+        }
+        let mut seen = 0;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            assert_eq!(j.stage, crate::store::jobs::Stage::Associate);
+            seen += 1;
+        }
+        assert_eq!(seen, 1, "the sweep stacked up in the queue");
+    }
+
+    #[tokio::test]
+    async fn the_association_ticker_queues_a_sweep_as_soon_as_it_starts() {
+        // `tokio::time::interval` fires immediately on its first tick, which
+        // is what makes a restart pick the association sweep up rather than
+        // waiting out a full `interval_mins`.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_associate_ticker(core.clone(), rx);
+        for _ in 0..50 {
+            if core
+                .store
+                .job_counts()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(_, n)| *n > 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let _ = tx.send(true);
+        let _ = h.await;
+
+        let j = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the ticker queued nothing");
+        assert_eq!(j.stage, crate::store::jobs::Stage::Associate);
+        assert_eq!(j.target_id, ASSOCIATE_TARGET);
+        assert!(core.store.claim_job().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn no_recorded_searches_means_no_association_ticker_at_all() {
+        // `associate.enabled` without `feedback.enabled` is a warning at startup
+        // and nothing else: there is nothing to learn from.
+        let core = crate::core::test_support::test_core().await; // feedback off
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        // Returns rather than looping, so awaiting it cannot hang.
+        let _ = spawn_associate_ticker(core.clone(), rx).await;
+        assert!(core.store.claim_job().await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -274,8 +274,8 @@ impl Store {
             last_verified_at: Some(created_at),
         };
         sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
-             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)",
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
+             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?)",
         )
         .bind(&c.id)
         .bind(c.source_count)
@@ -288,6 +288,7 @@ impl Store {
         .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
         .bind(c.status.as_str())
         .bind(c.last_verified_at)
+        .bind(c.created_at)
         .execute(&mut *tx)
         .await?;
 
@@ -345,8 +346,8 @@ impl Store {
                 last_verified_at: Some(created_at),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at)
-                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
+                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -362,6 +363,7 @@ impl Store {
             .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
             .bind(c.status.as_str())
             .bind(c.last_verified_at)
+            .bind(c.created_at)
             .execute(&mut *tx)
             .await?;
             out.push(c);

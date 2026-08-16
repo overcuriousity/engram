@@ -944,19 +944,24 @@ impl Core {
                     .set_corpus_status(&src.id, CorpusStatus::Embedding)
                     .await?;
             }
-            // Consolidation looks at the whole collection, so there is no such
-            // thing as reprocessing one corpus through it. Saying so beats
-            // silently queueing a sweep the caller did not ask for.
-            Stage::Consolidate => {
+            // Consolidation and association both look at the whole collection,
+            // so there is no such thing as reprocessing one corpus through
+            // either. Saying so beats silently queueing a sweep the caller did
+            // not ask for.
+            Stage::Consolidate | Stage::Associate => {
                 return Err(Error::Validation(
-                    "consolidate is a collection-wide sweep, not a per-corpus stage".into(),
+                    "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
             // Units the queue arms for itself, one per artifact or inference
             // call. An operator reprocesses a document, not one of its windows:
             // asking for `synthesize` re-windows the whole thing and arms them
             // all, and `embed` re-arms a `relate` unit per artifact behind it.
-            Stage::SegmentWindow | Stage::Title | Stage::Dedupe | Stage::Relate => {
+            Stage::SegmentWindow
+            | Stage::Title
+            | Stage::Dedupe
+            | Stage::Relate
+            | Stage::LinkJudge => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"

@@ -116,7 +116,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
   superseded_by    TEXT,
   caveats          TEXT NOT NULL DEFAULT '[]',
   status           TEXT NOT NULL DEFAULT 'active',
-  last_verified_at INTEGER
+  last_verified_at INTEGER,
+  activation       REAL    NOT NULL DEFAULT 1.0,
+  -- Current accessibility above is raised by being captured, retrieved,
+  -- opened and confirmed; read through the same lazy decay as a link's
+  -- weight. In SQLite rather than the vector payload because the query path
+  -- already needs one SQLite read for links, and the same read returns this
+  -- — one crossing.
+  activated_at     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -276,6 +283,12 @@ CREATE TABLE IF NOT EXISTS search_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
+-- The association sweep's own read: `created_at > watermark AND < cutoff`,
+-- ordered by the same column. `idx_events_pending` cannot serve it — it leads
+-- with `judged_at` — so without this the sweep full-scans and sorts the whole
+-- log every `associate.interval_mins`, and with `feedback.retain_days = 0` that
+-- log is never trimmed.
+CREATE INDEX IF NOT EXISTS idx_events_created ON search_events(created_at);
 
 CREATE TABLE IF NOT EXISTS search_candidates (
   event_id    TEXT NOT NULL REFERENCES search_events(id) ON DELETE CASCADE,
@@ -285,6 +298,47 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   similarity  REAL,
   shown       INTEGER NOT NULL,
   PRIMARY KEY (event_id, rank)
+);
+
+-- ── Association ──────────────────────────────────────────────────────────────
+-- Two artifacts that keep being retrieved by the same searches. The other half
+-- of relatedness: `artifact_pairs` is about two texts saying the same thing,
+-- this is about two texts being needed together. A pair can be both — filed by
+-- `Relate` at 0.89 and judged distinct, and co-retrieved and related — and one
+-- row cannot hold two verdicts, so they are separate tables.
+CREATE TABLE IF NOT EXISTS artifact_links (
+  a_id        TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  b_id        TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Strength as of `bumped_at`. Read through decay; never decayed in place, so
+  -- learning is one UPDATE and forgetting costs no writes at all.
+  weight      REAL NOT NULL,
+  bumped_at   INTEGER NOT NULL,
+  -- Distinct normalised query texts that bound this pair. What separates a
+  -- link from one search typed twice.
+  queries     INTEGER NOT NULL DEFAULT 1,
+  -- Up to three binding queries with counts, JSON: [{"q":..,"n":..}].
+  cues        TEXT NOT NULL DEFAULT '[]',
+  -- 'learning' | 'related' | 'unrelated' | 'dismissed'
+  state       TEXT NOT NULL DEFAULT 'learning',
+  -- The judge's one line, for `related`.
+  reason      TEXT,
+  -- Revisions the judge read. A re-embed of either side reopens the verdict:
+  -- the text changed under it.
+  judged_rev_a INTEGER,
+  judged_rev_b INTEGER,
+  judge_attempts INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (a_id, b_id),
+  CHECK (a_id < b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_links_b ON artifact_links(b_id);
+CREATE INDEX IF NOT EXISTS idx_links_state ON artifact_links(state, weight DESC);
+
+-- Cursors that have no row to live on. Two keys so far:
+-- `associate.events_after` and `associate.judged_after`.
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 -- ── Auth ─────────────────────────────────────────────────────────────────────

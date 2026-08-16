@@ -1,7 +1,7 @@
 use super::Core;
 use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
-use crate::store::feedback::Origin;
+use crate::store::feedback::{Door, Origin};
 use crate::vector::{SearchFilter, SearchHit};
 use std::collections::HashMap;
 
@@ -79,6 +79,19 @@ pub struct SearchResult {
     /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
+    /// This hit moved up because it is more accessible than the ones it passed
+    /// — recently and often reached. Bounded by `associate.prime_lift`, never
+    /// past rank 1, and said out loud wherever it happened: nothing about the
+    /// order is silent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primed: bool,
+    /// The ranked hit that recalled this one. `None` for a ranked hit — which
+    /// is every hit inside `limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// What the judge said the relation is, where a link has been judged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl From<SearchHit> for SearchResult {
@@ -95,6 +108,9 @@ impl From<SearchHit> for SearchResult {
             superseded_by: h.payload.superseded_by,
             last_verified_at: h.payload.last_verified_at,
             weak: false,
+            primed: false,
+            via: None,
+            reason: None,
         }
     }
 }
@@ -152,6 +168,94 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
         .collect()
 }
 
+/// Move hits up on activation, within hard bounds.
+///
+/// Rank-based rather than score-based: hybrid scores are fused ranks and mean
+/// nothing across queries, while "moved up two places" means the same thing
+/// every time. The activation is normalised within this one list, so `margin` is
+/// a fraction of the most accessible hit here rather than an absolute weight —
+/// which is what makes one default work for a list of ones and a list of
+/// hundreds.
+///
+/// Index 0 is untouchable and index 1 cannot move, because moving it would
+/// displace rank 1. An exact match is never buried.
+///
+/// Every row's destination is decided against the ORIGINAL ordering in one
+/// pass, then the list is reordered once. An earlier attempt did this by
+/// repeatedly swapping adjacent rows in place, insertion-sort style — but
+/// once a row swaps, the array no longer records which row already spent its
+/// budget: a later position, reached by a *different* row after an earlier
+/// row moved through it, got a fresh budget for free. On a five-element list
+/// with only the last row activated and `lift = 2`, that let it climb three
+/// places instead of two, and on a longer list the overrun only grows. Here
+/// every comparison reads from an activation snapshot untouched by any move,
+/// so no row can ever borrow a gap another row's move opened.
+fn prime(
+    results: Vec<SearchResult>,
+    activation: &HashMap<String, f64>,
+    margin: f64,
+    lift: usize,
+) -> Vec<SearchResult> {
+    if lift == 0 || results.len() < 3 {
+        return results;
+    }
+    let max = activation.values().copied().fold(0.0f64, f64::max);
+    if max <= 0.0 {
+        return results;
+    }
+    let n = results.len();
+    // Normalised once, against the original list, and never touched again.
+    let acts: Vec<f64> = results
+        .iter()
+        .map(|r| activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max)
+        .collect();
+
+    // For each row, how many of its original predecessors — walked nearest
+    // first — it beats by strictly more than `margin`, stopping at the first
+    // it does not beat, capped at `lift`, and floored so the target index
+    // can never fall below 1: rank 1 is never displaced. Rows 0 and 1 never
+    // move, so the walk only starts at index 2.
+    let mut climb = vec![0usize; n];
+    for (i, slot) in climb.iter_mut().enumerate().skip(2) {
+        let mut c = 0usize;
+        while c < lift {
+            let predecessor = i - c - 1;
+            if predecessor < 1 || acts[i] - acts[predecessor] <= margin {
+                break;
+            }
+            c += 1;
+        }
+        *slot = c;
+    }
+
+    // One stable sort by destination decides the final order. The secondary
+    // key is load-bearing: without it, a climbing row sorts behind the row
+    // it was meant to pass, because its original index is larger.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| {
+        let target = i - climb[i];
+        let climbed = climb[i] > 0;
+        (target, u8::from(!climbed), i)
+    });
+
+    let mut slots: Vec<Option<SearchResult>> = results.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(pos, i)| {
+            let mut r = slots[i]
+                .take()
+                .expect("each original index used exactly once");
+            // Only a climb is priming: this is exactly the row that ended up
+            // at a lower index than it started at. A hit that was merely
+            // displaced by another row's climb did not move up, and
+            // labelling it would say something untrue about it.
+            r.primed = pos < i;
+            r
+        })
+        .collect()
+}
+
 /// Chunks older than this are candidates for resurfacing, and a chunk shown
 /// within this window counts as still remembered.
 pub const FORGOTTEN_AFTER_DAYS: i64 = 30;
@@ -202,6 +306,26 @@ impl Core {
                 tracing::warn!(error = %e, "could not record which chunks were shown");
             }
         });
+
+        // Only a retrieval raises accessibility. A list nobody asked for —
+        // `resurface`, an association — is shown, not reached, and the row in
+        // §5.4 that reads zero is the one-way guard this implements.
+        //
+        // Also gated on `associating()`: activation only exists to feed
+        // priming, and an install that never opted into `feedback` must see
+        // no artifact's activation move, or the ranked order could start
+        // changing under a feature it never turned on.
+        if counts_as_hit && self.associating() {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let store = self.store.clone();
+            let (delta, half_life) = (self.activation.retrieved, self.activation.half_life_days);
+            let at = now_secs();
+            self.background.spawn(async move {
+                if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                    tracing::warn!(error = %e, "could not raise activation for a search");
+                }
+            });
+        }
     }
 
     /// Opening a chunk is the deliberate act that counts as remembering it,
@@ -222,6 +346,170 @@ impl Core {
                 tracing::warn!(error = %e, "could not record that a chunk was opened");
             }
         });
+
+        // An open is a deliberate act and counts for less than a retrieval:
+        // clicking a candidate says you looked, not that it answered. Gated
+        // on `associating()` for the same reason as `mark_seen`: activation
+        // exists only to feed priming, so it must not move at all while the
+        // layer is off.
+        if self.associating() {
+            let ids = vec![artifact_id.to_string()];
+            let store = self.store.clone();
+            let (delta, half_life) = (self.activation.opened, self.activation.half_life_days);
+            let at = now_secs();
+            self.background.spawn(async move {
+                if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                    tracing::warn!(error = %e, "could not raise activation for opening");
+                }
+            });
+        }
+    }
+
+    /// Each artifact's activation, already decayed to now.
+    ///
+    /// The one SQLite read the query path takes. It can only add: a failure is
+    /// one warning and an empty map, and everything downstream then behaves
+    /// exactly as it did before any of this existed.
+    async fn activation_now(&self, ids: &[String]) -> HashMap<String, f64> {
+        let at = now_secs();
+        match self.store.activation_of(ids).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(id, (value, stamp))| {
+                    (
+                        id,
+                        crate::store::links::decayed(
+                            value,
+                            stamp,
+                            at,
+                            self.activation.half_life_days,
+                        ),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read activation; results are unprimed");
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Artifacts linked to the top of the answer, appended beside it.
+    ///
+    /// One hop only. Spreading further is what a graph view would be for, and
+    /// there is none. Everything here is additive: it never removes or reorders
+    /// a ranked hit, and a store that will not answer produces an empty list and
+    /// one warning.
+    ///
+    /// `filter` is the caller's own narrowing, and it applies here too. A
+    /// search for `category=runbook` is a statement about what the searcher
+    /// will accept, not a hint to the ranker, and an association that walks
+    /// past it hands back exactly the rows they asked not to see. `links_from`
+    /// already excludes anything not active and not live, so what is left to
+    /// re-check here is what the caller typed.
+    async fn associated(
+        &self,
+        results: &[SearchResult],
+        filter: &SearchFilter,
+    ) -> Vec<SearchResult> {
+        let anchors: Vec<String> = results
+            .iter()
+            .take(self.associate.spread_from)
+            .map(|r| r.artifact_id.clone())
+            .collect();
+        if anchors.is_empty() || self.associate.spread_max == 0 {
+            return Vec::new();
+        }
+        let links = match self
+            .store
+            .links_from(
+                &anchors,
+                &[
+                    crate::store::links::LinkState::Learning,
+                    crate::store::links::LinkState::Related,
+                ],
+                self.associate.half_life_days,
+                now_secs(),
+                self.associate.show_min,
+                // Not `spread_max`: `links_from` returns one row per (anchor,
+                // link) with no dedup across anchors, and it truncates before
+                // the filtering below runs. The rows most likely to be
+                // discarded here are anchor-to-anchor links — both ends
+                // already in `results` — and those are exactly the links
+                // co-retrieval makes most likely to exist. A limit of just
+                // `spread_max` lets such rows consume the whole budget and
+                // leave nothing for genuinely new artifacts. This bound
+                // leaves room for every anchor-to-anchor pair among the
+                // ranked anchors to be discarded and still fill the budget;
+                // the real cap is the `out.len() >= spread_max` check below.
+                //
+                // Saturating, and `try_from` rather than `as`: both operands
+                // are operator-typed. `Config::normalize` clamps them to
+                // something a person could mean, so this cannot overflow in
+                // practice — but `as` on a `usize` that did would wrap to a
+                // negative `i64` and switch association silently off, which is
+                // the one failure nobody would report as a bug.
+                i64::try_from(
+                    self.associate
+                        .spread_max
+                        .saturating_mul(self.associate.spread_from.saturating_add(1)),
+                )
+                .unwrap_or(i64::MAX),
+            )
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read links; results are unassociated");
+                return Vec::new();
+            }
+        };
+
+        let mut have: std::collections::HashSet<String> =
+            results.iter().map(|r| r.artifact_id.clone()).collect();
+        let mut out = Vec::new();
+        for l in links {
+            if out.len() >= self.associate.spread_max {
+                break;
+            }
+            if !have.insert(l.other.clone()) {
+                continue;
+            }
+            // Read from SQLite rather than the vector store: the row is already
+            // one connection away, and the payload adds nothing this needs.
+            let Ok(c) = self.store.get_artifact(&l.other).await else {
+                continue;
+            };
+            // The same predicate the vector store applies, on the same two
+            // fields: every listed tag present, and the category exact.
+            if !filter.tags.iter().all(|t| c.tags.contains(t))
+                || filter
+                    .category
+                    .as_ref()
+                    .is_some_and(|want| c.category.as_ref() != Some(want))
+            {
+                continue;
+            }
+            out.push(SearchResult {
+                artifact_id: c.id,
+                corpus_id: c.corpus_id.unwrap_or_default(),
+                title: c.title,
+                text: c.text,
+                category: c.category,
+                tags: c.tags,
+                // Not a rank and not a similarity: this hit did not compete for
+                // a place in the list, it was recalled beside it.
+                score: 0.0,
+                status: Some(c.status),
+                superseded_by: c.superseded_by,
+                last_verified_at: c.last_verified_at,
+                weak: false,
+                primed: false,
+                via: Some(l.via),
+                reason: l.reason,
+            });
+        }
+        out
     }
 
     /// A random handful of chunks that have not surfaced in a month.
@@ -445,6 +733,34 @@ impl Core {
             }
         }
 
+        // Before capture and before the truncate, so the pool that is recorded
+        // is the order the searcher was actually shown — a judged rank has to
+        // be a rank that happened. Bounded by `prime_lift` and never past rank
+        // 1, so this can reorder near-ties and nothing else.
+        //
+        // Held off the same two doors as association below, for the same
+        // reason in a different shape. `Ask` does not show this list to
+        // anybody: it turns the head of it into excerpts and, when they do not
+        // all fit the context window, keeps a prefix and drops the tail on the
+        // stated grounds that the tail matched the question least
+        // (`src/core/ask.rs`). Reordering by accessibility makes that untrue,
+        // and the excerpt lost is then the one that answered best — a silent
+        // change to the answer, on a path where nobody can see what was cut.
+        // `Judge` needs the pool it labels to be the pool the ranking produced.
+        if self.associating()
+            && self.associate.prime_lift > 0
+            && !matches!(door, Door::Ask | Door::Judge)
+        {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let activation = self.activation_now(&ids).await;
+            results = prime(
+                results,
+                &activation,
+                self.associate.prime_margin,
+                self.associate.prime_lift,
+            );
+        }
+
         // Recorded here, where the list is still wider than the answer and the
         // ordering is final. Off the request path via `Background`, like
         // `mark_seen` below it: a search must not get slower, or fail, because
@@ -490,6 +806,24 @@ impl Core {
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
+        }
+        // After the truncate and after capture, so an association can only ever
+        // add: it is outside `limit`, outside the recorded pool, and outside the
+        // retrieval count. See `Touch::shown`.
+        //
+        // Gated on the door, not on `captured()` — that predicate means
+        // "recorded for relevance feedback", an unrelated idea that happens
+        // to select the same four doors today. `Ask` is excluded because it
+        // synthesises an answer from `results` as excerpts; text that never
+        // matched the question must not become source material. `Judge` is
+        // excluded because its query is composed in full knowledge of the
+        // answer and needs a clean pool to label, not a widened one.
+        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
+            let recalled = self.associated(&results, &filter).await;
+            if !recalled.is_empty() {
+                self.mark_seen(&recalled, &HashMap::new(), false);
+                results.extend(recalled);
+            }
         }
         tracing::info!(
             q = %query.q,
@@ -698,6 +1032,131 @@ mod tests {
             .filter(|h| h.payload.last_seen_at.is_some())
             .count();
         assert!(stamped > 0, "a deliberate search still counts as seeing");
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        core.search(&q("alpha"), Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+        assert!(after > before, "a retrieval raised nothing");
+    }
+
+    #[tokio::test]
+    async fn typing_does_not_make_what_it_happened_to_match_more_accessible() {
+        // The same rule as `last_seen_at`: an incremental request is not a
+        // retrieval, and letting every keystroke raise activation would make
+        // accessibility a function of how slowly someone types.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        let mut query = q("alpha");
+        query.mark = false;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store
+                .activation_of(std::slice::from_ref(&id))
+                .await
+                .unwrap()[&id]
+                .0,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn being_drawn_at_random_raises_nothing() {
+        // `resurface` shows what has been forgotten. Counting that as a reason
+        // to be more accessible is the loop this whole design is built to close.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
+        sqlx::query("UPDATE artifacts SET created_at = ?")
+            .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        core.resurface(10).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store
+                .activation_of(std::slice::from_ref(&id))
+                .await
+                .unwrap()[&id]
+                .0,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        core.mark_artifact_seen(&id);
+        core.background.wait_idle().await;
+
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+        // Loose on purpose: `before` is the raw stored activation, but the bump
+        // re-reads it through decay, so the error grows with wall-clock time
+        // between the artifact's creation and the bump (5.7e-7 after one
+        // second, 1.15e-6 after two) and a loaded machine can straddle 1e-6.
+        // 1e-3 still separates `opened` (0.5) from `retrieved` (1.0) by three
+        // orders of magnitude, so it cannot mask a real regression — don't
+        // tighten it back without addressing the decay re-read instead.
+        assert!((after - before - core.activation.opened).abs() < 1e-3);
+        assert!(core.activation.opened < core.activation.retrieved);
     }
 
     #[tokio::test]
@@ -1176,6 +1635,331 @@ mod tests {
         );
     }
 
+    fn ranked(ids: &[&str]) -> Vec<SearchResult> {
+        ids.iter()
+            .map(|id| SearchResult {
+                artifact_id: (*id).into(),
+                corpus_id: "c".into(),
+                title: None,
+                text: String::new(),
+                category: None,
+                tags: vec![],
+                score: 0.5,
+                status: None,
+                superseded_by: None,
+                last_verified_at: None,
+                weak: false,
+                primed: false,
+                via: None,
+                reason: None,
+            })
+            .collect()
+    }
+
+    fn order(rs: &[SearchResult]) -> Vec<&str> {
+        rs.iter().map(|r| r.artifact_id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_hit_climbs_at_most_two_places_and_never_past_the_first() {
+        // Rank-based rather than score-based on purpose: hybrid scores are
+        // fused ranks and mean nothing across queries, while "moved up two
+        // places" means the same thing every time — and can be tested here.
+        let act = HashMap::from([("d".to_string(), 4.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed, "the hit that moved must say so");
+        assert!(!out[2].primed, "the hit it passed did not move up");
+    }
+
+    #[test]
+    fn the_most_active_hit_cannot_displace_an_exact_match() {
+        let act = HashMap::from([("b".to_string(), 9.0)]);
+        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "b", "c"]);
+        assert!(out.iter().all(|r| !r.primed));
+    }
+
+    #[test]
+    fn a_lift_of_zero_turns_priming_off_entirely() {
+        let act = HashMap::from([("d".to_string(), 4.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 0);
+        assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn activation_that_is_merely_higher_does_not_move_anything() {
+        // The margin is what keeps this from reshuffling every list: two hits
+        // that are both somewhat active stay in the order the ranking gave.
+        let act = HashMap::from([("c".to_string(), 4.0), ("d".to_string(), 3.6)]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        assert_eq!(
+            order(&out),
+            vec!["a", "c", "b", "d"],
+            "only c clears the margin"
+        );
+    }
+
+    #[test]
+    fn a_hit_climbs_exactly_the_lift_and_no_further_however_long_the_list_is() {
+        // An insertion-sort-style implementation can let a row that already
+        // spent its climb budget be mistaken for a fresh row once something
+        // else moves through the position it landed on. Five elements is
+        // enough to expose that: `e` should climb exactly two, not three.
+        let act = HashMap::from([("e".to_string(), 1.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2);
+        assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
+        let moved = order(&out).iter().position(|id| *id == "e").unwrap();
+        assert_eq!(moved, 4 - 2, "e must climb exactly prime_lift positions");
+        assert!(out[moved].primed);
+    }
+
+    #[test]
+    fn the_lift_bound_holds_on_a_longer_list_too() {
+        // Same shape, stretched to seven: the last row must still land
+        // exactly `lift` positions up, at index 4 rather than index 1.
+        let act = HashMap::from([("g".to_string(), 1.0)]);
+        let out = prime(ranked(&["a", "b", "c", "d", "e", "f", "g"]), &act, 0.5, 2);
+        let moved = order(&out).iter().position(|id| *id == "g").unwrap();
+        assert_eq!(moved, 4, "g must land at index 4, not be pulled to index 1");
+        assert_eq!(6 - moved, 2, "the climb must equal prime_lift exactly");
+    }
+
+    #[tokio::test]
+    async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.associate.prime_lift = 2;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = {
+            let mut off = core.clone();
+            off.associate.prime_lift = 0;
+            off.search(&q("alpha text about it"), Door::Ui)
+                .await
+                .unwrap()
+        };
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+        assert!(plain.iter().all(|r| !r.primed));
+
+        // The one at the bottom is the one people actually keep confirming.
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let primed = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        let moved = primed.iter().position(|r| r.artifact_id == bottom).unwrap();
+        assert!(
+            moved < plain.len() - 1,
+            "activation did not reach the ranked list at all"
+        );
+        assert!(primed[moved].primed, "a hit that moved must say so");
+        assert_ne!(primed[0].artifact_id, bottom, "rank 1 was displaced");
+    }
+
+    #[tokio::test]
+    async fn a_marked_search_does_not_touch_activation_while_feedback_is_off() {
+        // Shipped defaults: `feedback.enabled = false`, `associate.enabled =
+        // true`. Links are learned from recorded searches, and none are being
+        // recorded, so the whole associative layer — including activation,
+        // which exists only to feed priming — must stay dark. `test_core()`
+        // is exactly this combination; nothing here turns `feedback` on.
+        let core = test_core().await;
+        assert!(!core.feedback.enabled && core.associate.enabled);
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        core.search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+        assert_eq!(
+            after, before,
+            "a marked search raised activation with feedback.enabled false"
+        );
+    }
+
+    #[tokio::test]
+    async fn priming_never_reaches_the_order_while_feedback_is_off() {
+        // The spec promise (§11): "existing installs see nothing change until
+        // they opt in." `associate.enabled` alone must not let a large
+        // activation move the ranked order — the order must be byte-identical
+        // to `prime_lift = 0`, not merely bounded.
+        let core = test_core().await;
+        assert!(!core.feedback.enabled && core.associate.enabled);
+        assert_eq!(core.associate.prime_lift, 2, "the shipped default");
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+
+        // The one at the bottom is given a huge activation directly — exactly
+        // what moved the order in the "feature on" test above.
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let with_huge_activation = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        let plain_ids: Vec<&str> = plain.iter().map(|r| r.artifact_id.as_str()).collect();
+        let after_ids: Vec<&str> = with_huge_activation
+            .iter()
+            .map(|r| r.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            plain_ids, after_ids,
+            "the order changed even though feedback.enabled is false"
+        );
+        assert!(with_huge_activation.iter().all(|r| !r.primed));
+    }
+
+    #[tokio::test]
+    async fn priming_never_reaches_the_list_ask_and_judge_are_given() {
+        // `ask` does not show this list to anyone: it turns the head of it into
+        // excerpts and, when they do not all fit the context window, keeps a
+        // prefix and drops the tail — on the stated grounds that the tail
+        // matched the question least. Reorder by accessibility and the excerpt
+        // dropped is the one that answered best, invisibly. `judge` needs the
+        // pool it labels to be the pool the ranking produced.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.associate.prime_lift = 2;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        // The same activation that does move the order on the UI door.
+        let moved = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert_ne!(
+            moved.last().unwrap().artifact_id,
+            bottom,
+            "this test proves nothing unless priming is working on some door"
+        );
+
+        for door in [Door::Ask, Door::Judge] {
+            let held = core.search(&q("alpha text about it"), door).await.unwrap();
+            let ids: Vec<&str> = held.iter().map(|r| r.artifact_id.as_str()).collect();
+            let plain_ids: Vec<&str> = plain.iter().map(|r| r.artifact_id.as_str()).collect();
+            assert_eq!(ids, plain_ids, "{door:?} was handed a primed order");
+            assert!(held.iter().all(|r| !r.primed));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_association_obeys_the_filters_the_searcher_typed() {
+        // A category is a statement about what the searcher will accept, not a
+        // hint to the ranker. An artifact recalled beside a hit still has to
+        // satisfy it, or the search hands back exactly the rows they narrowed
+        // away.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.associate.show_min = 1.0;
+        seed(
+            &core,
+            &[
+                ("alpha text about it", "runbook", &["ops"][..]),
+                ("something else entirely", "note", &[][..]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+        let (hit, other) = {
+            let a = core.store.get_artifact(&ids[0]).await.unwrap();
+            if a.category.as_deref() == Some("runbook") {
+                (ids[0].clone(), ids[1].clone())
+            } else {
+                (ids[1].clone(), ids[0].clone())
+            }
+        };
+        core.store
+            .bump_link(&hit, &other, 9.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        // Unfiltered, the linked artifact is recalled beside the ranked hit.
+        let wide = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(
+            wide.iter().any(|r| r.artifact_id == other),
+            "the association never fired, so the filter proves nothing"
+        );
+
+        let mut narrowed = q("alpha text about it");
+        narrowed.category = Some("runbook".into());
+        let narrow = core.search(&narrowed, Door::Ui).await.unwrap();
+        assert!(
+            !narrow.iter().any(|r| r.artifact_id == other),
+            "an association walked past the category the searcher typed"
+        );
+
+        let mut tagged = q("alpha text about it");
+        tagged.tags = vec!["ops".into()];
+        let by_tag = core.search(&tagged, Door::Ui).await.unwrap();
+        assert!(
+            !by_tag.iter().any(|r| r.artifact_id == other),
+            "an association walked past the tags the searcher typed"
+        );
+    }
+
     async fn captured_events(core: &crate::core::Core) -> i64 {
         core.background.wait_idle().await;
         sqlx::query_scalar("SELECT count(*) FROM search_events")
@@ -1350,5 +2134,342 @@ mod tests {
         core.search(&q("alpha text"), Door::Judge).await.unwrap();
         core.search(&q("alpha text"), Door::Ask).await.unwrap();
         assert_eq!(captured_events(&core).await, 0);
+    }
+
+    /// The id of the artifact whose text is exactly this. Ordering from
+    /// `list_all_artifact_ids` is not promised, and a test that assumed one
+    /// would pass or fail on which row SQLite happened to return first.
+    async fn id_of(core: &crate::core::Core, text: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
+            .bind(text)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_linked_artifact_is_recalled_beside_the_answer_and_says_what_recalled_it() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+
+        assert_eq!(out.len(), 2, "the association was not appended: {out:?}");
+        assert_eq!(out[0].artifact_id, a);
+        assert_eq!(
+            out[0].via, None,
+            "a ranked hit was not recalled by anything"
+        );
+        assert_eq!(out[1].artifact_id, b);
+        assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ask_and_judge_never_receive_an_association_but_ui_does() {
+        // `ask` feeds `results` to the model as excerpts to synthesise an
+        // answer from; text that never matched the question must not become
+        // source material. `judge` composes its query in full knowledge of
+        // the answer and needs a clean pool to label. Both are excluded by
+        // door, not by `captured()` — that predicate means something
+        // unrelated (recorded for relevance feedback) that happens to select
+        // the same four doors today. One door alone would not prove the
+        // gate is door-shaped rather than coincidental, so this checks both
+        // an excluded door and an included one against the same link.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+
+        let ask_out = core.search(&query, Door::Ask).await.unwrap();
+        assert_eq!(ask_out.len(), 1, "ask received an association: {ask_out:?}");
+
+        let judge_out = core.search(&query, Door::Judge).await.unwrap();
+        assert_eq!(
+            judge_out.len(),
+            1,
+            "judge received an association: {judge_out:?}"
+        );
+
+        let ui_out = core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(
+            ui_out.len(),
+            2,
+            "ui did not receive the association: {ui_out:?}"
+        );
+        assert_eq!(ui_out[1].via.as_deref(), Some(a.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_artifact_already_in_the_answer_is_not_recalled_again() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(
+            &core,
+            "one",
+            &[("alpha text", "note", &[]), ("alpha other", "note", &[])],
+        )
+        .await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "alpha other").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let out = core.search(&q("alpha"), Door::Ui).await.unwrap();
+        let seen: std::collections::HashSet<&str> =
+            out.iter().map(|r| r.artifact_id.as_str()).collect();
+        assert_eq!(seen.len(), out.len(), "an artifact was returned twice");
+    }
+
+    /// The captured pool, as `(role, shown)` ordered by rank — `role` is `"a"`
+    /// or `"b"` depending on which of the two seeded ids the row names, so two
+    /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
+    /// equal) can still be compared for shape.
+    async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT artifact_id, shown FROM search_candidates ORDER BY rank")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(id, shown)| {
+                let role = if id == a {
+                    "a"
+                } else if id == b {
+                    "b"
+                } else {
+                    "?"
+                };
+                (role, shown)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_recalled_artifact_does_not_feed_the_learning_that_produced_it() {
+        // The failure mode of any Hebbian system: a link recalls an artifact, is
+        // strengthened by having done so, and recalls it harder next time. Both
+        // loops have to be closed by construction: the recalled hit must not be
+        // written as a candidate, and must not count as a retrieval.
+        //
+        // This cannot be checked by asking "is `b` absent from
+        // `search_candidates`" directly: on a base this small, `b` is a
+        // legitimate low-ranked candidate of the plain hybrid search with or
+        // without any link — `feedback.candidates` over-fetches wider than the
+        // two-artifact corpus, so the ordinary capture path records it anyway,
+        // unshown. That is correct and expected, and unrelated to association.
+        // What has to be proven instead is a control comparison: the captured
+        // pool is identical whether or not the link exists, which is what shows
+        // the link changed nothing about what was recorded — plus a check that
+        // the treatment side effect (the link) actually took hold, or the
+        // comparison would pass vacuously on a run where nothing associated at
+        // all. A later reader tempted to simplify this back to a direct
+        // absence check would reintroduce a test that fails on an artifact of
+        // the fixture rather than a bug.
+        async fn seeded() -> (crate::core::Core, String, String) {
+            let mut core = test_core().await;
+            core.feedback.enabled = true;
+            seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+            seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+            reembed_all(&core).await;
+            let a = id_of(&core, "alpha text").await;
+            let b = id_of(&core, "something else entirely").await;
+            (core, a, b)
+        }
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+
+        // Unlinked control.
+        let (unlinked, a_u, b_u) = seeded().await;
+        let unlinked_out = unlinked.search(&query, Door::Ui).await.unwrap();
+        unlinked.background.wait_idle().await;
+        let unlinked_pool = captured_pool(&unlinked, &a_u, &b_u).await;
+
+        // Linked treatment.
+        let (linked, a, b) = seeded().await;
+        linked
+            .store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+        let before = linked
+            .store
+            .activation_of(std::slice::from_ref(&b))
+            .await
+            .unwrap()[&b]
+            .0;
+        let linked_out = linked.search(&query, Door::Ui).await.unwrap();
+        linked.background.wait_idle().await;
+        let linked_pool = captured_pool(&linked, &a, &b).await;
+        let after = linked
+            .store
+            .activation_of(std::slice::from_ref(&b))
+            .await
+            .unwrap()[&b]
+            .0;
+
+        // 3. The treatment actually took effect, or the comparison below is
+        // vacuous.
+        assert_eq!(unlinked_out.len(), 1, "got: {unlinked_out:?}");
+        assert_eq!(linked_out.len(), 2, "got: {linked_out:?}");
+        assert_eq!(linked_out[1].artifact_id, b);
+        assert_eq!(linked_out[1].via.as_deref(), Some(a.as_str()));
+
+        // 1. The captured pool — id and shown, in rank order — is identical
+        // either way: the link changed nothing about what the search recorded.
+        assert_eq!(
+            unlinked_pool, linked_pool,
+            "the link changed what the search recorded as a candidate"
+        );
+
+        // 2. Being recalled did not count as a retrieval.
+        assert!(
+            (after - before).abs() < 1e-9,
+            "being recalled raised activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_artifact_is_never_recalled_by_association() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+        core.deprecate(&b).await.unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_weak_link_is_not_strong_enough_to_recall_anything() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        // One co-appearance, against a `show_min` of 2.0.
+        core.store
+            .bump_link(&a, &b, 1.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn links_between_ranked_hits_do_not_starve_the_association_budget() {
+        // `links_from` returns one row per (anchor, link) with no dedup
+        // across anchors, and truncates at its own limit before `associated`
+        // filters out rows whose other end is already ranked. A link between
+        // two of the top `spread_from` hits is therefore fetched twice — once
+        // per anchor — and those are exactly the rows co-retrieval makes most
+        // likely to exist. If the store limit were just `spread_max`, three
+        // such rows could fill the entire budget and then all be discarded,
+        // leaving nothing for an artifact that is linked to the ranked hits
+        // but did not itself rank. This calls `associated` directly, on
+        // hand-built anchors, so the outcome does not depend on the fake
+        // embedder's incidental ranking of a fifth candidate.
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "one",
+            &[
+                ("alpha one", "note", &[]),
+                ("alpha two", "note", &[]),
+                ("alpha three", "note", &[]),
+                ("alpha four", "note", &[]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha one").await;
+        let b = id_of(&core, "alpha two").await;
+        let c = id_of(&core, "alpha three").await;
+        let d = id_of(&core, "alpha four").await;
+
+        // Every pair among the three ranked hits (a, b, c) is linked more
+        // strongly than the single link from a ranked hit to the one
+        // artifact that never ranks (d) — so a limit that keeps the
+        // strongest rows first keeps the redundant, discardable ones and
+        // drops the useful one, which is exactly the bug.
+        let now = now_secs();
+        core.store
+            .bump_link(&a, &b, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&a, &c, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&b, &c, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&a, &d, 5.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+
+        let dummy = |id: String| SearchResult {
+            artifact_id: id,
+            corpus_id: String::new(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score: 1.0,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            via: None,
+            reason: None,
+        };
+        let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
+
+        let out = core.associated(&results, &SearchFilter::default()).await;
+        let ids: Vec<&str> = out.iter().map(|r| r.artifact_id.as_str()).collect();
+        assert!(
+            ids.contains(&d.as_str()),
+            "an artifact linked only to the ranked hits, not among them, was not recalled: {ids:?}"
+        );
     }
 }

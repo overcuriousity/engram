@@ -38,6 +38,14 @@ pub struct RenderedResult {
     pub rank: String,
     /// Only loosely related to the query — see `SearchResult::weak`.
     pub weak: bool,
+    /// This hit moved up on activation. A small marker, because the claim is
+    /// small: it passed a near-tie, it did not become a better match.
+    pub primed: bool,
+    /// The title of the ranked hit that recalled this one. Set only on an
+    /// associated hit, and it is what the row names.
+    pub via_title: Option<String>,
+    /// The judge's line, where the link was judged.
+    pub reason: Option<String>,
 }
 
 pub struct QueueRow {
@@ -136,6 +144,11 @@ pub struct ArtifactDetail {
     /// vector is already stored, so this costs no embedding call and no
     /// completion. Empty while the artifact is still waiting to be embedded.
     pub related: Vec<RelatedArtifact>,
+    /// What this artifact has been needed alongside, learned from co-retrieval
+    /// rather than resemblance. Beside `related`, not instead of it: one list
+    /// is what this resembles, the other is what it has been reached for
+    /// together with, and they answer different questions.
+    pub seen_together: Vec<SeenTogether>,
 }
 
 /// A neighbour, as one line in the pane.
@@ -143,6 +156,22 @@ pub struct RelatedArtifact {
     pub id: String,
     pub title: String,
     pub snippet: String,
+}
+
+/// A link, as one line in the pane. Beside the nearest neighbours, not instead
+/// of them: one list is what this artifact resembles, the other is what it has
+/// been needed alongside, and they answer different questions.
+pub struct SeenTogether {
+    pub id: String,
+    pub title: String,
+    pub snippet: String,
+    /// The judge's line, or the question that bound the pair. `None` only for a
+    /// link with neither, which is a link nothing can explain yet.
+    pub why: Option<String>,
+    pub corpus_title: String,
+    /// Rendered emphasised: two documents needing each other is the finding.
+    /// Two passages of one document needing each other is not.
+    pub cross_corpus: bool,
 }
 
 /// Work that hit something and is waiting to try again by itself.
@@ -182,6 +211,12 @@ pub struct PairRow {
     pub b_id: String,
     pub b_title: String,
     pub detail: Option<String>,
+    /// The stored `detail` is exactly `"link"` — the judge's duplicate
+    /// hand-off (§7), a provenance marker, not prose. The row renders a
+    /// sentence explaining that instead, and the percent is not shown as a
+    /// measured similarity, because no cosine was ever computed for a pair
+    /// found by co-retrieval.
+    pub via_link: bool,
     pub contradiction: bool,
     /// Set when the judge named a direction with enough confidence to propose
     /// a supersede. A recommendation only: nothing here has hidden anything,
@@ -337,6 +372,9 @@ struct SearchTemplate {
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// Recalled by association with a ranked hit, never ranked against the
+    /// query itself. Shown below the ranked list, under its own rule.
+    associated: Vec<RenderedResult>,
     /// Every result is only loosely related, so the page says so once above the
     /// list instead of repeating it on each card.
     all_weak: bool,
@@ -432,6 +470,10 @@ struct OpsTemplate {
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
     feedback: Option<crate::store::feedback::Stats>,
+    /// `None` when nothing is being learned, which renders nothing at all: a
+    /// count of links on a base that records no searches is a line about a
+    /// feature that is switched off.
+    links: Option<crate::store::links::LinkCounts>,
 }
 
 struct MergedRow {
@@ -645,6 +687,7 @@ async fn search_results(
     if p.q.trim().is_empty() {
         return Ok(HtmlTemplate(ResultsTemplate {
             results: vec![],
+            associated: vec![],
             all_weak: false,
             terms: String::new(),
             timing: String::new(),
@@ -678,25 +721,50 @@ async fn search_results(
         )
         .await?;
 
-    let results: Vec<RenderedResult> = hits
+    // The ranked answer and what it recalled are two lists on the page, and one
+    // list here: an associated hit carries the id of the hit that recalled it,
+    // and the title is looked up among the ranked ones rather than fetched.
+    let titles: std::collections::HashMap<String, String> = hits
+        .iter()
+        .filter(|h| h.via.is_none())
+        .map(|h| {
+            (
+                h.artifact_id.clone(),
+                h.title.clone().unwrap_or_else(|| "Untitled".into()),
+            )
+        })
+        .collect();
+    let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
+    let results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
-        .map(|(i, h)| render_hit(i, h))
+        .map(|(i, h)| render_hit(i, h, &titles))
+        .collect();
+    let associated: Vec<RenderedResult> = recalled
+        .into_iter()
+        .map(|h| render_hit(0, h, &titles))
         .collect();
     Ok(HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
         // "nothing matches" over a list that plainly does would train the
-        // operator to ignore the warning.
+        // operator to ignore the warning. Computed from `results` only: an
+        // association is not an answer to the query and cannot make the
+        // answer look better or worse than it was.
         all_weak: !results.is_empty() && results.iter().all(|r| r.weak),
         results,
+        associated,
         terms,
         timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
     .into_response())
 }
 
-fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
+fn render_hit(
+    position: usize,
+    h: crate::core::search::SearchResult,
+    titles: &std::collections::HashMap<String, String>,
+) -> RenderedResult {
     RenderedResult {
         artifact_id: h.artifact_id,
         title: h.title.unwrap_or_else(|| "Untitled".into()),
@@ -705,12 +773,18 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
-        rank: if h.weak {
+        // No rank on an associated hit — the same reasoning that drops the
+        // rank on a weak one: a rank is a claim about standing among answers,
+        // and this did not compete for one.
+        rank: if h.weak || h.via.is_some() {
             String::new()
         } else {
             format!("#{}", position + 1)
         },
         weak: h.weak,
+        primed: h.primed,
+        via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
+        reason: h.reason.clone(),
     }
 }
 
@@ -1037,6 +1111,41 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
             // `a` obsolete is a recommendation to keep `b`.
             let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
             let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
+            // A score of exactly zero is what "no cosine was ever measured"
+            // looks like in the row: the link judge's `duplicate` verdict files
+            // the pair with one (`src/jobs/associate.rs`), and the similarity
+            // sweep — the only other producer of a pending pair — files the
+            // cosine it found, which cleared `consolidate.review_min` to get
+            // there (`src/jobs/relate.rs:68`).
+            //
+            // That gate is `>=` and `review_min` has no lower bound of its own
+            // — only `auto_supersede > review_min` is enforced — so an operator
+            // who sets it to zero could in principle file a pair measured at
+            // exactly 0.0, and this would call it unmeasured. It takes an exact
+            // float zero out of a real embedding to get there, which is why the
+            // marker is left implicit; if that ever stops being true the fix is
+            // an explicit `origin` column, not a smaller epsilon.
+            //
+            // Not `detail == "link"`, which is only the *initial* detail: the
+            // dedupe judge's `set_pair_state` and `set_pair_superseded`
+            // (`src/store/pairs.rs`) both write their own prose over that
+            // field, so a marker read out of it survives only while the pair is
+            // pending. The score is never rewritten.
+            let via_link = p.score == 0.0;
+            // The bare marker, on the other hand, *is* read out of `detail` —
+            // it is the whole of that field only while the pair is pending, and
+            // that is exactly when there is no judge's line to lose. Once one
+            // has been written the prose is what the reader needs; the score
+            // above still keeps the page from calling it a measurement.
+            let detail = if p.detail.as_deref() == Some("link") {
+                Some(
+                    "Not found by similarity: these two kept being retrieved together, \
+                     and the judge then found they say the same thing."
+                        .to_string(),
+                )
+            } else {
+                p.detail
+            };
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -1044,7 +1153,8 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 b_title: title_of(&b),
                 a_id: p.a_id,
                 b_id: p.b_id,
-                detail: p.detail,
+                detail,
+                via_link,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
                 obsolete_title,
                 keeps_a,
@@ -1213,6 +1323,10 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         tokens,
         feedback: match st.core.feedback.enabled {
             true => Some(st.core.store.feedback_stats().await?),
+            false => None,
+        },
+        links: match st.core.associating() {
+            true => Some(st.core.store.link_counts().await?),
             false => None,
         },
     })
@@ -1464,7 +1578,7 @@ async fn ask_submit(
             .citations
             .into_iter()
             .enumerate()
-            .map(|(i, h)| render_hit(i, h))
+            .map(|(i, h)| render_hit(i, h, &Default::default()))
             .collect(),
         dropped: out.dropped,
     })
@@ -1532,6 +1646,68 @@ pub(crate) async fn build_artifact_detail(
             id: h.payload.artifact_id,
         })
         .collect();
+    // Unreadable links are not a missing pane, for the same reason a missing
+    // neighbour list is not: this layer can only ever add. And gated on
+    // `associating()`, not just `associate.enabled`: a base that learned
+    // links and then had the feature switched off must stop rendering them,
+    // the same as every other associative surface.
+    let anchor = vec![c.id.clone()];
+    let seen_together_links = if core.associating() {
+        match core
+            .store
+            .links_from(
+                &anchor,
+                &[
+                    crate::store::links::LinkState::Learning,
+                    crate::store::links::LinkState::Related,
+                ],
+                core.associate.half_life_days,
+                crate::store::now(),
+                core.associate.show_min,
+                RELATED_LIMIT as i64,
+            )
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(artifact_id, error = %e, "no links for this pane");
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+    let mut seen_together = Vec::new();
+    for l in seen_together_links.into_iter().take(RELATED_LIMIT) {
+        let Ok(other) = core.store.get_artifact(&l.other).await else {
+            continue;
+        };
+        let corpus_title = match &other.corpus_id {
+            Some(id) => core
+                .store
+                .get_corpus(id)
+                .await
+                .ok()
+                .and_then(|s| s.title_hint)
+                .unwrap_or_else(|| "untitled".into()),
+            // A merged artifact belongs to no document, which is worth saying
+            // rather than leaving blank.
+            None => "merged".to_string(),
+        };
+        seen_together.push(SeenTogether {
+            title: title_of(&other),
+            snippet: markdown::snippet(&other.text, 90),
+            // The judge's line where there is one; otherwise the question that
+            // bound them, which is the link's own explanation and free.
+            why: l
+                .reason
+                .clone()
+                .or_else(|| l.cues.first().map(|c| format!("when asking: {}", c.q))),
+            corpus_title,
+            cross_corpus: l.cross_corpus,
+            id: other.id,
+        });
+    }
     // Built before the struct consumes `c`. The fragment is what makes the
     // browser scroll to the span; the query parameters are what make the page
     // highlight it.
@@ -1548,6 +1724,7 @@ pub(crate) async fn build_artifact_detail(
     let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
     Ok(ArtifactDetail {
         related,
+        seen_together,
         orphaned_source,
         source_at_lines,
         id: c.id,
@@ -1601,6 +1778,22 @@ async fn artifact_detail(
     .into_response())
 }
 
+/// The operator saying this pair does not belong together.
+///
+/// Final for that pair: never shown, never judged, never pruned. The weight is
+/// left exactly as it is, so the decision stays auditable against the evidence
+/// that produced it — undoing one is out of scope, and Ops is where it would go.
+async fn dismiss_link(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((artifact_id, other_id)): Path<(String, String)>,
+) -> Result<Response> {
+    st.core.store.dismiss_link(&artifact_id, &other_id).await?;
+    // The row swaps itself out and leaves the pane alone, so the artifact you
+    // were reading is still on screen afterwards.
+    Ok(axum::response::Html(String::new()).into_response())
+}
+
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
@@ -1639,6 +1832,10 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
+        .route(
+            "/ui/artifacts/{id}/links/{other}/dismiss",
+            post(dismiss_link),
+        )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
@@ -1709,7 +1906,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let r = super::render_hit(0, hits[0].clone());
+        let r = super::render_hit(0, hits[0].clone(), &Default::default());
 
         assert!(
             !r.artifact_id.is_empty(),
@@ -1919,6 +2116,18 @@ mod tests {
         (app, cookie, handle)
     }
 
+    /// A session whose core records searches, which is what the association
+    /// features are gated on. `app_session_and_core` cannot be reused: the
+    /// router owns its own clone of the core, so flipping a flag afterwards
+    /// changes the handle and not the app.
+    async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle)
+    }
+
     async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
         let res = app
             .clone()
@@ -1972,6 +2181,73 @@ mod tests {
     /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
         app_with_cookie(core).await
+    }
+
+    #[tokio::test]
+    async fn a_link_derived_pair_never_claims_a_similarity_once_the_judge_has_settled_it() {
+        // The link judge files these with `detail = "link"` and a score of 0.0,
+        // because no cosine was ever measured. But `detail` is where the dedupe
+        // judge then writes its own prose — `set_pair_state` and
+        // `set_pair_superseded` both overwrite it — so provenance read out of
+        // that field survives only while the pair is pending. Once it settles,
+        // the page would go back to rendering the placeholder score, and
+        // "0% alike" reads as a measurement meaning "nothing alike".
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "the first one".into(),
+                        corpus_span: None,
+                        title: Some("first".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "the second one".into(),
+                        corpus_span: None,
+                        title: Some("second".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_pair_with_detail(&made[0].id, &made[1].id, 0.0, "link")
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM artifact_pairs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        // The dedupe judge answers, and writes its line over the marker.
+        core.store
+            .set_pair_state(
+                id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("one says the opposite of the other"),
+            )
+            .await
+            .unwrap();
+
+        let (app, cookie) = app_for(core).await;
+        let html = flat(&get(&app, "/ui/capture", &cookie).await);
+
+        assert!(
+            !html.contains("0% alike"),
+            "a pair no cosine was ever measured for reports a measured similarity"
+        );
     }
 
     #[tokio::test]
@@ -2282,6 +2558,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_pane_lists_what_this_artifact_is_seen_together_with() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(
+                &ids[0],
+                &ids[1],
+                5.0,
+                Some("mount forensic image"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert_eq!(d.seen_together.len(), 1);
+        assert_eq!(d.seen_together[0].id, ids[1]);
+        assert_eq!(
+            d.seen_together[0].why.as_deref(),
+            Some("when asking: mount forensic image"),
+            "an unjudged link explains itself with the question that bound it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_judged_link_shows_the_judges_line_instead_of_the_query() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(
+                &ids[0],
+                &ids[1],
+                crate::store::links::LinkState::Related,
+                Some("the tool and the error it prints"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert_eq!(
+            d.seen_together[0].why.as_deref(),
+            Some("the tool and the error it prints")
+        );
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_link_takes_it_out_for_good_without_losing_the_evidence() {
+        // The weight stays, so the decision is auditable; the state is final,
+        // so it is never shown, judged or pruned again.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{}/links/{}/dismiss", ids[0], ids[1]),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, crate::store::links::LinkState::Dismissed);
+        assert!(
+            l.weight > 0.0,
+            "the evidence was thrown away with the decision"
+        );
+        assert!(
+            build_artifact_detail(&core, &ids[0], "")
+                .await
+                .unwrap()
+                .seen_together
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pane_still_renders_when_the_links_cannot_be_read() {
+        // The associative layer can only add. It is not a reason to refuse to
+        // show an artifact beside its source.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        sqlx::query("DROP TABLE artifact_links")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert!(d.seen_together.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cross_corpus_pair_is_marked_and_a_same_corpus_pair_is_not() {
+        // "Two documents needing each other is the finding; two passages of one
+        // document needing each other is not" is the whole point of the flag —
+        // pin it on the data the pane renders, not on a CSS class name.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
+        let other_corpus = core.store.insert_corpus("y", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &other_corpus.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "body of other document".to_string(),
+                    corpus_span: None,
+                    title: Some("other document".to_string()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let cross_id = made[0].id.clone();
+
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q1"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .bump_link(
+                &ids[0],
+                &cross_id,
+                5.0,
+                Some("q2"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let same = d
+            .seen_together
+            .iter()
+            .find(|r| r.id == ids[1])
+            .expect("the same-corpus pair should still be listed");
+        let cross = d
+            .seen_together
+            .iter()
+            .find(|r| r.id == cross_id)
+            .expect("the cross-corpus pair should be listed");
+        assert!(
+            !same.cross_corpus,
+            "two passages of one document is not the finding"
+        );
+        assert!(
+            cross.cross_corpus,
+            "two documents needing each other is the finding"
+        );
+    }
+
+    #[tokio::test]
     async fn a_related_link_works_on_the_standalone_artifact_page() {
         // The detail partial is both the search pane's content and the whole of
         // `/ui/artifacts/{id}`. A neighbour link that named `#pane` would be
@@ -2430,15 +2880,19 @@ mod tests {
             superseded_by: None,
             last_verified_at: None,
             weak,
+            primed: false,
+            via: None,
+            reason: None,
         };
 
-        let loose = render_hit(0, result(true));
+        let loose = render_hit(0, result(true), &Default::default());
         assert!(loose.weak);
         assert!(loose.rank.is_empty(), "a loose result was presented as #1");
-        assert_eq!(render_hit(0, result(false)).rank, "#1");
+        assert_eq!(render_hit(0, result(false), &Default::default()).rank, "#1");
 
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![loose],
+            associated: vec![],
             all_weak: true,
             terms: String::new(),
             timing: String::new(),
@@ -2446,6 +2900,141 @@ mod tests {
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
         assert!(!html.contains("#1"), "{html}");
+    }
+
+    fn rendered(via: Option<&str>, reason: Option<&str>) -> RenderedResult {
+        RenderedResult {
+            artifact_id: "a1".into(),
+            title: "The one that was recalled".into(),
+            html: String::new(),
+            snippet: "a snippet".into(),
+            category: None,
+            tags: vec![],
+            corpus_id: "c1".into(),
+            rank: String::new(),
+            weak: false,
+            primed: false,
+            via_title: via.map(str::to_string),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_results_name_what_recalled_an_associated_hit() {
+        // An associated hit says which hit recalled it, or it is an unexplained
+        // result in a list the reader believes is ranked. Rendered directly
+        // rather than driven through a search: the UI handler asks for the
+        // default limit, so on any base small enough to reason about, every
+        // artifact is already ranked and there is nothing left to recall. What
+        // this task changed is the split and the copy, and that is what this
+        // pins.
+        let template = ResultsTemplate {
+            results: vec![],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = template.render().unwrap();
+        assert!(body.contains("Recalled by association"), "{body}");
+        assert!(body.contains("seen together with"), "{body}");
+        assert!(body.contains("Mounting E01 images"), "{body}");
+
+        // A judged link says what the relation is instead of what was asked.
+        let judged = ResultsTemplate {
+            results: vec![],
+            associated: vec![rendered(
+                Some("Mounting E01 images"),
+                Some("the tool and its errors"),
+            )],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = judged.render().unwrap();
+        assert!(body.contains("the tool and its errors"), "{body}");
+        assert!(!body.contains("seen together with"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_unlinked_search_shows_no_association() {
+        // Nothing was linked, so there is nothing to recall. This only pins
+        // the absence of the section on a corpus with no links — the
+        // `all_weak` invariant itself is proven separately below, since this
+        // search never has an association present to prove it against.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(!body.contains("Recalled by association"), "{body}");
+    }
+
+    fn ranked(weak: bool) -> RenderedResult {
+        RenderedResult {
+            artifact_id: "r1".into(),
+            title: "The ranked hit".into(),
+            html: String::new(),
+            snippet: "a snippet".into(),
+            category: None,
+            tags: vec![],
+            corpus_id: "c1".into(),
+            rank: if weak { String::new() } else { "#1".into() },
+            weak,
+            primed: false,
+            via_title: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn an_association_cannot_make_the_answer_look_worse_than_it_was() {
+        // `all_weak` is a statement about how well the *query* was answered. An
+        // associated hit did not answer the query at all, so its presence must
+        // not move this verdict either way. Proven both directions: a weak
+        // ranked answer still warns with an association beside it, and a good
+        // ranked answer stays silent with one beside it too.
+        let weak_with_association = ResultsTemplate {
+            results: vec![ranked(true)],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: true,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = weak_with_association.render().unwrap();
+        assert!(
+            body.contains("Nothing matches closely"),
+            "an association hid a real warning: {body}"
+        );
+
+        let good_with_association = ResultsTemplate {
+            results: vec![ranked(false)],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = good_with_association.render().unwrap();
+        assert!(
+            !body.contains("Nothing matches closely"),
+            "an association manufactured a warning: {body}"
+        );
+    }
+
+    #[test]
+    fn a_primed_hit_gets_a_small_marker() {
+        let mut r = ranked(false);
+        r.primed = true;
+        let body = ResultsTemplate {
+            results: vec![r],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(body.contains("primed"), "{body}");
     }
 
     #[test]
@@ -2923,6 +3512,23 @@ mod tests {
         // "None."
         assert!(html.contains("Nothing deprecated"));
         assert!(!html.contains("<h3>Deprecated</h3>"));
+    }
+
+    #[tokio::test]
+    async fn ops_says_how_many_links_there_are_and_how_many_are_named() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        // One `bump_link` call between one pair is one row in `artifact_links`
+        // — see `the_counts_say_how_many_links_there_are_and_how_many_are_named`
+        // in store::links, which needs two calls between two different pairs
+        // to reach a total of two.
+        assert!(page.contains("1 links"), "{page}");
     }
 
     #[tokio::test]

@@ -11,6 +11,9 @@
   {{ artifact_count }} artifacts, {{ vector_count }} embedded.
   {% for j in job_counts %}{{ j.1 }} {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}{% if job_counts.is_empty() %}Nothing queued{% endif %}.
   {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
+  {% if let Some(l) = links %}
+  {{ l.total }} links, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
+  {% endif %}
 </p>
 
 {% if !merged.is_empty() %}

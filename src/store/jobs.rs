@@ -38,6 +38,13 @@ pub enum Stage {
     /// One image, one vision call: reads a captured image into the markdown
     /// that becomes its `raw_text`, then hands off to `Synthesize`.
     Describe,
+    /// The periodic association sweep. Its target is the collection rather than
+    /// any one artifact, so the `UNIQUE(stage, target_id)` on `jobs` guarantees
+    /// at most one queued sweep however often the ticker fires. Local work: it
+    /// replays the search log and arms `LinkJudge` units, and calls no model.
+    Associate,
+    /// One strong cross-corpus link, one call. Target is `"<a_id>|<b_id>"`.
+    LinkJudge,
 }
 
 impl Stage {
@@ -52,6 +59,8 @@ impl Stage {
             Stage::Dedupe => "dedupe",
             Stage::Relate => "relate",
             Stage::Describe => "describe",
+            Stage::Associate => "associate",
+            Stage::LinkJudge => "link_judge",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -65,6 +74,8 @@ impl Stage {
             "dedupe" => Some(Stage::Dedupe),
             "relate" => Some(Stage::Relate),
             "describe" => Some(Stage::Describe),
+            "associate" => Some(Stage::Associate),
+            "link_judge" => Some(Stage::LinkJudge),
             _ => None,
         }
     }
