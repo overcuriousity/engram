@@ -38,6 +38,14 @@ pub struct RenderedResult {
     pub rank: String,
     /// Only loosely related to the query — see `SearchResult::weak`.
     pub weak: bool,
+    /// This hit moved up on activation. A small marker, because the claim is
+    /// small: it passed a near-tie, it did not become a better match.
+    pub primed: bool,
+    /// The title of the ranked hit that recalled this one. Set only on an
+    /// associated hit, and it is what the row names.
+    pub via_title: Option<String>,
+    /// The judge's line, where the link was judged.
+    pub reason: Option<String>,
 }
 
 pub struct QueueRow {
@@ -337,6 +345,9 @@ struct SearchTemplate {
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
+    /// Recalled by association with a ranked hit, never ranked against the
+    /// query itself. Shown below the ranked list, under its own rule.
+    associated: Vec<RenderedResult>,
     /// Every result is only loosely related, so the page says so once above the
     /// list instead of repeating it on each card.
     all_weak: bool,
@@ -645,6 +656,7 @@ async fn search_results(
     if p.q.trim().is_empty() {
         return Ok(HtmlTemplate(ResultsTemplate {
             results: vec![],
+            associated: vec![],
             all_weak: false,
             terms: String::new(),
             timing: String::new(),
@@ -678,25 +690,50 @@ async fn search_results(
         )
         .await?;
 
-    let results: Vec<RenderedResult> = hits
+    // The ranked answer and what it recalled are two lists on the page, and one
+    // list here: an associated hit carries the id of the hit that recalled it,
+    // and the title is looked up among the ranked ones rather than fetched.
+    let titles: std::collections::HashMap<String, String> = hits
+        .iter()
+        .filter(|h| h.via.is_none())
+        .map(|h| {
+            (
+                h.artifact_id.clone(),
+                h.title.clone().unwrap_or_else(|| "Untitled".into()),
+            )
+        })
+        .collect();
+    let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
+    let results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
-        .map(|(i, h)| render_hit(i, h))
+        .map(|(i, h)| render_hit(i, h, &titles))
+        .collect();
+    let associated: Vec<RenderedResult> = recalled
+        .into_iter()
+        .map(|h| render_hit(0, h, &titles))
         .collect();
     Ok(HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
         // "nothing matches" over a list that plainly does would train the
-        // operator to ignore the warning.
+        // operator to ignore the warning. Computed from `results` only: an
+        // association is not an answer to the query and cannot make the
+        // answer look better or worse than it was.
         all_weak: !results.is_empty() && results.iter().all(|r| r.weak),
         results,
+        associated,
         terms,
         timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
     .into_response())
 }
 
-fn render_hit(position: usize, h: crate::core::search::SearchResult) -> RenderedResult {
+fn render_hit(
+    position: usize,
+    h: crate::core::search::SearchResult,
+    titles: &std::collections::HashMap<String, String>,
+) -> RenderedResult {
     RenderedResult {
         artifact_id: h.artifact_id,
         title: h.title.unwrap_or_else(|| "Untitled".into()),
@@ -705,12 +742,18 @@ fn render_hit(position: usize, h: crate::core::search::SearchResult) -> Rendered
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
-        rank: if h.weak {
+        // No rank on an associated hit — the same reasoning that drops the
+        // rank on a weak one: a rank is a claim about standing among answers,
+        // and this did not compete for one.
+        rank: if h.weak || h.via.is_some() {
             String::new()
         } else {
             format!("#{}", position + 1)
         },
         weak: h.weak,
+        primed: h.primed,
+        via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
+        reason: h.reason.clone(),
     }
 }
 
@@ -1464,7 +1507,7 @@ async fn ask_submit(
             .citations
             .into_iter()
             .enumerate()
-            .map(|(i, h)| render_hit(i, h))
+            .map(|(i, h)| render_hit(i, h, &Default::default()))
             .collect(),
         dropped: out.dropped,
     })
@@ -1709,7 +1752,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let r = super::render_hit(0, hits[0].clone());
+        let r = super::render_hit(0, hits[0].clone(), &Default::default());
 
         assert!(
             !r.artifact_id.is_empty(),
@@ -2435,13 +2478,14 @@ mod tests {
             reason: None,
         };
 
-        let loose = render_hit(0, result(true));
+        let loose = render_hit(0, result(true), &Default::default());
         assert!(loose.weak);
         assert!(loose.rank.is_empty(), "a loose result was presented as #1");
-        assert_eq!(render_hit(0, result(false)).rank, "#1");
+        assert_eq!(render_hit(0, result(false), &Default::default()).rank, "#1");
 
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![loose],
+            associated: vec![],
             all_weak: true,
             terms: String::new(),
             timing: String::new(),
@@ -2449,6 +2493,73 @@ mod tests {
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
         assert!(!html.contains("#1"), "{html}");
+    }
+
+    fn rendered(via: Option<&str>, reason: Option<&str>) -> RenderedResult {
+        RenderedResult {
+            artifact_id: "a1".into(),
+            title: "The one that was recalled".into(),
+            html: String::new(),
+            snippet: "a snippet".into(),
+            category: None,
+            tags: vec![],
+            corpus_id: "c1".into(),
+            rank: String::new(),
+            weak: false,
+            primed: false,
+            via_title: via.map(str::to_string),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_results_name_what_recalled_an_associated_hit() {
+        // An associated hit says which hit recalled it, or it is an unexplained
+        // result in a list the reader believes is ranked. Rendered directly
+        // rather than driven through a search: the UI handler asks for the
+        // default limit, so on any base small enough to reason about, every
+        // artifact is already ranked and there is nothing left to recall. What
+        // this task changed is the split and the copy, and that is what this
+        // pins.
+        let template = ResultsTemplate {
+            results: vec![],
+            associated: vec![rendered(Some("Mounting E01 images"), None)],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = template.render().unwrap();
+        assert!(body.contains("Recalled by association"), "{body}");
+        assert!(body.contains("seen together with"), "{body}");
+        assert!(body.contains("Mounting E01 images"), "{body}");
+
+        // A judged link says what the relation is instead of what was asked.
+        let judged = ResultsTemplate {
+            results: vec![],
+            associated: vec![rendered(
+                Some("Mounting E01 images"),
+                Some("the tool and its errors"),
+            )],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        };
+        let body = judged.render().unwrap();
+        assert!(body.contains("the tool and its errors"), "{body}");
+        assert!(!body.contains("seen together with"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_association_cannot_make_the_answer_look_worse_than_it_was() {
+        // `all_weak` is a statement about how well the *query* was answered. An
+        // associated hit did not answer the query at all, so counting it either
+        // way would put a warning over a good list, or take one off a bad one.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+
+        let body = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(!body.contains("Recalled by association"), "{body}");
     }
 
     #[test]

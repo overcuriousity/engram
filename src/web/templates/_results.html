@@ -1,5 +1,5 @@
 <span id="timing-value" hx-swap-oob="innerHTML:#timing">{{ timing }}</span>
-{% if results.is_empty() %}
+{% if results.is_empty() && associated.is_empty() %}
   <p class="muted">No matches.</p>
 {% else %}
 <div data-terms="{{ terms }}">
@@ -33,6 +33,9 @@
         {% else %}
         <span class="rail-rank mono">{{ r.rank }}</span>
         {% endif %}
+        {% if r.primed %}
+        <span class="badge" title="Moved up: you reach this one often">primed</span>
+        {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in
@@ -54,5 +57,29 @@
     </div>
   </div>
   {% endfor %}
+  {% if !associated.is_empty() %}
+  {# Below a rule and under its own heading: these were not ranked against the
+     query, they were recalled by something that was. Presenting them in the
+     same list would be a claim about relevance that nothing here supports. #}
+  <div class="assoc-rule" role="separator">Recalled by association</div>
+  {% for r in associated %}
+  <div class="rail-row">
+    <a class="rail-item rail-assoc" role="option" aria-selected="false"
+       href="/ui/artifacts/{{ r.artifact_id }}"
+       hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
+       hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
+      <div class="rail-head">
+        <span class="rail-title">{{ r.title }}</span>
+      </div>
+      {% if let Some(why) = r.reason %}
+      <div class="rail-why">{{ why }}</div>
+      {% else if let Some(via) = r.via_title %}
+      <div class="rail-why">seen together with "{{ via }}"</div>
+      {% endif %}
+      <div class="rail-snippet">{{ r.snippet }}</div>
+    </a>
+  </div>
+  {% endfor %}
+  {% endif %}
 </div>
 {% endif %}

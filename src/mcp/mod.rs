@@ -22,10 +22,16 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
             } else {
                 format!(" · {}", r.tags.join(", "))
             };
+            // An agent reads this as a ranked list unless it is told otherwise,
+            // and an associated hit did not compete for its place.
+            let how = match (&r.via, &r.reason) {
+                (Some(_), Some(why)) => format!("recalled beside the answer — {why}"),
+                (Some(_), None) => "recalled beside the answer".to_string(),
+                (None, _) => format!("score {:.3}", r.score),
+            };
             format!(
-                "### {}. {title}\n_score {:.3}{tags} · corpus: {}_\n\n{}",
+                "### {}. {title}\n_{how}{tags} · corpus: {}_\n\n{}",
                 i + 1,
-                r.score,
                 r.corpus_id,
                 r.text
             )
@@ -263,5 +269,32 @@ mod tests {
         let text = format_search_results(&[]);
         assert!(!text.trim().is_empty());
         assert!(text.to_lowercase().contains("no match"));
+    }
+
+    fn hit(id: &str, via: Option<&str>) -> SearchResult {
+        SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: Some(id.into()),
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            via: via.map(str::to_string),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn an_associated_result_says_it_was_recalled_rather_than_ranked() {
+        // Straight into an agent's context: without this the extra result reads
+        // as the fourth-best match for the query, which it is not.
+        let out = format_search_results(&[hit("ranked", None), hit("recalled", Some("ranked"))]);
+        assert!(out.contains("recalled beside"), "{out}");
     }
 }
