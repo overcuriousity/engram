@@ -49,7 +49,7 @@ async fn replay_events(core: &Core, at: i64) -> Result<usize> {
 
     let events = sqlx::query(
         "SELECT id, query, created_at FROM search_events
-          WHERE created_at > ? AND created_at <= ?
+          WHERE created_at > ? AND created_at < ?
           ORDER BY created_at ASC, id ASC LIMIT ?",
     )
     .bind(after)
@@ -119,16 +119,26 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
         let id: String = e.get("id");
         let expect: String = e.get("expect_id");
         let shown = shown_candidates(core, &id).await?;
-        for other in shown.iter().filter(|c| **c != expect) {
-            // No cue: this event's words were already folded in as a binding
-            // query when its co-appearance was replayed, and counting them
-            // twice would say two questions bound this pair.
-            if let Err(err) = core
-                .store
-                .bump_link(&expect, other, 2.0, None, core.associate.half_life_days, at)
-                .await
-            {
-                tracing::debug!(error = %err, "could not bind a pair; one side is gone");
+        // Only a *shown* pair containing the answer is bound harder — a find,
+        // where the operator confirmed an artifact the search never returned,
+        // has no shown pair to strengthen. Binding it against the pool anyway
+        // would invent a co-retrieval that never happened, which is exactly
+        // the rule ("only what the searcher actually saw fires together")
+        // this whole sweep exists to hold. The activation bump below is
+        // unconditional and still fires for a find — that is the one signal a
+        // find is allowed to give.
+        if shown.contains(&expect) {
+            for other in shown.iter().filter(|c| **c != expect) {
+                // No cue: this event's words were already folded in as a
+                // binding query when its co-appearance was replayed, and
+                // counting them twice would say two questions bound this pair.
+                if let Err(err) = core
+                    .store
+                    .bump_link(&expect, other, 2.0, None, core.associate.half_life_days, at)
+                    .await
+                {
+                    tracing::debug!(error = %err, "could not bind a pair; one side is gone");
+                }
             }
         }
         // Raised whether or not the answer was in the pool at all — an artifact
@@ -359,6 +369,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_event_exactly_at_the_fold_boundary_waits_one_more_sweep() {
+        // `record_search` treats an event as still foldable while
+        // `(at - created_at) <= coalesce_secs` (src/store/feedback.rs). The
+        // sweep's read must be the complement of that with nothing shared, or
+        // there is an instant where both are true and the sweep binds an
+        // event a further keystroke could still fold into — the exact
+        // double-binding this whole two-watermark design exists to prevent.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.feedback.coalesce_secs = 15;
+        let ids = seed(&core, 2).await;
+        let ev = record(&core, "fat", &[&ids[0], &ids[1]], &[]).await;
+
+        // Aged to exactly the boundary: still foldable, so the sweep must not
+        // replay it yet.
+        sqlx::query("UPDATE search_events SET created_at = created_at - ? WHERE id = ?")
+            .bind(core.feedback.coalesce_secs)
+            .bind(&ev)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none(),
+            "an event still exactly at the fold boundary was replayed early"
+        );
+
+        // One second further: no longer foldable, so the next sweep replays it.
+        sqlx::query("UPDATE search_events SET created_at = created_at - 1 WHERE id = ?")
+            .bind(&ev)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_some(),
+            "an event one second past the boundary was still withheld"
+        );
+    }
+
+    #[tokio::test]
     async fn a_replayed_event_is_never_replayed_again() {
         let mut core = test_core().await;
         on(&mut core).await;
@@ -417,6 +476,55 @@ mod tests {
         assert!(
             act[&ids[0]].0 > act[&ids[1]].0,
             "the confirmed answer gained no activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_search_never_showed_raises_activation_but_binds_nothing() {
+        // A find: the operator confirmed an artifact the search never
+        // returned at all. Spec §5.1 step 2 binds harder only the shown pairs
+        // containing the answer — with no shown pair to strengthen, nothing
+        // is bound. Step 3's activation bump has no such condition, and a
+        // find is the most valuable confirmation there is.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 3).await;
+        // ids[2] is never offered as a candidate at all.
+        let ev = record(&core, "q", &[&ids[0], &ids[1]], &[]).await;
+        core.store.judge_hit(&ev, &ids[2]).await.unwrap();
+        settle(&core).await;
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_link(&ids[2], &ids[0])
+                .await
+                .unwrap()
+                .is_none(),
+            "a find bound a pair that was never shown together"
+        );
+        assert!(
+            core.store
+                .get_link(&ids[2], &ids[1])
+                .await
+                .unwrap()
+                .is_none(),
+            "a find bound a pair that was never shown together"
+        );
+        // The shown pair not involving the answer still binds on co-appearance.
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let act = core.store.activation_of(&ids).await.unwrap();
+        assert!(
+            act[&ids[2]].0 > act[&ids[1]].0,
+            "the find gained no activation"
         );
     }
 
