@@ -324,7 +324,11 @@ impl Store {
 
             for r in &rows {
                 let state = LinkState::parse(r.get::<String, _>("state").as_str());
-                if !allowed.contains(&state.as_str()) {
+                // The operator's "not related" is final. It does not depend on
+                // callers remembering to leave `Dismissed` out of `states` — a
+                // caller that could opt back into it would make the control a
+                // suggestion, not an invariant.
+                if state == LinkState::Dismissed || !allowed.contains(&state.as_str()) {
                     continue;
                 }
                 let weight = decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days);
@@ -383,7 +387,10 @@ impl Store {
         )
         .bind(min_weight)
         .bind(min_queries)
-        .bind(limit.saturating_mul(4))
+        // SQLite reads a negative LIMIT as unbounded, so the cap must be
+        // clamped at zero — a negative `limit` must still cap the fetch, not
+        // remove it, even though `take(limit.max(0))` below empties it anyway.
+        .bind(limit.max(0).saturating_mul(4))
         .fetch_all(&self.pool)
         .await?;
 
@@ -818,6 +825,36 @@ mod tests {
                 .links_from(
                     &[a],
                     &[LinkState::Learning, LinkState::Related],
+                    30.0,
+                    0,
+                    0.0
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_link_stays_hidden_even_from_a_caller_that_asks_for_it() {
+        // The operator's decision is final, and an invariant that holds only
+        // while every call site remembers the right argument is not one.
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store
+            .set_link_state(&a, &b, LinkState::Dismissed, None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .links_from(
+                    &[a],
+                    &[LinkState::Dismissed, LinkState::Learning],
                     30.0,
                     0,
                     0.0
