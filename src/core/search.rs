@@ -420,7 +420,18 @@ impl Core {
                 self.associate.half_life_days,
                 now_secs(),
                 self.associate.show_min,
-                self.associate.spread_max as i64,
+                // Not `spread_max`: `links_from` returns one row per (anchor,
+                // link) with no dedup across anchors, and it truncates before
+                // the filtering below runs. The rows most likely to be
+                // discarded here are anchor-to-anchor links — both ends
+                // already in `results` — and those are exactly the links
+                // co-retrieval makes most likely to exist. A limit of just
+                // `spread_max` lets such rows consume the whole budget and
+                // leave nothing for genuinely new artifacts. This bound
+                // leaves room for every anchor-to-anchor pair among the
+                // ranked anchors to be discarded and still fill the budget;
+                // the real cap is the `out.len() >= spread_max` check below.
+                (self.associate.spread_max * (self.associate.spread_from + 1)) as i64,
             )
             .await
         {
@@ -1008,7 +1019,8 @@ mod tests {
         // The same rule as `last_seen_at`: an incremental request is not a
         // retrieval, and letting every keystroke raise activation would make
         // accessibility a function of how slowly someone types.
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
@@ -1038,7 +1050,8 @@ mod tests {
     async fn being_drawn_at_random_raises_nothing() {
         // `resurface` shows what has been forgotten. Counting that as a reason
         // to be more accessible is the loop this whole design is built to close.
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         sqlx::query("UPDATE artifacts SET created_at = ?")
             .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
@@ -2223,5 +2236,85 @@ mod tests {
         let mut query = q("t0\nalpha text");
         query.limit = 1;
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn links_between_ranked_hits_do_not_starve_the_association_budget() {
+        // `links_from` returns one row per (anchor, link) with no dedup
+        // across anchors, and truncates at its own limit before `associated`
+        // filters out rows whose other end is already ranked. A link between
+        // two of the top `spread_from` hits is therefore fetched twice — once
+        // per anchor — and those are exactly the rows co-retrieval makes most
+        // likely to exist. If the store limit were just `spread_max`, three
+        // such rows could fill the entire budget and then all be discarded,
+        // leaving nothing for an artifact that is linked to the ranked hits
+        // but did not itself rank. This calls `associated` directly, on
+        // hand-built anchors, so the outcome does not depend on the fake
+        // embedder's incidental ranking of a fifth candidate.
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "one",
+            &[
+                ("alpha one", "note", &[]),
+                ("alpha two", "note", &[]),
+                ("alpha three", "note", &[]),
+                ("alpha four", "note", &[]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha one").await;
+        let b = id_of(&core, "alpha two").await;
+        let c = id_of(&core, "alpha three").await;
+        let d = id_of(&core, "alpha four").await;
+
+        // Every pair among the three ranked hits (a, b, c) is linked more
+        // strongly than the single link from a ranked hit to the one
+        // artifact that never ranks (d) — so a limit that keeps the
+        // strongest rows first keeps the redundant, discardable ones and
+        // drops the useful one, which is exactly the bug.
+        let now = now_secs();
+        core.store
+            .bump_link(&a, &b, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&a, &c, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&b, &c, 10.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&a, &d, 5.0, Some("q"), 30.0, now)
+            .await
+            .unwrap();
+
+        let dummy = |id: String| SearchResult {
+            artifact_id: id,
+            corpus_id: String::new(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score: 1.0,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            via: None,
+            reason: None,
+        };
+        let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
+
+        let out = core.associated(&results).await;
+        let ids: Vec<&str> = out.iter().map(|r| r.artifact_id.as_str()).collect();
+        assert!(
+            ids.contains(&d.as_str()),
+            "an artifact linked only to the ranked hits, not among them, was not recalled: {ids:?}"
+        );
     }
 }
