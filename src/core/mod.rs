@@ -96,6 +96,10 @@ pub struct Core {
     /// Limits for the upload, link and extension capture paths. Read on the
     /// request path, so it lives here rather than being threaded down.
     pub capture: crate::config::CaptureConfig,
+    /// Link learning, priming and association. Read on the search path and by
+    /// the sweep, so it lives here rather than being threaded down.
+    pub associate: crate::config::AssociateConfig,
+    pub activation: crate::config::ActivationConfig,
     /// The pacer every inference call passes through. Shared by every clone,
     /// because a per-clone gate would pace nothing: the point is one queue of
     /// calls in front of one GPU.
@@ -158,6 +162,8 @@ impl Core {
             weak_below: cfg.vector.weak_below,
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
+            associate: cfg.associate.clone(),
+            activation: cfg.activation.clone(),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
             )),
@@ -200,6 +206,21 @@ impl Core {
             Arc::clone(locks.entry(corpus_id.to_string()).or_default())
         };
         lock.lock_owned().await
+    }
+
+    /// Whether the associative layer — links and priming — is actually live,
+    /// not merely configured on.
+    ///
+    /// Links are learned from recorded searches (`search_events`), and
+    /// recording queries is a separate privacy decision the operator makes
+    /// with `feedback.enabled`. Without recordings there is nothing to learn
+    /// from, so `associate.enabled` alone must not let the layer read or
+    /// write anything: every site that primes, associates, bumps activation
+    /// from a search, or renders "seen together" has to check both flags, or
+    /// an install that never opted into `feedback` still has its ranking and
+    /// activation quietly touched.
+    pub fn associating(&self) -> bool {
+        self.associate.enabled && self.feedback.enabled
     }
 }
 
@@ -272,6 +293,10 @@ pub mod test_support {
             // Off, like the shipped default. The capture tests switch it on.
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
+            // On, like the shipped default — and inert in most tests, because
+            // nothing has learned a link yet. The association tests seed one.
+            associate: crate::config::AssociateConfig::default(),
+            activation: crate::config::ActivationConfig::default(),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
@@ -319,6 +344,23 @@ mod tests {
             cfg.consolidate.merge_max_roots >= 2,
             "a merge needs at least two sources to be a merge"
         );
+    }
+
+    #[tokio::test]
+    async fn associating_requires_both_flags_the_shipped_default_has_only_one() {
+        // Shipped defaults: `associate.enabled = true`, `feedback.enabled =
+        // false`. Links are learned from recorded searches, and recording is
+        // a separate privacy decision, so the layer must stay dark until both
+        // are on.
+        let mut core = test_support::test_core().await;
+        assert!(core.associate.enabled && !core.feedback.enabled);
+        assert!(!core.associating(), "on with only associate.enabled set");
+
+        core.feedback.enabled = true;
+        assert!(core.associating(), "both flags set");
+
+        core.associate.enabled = false;
+        assert!(!core.associating(), "on with only feedback.enabled set");
     }
 
     #[tokio::test]

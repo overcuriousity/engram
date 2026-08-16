@@ -13,7 +13,10 @@
 <div class="decide">
   <div class="decide-head">
     {% if p.contradiction %}<b>These two disagree</b>{% else %}<b>These two cover the same ground</b>{% endif %}
-    — {{ p.percent }}% alike.
+    {# `via_link` pairs were never scored by embedding — the judge found them
+       through repeated co-retrieval, not cosine — so `percent` would read as a
+       measured similarity that was never computed. #}
+    {% if p.via_link %}— no similarity was measured for this pair.{% else %}— {{ p.percent }}% alike.{% endif %}
     <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> and
     <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>.
   </div>

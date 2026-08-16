@@ -16,7 +16,9 @@ must not alter; filter chips from facet counts; nearest neighbours in the
 detail pane; near-duplicate detection at capture; autonomous consolidation with
 complete pair coverage, merge-loss checks and undo; caveats on artifacts; text
 and image capture; hybrid search inside Qdrant; the evaluation harness fed from
-judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`).
+judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`);
+Hebbian links learned from co-retrieval with bounded priming and one-hop
+association in the results.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -43,11 +45,11 @@ moves only after it has been run.
 
 ## [Associative Memory]
 
-Spec: `docs/superpowers/specs/2026-08-16-associative-memory-design.md` —
+Spec: `docs/superpowers/specs/2026-08-16-associative-memory-design.md` — built:
 Hebbian links learned from co-retrieval, decaying activation per artifact,
 bounded priming and one-hop association in the results, a sparse judge on
-strong cross-corpus links. The items below are the mechanisms that come after
-it, in order.
+strong cross-corpus links, switched on with `[associate]` and `[activation]`
+in config. The items below are the mechanisms that come after it, in order.
 
 - **Sleep as an explicit cycle.** The background work already exists — link
   replay, activation decay, pruning, relate/dedupe, retention. It becomes phases
