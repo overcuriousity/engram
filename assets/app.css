@@ -360,6 +360,21 @@ body { overflow-x: hidden; }
 .related { display: flex; flex-direction: column; gap: 0.375rem; }
 .related .rail-item { padding: 0.5rem 0.625rem; }
 
+/* Same shape as `.rail-row`: the dismiss control sits beside the link rather
+   than inside it, revealed on hover or focus. `.muted` is the same-corpus
+   case — two passages of one document needing each other is not the finding
+   that a cross-corpus pair is, so it recedes instead of competing for
+   attention. */
+.seen-row { position: relative; }
+.seen-row .rail-item { padding-right: 2.75rem; }
+.seen-row .rail-del {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.seen-row:hover .rail-del, .seen-row .rail-del:focus-within { opacity: 1; }
+@media (hover: none) { .seen-row .rail-del { opacity: 1; } }
+.seen-row.muted .rail-item { opacity: 0.75; }
+
 /* ── Filter chips ────────────────────────────────────────────────────────── */
 
 /* A radio styled as a chip. The input is the state — checked, focusable,

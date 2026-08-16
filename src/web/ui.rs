@@ -144,6 +144,11 @@ pub struct ArtifactDetail {
     /// vector is already stored, so this costs no embedding call and no
     /// completion. Empty while the artifact is still waiting to be embedded.
     pub related: Vec<RelatedArtifact>,
+    /// What this artifact has been needed alongside, learned from co-retrieval
+    /// rather than resemblance. Beside `related`, not instead of it: one list
+    /// is what this resembles, the other is what it has been reached for
+    /// together with, and they answer different questions.
+    pub seen_together: Vec<SeenTogether>,
 }
 
 /// A neighbour, as one line in the pane.
@@ -151,6 +156,22 @@ pub struct RelatedArtifact {
     pub id: String,
     pub title: String,
     pub snippet: String,
+}
+
+/// A link, as one line in the pane. Beside the nearest neighbours, not instead
+/// of them: one list is what this artifact resembles, the other is what it has
+/// been needed alongside, and they answer different questions.
+pub struct SeenTogether {
+    pub id: String,
+    pub title: String,
+    pub snippet: String,
+    /// The judge's line, or the question that bound the pair. `None` only for a
+    /// link with neither, which is a link nothing can explain yet.
+    pub why: Option<String>,
+    pub corpus_title: String,
+    /// Rendered emphasised: two documents needing each other is the finding.
+    /// Two passages of one document needing each other is not.
+    pub cross_corpus: bool,
 }
 
 /// Work that hit something and is waiting to try again by itself.
@@ -1575,6 +1596,60 @@ pub(crate) async fn build_artifact_detail(
             id: h.payload.artifact_id,
         })
         .collect();
+    // Unreadable links are not a missing pane, for the same reason a missing
+    // neighbour list is not: this layer can only ever add.
+    let anchor = vec![c.id.clone()];
+    let seen_together_links = match core
+        .store
+        .links_from(
+            &anchor,
+            &[
+                crate::store::links::LinkState::Learning,
+                crate::store::links::LinkState::Related,
+            ],
+            core.associate.half_life_days,
+            crate::store::now(),
+            core.associate.show_min,
+        )
+        .await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(artifact_id, error = %e, "no links for this pane");
+            vec![]
+        }
+    };
+    let mut seen_together = Vec::new();
+    for l in seen_together_links.into_iter().take(RELATED_LIMIT) {
+        let Ok(other) = core.store.get_artifact(&l.other).await else {
+            continue;
+        };
+        let corpus_title = match &other.corpus_id {
+            Some(id) => core
+                .store
+                .get_corpus(id)
+                .await
+                .ok()
+                .and_then(|s| s.title_hint)
+                .unwrap_or_else(|| "untitled".into()),
+            // A merged artifact belongs to no document, which is worth saying
+            // rather than leaving blank.
+            None => "merged".to_string(),
+        };
+        seen_together.push(SeenTogether {
+            title: title_of(&other),
+            snippet: markdown::snippet(&other.text, 90),
+            // The judge's line where there is one; otherwise the question that
+            // bound them, which is the link's own explanation and free.
+            why: l
+                .reason
+                .clone()
+                .or_else(|| l.cues.first().map(|c| format!("when asking: {}", c.q))),
+            corpus_title,
+            cross_corpus: l.cross_corpus,
+            id: other.id,
+        });
+    }
     // Built before the struct consumes `c`. The fragment is what makes the
     // browser scroll to the span; the query parameters are what make the page
     // highlight it.
@@ -1591,6 +1666,7 @@ pub(crate) async fn build_artifact_detail(
     let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
     Ok(ArtifactDetail {
         related,
+        seen_together,
         orphaned_source,
         source_at_lines,
         id: c.id,
@@ -1644,6 +1720,31 @@ async fn artifact_detail(
     .into_response())
 }
 
+/// The operator saying this pair does not belong together.
+///
+/// Final for that pair: never shown, never judged, never pruned. The weight is
+/// left exactly as it is, so the decision stays auditable against the evidence
+/// that produced it — undoing one is out of scope, and Ops is where it would go.
+async fn dismiss_link(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((artifact_id, other_id)): Path<(String, String)>,
+) -> Result<Response> {
+    st.core
+        .store
+        .set_link_state(
+            &artifact_id,
+            &other_id,
+            crate::store::links::LinkState::Dismissed,
+            None,
+            None,
+        )
+        .await?;
+    // The row swaps itself out and leaves the pane alone, so the artifact you
+    // were reading is still on screen afterwards.
+    Ok(axum::response::Html(String::new()).into_response())
+}
+
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
@@ -1682,6 +1783,10 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
+        .route(
+            "/ui/artifacts/{id}/links/{other}/dismiss",
+            post(dismiss_link),
+        )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ops", get(ops))
@@ -2322,6 +2427,112 @@ mod tests {
             "an artifact must not be listed as its own neighbour"
         );
         assert!(d.related.len() <= RELATED_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn the_pane_lists_what_this_artifact_is_seen_together_with() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(
+                &ids[0],
+                &ids[1],
+                5.0,
+                Some("mount forensic image"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert_eq!(d.seen_together.len(), 1);
+        assert_eq!(d.seen_together[0].id, ids[1]);
+        assert_eq!(
+            d.seen_together[0].why.as_deref(),
+            Some("when asking: mount forensic image"),
+            "an unjudged link explains itself with the question that bound it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_judged_link_shows_the_judges_line_instead_of_the_query() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(
+                &ids[0],
+                &ids[1],
+                crate::store::links::LinkState::Related,
+                Some("the tool and the error it prints"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert_eq!(
+            d.seen_together[0].why.as_deref(),
+            Some("the tool and the error it prints")
+        );
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_link_takes_it_out_for_good_without_losing_the_evidence() {
+        // The weight stays, so the decision is auditable; the state is final,
+        // so it is never shown, judged or pruned again.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{}/links/{}/dismiss", ids[0], ids[1]),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, crate::store::links::LinkState::Dismissed);
+        assert!(
+            l.weight > 0.0,
+            "the evidence was thrown away with the decision"
+        );
+        assert!(
+            build_artifact_detail(&core, &ids[0], "")
+                .await
+                .unwrap()
+                .seen_together
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pane_still_renders_when_the_links_cannot_be_read() {
+        // The associative layer can only add. It is not a reason to refuse to
+        // show an artifact beside its source.
+        let core = crate::core::test_support::test_core().await;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        sqlx::query("DROP TABLE artifact_links")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        assert!(d.seen_together.is_empty());
     }
 
     #[tokio::test]

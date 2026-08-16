@@ -158,6 +158,33 @@
         {% endfor %}
       </div>
       {% endif %}
+
+      {% if !d.seen_together.is_empty() %}
+      {# Beside the nearest neighbours, not instead of them: one list is what
+         this resembles, the other is what it has been needed alongside. #}
+      <div class="pane-label">Seen together</div>
+      <div class="related">
+        {% for r in d.seen_together %}
+        <div class="seen-row{% if !r.cross_corpus %} muted{% endif %}">
+          <a class="rail-item" href="/ui/artifacts/{{ r.id }}"
+             hx-get="/ui/artifacts/{{ r.id }}"
+             hx-target="closest [data-terms]" hx-swap="outerHTML"
+             hx-push-url="true">
+            <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+            {% if let Some(why) = r.why %}<div class="rail-why">{{ why }}</div>{% endif %}
+            <div class="rail-snippet">{{ r.snippet }} · {{ r.corpus_title }}</div>
+          </a>
+          <div class="rail-del">
+            <button class="btn-icon" title="Not related" aria-label="Not related"
+                    hx-post="/ui/artifacts/{{ d.id }}/links/{{ r.id }}/dismiss"
+                    hx-target="closest .seen-row" hx-swap="outerHTML">
+              {% include "_icon_hide.html" %}
+            </button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
     <div>
       {# One statement of which lines these are, and it is the link. The crumb
