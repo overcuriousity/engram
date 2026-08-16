@@ -78,12 +78,22 @@ output_ratio = 8.0
 # other, and llama.cpp/vLLM read `max_tokens` and silently ignore what they do
 # not recognise.
 #
-# Unset by default, which means: guess from `reasoning_effort` (set implies the
-# hosted spelling), then correct the guess the first time the endpoint refuses
-# the name. Set it explicitly for the case the guess gets wrong and no 400 ever
-# corrects — a local endpoint told `reasoning_effort = "none"` to suppress its
-# thinking, which then silently drops a `max_completion_tokens` it does not know
-# and answers with no ceiling at all.
+# Unset by default, which means: guess from `reasoning_effort`, then correct the
+# guess the first time the endpoint refuses the name. Any effort but "none"
+# implies the hosted spelling; "none" is what a local endpoint is told to
+# suppress its thinking and says nothing either way, so it is read as
+# `max_tokens` — the guess that a hosted endpoint corrects with a 400, rather
+# than the one a local endpoint drops in silence.
+#
+# Set it explicitly wherever the guess would be wrong with no 400 to correct it,
+# which is any endpoint that ignores an unrecognised ceiling rather than
+# refusing it. Startup logs a warning naming the guess whenever this is unset
+# and `reasoning_effort` is not.
+#
+# The name belongs to the server, not to the role: every role pointed at the
+# same base_url and model shares one, and what one role is told beats what
+# another infers. Where two roles are both told, and told different things,
+# startup warns and the first one wins.
 # ceiling_param = "max_tokens"
 
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so

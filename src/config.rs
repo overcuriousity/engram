@@ -523,6 +523,34 @@ pub enum CeilingParam {
 }
 
 impl CeilingParam {
+    /// The name to send the ceiling under when the operator has not said.
+    ///
+    /// A reasoning model refuses `max_tokens` outright — a 400 naming
+    /// `max_completion_tokens` — and `reasoning_effort` is the only signal
+    /// available that one is on the other end.
+    ///
+    /// The two ways of guessing wrong do not cost the same, which is what
+    /// decides the ambiguous value. Guess `max_completion_tokens` at a local
+    /// endpoint and the field is silently ignored: no ceiling at all, no 400 to
+    /// learn from, and a reply bounded only by the server's own limit. Guess
+    /// `max_tokens` at a reasoning endpoint and it says so, in a 400 the
+    /// transport reads once and remembers. Where the signal is ambiguous, the
+    /// safe guess is the one that self-corrects.
+    ///
+    /// `"none"` is exactly that case. It is what the local-endpoint
+    /// documentation — and `config.example.toml` — recommend for suppressing a
+    /// local model's thinking, and it is *also* a value hosted reasoning models
+    /// accept, so it says nothing either way. Reading it as `max_tokens` costs
+    /// a hosted endpoint one self-correcting 400 and saves a silent local one
+    /// from running with no ceiling at all.
+    pub fn inferred_from(effort: Option<&str>) -> Self {
+        match effort.map(str::trim) {
+            None => Self::MaxTokens,
+            Some(e) if e.eq_ignore_ascii_case("none") => Self::MaxTokens,
+            Some(_) => Self::MaxCompletionTokens,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MaxTokens => "max_tokens",
@@ -611,6 +639,22 @@ impl VisionRole {
                 .flatten()
         })
     }
+
+    /// The effort the ceiling name is inferred from when neither role names it,
+    /// inherited on the same condition and for the same reason as
+    /// [`Self::ceiling_param`].
+    ///
+    /// Without this, a synthesize role that sets `reasoning_effort` and leaves
+    /// `ceiling_param` unset has nothing to inherit, and the two roles guess
+    /// different names for the one server they share. This role never sends
+    /// `reasoning_effort` itself — it is read here only as the signal about how
+    /// that server reads a request.
+    pub fn inherited_reasoning_effort<'a>(&self, synth: &'a SynthesizeRole) -> Option<&'a str> {
+        self.base_url
+            .is_none()
+            .then_some(synth.reasoning_effort.as_deref())
+            .flatten()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -697,6 +741,7 @@ impl Config {
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_moved_keys();
+        cfg.warn_on_inferred_ceiling_param();
         Ok(cfg)
     }
 
@@ -902,6 +947,54 @@ impl Config {
                 "associate.enabled has no effect while feedback.enabled is false: links are \
                  learned from recorded searches, and none are being recorded. Recording queries \
                  is a privacy decision, so it keeps its own switch."
+            );
+        }
+    }
+
+    /// The output ceiling's name is a guess whenever `reasoning_effort` is set
+    /// and `ceiling_param` is not, and one of the two ways it can be wrong is
+    /// silent: an endpoint that ignores the field it does not recognise applies
+    /// no ceiling and returns no error, so nothing downstream ever finds out.
+    ///
+    /// Say which way it guessed, at startup, where an operator can compare it
+    /// against the server they know they are running. The 400 that corrects the
+    /// other direction needs no warning — it corrects itself.
+    fn warn_on_inferred_ceiling_param(&self) {
+        let synth = &self.infer.synthesize;
+        let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = vec![
+            (
+                "infer.synthesize",
+                synth.reasoning_effort.as_deref(),
+                synth.ceiling_param,
+            ),
+            (
+                "infer.ask",
+                self.infer.ask.reasoning_effort.as_deref(),
+                self.infer.ask.ceiling_param,
+            ),
+        ];
+        // Vision resolves a name the same way, off values it may have inherited
+        // from synthesize — and it is the role a dropped ceiling costs most,
+        // since what it writes is stored as a corpus and segmented again.
+        if let Some(v) = &self.infer.vision {
+            roles.push((
+                "infer.vision",
+                v.inherited_reasoning_effort(synth),
+                v.ceiling_param(synth),
+            ));
+        }
+        for (role, effort, configured) in roles {
+            let (Some(effort), None) = (effort, configured) else {
+                continue;
+            };
+            tracing::warn!(
+                role,
+                reasoning_effort = effort,
+                guessing = CeilingParam::inferred_from(Some(effort)).as_str(),
+                "{role}.ceiling_param is unset, so the output ceiling's name is inferred from \
+                 reasoning_effort. If this endpoint takes the other name and ignores unknown \
+                 fields — llama.cpp and older vLLM builds do — replies run with no ceiling at \
+                 all and nothing reports it. Set {role}.ceiling_param to say."
             );
         }
     }
@@ -1281,6 +1374,58 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             v.ceiling_param(&synth),
             Some(CeilingParam::MaxCompletionTokens)
         );
+    }
+
+    /// The setting is not the only thing a borrowed endpoint has to inherit.
+    /// With `ceiling_param` unset there is nothing explicit to carry, and the
+    /// name is inferred from `reasoning_effort` — so a role that borrows the
+    /// endpoint has to borrow the signal too, or the two guess differently about
+    /// one server.
+    #[test]
+    fn the_effort_the_name_is_guessed_from_travels_with_the_borrowed_endpoint() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
+        );
+        let mut cfg = Config::load(Some(&p)).unwrap();
+        cfg.infer.synthesize.reasoning_effort = Some("high".into());
+        let synth = cfg.infer.synthesize.clone();
+        let v = cfg.infer.vision.as_mut().expect("configured");
+
+        assert_eq!(v.ceiling_param(&synth), None, "nothing explicit to inherit");
+        assert_eq!(v.inherited_reasoning_effort(&synth), Some("high"));
+
+        // Its own address is its own server, and the signal stops there.
+        v.base_url = Some("http://vision:9000/v1".into());
+        assert_eq!(v.inherited_reasoning_effort(&synth), None);
+    }
+
+    /// The ceiling's name is guessed from `reasoning_effort`, and the two ways
+    /// of guessing wrong do not cost the same: a hosted endpoint refuses the
+    /// wrong name in a 400 the transport learns from, while a local one ignores
+    /// it silently and applies no ceiling at all. `"none"` is the value that
+    /// says nothing either way — both kinds accept it, and it is what this
+    /// project recommends for suppressing local thinking — so it has to fall to
+    /// the side that self-corrects.
+    #[test]
+    fn the_ambiguous_effort_is_guessed_the_way_that_corrects_itself() {
+        assert_eq!(CeilingParam::inferred_from(None), CeilingParam::MaxTokens);
+        for ambiguous in ["none", "None", " none "] {
+            assert_eq!(
+                CeilingParam::inferred_from(Some(ambiguous)),
+                CeilingParam::MaxTokens,
+                "{ambiguous} was read as a hosted reasoning endpoint"
+            );
+        }
+        for hosted in ["minimal", "low", "medium", "high"] {
+            assert_eq!(
+                CeilingParam::inferred_from(Some(hosted)),
+                CeilingParam::MaxCompletionTokens,
+                "{hosted}"
+            );
+        }
     }
 
     #[test]

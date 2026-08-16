@@ -62,24 +62,41 @@ pub(crate) struct Endpoint {
     /// place the first time the endpoint rejects the name we guessed.
     ///
     /// Shared mutable state on a struct that is otherwise plain configuration,
-    /// because the correction is worth nothing if every later call re-learns it:
-    /// one 400 per process, not one per judge call.
-    ceiling_param: AtomicCeilingParam,
+    /// because the correction is worth nothing if every later call re-learns it.
+    /// Shared *between* endpoints too — see [`LEARNED_CEILING`] — so that is one
+    /// 400 per server per process, and not one per role pointed at it.
+    ceiling_param: std::sync::Arc<AtomicCeilingParam>,
 }
 
 /// `CeilingParam` behind an atomic, so a `&self` call can record what it
 /// learned.
-struct AtomicCeilingParam(std::sync::atomic::AtomicBool);
+///
+/// `explicit` records whether the name currently held was named by the operator
+/// or merely inferred, so a role that was told the name outranks one that
+/// guessed it — see [`learned_ceiling`].
+struct AtomicCeilingParam {
+    param: std::sync::atomic::AtomicBool,
+    explicit: std::sync::atomic::AtomicBool,
+}
 
 impl AtomicCeilingParam {
     fn new(p: CeilingParam) -> Self {
-        Self(std::sync::atomic::AtomicBool::new(
-            p == CeilingParam::MaxCompletionTokens,
-        ))
+        Self::seeded(p, false)
+    }
+
+    fn seeded(p: CeilingParam, explicit: bool) -> Self {
+        Self {
+            param: std::sync::atomic::AtomicBool::new(p == CeilingParam::MaxCompletionTokens),
+            explicit: std::sync::atomic::AtomicBool::new(explicit),
+        }
+    }
+
+    fn is_explicit(&self) -> bool {
+        self.explicit.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn get(&self) -> CeilingParam {
-        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.param.load(std::sync::atomic::Ordering::Relaxed) {
             CeilingParam::MaxCompletionTokens
         } else {
             CeilingParam::MaxTokens
@@ -87,10 +104,18 @@ impl AtomicCeilingParam {
     }
 
     fn set(&self, p: CeilingParam) {
-        self.0.store(
+        self.param.store(
             p == CeilingParam::MaxCompletionTokens,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    /// Set a name that is not a guess — one the operator gave, or one a 400
+    /// taught — so that a role which only inferred a name cannot unseat it.
+    fn set_authoritative(&self, p: CeilingParam) {
+        self.set(p);
+        self.explicit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -119,14 +144,41 @@ impl Endpoint {
             model: model.to_string(),
             api_key: api_key.map(str::to_string),
             role,
-            ceiling_param: AtomicCeilingParam::new(CeilingParam::MaxTokens),
+            // Unshared until a role that actually sends a ceiling claims the
+            // server's cell below. `embed` and `rerank` send none, and have no
+            // business seeding a name for a model they are not the one calling.
+            ceiling_param: std::sync::Arc::new(AtomicCeilingParam::new(CeilingParam::MaxTokens)),
         }
     }
 
-    /// The name to send the output ceiling under, configured or inferred.
-    fn with_ceiling_param(self, configured: Option<CeilingParam>, effort: Option<&str>) -> Self {
-        self.ceiling_param
-            .set(configured.unwrap_or_else(|| inferred_ceiling_param(effort)));
+    /// The name to send the output ceiling under, configured or inferred, in the
+    /// cell this server's other roles read and write.
+    ///
+    /// The cell is shared per server, so what this role resolves must not simply
+    /// overwrite what another role resolved for the same server: the roles are
+    /// constructed in a fixed order and the last one would otherwise win. An
+    /// operator who sets `ask.ceiling_param` explicitly while `synthesize` — the
+    /// same URL and model in the shipped example — only sets `reasoning_effort`
+    /// would have their explicit setting replaced by synthesize's guess, and
+    /// against an endpoint that ignores unknown fields that leaves `ask` with no
+    /// ceiling at all, which is the failure this is all here to prevent.
+    ///
+    /// So: a name the operator gave outranks one a role inferred, and between
+    /// two of equal standing the first wins and the disagreement is reported.
+    /// See [`learned_ceiling`].
+    fn with_ceiling_param(
+        mut self,
+        configured: Option<CeilingParam>,
+        effort: Option<&str>,
+    ) -> Self {
+        let resolved = configured.unwrap_or_else(|| CeilingParam::inferred_from(effort));
+        self.ceiling_param = learned_ceiling(
+            &self.base_url,
+            &self.model,
+            resolved,
+            configured.is_some(),
+            self.role,
+        );
         self
     }
 
@@ -196,7 +248,7 @@ impl Endpoint {
                         "the endpoint refused the output ceiling's name; using the other one \
                          from now on. Set ceiling_param to skip this."
                     );
-                    self.ceiling_param.set(sent);
+                    self.ceiling_param.set_authoritative(sent);
                 }
                 Err(e) => return Err(e),
             }
@@ -243,19 +295,68 @@ impl Endpoint {
     }
 }
 
-/// The name to send the output ceiling under when the operator has not said.
+/// The ceiling name learned per server, shared by every role that calls it.
 ///
-/// A reasoning model refuses `max_tokens` outright — a 400 naming
-/// `max_completion_tokens` — and `reasoning_effort` is the only signal at this
-/// layer that one is on the other end. It is a guess, not a fact: the field is
-/// also what suppresses thinking on a local model that understands it, and that
-/// endpoint wants `max_tokens`. `ceiling_param` overrides it, and a 400
-/// corrects it.
-fn inferred_ceiling_param(effort: Option<&str>) -> CeilingParam {
-    match effort {
-        Some(_) => CeilingParam::MaxCompletionTokens,
-        None => CeilingParam::MaxTokens,
+/// What a 400 buys is worth one call and only if it is not re-bought: `ask`,
+/// `judge`, `link_judge`, `vision` and `synthesize` are five [`Endpoint`]s that
+/// may all be one server, and the two judges always are. Keyed by address and
+/// model, because that pair is what decides how a request gets read.
+type CeilingRegistry =
+    std::collections::HashMap<(String, String), std::sync::Arc<AtomicCeilingParam>>;
+
+static LEARNED_CEILING: std::sync::LazyLock<std::sync::Mutex<CeilingRegistry>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The shared cell for one server, seeded with `resolved` if this is the first
+/// role to ask for it.
+///
+/// When a later role resolves a different name for the same server, the cell is
+/// *not* simply overwritten — see [`Endpoint::with_ceiling_param`] for what that
+/// costs. `explicit` says whether the operator named this one or the role
+/// inferred it, and an explicit name replaces an inferred one. Anything else
+/// keeps what is already there and says so, because the two roles disagreeing
+/// about one server is a configuration mistake only the operator can settle.
+fn learned_ceiling(
+    base_url: &str,
+    model: &str,
+    resolved: CeilingParam,
+    explicit: bool,
+    role: &'static str,
+) -> std::sync::Arc<AtomicCeilingParam> {
+    let mut map = LEARNED_CEILING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cell = map
+        .entry((base_url.to_string(), model.to_string()))
+        .or_insert_with(|| std::sync::Arc::new(AtomicCeilingParam::seeded(resolved, explicit)))
+        .clone();
+
+    let held = cell.get();
+    if held == resolved {
+        // Agreement still promotes an inferred name to an explicit one: the
+        // operator has now said it, so a later inferring role cannot unseat it.
+        if explicit {
+            cell.set_authoritative(resolved);
+        }
+        return cell;
     }
+
+    if explicit && !cell.is_explicit() {
+        cell.set_authoritative(resolved);
+        return cell;
+    }
+
+    tracing::warn!(
+        role,
+        base_url,
+        model,
+        wanted = resolved.as_str(),
+        using = held.as_str(),
+        "two roles share this endpoint and resolved different names for the output ceiling; \
+         keeping the one already resolved. Set ceiling_param to the same value on every role \
+         pointed at this server."
+    );
+    cell
 }
 
 /// Whether this rejection is the endpoint saying the ceiling went out under the
@@ -300,6 +401,21 @@ pub struct HttpSynthesizer {
     structured_output: bool,
 }
 
+/// What a chat message list costs as a prompt: the text of every `content`,
+/// which is everything an endpoint counts that this side controls.
+fn message_tokens(messages: &serde_json::Value) -> usize {
+    let counter = crate::infer::budget::TokenCounter;
+    messages
+        .as_array()
+        .map(|ms| {
+            ms.iter()
+                .filter_map(|m| m["content"].as_str())
+                .map(|c| counter.count(c))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 impl HttpSynthesizer {
     pub fn new(cfg: &SynthesizeRole) -> Self {
         Self {
@@ -339,6 +455,7 @@ impl HttpSynthesizer {
     /// model closing an array with a brace or dropping a required field. The
     /// calls that want prose rather than JSON — titles — pass `None`.
     async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
+        let spent = message_tokens(&messages);
         let mut body = json!({
             "messages": messages,
             "temperature": 0.2,
@@ -349,14 +466,22 @@ impl HttpSynthesizer {
         if let Some(name) = schema.filter(|_| self.structured_output) {
             body["response_format"] = response_format(name, prompt::artifacts_schema());
         }
+        // The same invariant every other caller keeps: prompt plus ceiling has
+        // to fit the window as the server counts both. `segment`'s first call
+        // is budgeted against the window by construction, but the repair call
+        // carries the whole first reply as well — up to `max_output_tokens` of
+        // it — so asking for the full ceiling again is a permanent 400 on
+        // precisely the windows that needed repairing.
+        //
         // Truncation is not an error here: `parse_response` salvages the
         // artifacts a cut-off list still got right, and losing nine good ones to
         // the tenth is the worst trade in the write path.
-        Ok(self
-            .ep
-            .chat(body, Some(self.budget.max_output_tokens))
-            .await?
-            .text)
+        let ceiling = crate::infer::budget::ceiling_for_prompt(
+            self.budget.context_tokens,
+            spent,
+            self.budget.max_output_tokens,
+        );
+        Ok(self.ep.chat(body, Some(ceiling)).await?.text)
     }
 }
 
@@ -381,17 +506,35 @@ impl Synthesizer for HttpSynthesizer {
                 // that the caller falls back to a structural split.
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
-                let second = self
-                    .chat(
-                        json!([
-                            {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
-                            {"role":"user","content": user},
-                            {"role":"assistant","content": first},
-                            {"role":"user","content": repair}
-                        ]),
-                        Some("artifacts"),
-                    )
-                    .await?;
+                let messages = json!([
+                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"user","content": user},
+                    {"role":"assistant","content": first},
+                    {"role":"user","content": repair}
+                ]);
+
+                // The repair prompt is the first one plus the whole reply it is
+                // repairing, so on a window the first call nearly filled there
+                // is no room left to answer in. Sending it anyway spends a call
+                // to be refused; not sending it leaves the parse error to stand,
+                // and the caller falls back to a structural split — which is
+                // what happens when the repair fails in any case.
+                if crate::infer::budget::checked_ceiling_for_prompt(
+                    self.budget.context_tokens,
+                    message_tokens(&messages),
+                    self.budget.max_output_tokens,
+                )
+                .is_none()
+                {
+                    tracing::warn!(
+                        context_tokens = self.budget.context_tokens,
+                        "the repair prompt does not fit the window; splitting structurally \
+                         instead of spending a call that cannot be answered"
+                    );
+                    return Err(e);
+                }
+
+                let second = self.chat(messages, Some("artifacts")).await?;
                 prompt::parse_response(&second)
             }
         }
@@ -682,11 +825,46 @@ impl HttpCompleter {
 
 #[async_trait]
 impl Completer for HttpCompleter {
+    /// The judges come through here, and neither budgets its prompt against the
+    /// window: `dedupe_prompt` concatenates up to `merge_max_roots` whole
+    /// artifacts, and asking for the full configured ceiling beside that is a
+    /// request the endpoint refuses. So the ceiling is measured against what the
+    /// prompt costs, the way `ask` measures its own.
+    ///
+    /// A prompt that leaves no room for a reply is refused here rather than
+    /// sent under a ceiling of 1. The clamped call does not fail cleanly: it
+    /// returns 200 with an empty message and `finish_reason = "length"`, which
+    /// surfaces as a retryable `Error::Inference`, so the sweep re-sends the
+    /// same structurally impossible request forever. `InferenceRejected` is
+    /// permanent, which is what a prompt too large for its window is.
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        Ok(self
-            .answer(system, user, self.max_output_tokens)
-            .await?
-            .text)
+        let counter = crate::infer::budget::TokenCounter;
+        let spent = counter.count(system) + counter.count(user);
+        let Some(ceiling) = crate::infer::budget::checked_ceiling_for_prompt(
+            self.context_tokens,
+            spent,
+            self.max_output_tokens,
+        ) else {
+            return Err(Error::InferenceRejected {
+                role: self.ep.role,
+                detail: format!(
+                    "the prompt is {spent} tokens against a {} token context window, which \
+                     leaves no room for a reply. Raise this role's context_tokens, or lower \
+                     what the caller packs into one call.",
+                    self.context_tokens
+                ),
+            });
+        };
+        if ceiling < self.max_output_tokens {
+            tracing::debug!(
+                ceiling,
+                configured = self.max_output_tokens,
+                prompt = spent,
+                context = self.context_tokens,
+                "the prompt left less window than the configured output ceiling"
+            );
+        }
+        Ok(self.answer(system, user, ceiling).await?.text)
     }
 
     async fn answer(&self, system: &str, user: &str, ceiling: usize) -> Result<Completion> {
@@ -749,10 +927,15 @@ impl HttpDescriber {
                 cfg.timeout_secs,
                 "vision",
             )
-            // No `reasoning_effort` on this role, so the guess is `max_tokens`
-            // unless the synthesize endpoint it may be borrowing says otherwise;
-            // a hosted reasoning model's 400 corrects it on the first call.
-            .with_ceiling_param(cfg.ceiling_param(synth), None),
+            // This role has no `reasoning_effort` of its own. Where it borrows
+            // the synthesize endpoint it inherits that role's — not just its
+            // explicit `ceiling_param` — because otherwise the two roles guess
+            // different names for one server, and against a silent endpoint the
+            // describer's ceiling is the one that gets dropped.
+            .with_ceiling_param(
+                cfg.ceiling_param(synth),
+                cfg.inherited_reasoning_effort(synth),
+            ),
             max_output_tokens: cfg.max_output_tokens,
         }
     }
@@ -850,10 +1033,22 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// A model name no other test shares.
+    ///
+    /// [`LEARNED_CEILING`] is keyed by `(base_url, model)` and outlives every
+    /// test in the process, while a `MockServer`'s ephemeral port does not: a
+    /// later test can bind the port a finished one used, and would then inherit
+    /// what that test's endpoint had resolved or learned. Varying the model
+    /// keeps each test's cell its own.
+    fn test_model() -> String {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!("m{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
     fn synthesize_cfg(base: String) -> SynthesizeRole {
         SynthesizeRole {
             base_url: base,
-            model: "m".into(),
+            model: test_model(),
             api_key: Some("secret".into()),
             context_tokens: 8192,
             max_output_tokens: 2048,
@@ -871,7 +1066,7 @@ mod tests {
     fn ask_cfg(base: String) -> AskRole {
         AskRole {
             base_url: base,
-            model: "m".into(),
+            model: test_model(),
             api_key: None,
             context_tokens: 4096,
             max_output_tokens: 1024,
@@ -882,7 +1077,7 @@ mod tests {
     }
     fn vision_cfg(base: Option<String>) -> crate::config::VisionRole {
         crate::config::VisionRole {
-            model: "vl".into(),
+            model: test_model(),
             base_url: base,
             api_key: Some("k".into()),
             timeout_secs: 30,
@@ -1030,7 +1225,7 @@ mod tests {
         let ask_server = echoing_server("a prose answer").await;
         HttpCompleter::new(&AskRole {
             base_url: ask_server.uri(),
-            model: "m".into(),
+            model: test_model(),
             api_key: None,
             context_tokens: 4096,
             max_output_tokens: 1024,
@@ -1074,6 +1269,83 @@ mod tests {
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
         let out = c.segment(window("anything")).await.unwrap();
         assert_eq!(out[0].text, "ok");
+    }
+
+    /// The repair call carries the whole first reply on top of the prompt that
+    /// produced it, so asking for the full configured ceiling again breaks the
+    /// one invariant the endpoint enforces — prompt plus ceiling fits the window
+    /// — and it breaks it on precisely the windows that needed repairing.
+    #[tokio::test]
+    async fn the_repair_call_still_fits_the_window_it_is_repairing() {
+        let server = MockServer::start().await;
+        // A long unparsable reply. The repair prompt carries it twice — once as
+        // the assistant turn, once quoted back in the repair instruction — so
+        // this leaves the window with less room than the configured ceiling.
+        let long_prose = "sorry, here is prose ".repeat(533);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"content": long_prose}}]
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"content":r#"{"artifacts":[{"text":"ok"}]}"#}}]
+            })))
+            .mount(&server)
+            .await;
+
+        // A ceiling that is half its window, which is the shape the shipped
+        // example config uses and the one where this fails.
+        let mut cfg = synthesize_cfg(server.uri());
+        cfg.max_output_tokens = cfg.context_tokens / 2;
+        let context = cfg.context_tokens;
+        HttpSynthesizer::new(&cfg)
+            .segment(window(&"a sentence to segment. ".repeat(60)))
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2, "the repair call was not made");
+        let repair: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let prompt = message_tokens(&repair["messages"]);
+        let ceiling = repair["max_tokens"].as_u64().expect("a ceiling is sent") as usize;
+        assert!(
+            prompt > cfg.max_output_tokens,
+            "the repair prompt did not carry the first reply, so this proves nothing: {prompt}"
+        );
+        assert!(
+            prompt + ceiling <= context,
+            "the repair asked for {ceiling} tokens beside a {prompt} token prompt, \
+             which is {} over the {context} token window",
+            prompt + ceiling - context
+        );
+    }
+
+    /// And where the repair prompt cannot fit at all, the call is not made:
+    /// there is no ceiling that answers it, so spending the call only delays
+    /// the structural split the caller falls back to anyway.
+    #[tokio::test]
+    async fn a_repair_that_cannot_fit_the_window_is_not_attempted() {
+        let server = echoing_server(&"sorry, here is prose ".repeat(2000)).await;
+
+        let cfg = synthesize_cfg(server.uri());
+        let out = HttpSynthesizer::new(&cfg)
+            .segment(window(&"a sentence to segment. ".repeat(60)))
+            .await;
+
+        assert!(
+            matches!(out, Err(crate::error::Error::MalformedLlmOutput(_))),
+            "the parse error did not stand, so the structural fallback never runs: {out:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "a repair call went out with no room in the window to answer it"
+        );
     }
 
     #[tokio::test]
@@ -1253,7 +1525,7 @@ mod tests {
             .await;
         let cfg = AskRole {
             base_url: format!("{}/", server.uri()),
-            model: "m".into(),
+            model: test_model(),
             api_key: None,
             context_tokens: 4096,
             max_output_tokens: 1024,
@@ -1281,7 +1553,7 @@ mod tests {
             let completer = match label {
                 "ask" => HttpCompleter::new(&AskRole {
                     base_url: server.uri(),
-                    model: "m".into(),
+                    model: test_model(),
                     api_key: None,
                     context_tokens: 4096,
                     max_output_tokens: 1024,
@@ -1353,6 +1625,64 @@ mod tests {
         assert_eq!(body["reasoning_effort"].as_str(), Some("none"));
     }
 
+    /// The other half of the same argument, without the operator having said
+    /// anything. `reasoning_effort = "none"` is what this project's own example
+    /// config recommends for suppressing a local model's thinking, so reading it
+    /// as evidence of a hosted reasoning endpoint sends `max_completion_tokens`
+    /// to a llama.cpp build — which ignores the field it does not know, applies
+    /// no ceiling, and returns no error saying so. The guess has to fall the
+    /// safe way, because only the other direction has a 400 to learn from.
+    #[tokio::test]
+    async fn suppressed_thinking_is_not_mistaken_for_a_reasoning_endpoint() {
+        let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+        let mut cfg = synthesize_cfg(server.uri());
+        cfg.reasoning_effort = Some("none".into());
+        assert!(cfg.ceiling_param.is_none(), "the operator has not said");
+        HttpCompleter::for_judging(&cfg)
+            .complete("s", "u")
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["max_tokens"].as_u64(), Some(2048));
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "a local endpoint was sent the name it silently ignores: {body}"
+        );
+    }
+
+    /// Neither judge budgets its prompt against the window — `dedupe_prompt`
+    /// concatenates up to `merge_max_roots` whole artifacts — so asking for the
+    /// configured ceiling regardless is a request the endpoint refuses outright.
+    /// That 400 is permanent, the pair is re-armed at the same size on every
+    /// later sweep, and the group never gets judged at all.
+    #[tokio::test]
+    async fn a_judge_prompt_that_fills_the_window_shrinks_its_own_ceiling() {
+        let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+        let cfg = synthesize_cfg(server.uri());
+        // Roughly 7000 tokens by the character estimate: 2048 of reply on top of
+        // it does not fit the role's 8192-token window.
+        let user = "x".repeat(7000 * 7 / 2);
+        HttpCompleter::for_judging(&cfg)
+            .complete("s", &user)
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        let sent = body["max_tokens"].as_u64().unwrap() as usize;
+        let counter = crate::infer::budget::TokenCounter;
+        let prompt = counter.count("s") + counter.count(&user);
+        assert!(
+            sent < cfg.max_output_tokens,
+            "the full configured ceiling went out beside a {prompt}-token prompt"
+        );
+        assert!(
+            prompt + sent < cfg.context_tokens,
+            "prompt ({prompt}) plus ceiling ({sent}) does not fit {}",
+            cfg.context_tokens
+        );
+    }
+
     /// The half of the guess the endpoint can correct. An endpoint that names
     /// the other parameter in its refusal is telling us which one it takes, and
     /// re-learning that on every call would mean one wasted 400 per judge call
@@ -1396,6 +1726,119 @@ mod tests {
         assert_eq!(requests.len(), 3, "the second call was retried again");
         let second: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
         assert_eq!(second["max_completion_tokens"].as_u64(), Some(2048));
+    }
+
+    /// What the 400 taught belongs to the server, not to the role that paid for
+    /// it. `ask`, `judge`, `link_judge`, `vision` and `synthesize` are five
+    /// endpoints that may all be one address, and the two judges always are — so
+    /// a name learned per endpoint means the same refusal bought over and over.
+    #[tokio::test]
+    async fn the_name_a_400_teaches_is_shared_by_every_role_on_that_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                "Unsupported parameter: 'max_tokens' is not supported with this model. \
+                 Use 'max_completion_tokens' instead.",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"content":"the answer"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        // Both built up front, the way the core builds them at startup.
+        let cfg = synthesize_cfg(server.uri());
+        let dedupe = HttpCompleter::for_judging(&cfg);
+        let link = HttpCompleter::for_link_judging(&cfg);
+
+        dedupe.complete("s", "u").await.unwrap();
+        link.complete("s", "u").await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "the link judge re-bought a refusal the dedupe judge had already paid for"
+        );
+        let last: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(last["max_completion_tokens"].as_u64(), Some(2048));
+        assert!(last.get("max_tokens").is_none(), "{last}");
+    }
+
+    /// The cell is shared per server, so a role that only *guessed* a name must
+    /// not overwrite one the operator gave. The shipped example config puts
+    /// `infer.ask` and `infer.synthesize` on one URL and one model, and the core
+    /// builds ask before the judges — so an explicit `ask.ceiling_param` used to
+    /// be replaced by synthesize's guess. Against an endpoint that ignores the
+    /// field it does not know, that leaves ask with no ceiling at all.
+    ///
+    /// Both orders, because "whichever was built last" is exactly the bug.
+    #[tokio::test]
+    async fn an_explicit_ceiling_name_is_not_overwritten_by_another_role_s_guess() {
+        for ask_first in [true, false] {
+            let server = echoing_server("a prose answer").await;
+
+            let mut ask = ask_cfg(server.uri());
+            ask.ceiling_param = Some(CeilingParam::MaxTokens);
+            let mut synth = synthesize_cfg(server.uri());
+            // One server, one model: the same endpoint by every measure that
+            // decides how a request is read.
+            synth.model = ask.model.clone();
+            synth.reasoning_effort = Some("high".into());
+            assert!(synth.ceiling_param.is_none(), "synthesize only guesses");
+
+            let asker = if ask_first {
+                let a = HttpCompleter::new(&ask);
+                let _ = HttpCompleter::for_judging(&synth);
+                a
+            } else {
+                let _ = HttpCompleter::for_judging(&synth);
+                HttpCompleter::new(&ask)
+            };
+            asker.answer("s", "u", 100).await.unwrap();
+
+            let body = sent_body(&server).await;
+            assert_eq!(
+                body["max_tokens"].as_u64(),
+                Some(100),
+                "ask built {}: the configured name lost to synthesize's guess: {body}",
+                if ask_first { "first" } else { "second" }
+            );
+            assert!(body.get("max_completion_tokens").is_none(), "{body}");
+        }
+    }
+
+    /// A prompt too large for its window is a permanent failure and has to
+    /// settle as one. Clamping the ceiling to 1 instead turns it into a 200
+    /// carrying an empty reply — indistinguishable from a transient failure, so
+    /// the sweep re-sends the same impossible request forever.
+    #[tokio::test]
+    async fn a_prompt_that_cannot_fit_its_window_is_refused_rather_than_clamped() {
+        let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+        let cfg = synthesize_cfg(server.uri());
+        // 8192 tokens of window; 3.5 chars to the token, so this is well past it.
+        let huge = "x".repeat(cfg.context_tokens * 4);
+
+        let e = HttpCompleter::for_judging(&cfg)
+            .complete("s", &huge)
+            .await
+            .expect_err("an unanswerable prompt was sent anyway");
+
+        assert!(
+            matches!(e, Error::InferenceRejected { .. }),
+            "a permanent failure was reported as something to retry: {e}"
+        );
+        assert!(!e.retryable(), "{e}");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "the call went out despite having no room for a reply"
+        );
     }
 
     /// A 400 about anything else is not a ceiling-name problem, and retrying it
@@ -1546,10 +1989,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let d = HttpDescriber::new(
-            &vision_cfg(Some(format!("{}/v1", server.uri()))),
-            &synthesize_cfg("http://unused".into()),
-        );
+        let cfg = vision_cfg(Some(format!("{}/v1", server.uri())));
+        let model = cfg.model.clone();
+        let d = HttpDescriber::new(&cfg, &synthesize_cfg("http://unused".into()));
         let out = d
             .describe(b"\xFF\xD8jpegbytes", "Photo taken 2026-08-09")
             .await
@@ -1559,7 +2001,7 @@ mod tests {
         let req = &server.received_requests().await.unwrap()[0];
         assert_eq!(req.headers.get("authorization").unwrap(), "Bearer k");
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body["model"], "vl");
+        assert_eq!(body["model"], model);
         // Every completion carries a ceiling, this one most of all: what comes
         // back is stored as a corpus and segmented from there.
         assert_eq!(body["max_tokens"].as_u64(), Some(2048));
@@ -1576,6 +2018,50 @@ mod tests {
             .decode(url.trim_start_matches("data:image/jpeg;base64,"))
             .unwrap();
         assert_eq!(decoded, b"\xFF\xD8jpegbytes");
+    }
+
+    /// A vision role without a `base_url` *is* the synthesize endpoint, so it has
+    /// to guess the ceiling's name the same way that role does. Inheriting only
+    /// the explicit `ceiling_param` left the two disagreeing whenever synthesize
+    /// set `reasoning_effort` and nothing else — and against the silent endpoint
+    /// that matters on, the describer's ceiling is the one that gets dropped.
+    #[tokio::test]
+    async fn a_borrowed_vision_endpoint_inherits_the_guess_and_not_only_the_setting() {
+        let server = echoing_server("# Whiteboard").await;
+        let mut synth = synthesize_cfg(server.uri());
+        synth.reasoning_effort = Some("high".into());
+        assert!(synth.ceiling_param.is_none(), "nothing explicit to inherit");
+
+        HttpDescriber::new(&vision_cfg(None), &synth)
+            .describe(b"x", "")
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["max_completion_tokens"].as_u64(), Some(2048));
+        assert!(
+            body.get("max_tokens").is_none(),
+            "the describer guessed a different name than the synthesizer sharing its server: {body}"
+        );
+    }
+
+    /// The condition on that inheritance: a role with its own address is a
+    /// different server, and how one server reads a request says nothing about
+    /// how another does.
+    #[tokio::test]
+    async fn a_vision_role_with_its_own_endpoint_inherits_neither() {
+        let server = echoing_server("# Whiteboard").await;
+        let mut synth = synthesize_cfg("http://unused".into());
+        synth.reasoning_effort = Some("high".into());
+
+        HttpDescriber::new(&vision_cfg(Some(server.uri())), &synth)
+            .describe(b"x", "")
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["max_tokens"].as_u64(), Some(2048));
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
     }
 
     #[tokio::test]

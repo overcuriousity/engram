@@ -111,6 +111,13 @@ impl Core {
         // outright — and it refuses it on precisely the queries that retrieved
         // enough to be worth answering.
         //
+        // The margin comes off the top too. `ceiling_for_prompt` holds back
+        // headroom for the estimate being an estimate, and it holds it back out
+        // of the *reply*: packing up to `max_output_tokens` exactly and then
+        // being charged that margin is how a 32k window with a 2k ceiling ends
+        // up asking for one token of answer. Reserving it here is what makes
+        // the two halves agree.
+        //
         // Never more than half the window, though. The reserve is configuration
         // and the window is configuration, and nothing makes the two agree: a
         // role whose ceiling is its whole context (4096 and 4096, which is an
@@ -120,7 +127,11 @@ impl Core {
         // half a window of answer is a worse answer than the operator asked for;
         // no answer is not an answer.
         let context = self.completer.context_tokens();
-        let reserve = self.completer.max_output_tokens().min(context / 2);
+        let reserve = self
+            .completer
+            .max_output_tokens()
+            .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
+            .min(context / 2);
         let budget = context
             .saturating_sub(self.counter.count(ASK_SYSTEM))
             .saturating_sub(self.counter.count(&req.q))
@@ -151,11 +162,14 @@ impl Core {
         // the answer may have. Bounded by the configured ceiling, so this only
         // ever gives back what the reserve above took away — and it keeps the
         // one invariant the endpoint enforces, that prompt plus ceiling fits the
-        // window.
+        // window, with the margin `ceiling_for_prompt` leaves for the estimate
+        // being an estimate.
         let spent = self.counter.count(ASK_SYSTEM) + self.counter.count(&user);
-        let ceiling = context
-            .saturating_sub(spent)
-            .min(self.completer.max_output_tokens());
+        let ceiling = crate::infer::budget::ceiling_for_prompt(
+            context,
+            spent,
+            self.completer.max_output_tokens(),
+        );
         let answer = self.completer.answer(ASK_SYSTEM, &user, ceiling).await?;
         if answer.truncated {
             tracing::warn!(
@@ -408,12 +422,19 @@ mod tests {
     /// of it.
     #[tokio::test]
     async fn what_is_packed_leaves_room_for_the_reply_that_was_asked_for() {
-        for (context, max_output) in [(4096, 3072), (8192, 1024), (4096, 4096)] {
+        use crate::infer::budget::MAX_HEADROOM_TOKENS;
+
+        for (context, max_output) in [(4096, 3072), (8192, 1024), (4096, 4096), (32768, 2048)] {
             let completer = std::sync::Arc::new(Ceilinged::new(context, max_output));
             let mut core = test_core().await;
             core.completer = completer.clone();
-            seed(&core, 20, 400).await;
-            let out = core.ask(&req("anything")).await.unwrap();
+            // Excerpts sized against the window, so packing actually fills it
+            // in every case — a prompt that leaves the window half empty tests
+            // nothing about what happens when it does not.
+            seed(&core, 20, context / 20).await;
+            let mut r = req("anything");
+            r.limit = Some(20);
+            let out = core.ask(&r).await.unwrap();
 
             // The echoed prompt is what actually went to the endpoint, and the
             // recorded ceiling is what the call asked for on top of it.
@@ -429,6 +450,18 @@ mod tests {
                 ceiling > 0 && ceiling <= max_output,
                 "at context {context} / ceiling {max_output}: the call asked for {ceiling}, \
                  which is not a ceiling the role allows"
+            );
+
+            // And it is a *usable* ceiling, not merely a positive one. The
+            // reserve is what packing set aside for the answer; the answer must
+            // get it back, less the margin held for the estimate. Asserting
+            // only `> 0` let a ceiling of 1 — an empty reply, every time —
+            // through at the very ordinary 32k/2k shape.
+            let floor = max_output.min(context / 2) - MAX_HEADROOM_TOKENS;
+            assert!(
+                ceiling >= floor,
+                "at context {context} / ceiling {max_output}: the call asked for {ceiling}, \
+                 but packing reserved room for at least {floor}"
             );
         }
     }
