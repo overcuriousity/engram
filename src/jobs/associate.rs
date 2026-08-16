@@ -366,27 +366,22 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
         }
     };
 
+    // A verdict with no line is still a verdict, so this does not fail the parse.
+    // But it must not be stored as an empty string either: the pane falls back to
+    // the binding query when a link has no reason, and `Some("")` would defeat that
+    // fallback and render a blank explanation instead.
+    let reason = reason.trim();
+    let reason = (!reason.is_empty()).then_some(reason);
+
     match verdict {
         LinkVerdict::Related => {
             core.store
-                .set_link_state(
-                    &link.a_id,
-                    &link.b_id,
-                    LinkState::Related,
-                    Some(&reason),
-                    revs,
-                )
+                .set_link_state(&link.a_id, &link.b_id, LinkState::Related, reason, revs)
                 .await?;
         }
         LinkVerdict::Unrelated => {
             core.store
-                .set_link_state(
-                    &link.a_id,
-                    &link.b_id,
-                    LinkState::Unrelated,
-                    Some(&reason),
-                    revs,
-                )
+                .set_link_state(&link.a_id, &link.b_id, LinkState::Unrelated, reason, revs)
                 .await?;
         }
         LinkVerdict::Duplicate => {
@@ -987,6 +982,35 @@ mod tests {
         assert_eq!(l.state, LinkState::Related);
         assert_eq!(l.reason.as_deref(), Some("the config and its errors"));
         assert_eq!(l.judged_rev_a, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_verdict_with_no_line_stores_no_reason_rather_than_an_empty_one() {
+        // A `related` reply that omits `reason` is still a usable verdict, and
+        // `parse_link` does not fail it. But `Some("")` would defeat the pane's
+        // fallback to the top binding query, so the empty string must never
+        // reach the row.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"related"}"#.into()),
+        });
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.reason, None, "an empty reason was stored as Some(\"\")");
     }
 
     #[tokio::test]
