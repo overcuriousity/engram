@@ -211,6 +211,12 @@ pub struct PairRow {
     pub b_id: String,
     pub b_title: String,
     pub detail: Option<String>,
+    /// The stored `detail` is exactly `"link"` — the judge's duplicate
+    /// hand-off (§7), a provenance marker, not prose. The row renders a
+    /// sentence explaining that instead, and the percent is not shown as a
+    /// measured similarity, because no cosine was ever computed for a pair
+    /// found by co-retrieval.
+    pub via_link: bool,
     pub contradiction: bool,
     /// Set when the judge named a direction with enough confidence to propose
     /// a supersede. A recommendation only: nothing here has hidden anything,
@@ -1105,6 +1111,20 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
             // `a` obsolete is a recommendation to keep `b`.
             let keeps_a = p.obsolete_id.as_deref() == Some(b.id.as_str());
             let keeps_b = p.obsolete_id.as_deref() == Some(a.id.as_str());
+            // The judge's `duplicate` verdict files this pair with
+            // `detail = "link"` (`src/jobs/associate.rs`) — a provenance
+            // marker meant for code, not the reader. Rendered as a sentence
+            // here rather than the bare token; the stored value is untouched.
+            let via_link = p.detail.as_deref() == Some("link");
+            let detail = if via_link {
+                Some(
+                    "Not found by similarity: these two kept being retrieved together, \
+                     and the judge then found they say the same thing."
+                        .to_string(),
+                )
+            } else {
+                p.detail
+            };
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -1112,7 +1132,8 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 b_title: title_of(&b),
                 a_id: p.a_id,
                 b_id: p.b_id,
-                detail: p.detail,
+                detail,
+                via_link,
                 contradiction: state == crate::store::pairs::PairState::Contradiction,
                 obsolete_title,
                 keeps_a,
@@ -1283,7 +1304,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             true => Some(st.core.store.feedback_stats().await?),
             false => None,
         },
-        links: match st.core.associate.enabled && st.core.feedback.enabled {
+        links: match st.core.associating() {
             true => Some(st.core.store.link_counts().await?),
             false => None,
         },
@@ -1605,27 +1626,35 @@ pub(crate) async fn build_artifact_detail(
         })
         .collect();
     // Unreadable links are not a missing pane, for the same reason a missing
-    // neighbour list is not: this layer can only ever add.
+    // neighbour list is not: this layer can only ever add. And gated on
+    // `associating()`, not just `associate.enabled`: a base that learned
+    // links and then had the feature switched off must stop rendering them,
+    // the same as every other associative surface.
     let anchor = vec![c.id.clone()];
-    let seen_together_links = match core
-        .store
-        .links_from(
-            &anchor,
-            &[
-                crate::store::links::LinkState::Learning,
-                crate::store::links::LinkState::Related,
-            ],
-            core.associate.half_life_days,
-            crate::store::now(),
-            core.associate.show_min,
-        )
-        .await
-    {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(artifact_id, error = %e, "no links for this pane");
-            vec![]
+    let seen_together_links = if core.associating() {
+        match core
+            .store
+            .links_from(
+                &anchor,
+                &[
+                    crate::store::links::LinkState::Learning,
+                    crate::store::links::LinkState::Related,
+                ],
+                core.associate.half_life_days,
+                crate::store::now(),
+                core.associate.show_min,
+                RELATED_LIMIT as i64,
+            )
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(artifact_id, error = %e, "no links for this pane");
+                vec![]
+            }
         }
+    } else {
+        vec![]
     };
     let mut seen_together = Vec::new();
     for l in seen_together_links.into_iter().take(RELATED_LIMIT) {
@@ -2442,7 +2471,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_pane_lists_what_this_artifact_is_seen_together_with() {
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(
@@ -2468,7 +2498,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_judged_link_shows_the_judges_line_instead_of_the_query() {
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -2536,7 +2567,8 @@ mod tests {
     async fn a_pane_still_renders_when_the_links_cannot_be_read() {
         // The associative layer can only add. It is not a reason to refuse to
         // show an artifact beside its source.
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
         let ids = artifacts(&core, &["alpha text"]).await;
         sqlx::query("DROP TABLE artifact_links")
             .execute(&core.store.pool)
@@ -2551,7 +2583,8 @@ mod tests {
         // "Two documents needing each other is the finding; two passages of one
         // document needing each other is not" is the whole point of the flag —
         // pin it on the data the pane renders, not on a CSS class name.
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
         let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
         let other_corpus = core.store.insert_corpus("y", "web", None).await.unwrap();
         let made = core

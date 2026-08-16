@@ -207,6 +207,21 @@ impl Core {
         };
         lock.lock_owned().await
     }
+
+    /// Whether the associative layer — links and priming — is actually live,
+    /// not merely configured on.
+    ///
+    /// Links are learned from recorded searches (`search_events`), and
+    /// recording queries is a separate privacy decision the operator makes
+    /// with `feedback.enabled`. Without recordings there is nothing to learn
+    /// from, so `associate.enabled` alone must not let the layer read or
+    /// write anything: every site that primes, associates, bumps activation
+    /// from a search, or renders "seen together" has to check both flags, or
+    /// an install that never opted into `feedback` still has its ranking and
+    /// activation quietly touched.
+    pub fn associating(&self) -> bool {
+        self.associate.enabled && self.feedback.enabled
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +344,23 @@ mod tests {
             cfg.consolidate.merge_max_roots >= 2,
             "a merge needs at least two sources to be a merge"
         );
+    }
+
+    #[tokio::test]
+    async fn associating_requires_both_flags_the_shipped_default_has_only_one() {
+        // Shipped defaults: `associate.enabled = true`, `feedback.enabled =
+        // false`. Links are learned from recorded searches, and recording is
+        // a separate privacy decision, so the layer must stay dark until both
+        // are on.
+        let mut core = test_support::test_core().await;
+        assert!(core.associate.enabled && !core.feedback.enabled);
+        assert!(!core.associating(), "on with only associate.enabled set");
+
+        core.feedback.enabled = true;
+        assert!(core.associating(), "both flags set");
+
+        core.associate.enabled = false;
+        assert!(!core.associating(), "on with only feedback.enabled set");
     }
 
     #[tokio::test]

@@ -42,7 +42,7 @@ fn settled_cutoff(at: i64, coalesce_secs: i64) -> i64 {
 
 /// One sweep over everything learned since the last one.
 pub async fn run(core: &Core) -> Result<()> {
-    if !core.associate.enabled || !core.feedback.enabled {
+    if !core.associating() {
         return Ok(());
     }
     let at = crate::store::now();
@@ -290,6 +290,13 @@ pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
 
 /// One link, one call. `target` is `"<a_id>|<b_id>"`.
 pub async fn judge(core: &Core, target: &str) -> Result<()> {
+    // A unit already queued when the operator disables the feature should not
+    // spend the one scarce thing in the system after they said stop. The
+    // sweep will not arm more (`run` returns early), but a unit armed before
+    // the flag flipped is still sitting in the queue when this runs.
+    if !core.associate.enabled {
+        return Ok(());
+    }
     let (a_id, b_id) = target.split_once('|').ok_or(Error::NotFound)?;
     let Some(link) = core.store.get_link(a_id, b_id).await? else {
         // Pruned, or one side deleted, while the unit waited out a backoff.
@@ -1151,6 +1158,44 @@ mod tests {
                 .unwrap()
                 .state,
             LinkState::Dismissed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unit_already_queued_when_the_feature_is_switched_off_spends_no_call() {
+        // The sweep will not arm more once `associate.enabled` is false — see
+        // `the_sweep_does_nothing_at_all_while_nothing_is_recorded` — but a unit
+        // already in the queue when the operator disables the feature must not
+        // spend the one scarce thing in the system after they said stop.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"relation":"related","reason":"should never be read"}"#.into(),
+        ]));
+        core.judge = scripted.clone();
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.associate.enabled = false;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            scripted.calls(),
+            0,
+            "a call was spent after the feature was off"
+        );
+        assert_eq!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            LinkState::Learning,
+            "an unjudged link stays visible as learning"
         );
     }
 

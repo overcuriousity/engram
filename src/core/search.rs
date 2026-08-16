@@ -310,7 +310,12 @@ impl Core {
         // Only a retrieval raises accessibility. A list nobody asked for —
         // `resurface`, an association — is shown, not reached, and the row in
         // §5.4 that reads zero is the one-way guard this implements.
-        if counts_as_hit {
+        //
+        // Also gated on `associating()`: activation only exists to feed
+        // priming, and an install that never opted into `feedback` must see
+        // no artifact's activation move, or the ranked order could start
+        // changing under a feature it never turned on.
+        if counts_as_hit && self.associating() {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let store = self.store.clone();
             let (delta, half_life) = (self.activation.retrieved, self.activation.half_life_days);
@@ -343,16 +348,21 @@ impl Core {
         });
 
         // An open is a deliberate act and counts for less than a retrieval:
-        // clicking a candidate says you looked, not that it answered.
-        let ids = vec![artifact_id.to_string()];
-        let store = self.store.clone();
-        let (delta, half_life) = (self.activation.opened, self.activation.half_life_days);
-        let at = now_secs();
-        self.background.spawn(async move {
-            if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
-                tracing::warn!(error = %e, "could not raise activation for opening");
-            }
-        });
+        // clicking a candidate says you looked, not that it answered. Gated
+        // on `associating()` for the same reason as `mark_seen`: activation
+        // exists only to feed priming, so it must not move at all while the
+        // layer is off.
+        if self.associating() {
+            let ids = vec![artifact_id.to_string()];
+            let store = self.store.clone();
+            let (delta, half_life) = (self.activation.opened, self.activation.half_life_days);
+            let at = now_secs();
+            self.background.spawn(async move {
+                if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                    tracing::warn!(error = %e, "could not raise activation for opening");
+                }
+            });
+        }
     }
 
     /// Each artifact's activation, already decayed to now.
@@ -410,6 +420,7 @@ impl Core {
                 self.associate.half_life_days,
                 now_secs(),
                 self.associate.show_min,
+                self.associate.spread_max as i64,
             )
             .await
         {
@@ -682,7 +693,7 @@ impl Core {
         // is the order the searcher was actually shown — a judged rank has to
         // be a rank that happened. Bounded by `prime_lift` and never past rank
         // 1, so this can reorder near-ties and nothing else.
-        if self.associate.enabled && self.associate.prime_lift > 0 {
+        if self.associating() && self.associate.prime_lift > 0 {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.activation_now(&ids).await;
             results = prime(
@@ -750,7 +761,7 @@ impl Core {
         // matched the question must not become source material. `Judge` is
         // excluded because its query is composed in full knowledge of the
         // answer and needs a clean pool to label, not a widened one.
-        if self.associate.enabled && !matches!(door, Door::Ask | Door::Judge) {
+        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
             let recalled = self.associated(&results).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
@@ -968,7 +979,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
@@ -1057,7 +1069,8 @@ mod tests {
 
     #[tokio::test]
     async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
         let before = core
@@ -1656,6 +1669,7 @@ mod tests {
     #[tokio::test]
     async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
         let mut core = test_core().await;
+        core.feedback.enabled = true;
         core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
@@ -1693,6 +1707,89 @@ mod tests {
         );
         assert!(primed[moved].primed, "a hit that moved must say so");
         assert_ne!(primed[0].artifact_id, bottom, "rank 1 was displaced");
+    }
+
+    #[tokio::test]
+    async fn a_marked_search_does_not_touch_activation_while_feedback_is_off() {
+        // Shipped defaults: `feedback.enabled = false`, `associate.enabled =
+        // true`. Links are learned from recorded searches, and none are being
+        // recorded, so the whole associative layer — including activation,
+        // which exists only to feed priming — must stay dark. `test_core()`
+        // is exactly this combination; nothing here turns `feedback` on.
+        let core = test_core().await;
+        assert!(!core.feedback.enabled && core.associate.enabled);
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        reembed_all(&core).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+
+        core.search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let after = core
+            .store
+            .activation_of(std::slice::from_ref(&id))
+            .await
+            .unwrap()[&id]
+            .0;
+        assert_eq!(
+            after, before,
+            "a marked search raised activation with feedback.enabled false"
+        );
+    }
+
+    #[tokio::test]
+    async fn priming_never_reaches_the_order_while_feedback_is_off() {
+        // The spec promise (§11): "existing installs see nothing change until
+        // they opt in." `associate.enabled` alone must not let a large
+        // activation move the ranked order — the order must be byte-identical
+        // to `prime_lift = 0`, not merely bounded.
+        let core = test_core().await;
+        assert!(!core.feedback.enabled && core.associate.enabled);
+        assert_eq!(core.associate.prime_lift, 2, "the shipped default");
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("alpha text about it", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+        reembed_all(&core).await;
+
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(plain.len() >= 4, "this test needs a list to reorder");
+
+        // The one at the bottom is given a huge activation directly — exactly
+        // what moved the order in the "feature on" test above.
+        let bottom = plain.last().unwrap().artifact_id.clone();
+        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
+            .bind(now_secs())
+            .bind(&bottom)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let with_huge_activation = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
+        let plain_ids: Vec<&str> = plain.iter().map(|r| r.artifact_id.as_str()).collect();
+        let after_ids: Vec<&str> = with_huge_activation
+            .iter()
+            .map(|r| r.artifact_id.as_str())
+            .collect();
+        assert_eq!(
+            plain_ids, after_ids,
+            "the order changed even though feedback.enabled is false"
+        );
+        assert!(with_huge_activation.iter().all(|r| !r.primed));
     }
 
     async fn captured_events(core: &crate::core::Core) -> i64 {
@@ -1884,7 +1981,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_linked_artifact_is_recalled_beside_the_answer_and_says_what_recalled_it() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -1920,7 +2018,8 @@ mod tests {
         // the same four doors today. One door alone would not prove the
         // gate is door-shaped rather than coincidental, so this checks both
         // an excluded door and an included one against the same link.
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -1955,7 +2054,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_already_in_the_answer_is_not_recalled_again() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(
             &core,
             "one",
@@ -2087,7 +2187,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_hidden_artifact_is_never_recalled_by_association() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -2106,7 +2207,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_weak_link_is_not_strong_enough_to_recall_anything() {
-        let core = test_core().await;
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;

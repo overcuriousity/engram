@@ -278,7 +278,8 @@ impl Store {
         Ok(())
     }
 
-    /// Every live link out of these anchors, strongest first.
+    /// Every live link out of these anchors, strongest first, capped at
+    /// `limit`.
     ///
     /// One statement per anchor rather than one `IN` over all of them: the
     /// anchor list is `spread_from` long (three), the repo builds no SQL
@@ -287,6 +288,12 @@ impl Store {
     ///
     /// The endpoint's status is joined rather than stored, so undoing a merge
     /// brings its links back without a write.
+    ///
+    /// Same two-step as `links_to_judge`: SQL fetches four times `limit` so
+    /// that rows the exact decayed-weight test in Rust rejects do not eat the
+    /// budget, and the final truncate is what actually bounds a hub artifact
+    /// — one co-shown with many others — to a fixed, small read on every
+    /// search rather than every link above `show_min`.
     pub async fn links_from(
         &self,
         anchors: &[String],
@@ -294,6 +301,7 @@ impl Store {
         half_life_days: f64,
         at: i64,
         min_weight: f64,
+        limit: i64,
     ) -> Result<Vec<LinkedTo>> {
         let allowed: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
         let mut out: Vec<LinkedTo> = Vec::new();
@@ -314,11 +322,14 @@ impl Store {
                     AND l.weight >= ?
                     AND a.status = 'active' AND a.superseded_by IS NULL
                     AND b.status = 'active' AND b.superseded_by IS NULL
-                  ORDER BY l.weight DESC",
+                  ORDER BY l.weight DESC LIMIT ?",
             )
             .bind(anchor)
             .bind(anchor)
             .bind(min_weight)
+            // SQLite reads a negative LIMIT as unbounded, so the cap must be
+            // clamped at zero — a negative `limit` must still cap the fetch.
+            .bind(limit.max(0).saturating_mul(4))
             .fetch_all(&self.pool)
             .await?;
 
@@ -357,6 +368,7 @@ impl Store {
             }
         }
         out.sort_by(|x, y| y.weight.total_cmp(&x.weight));
+        out.truncate(limit.max(0) as usize);
         Ok(out)
     }
 
@@ -453,6 +465,12 @@ impl Store {
     /// since. The judge read text that no longer exists.
     pub async fn reopen_stale_judged_links(&self, limit: i64) -> Result<u64> {
         Ok(sqlx::query(
+            // `judge_attempts` is deliberately left alone here. A link shelved
+            // as `unrelated`/"unreadable" after three attempts and then
+            // reopened by a text change gets exactly one more call before
+            // `judge` (src/jobs/associate.rs) would shelve it again at the
+            // same ceiling — the model has already failed three times on this
+            // pair, and that history is not something a re-embed should erase.
             "UPDATE artifact_links
                 SET state = 'learning', reason = NULL,
                     judged_rev_a = NULL, judged_rev_b = NULL
@@ -585,6 +603,13 @@ impl Store {
     /// Read-then-write per artifact rather than one arithmetic UPDATE, for the
     /// same reason `bump_link` does it: the decay is an exponential, and not
     /// every SQLite build ships the math functions to express one in SQL.
+    ///
+    /// One transaction per artifact, the same shape as `bump_link`: the
+    /// sweep's confirmed bump and a search's retrieval bump can interleave on
+    /// the same artifact, as can two concurrent searches sharing a hit, and
+    /// without a transaction the loser's read is stale by the time it writes,
+    /// silently dropping its delta. An id with no row is skipped, same as
+    /// before.
     pub async fn bump_activation(
         &self,
         ids: &[String],
@@ -595,17 +620,24 @@ impl Store {
         if ids.is_empty() || delta == 0.0 {
             return Ok(());
         }
-        let current = self.activation_of(ids).await?;
         for id in ids {
-            let Some((value, stamp)) = current.get(id).copied() else {
+            let mut tx = self.pool.begin().await?;
+            let row = sqlx::query("SELECT activation, activated_at FROM artifacts WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(row) = row else {
                 continue;
             };
+            let value: f64 = row.get("activation");
+            let stamp: i64 = row.get("activated_at");
             sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
                 .bind(decayed(value, stamp, at, half_life_days) + delta)
                 .bind(at)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
         }
         Ok(())
     }
@@ -827,6 +859,7 @@ mod tests {
                     30.0,
                     0,
                     2.0,
+                    10,
                 )
                 .await
                 .unwrap();
@@ -854,6 +887,7 @@ mod tests {
                 30.0,
                 0,
                 2.0,
+                10,
             )
             .await
             .unwrap();
@@ -865,6 +899,7 @@ mod tests {
                 30.0,
                 60 * 86_400,
                 2.0,
+                10,
             )
             .await
             .unwrap();
@@ -888,7 +923,7 @@ mod tests {
 
         assert!(
             store
-                .links_from(&[a], &[LinkState::Learning], 30.0, 0, 2.0)
+                .links_from(&[a], &[LinkState::Learning], 30.0, 0, 2.0, 10)
                 .await
                 .unwrap()
                 .is_empty()
@@ -915,7 +950,8 @@ mod tests {
                     &[LinkState::Learning, LinkState::Related],
                     30.0,
                     0,
-                    0.0
+                    0.0,
+                    10
                 )
                 .await
                 .unwrap()
@@ -979,7 +1015,8 @@ mod tests {
                     &[LinkState::Dismissed, LinkState::Learning],
                     30.0,
                     0,
-                    0.0
+                    0.0,
+                    10
                 )
                 .await
                 .unwrap()

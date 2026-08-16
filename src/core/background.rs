@@ -350,7 +350,7 @@ pub fn spawn_associate_ticker(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if !core.associate.enabled || !core.feedback.enabled {
+        if !core.associating() {
             tracing::info!("association sweep disabled");
             return;
         }
