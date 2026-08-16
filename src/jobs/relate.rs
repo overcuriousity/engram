@@ -76,8 +76,22 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         };
         // Warn and carry on, as the sweep does. One unwritable pair row is no
         // reason to drop the other neighbours, and the next run finds it again.
-        if let Err(e) = classify_pair(core, &me, &other, similarity).await {
-            tracing::warn!(a = %me.id, b = %other.id, error = %e, "could not classify a neighbour");
+        match classify_pair(core, &me, &other, similarity).await {
+            // `me` was the contained side and is now hidden. It is read once,
+            // before the loop, so every later neighbour would be judged against
+            // a status that is no longer true — `Core::supersede` re-reads both
+            // sides and refuses the second attempt, so nothing is corrupted, but
+            // each remaining neighbour costs a round trip and a warning about an
+            // ordinary outcome. A hidden artifact has no duplicates worth
+            // recording; that is the same rule the top of this function applies.
+            Ok(true) => {
+                tracing::debug!(artifact_id, "hidden as a duplicate; leaving its neighbours");
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(a = %me.id, b = %other.id, error = %e, "could not classify a neighbour")
+            }
         }
     }
     Ok(())
@@ -96,15 +110,18 @@ fn contains_normalized(long: &str, short: &str) -> bool {
 /// Turn one scored pair into one decision. Nothing here calls a model: every
 /// rule is local, and the two that settle a pair outright — containment, and
 /// the `auto_supersede` band — are why most near pairs cost nothing at all.
-async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<()> {
+///
+/// Returns whether `a` itself was hidden by the decision, which is the caller's
+/// signal that the artifact it is scanning neighbours for is no longer live.
+async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<bool> {
     if a.id == b.id {
-        return Ok(());
+        return Ok(false);
     }
     // Only two live artifacts have a question worth a queue slot, a model call,
     // or a supersede. A retired artifact must not win against a live one, and a
     // pair that is already resolved has nothing left to decide.
     if [a, b].iter().any(|c| !c.in_results()) {
-        return Ok(());
+        return Ok(false);
     }
 
     // The free band. Filed, not acted on: resolving pairs one at a time leaves A
@@ -115,7 +132,7 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         core.store
             .record_settled_pair(&a.id, &b.id, score, PairState::NearIdentical)
             .await?;
-        return Ok(());
+        return Ok(false);
     }
 
     // One synthesis call emitting the same passage twice: the shorter text is
@@ -150,7 +167,7 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
                         state = state.as_str(),
                         "a duplicated passage is already settled; leaving it"
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             if crate::jobs::try_supersede(
@@ -167,8 +184,9 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
                 core.store
                     .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
                     .await?;
+                return Ok(short.id == a.id);
             }
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -184,7 +202,7 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     // It survives as a prior in the prompt and as the input to the merge
     // verification. It is no longer an admission gate. See the design, §6.5.
     core.store.record_pair(&a.id, &b.id, score).await?;
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -431,6 +449,49 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_hidden_by_its_first_neighbour_stops_there() {
+        // `me` is read once, before the loop. The first neighbour that contains
+        // it hides it, and every neighbour after that would be judged against a
+        // status that is no longer true: `Core::supersede` re-reads both sides
+        // and refuses, so the row is never wrong, but the attempt costs a round
+        // trip and logs a warning about an entirely ordinary outcome.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem.", [1.0, 0.0]),
+                ("Mount the filesystem. Then write.", [0.94, 0.34]),
+                ("Attach the volume before writing.", [0.92, 0.39]),
+            ],
+        )
+        .await;
+
+        run(&core, &ids[0]).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(ids[1].as_str()),
+            "the contained artifact should have been hidden by its nearest neighbour"
+        );
+        // The third neighbour is near but contains nothing, so on the stale
+        // read it reaches `record_pair` and files a question about an artifact
+        // that is already hidden — a pair no one will ever be asked to settle.
+        assert!(
+            core.store
+                .pair_state_between(&ids[0], &ids[2])
+                .await
+                .unwrap()
+                .is_none(),
+            "the scan should have stopped at the neighbour that hid it"
         );
     }
 
