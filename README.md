@@ -179,7 +179,7 @@ the file — the loader warns if it finds one.
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, `timeout_secs`, `reasoning_effort`, `cooldown_secs`. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
-| `infer.ask.*` | Completion model, used only by `ask`. Same timeout and reasoning keys. |
+| `infer.ask.*` | Completion model, used only by `ask`: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`, `merge_max_roots`. |
 | `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
@@ -187,7 +187,7 @@ the file — the loader warns if it finds one.
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
 
-Four worth knowing:
+Five worth knowing:
 
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
@@ -199,6 +199,10 @@ Four worth knowing:
 - **`infer.embed.max_input_tokens`** must be the *server's* ceiling, not the
   model's nominal one. llama.cpp refuses input above its physical batch size —
   often 1024 — with a 500 no retry can fix.
+- **`infer.ask.max_output_tokens`** defaults to 4096 and comes out of
+  `context_tokens`. The endpoint measures the prompt and this ceiling against
+  one window, so `ask` reserves it and packs excerpts into the remainder:
+  raising it buys longer answers by showing the model fewer of them.
 - **`timeout_secs`** defaults to 900. Absurd for a hosted API, about right for a
   local model answering in minutes.
 

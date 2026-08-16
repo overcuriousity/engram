@@ -476,6 +476,9 @@ impl Completer for FakeCompleter {
     fn context_tokens(&self) -> usize {
         4096
     }
+    fn max_output_tokens(&self) -> usize {
+        1024
+    }
 }
 
 /// A completer that answers from a script and counts how often it was asked.
@@ -514,6 +517,9 @@ impl Completer for ScriptedCompleter {
     }
     fn context_tokens(&self) -> usize {
         4096
+    }
+    fn max_output_tokens(&self) -> usize {
+        1024
     }
 }
 

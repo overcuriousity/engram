@@ -70,6 +70,11 @@ output_ratio = 8.0
 # Sent as `reasoning_effort` when set. On a reasoning model the thinking comes
 # out of max_output_tokens, so suppressing it is what stops the artifact list
 # from being cut off. Unset by default: models that do not reason reject the field.
+#
+# Setting this also changes how the ceiling is sent — `max_completion_tokens`
+# rather than `max_tokens`, which is what a reasoning model accepts. Leave it
+# unset against an endpoint that does not reason, or the ceiling may not be
+# recognised and the reply is bounded by the server's limit alone.
 # reasoning_effort = "none"
 
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
@@ -78,7 +83,8 @@ output_ratio = 8.0
 # or omit a required field often enough that windows fail permanently, and the
 # parse error it produces is indistinguishable from a truncated reply. Honoured
 # by llama.cpp, vLLM and the hosted APIs; set false for an endpoint that rejects
-# the field. Governs the dedupe judge too, which runs on this endpoint.
+# the field. Governs both judges too — duplicates and associative links — which
+# run on this endpoint under a schema each.
 # structured_output = true
 # Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
 # is ignored, and engram says so at startup rather than letting the setting
@@ -118,6 +124,11 @@ context_tokens = 32768
 # Raise it if answers are getting clipped; there is no reason to unset it, since
 # an endpoint asked for no ceiling applies its own — which is far larger, and is
 # the only thing bounding a reply the model has stopped being able to end.
+#
+# It comes out of `context_tokens`: the endpoint measures the prompt and this
+# ceiling against one window, so ask reserves exactly this much and packs
+# excerpts into what is left. Raising it buys longer answers by showing the
+# model fewer excerpts, and `dropped` on the answer says how many.
 # max_output_tokens = 4096
 # ask is the one interactive inference call, so someone is watching it happen.
 # timeout_secs = 900

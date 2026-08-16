@@ -334,9 +334,10 @@ pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
         #[serde(default)]
         reason: Option<String>,
     }
-    let r: Raw = serde_json::from_str(crate::infer::prompt::extract_json(body)).map_err(|e| {
-        Error::MalformedLlmOutput(format!("link reply was not the expected JSON: {e}"))
-    })?;
+    let r: Raw = serde_json::from_value(crate::infer::prompt::unwrap_verdict(
+        crate::infer::prompt::extract_json(body),
+    )?)
+    .map_err(|e| Error::MalformedLlmOutput(format!("link reply was not the expected JSON: {e}")))?;
     let verdict = match r.relation.as_str() {
         "related" => LinkVerdict::Related,
         "unrelated" => LinkVerdict::Unrelated,
@@ -387,7 +388,7 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
     let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
     let permit = core.gate.background().await;
     let reply = core
-        .judge
+        .link_judge
         .complete(
             crate::infer::prompt::LINK_SYSTEM,
             &crate::infer::prompt::link_prompt(
@@ -1112,7 +1113,7 @@ mod tests {
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"related","reason":"should never be read"}"#.into(),
         ]));
-        core.judge = scripted.clone();
+        core.link_judge = scripted.clone();
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1160,7 +1161,7 @@ mod tests {
     async fn a_related_verdict_names_the_relation_and_stops_the_decay() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"related","reason":"the config and its errors"}"#.into()),
         });
         let ids = seed(&core, 2).await;
@@ -1190,7 +1191,7 @@ mod tests {
         // reach the row.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"related"}"#.into()),
         });
         let ids = seed(&core, 2).await;
@@ -1215,7 +1216,7 @@ mod tests {
     async fn an_unrelated_verdict_is_stored_so_it_is_not_asked_again() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"unrelated","reason":"a coincidence of retrieval"}"#.into()),
         });
         let ids = seed(&core, 2).await;
@@ -1255,7 +1256,7 @@ mod tests {
         // connection while dedupe decides what to do about it.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"duplicate","reason":"the same procedure twice"}"#.into()),
         });
         let ids = seed(&core, 2).await;
@@ -1287,7 +1288,7 @@ mod tests {
     async fn three_unreadable_replies_shelve_the_link_rather_than_asking_forever() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("no idea, sorry".into()),
         });
         let ids = seed(&core, 2).await;
@@ -1363,7 +1364,7 @@ mod tests {
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"related","reason":"should never be read"}"#.into(),
         ]));
-        core.judge = scripted.clone();
+        core.link_judge = scripted.clone();
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1466,7 +1467,7 @@ mod tests {
         // assert a handover that did not happen.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"duplicate","reason":"same thing"}"#.into()),
         });
         let ids = seed(&core, 2).await;

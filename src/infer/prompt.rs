@@ -188,7 +188,7 @@ When you answer "duplicate", the merged text must contain every number, version,
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"relation": "duplicate", "detail": "...", "supersedes": "a", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}
+{"verdict": {"relation": "duplicate", "detail": "...", "supersedes": "a", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}}
 
 - relation: one of "duplicate", "replaced", "conflict", "distinct".
 - detail: one short sentence saying why. Always.
@@ -262,7 +262,7 @@ Judge the relation between the artifacts, not their similarity. Two texts that s
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"relation": "related", "reason": "..."}
+{"verdict": {"relation": "related", "reason": "..."}}
 
 - relation: one of "related", "unrelated", "duplicate".
 - reason: one sentence. For "related" it is shown to the reader beside the link, so write it for them and not about the task."#;
@@ -323,6 +323,22 @@ pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
     )
 }
 
+/// The verdict inside the envelope, or the reply itself if it came without one.
+///
+/// `dedupe_schema` and `link_schema` both wrap their union under `verdict`,
+/// because a strict `json_schema` response format needs an object at the root.
+/// The bare shape is still accepted: `structured_output` can be off, and a model
+/// told the shape in prose sometimes writes the inner object alone. Either is
+/// readable, and refusing one of them would only cost a verdict that was fine.
+pub fn unwrap_verdict(body: &str) -> Result<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| Error::MalformedLlmOutput(format!("judge reply was not JSON at all: {e}")))?;
+    Ok(match v.get("verdict") {
+        Some(inner) if inner.is_object() => inner.clone(),
+        _ => v,
+    })
+}
+
 /// A reply that cannot be read is an error, not a verdict.
 ///
 /// Defaulting to "conflict" would fill the escalation queue with noise a person
@@ -353,7 +369,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         caveats: Vec<String>,
     }
 
-    let r: Raw = serde_json::from_str(extract_json(body)).map_err(|e| {
+    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
         Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
 
@@ -510,6 +526,18 @@ pub fn artifacts_schema() -> serde_json::Value {
 /// unwritable rather than merely wrong: `duplicate` cannot be emitted without
 /// `merged`, and `distinct` cannot be emitted with it.
 ///
+/// Both halves of that guarantee rest on `additionalProperties: false`. Without
+/// it a JSON Schema object accepts any property it does not mention, so
+/// `{"relation":"distinct","merged":{…}}` satisfies the third variant and the
+/// union constrains nothing it was written to constrain. llama.cpp's grammar
+/// generator closes objects implicitly and hid that; a validating gateway does
+/// not.
+///
+/// The union is nested under `verdict` rather than sitting at the root because
+/// a strict `json_schema` response format must have an object at the root — a
+/// bare `anyOf` there is rejected outright by the hosted APIs, which turns a
+/// loose constraint into a failed call. `parse_dedupe` unwraps the envelope.
+///
 /// That is worth more here than anywhere else, because `parse_dedupe` has no
 /// salvage path. A verdict it rejects is not a degraded verdict, it is no
 /// verdict, and the pair waits for a whole sweep to be asked about again — which
@@ -528,41 +556,88 @@ pub fn dedupe_schema() -> serde_json::Value {
             "tags": {"type": "array", "items": {"type": "string"}},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["text"]
+        "required": ["text"],
+        "additionalProperties": false
     });
     serde_json::json!({
-        "anyOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "relation": {"type": "string", "enum": ["duplicate"]},
-                    "detail": {"type": "string"},
-                    "merged": merged
-                },
-                "required": ["relation", "merged"]
-            },
-            {
-                // `supersedes` is required for the same reason `merged` is: a
-                // direction the model would not name is downgraded to a conflict
-                // by `parse_dedupe`, which turns the cheapest faithful outcome
-                // into a queue entry for a person.
-                "type": "object",
-                "properties": {
-                    "relation": {"type": "string", "enum": ["replaced"]},
-                    "detail": {"type": "string"},
-                    "supersedes": {"type": "string"}
-                },
-                "required": ["relation", "supersedes"]
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "relation": {"type": "string", "enum": ["distinct", "conflict"]},
-                    "detail": {"type": "string"}
-                },
-                "required": ["relation"]
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "relation": {"type": "string", "enum": ["duplicate"]},
+                            "detail": {"type": "string"},
+                            "merged": merged
+                        },
+                        "required": ["relation", "merged"],
+                        "additionalProperties": false
+                    },
+                    {
+                        // `supersedes` is required for the same reason `merged`
+                        // is: a direction the model would not name is downgraded
+                        // to a conflict by `parse_dedupe`, which turns the
+                        // cheapest faithful outcome into a queue entry for a
+                        // person.
+                        //
+                        // The pattern is that parser's rule written down. Left
+                        // unconstrained, a grammar satisfies "string" with "the
+                        // second one" and the verdict downgrades anyway — the
+                        // exact outcome requiring the field was meant to avoid.
+                        "type": "object",
+                        "properties": {
+                            "relation": {"type": "string", "enum": ["replaced"]},
+                            "detail": {"type": "string"},
+                            "supersedes": {"type": "string", "pattern": "^[A-Za-z]$"}
+                        },
+                        "required": ["relation", "supersedes"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "relation": {"type": "string", "enum": ["distinct", "conflict"]},
+                            "detail": {"type": "string"}
+                        },
+                        "required": ["relation"],
+                        "additionalProperties": false
+                    }
+                ]
             }
-        ]
+        },
+        "required": ["verdict"],
+        "additionalProperties": false
+    })
+}
+
+/// The shape `associate::parse_link` will accept.
+///
+/// Its own schema, and not the dedupe one, because the two judges share an
+/// endpoint and a `HttpCompleter` used to share a response format with it. A
+/// link asked under the dedupe grammar can only answer with a dedupe verdict —
+/// `related` and `unrelated` are not in that enum and `reason` is not one of its
+/// properties — so every link either came back as a spurious `duplicate` or
+/// failed to parse until the pair was shelved as unreadable.
+///
+/// Nested under `verdict` for the same reason `dedupe_schema` is, so both
+/// judges unwrap the same envelope shape.
+pub fn link_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "object",
+                "properties": {
+                    "relation": {"type": "string", "enum": ["related", "unrelated", "duplicate"]},
+                    "reason": {"type": "string"}
+                },
+                "required": ["relation", "reason"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["verdict"],
+        "additionalProperties": false
     })
 }
 
@@ -848,7 +923,9 @@ mod tests {
     #[test]
     fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
         let schema = dedupe_schema();
-        let variants = schema["anyOf"].as_array().expect("a union of variants");
+        let variants = schema["properties"]["verdict"]["anyOf"]
+            .as_array()
+            .expect("a union of variants under the envelope");
         let mut seen = Vec::new();
 
         for variant in variants {
@@ -883,9 +960,12 @@ mod tests {
                         }
                     }
                 }
+                // Read through the envelope the schema actually asks for, which
+                // is what a constrained endpoint will send.
+                let sent = serde_json::json!({ "verdict": body });
                 assert!(
-                    parse_dedupe(&body.to_string()).is_ok(),
-                    "the schema lets the model answer {body}, which the parser rejects"
+                    parse_dedupe(&sent.to_string()).is_ok(),
+                    "the schema lets the model answer {sent}, which the parser rejects"
                 );
             }
         }
@@ -904,7 +984,7 @@ mod tests {
     #[test]
     fn no_dedupe_variant_permits_a_duplicate_without_a_merge_or_a_distinct_with_one() {
         let schema = dedupe_schema();
-        for variant in schema["anyOf"].as_array().unwrap() {
+        for variant in schema["properties"]["verdict"]["anyOf"].as_array().unwrap() {
             let relations = variant["properties"]["relation"]["enum"]
                 .as_array()
                 .unwrap();
@@ -925,8 +1005,113 @@ mod tests {
 
         // And the parser still refuses both, because a grammar is only as good
         // as the endpoint honouring it and `structured_output` can be off.
-        assert!(parse_dedupe(r#"{"relation":"duplicate"}"#).is_err());
-        assert!(parse_dedupe(r#"{"relation":"distinct","merged":{"text":"x"}}"#).is_err());
+        assert!(parse_dedupe(r#"{"verdict":{"relation":"duplicate"}}"#).is_err());
+        assert!(
+            parse_dedupe(r#"{"verdict":{"relation":"distinct","merged":{"text":"x"}}}"#).is_err()
+        );
+    }
+
+    /// What actually makes a variant exclude a field, as opposed to declining to
+    /// mention it. A JSON Schema object with no `additionalProperties: false`
+    /// accepts every property it never named, so the `distinct`-with-a-merge
+    /// reply above validates against the third variant and the union constrains
+    /// nothing. llama.cpp's grammar generator closes objects implicitly and hid
+    /// this; a validating gateway does not.
+    #[test]
+    fn every_judge_schema_object_is_closed_and_rooted_in_an_object() {
+        fn closed(v: &serde_json::Value, path: &str) {
+            if v["type"] == "object" {
+                assert_eq!(
+                    v["additionalProperties"],
+                    serde_json::json!(false),
+                    "{path} is an open object, so it accepts fields it never named"
+                );
+                for (k, sub) in v["properties"].as_object().into_iter().flatten() {
+                    closed(sub, &format!("{path}.{k}"));
+                }
+            }
+            for (i, sub) in v["anyOf"].as_array().into_iter().flatten().enumerate() {
+                closed(sub, &format!("{path}.anyOf[{i}]"));
+            }
+        }
+
+        for (name, schema) in [
+            ("dedupe", dedupe_schema()),
+            ("link", link_schema()),
+            ("artifacts", artifacts_schema()),
+        ] {
+            // A strict `json_schema` response format needs an object at the
+            // root: the hosted APIs reject a bare `anyOf` there outright, which
+            // turns a loose constraint into a failed call.
+            assert_eq!(
+                schema["type"], "object",
+                "the {name} schema is not rooted in an object"
+            );
+            closed(&schema, name);
+        }
+    }
+
+    /// `parse_dedupe` reads a direction only as a single letter and downgrades
+    /// anything else to a conflict — the outcome requiring `supersedes` exists
+    /// to avoid. An unconstrained `{"type":"string"}` lets a grammar satisfy the
+    /// field with "the second one" and land in exactly that case.
+    #[test]
+    fn the_supersedes_the_schema_permits_is_a_direction_the_parser_reads() {
+        let schema = dedupe_schema();
+        let replaced = schema["properties"]["verdict"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["properties"]["relation"]["enum"][0] == "replaced")
+            .expect("a variant for replaced");
+        // Asserted literally rather than matched: the crate carries no regex
+        // engine, and the point is that the field is anchored to exactly one
+        // letter in either case — `dedupe_prompt` heads artifacts uppercase and
+        // its example answers lowercase. Anything looser ("artifact B", "the
+        // second one") satisfies the grammar and downgrades in the parser.
+        assert_eq!(
+            replaced["properties"]["supersedes"]["pattern"].as_str(),
+            Some("^[A-Za-z]$"),
+            "supersedes is not constrained to a direction parse_dedupe reads"
+        );
+
+        // And the parser agrees about which of those is a direction.
+        let verdict =
+            parse_dedupe(r#"{"verdict":{"relation":"replaced","supersedes":"B"}}"#).unwrap();
+        assert_eq!(verdict.relation, Relation::Replaced);
+        assert_eq!(verdict.supersedes, Some('b'));
+    }
+
+    /// The link judge shares an endpoint with the dedupe judge and used to share
+    /// its response format, which no link verdict can satisfy: `related` and
+    /// `unrelated` are not in the dedupe enum, and `reason` is not one of its
+    /// properties.
+    #[test]
+    fn every_relation_the_link_schema_allows_is_one_its_parser_knows() {
+        let schema = link_schema();
+        let relations = schema["properties"]["verdict"]["properties"]["relation"]["enum"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
+        assert_eq!(names, ["related", "unrelated", "duplicate"]);
+
+        for r in &names {
+            let sent = serde_json::json!({"verdict": {"relation": r, "reason": "because"}});
+            let (_, reason) =
+                crate::jobs::associate::parse_link(&sent.to_string()).unwrap_or_else(|e| {
+                    panic!("the schema allows {sent}, which the parser rejects: {e}")
+                });
+            assert_eq!(reason, "because");
+        }
+
+        // No dedupe verdict is a link verdict, which is the whole point of the
+        // two schemas being separate.
+        for r in ["distinct", "conflict", "replaced"] {
+            assert!(
+                !names.contains(&r),
+                "the link judge may answer {r:?}, which its parser refuses"
+            );
+        }
     }
 
     #[test]

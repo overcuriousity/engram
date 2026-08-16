@@ -184,12 +184,13 @@ impl HttpSynthesizer {
     async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
         let mut body = json!({
             "messages": messages,
-            "max_tokens": self.budget.max_output_tokens,
             "temperature": 0.2,
         });
-        if let Some(effort) = &self.reasoning_effort {
-            body["reasoning_effort"] = json!(effort);
-        }
+        set_output_ceiling(
+            &mut body,
+            self.budget.max_output_tokens,
+            self.reasoning_effort.as_deref(),
+        );
         if let Some(name) = schema.filter(|_| self.structured_output) {
             body["response_format"] = response_format(name, prompt::artifacts_schema());
         }
@@ -426,6 +427,35 @@ impl Reranker for HttpReranker {
     }
 }
 
+/// The output ceiling, under whichever name this endpoint will accept it.
+///
+/// A reasoning model refuses `max_tokens` outright — a 400 naming
+/// `max_completion_tokens` — and the two mean the same ceiling. `reasoning_effort`
+/// is the only signal available at this layer that such a model is on the other
+/// end, and it is a reliable one: a model that does not reason rejects that
+/// field, so it is only ever set against one that does.
+///
+/// Under either name the ceiling has to be sent. It is not a cost control:
+/// `response_format` compiles into a decoding constraint, and while the model is
+/// inside a JSON string the end-of-sequence token is masked out, so a small model
+/// that wanders has nothing of its own to stop it.
+///
+/// What the two names do not share is what the ceiling buys. A reasoning model
+/// bills its thinking against this number as well, so a low ceiling and a high
+/// effort can be spent entirely before the message content starts — which
+/// surfaces as an empty reply rather than as a truncation. `reasoning_effort`'s
+/// documentation in `config.example.toml` says so; there is nothing to do about
+/// it here beyond sending a ceiling the endpoint will honour.
+fn set_output_ceiling(body: &mut serde_json::Value, max: usize, reasoning_effort: Option<&str>) {
+    match reasoning_effort {
+        Some(effort) => {
+            body["reasoning_effort"] = json!(effort);
+            body["max_completion_tokens"] = json!(max);
+        }
+        None => body["max_tokens"] = json!(max),
+    }
+}
+
 /// An OpenAI `json_schema` response format.
 ///
 /// `strict` is what makes the difference between a schema the endpoint treats
@@ -485,6 +515,20 @@ impl HttpCompleter {
     /// slow careful model costs nobody a wait, while sharing the ask endpoint
     /// puts sweep traffic in front of an interactive request.
     pub fn for_judging(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("verdict", prompt::dedupe_schema()))
+    }
+
+    /// The judge that rules on associative links, on the same endpoint.
+    ///
+    /// A separate completer rather than a second caller of `for_judging`,
+    /// because the response format is carried by the struct and the two judges
+    /// answer different questions. Sharing one meant every link went out under
+    /// the dedupe grammar, which cannot express `related` or `unrelated` at all.
+    pub fn for_link_judging(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("link", prompt::link_schema()))
+    }
+
+    fn judging(cfg: &SynthesizeRole, schema: (&'static str, serde_json::Value)) -> Self {
         Self {
             ep: Endpoint::new(
                 &cfg.base_url,
@@ -496,9 +540,7 @@ impl HttpCompleter {
             context_tokens: cfg.context_tokens,
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
-            response_schema: cfg
-                .structured_output
-                .then(|| ("verdict", prompt::dedupe_schema())),
+            response_schema: cfg.structured_output.then_some(schema),
         }
     }
 }
@@ -511,12 +553,13 @@ impl Completer for HttpCompleter {
                 {"role":"system","content": system},
                 {"role":"user","content": user}
             ],
-            "max_tokens": self.max_output_tokens,
             "temperature": 0.3,
         });
-        if let Some(effort) = &self.reasoning_effort {
-            body["reasoning_effort"] = json!(effort);
-        }
+        set_output_ceiling(
+            &mut body,
+            self.max_output_tokens,
+            self.reasoning_effort.as_deref(),
+        );
         if let Some((name, schema)) = &self.response_schema {
             body["response_format"] = response_format(name, schema.clone());
         }
@@ -525,6 +568,10 @@ impl Completer for HttpCompleter {
 
     fn context_tokens(&self) -> usize {
         self.context_tokens
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens
     }
 }
 
@@ -1054,6 +1101,58 @@ mod tests {
                 sent_body(&server).await["max_tokens"].as_u64(),
                 Some(want),
                 "{label} did not send its output ceiling"
+            );
+        }
+    }
+
+    /// A reasoning model answers a `max_tokens` with a 400 naming
+    /// `max_completion_tokens`, so sending the ceiling under the wrong name
+    /// against one is not a loose constraint — it is every call failing.
+    #[tokio::test]
+    async fn a_reasoning_endpoint_gets_the_ceiling_under_the_name_it_accepts() {
+        let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+        let mut cfg = synthesize_cfg(server.uri());
+        cfg.reasoning_effort = Some("low".into());
+        HttpCompleter::for_judging(&cfg)
+            .complete("s", "u")
+            .await
+            .unwrap();
+
+        let body = sent_body(&server).await;
+        assert_eq!(body["max_completion_tokens"].as_u64(), Some(2048));
+        assert!(
+            body.get("max_tokens").is_none(),
+            "a reasoning endpoint was sent max_tokens, which it rejects: {body}"
+        );
+        assert_eq!(body["reasoning_effort"].as_str(), Some("low"));
+    }
+
+    /// The link judge shares an endpoint with the duplicate judge and used to
+    /// share its response format too, which no link verdict can satisfy.
+    #[tokio::test]
+    async fn each_judge_sends_the_schema_of_the_question_it_is_asking() {
+        for (label, schema_name) in [("dedupe", "verdict"), ("link", "link")] {
+            let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
+            let cfg = synthesize_cfg(server.uri());
+            let judge = match label {
+                "dedupe" => HttpCompleter::for_judging(&cfg),
+                _ => HttpCompleter::for_link_judging(&cfg),
+            };
+            judge.complete("s", "u").await.unwrap();
+
+            let sent = sent_body(&server).await;
+            assert_eq!(
+                sent["response_format"]["json_schema"]["name"].as_str(),
+                Some(schema_name),
+                "the {label} judge sent another judge's schema"
+            );
+            let relations =
+                &sent["response_format"]["json_schema"]["schema"]["properties"]["verdict"];
+            let allows_related = relations.to_string().contains("unrelated");
+            assert_eq!(
+                allows_related,
+                label == "link",
+                "the {label} judge's grammar covers the wrong set of relations"
             );
         }
     }

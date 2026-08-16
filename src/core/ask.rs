@@ -4,9 +4,6 @@ use crate::error::{Error, Result};
 use crate::infer::budget::pack_by_budget;
 use crate::infer::prompt::{ASK_SYSTEM, ask_excerpt, ask_prompt};
 
-/// Reserve part of the context for the answer itself.
-const ANSWER_RESERVE_TOKENS: usize = 1024;
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AskRequest {
     pub q: String,
@@ -100,12 +97,18 @@ impl Core {
             ));
         }
 
+        // Reserve exactly what the completer will ask for, not a constant. The
+        // endpoint counts the prompt and the requested ceiling against one
+        // window, so packing excerpts up to `context - 1024` while the call
+        // goes out demanding `max_output_tokens` of reply is a request the
+        // server refuses outright — and it refuses it on precisely the queries
+        // that retrieved enough to be worth answering.
         let budget = self
             .completer
             .context_tokens()
             .saturating_sub(self.counter.count(ASK_SYSTEM))
             .saturating_sub(self.counter.count(&req.q))
-            .saturating_sub(ANSWER_RESERVE_TOKENS);
+            .saturating_sub(self.completer.max_output_tokens());
 
         // Highest score first, so what gets cut is what mattered least.
         let kept = pack_by_budget(&blocks, &self.counter, budget);
@@ -161,6 +164,9 @@ mod tests {
         }
         fn context_tokens(&self) -> usize {
             4096
+        }
+        fn max_output_tokens(&self) -> usize {
+            1024
         }
     }
 
@@ -306,6 +312,46 @@ mod tests {
             "a silently dropped citation is worse than a reported one"
         );
         assert!(out.citations.len() < 20);
+    }
+
+    /// The prompt and the reply are counted against one window by the endpoint,
+    /// so packing excerpts up to a constant reserve while the call demands
+    /// `max_output_tokens` of reply is a request the server refuses — and it
+    /// refuses it on exactly the questions that retrieved enough to be worth
+    /// answering. What is packed has to leave room for what is asked for.
+    #[tokio::test]
+    async fn what_is_packed_leaves_room_for_the_reply_that_was_asked_for() {
+        /// Reports a wide context and a ceiling that eats most of it, which is
+        /// the shipped shape: a 4096-token ask ceiling inside a context an
+        /// operator sized for retrieval.
+        struct WideCeiling;
+        #[async_trait::async_trait]
+        impl crate::infer::Completer for WideCeiling {
+            async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                Ok(user.to_string())
+            }
+            fn context_tokens(&self) -> usize {
+                4096
+            }
+            fn max_output_tokens(&self) -> usize {
+                3072
+            }
+        }
+
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(WideCeiling);
+        seed(&core, 20, 400).await;
+        let out = core.ask(&req("anything")).await.unwrap();
+
+        // The echoed prompt is what actually went to the endpoint. Prompt plus
+        // ceiling must fit the window the endpoint will measure them against.
+        let prompt = core.counter.count(&out.answer) + core.counter.count(ASK_SYSTEM);
+        assert!(
+            prompt + 3072 <= 4096,
+            "the prompt was {prompt} tokens and the call asks for 3072 more, \
+             which is {} over a 4096-token window",
+            prompt + 3072 - 4096
+        );
     }
 
     #[tokio::test]

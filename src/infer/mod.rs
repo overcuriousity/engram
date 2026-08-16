@@ -80,6 +80,14 @@ pub trait Reranker: Send + Sync {
 pub trait Completer: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<String>;
     fn context_tokens(&self) -> usize;
+    /// The ceiling this completer sends on every call.
+    ///
+    /// Exposed because a caller that packs a prompt against `context_tokens`
+    /// has to leave the reply room in the same window: the endpoint counts
+    /// prompt plus ceiling against the context, and refuses the request when
+    /// the two together exceed it. Reserving less than this is how a request
+    /// that would have fit becomes a 400.
+    fn max_output_tokens(&self) -> usize;
 }
 
 /// Reads a captured image into text. One call per image; the caller has
