@@ -85,6 +85,13 @@ pub struct SearchResult {
     /// order is silent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
+    /// The ranked hit that recalled this one. `None` for a ranked hit — which
+    /// is every hit inside `limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// What the judge said the relation is, where a link has been judged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl From<SearchHit> for SearchResult {
@@ -102,6 +109,8 @@ impl From<SearchHit> for SearchResult {
             last_verified_at: h.payload.last_verified_at,
             weak: false,
             primed: false,
+            via: None,
+            reason: None,
         }
     }
 }
@@ -346,6 +355,79 @@ impl Core {
                 HashMap::new()
             }
         }
+    }
+
+    /// Artifacts linked to the top of the answer, appended beside it.
+    ///
+    /// One hop only. Spreading further is what a graph view would be for, and
+    /// there is none. Everything here is additive: it never removes or reorders
+    /// a ranked hit, and a store that will not answer produces an empty list and
+    /// one warning.
+    async fn associated(&self, results: &[SearchResult]) -> Vec<SearchResult> {
+        let anchors: Vec<String> = results
+            .iter()
+            .take(self.associate.spread_from)
+            .map(|r| r.artifact_id.clone())
+            .collect();
+        if anchors.is_empty() || self.associate.spread_max == 0 {
+            return Vec::new();
+        }
+        let links = match self
+            .store
+            .links_from(
+                &anchors,
+                &[
+                    crate::store::links::LinkState::Learning,
+                    crate::store::links::LinkState::Related,
+                ],
+                self.associate.half_life_days,
+                now_secs(),
+                self.associate.show_min,
+            )
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read links; results are unassociated");
+                return Vec::new();
+            }
+        };
+
+        let mut have: std::collections::HashSet<String> =
+            results.iter().map(|r| r.artifact_id.clone()).collect();
+        let mut out = Vec::new();
+        for l in links {
+            if out.len() >= self.associate.spread_max {
+                break;
+            }
+            if !have.insert(l.other.clone()) {
+                continue;
+            }
+            // Read from SQLite rather than the vector store: the row is already
+            // one connection away, and the payload adds nothing this needs.
+            let Ok(c) = self.store.get_artifact(&l.other).await else {
+                continue;
+            };
+            out.push(SearchResult {
+                artifact_id: c.id,
+                corpus_id: c.corpus_id.unwrap_or_default(),
+                title: c.title,
+                text: c.text,
+                category: c.category,
+                tags: c.tags,
+                // Not a rank and not a similarity: this hit did not compete for
+                // a place in the list, it was recalled beside it.
+                score: 0.0,
+                status: Some(c.status),
+                superseded_by: c.superseded_by,
+                last_verified_at: c.last_verified_at,
+                weak: false,
+                primed: false,
+                via: Some(l.via),
+                reason: l.reason,
+            });
+        }
+        out
     }
 
     /// A random handful of chunks that have not surfaced in a month.
@@ -629,6 +711,16 @@ impl Core {
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
+        }
+        // After the truncate and after capture, so an association can only ever
+        // add: it is outside `limit`, outside the recorded pool, and outside the
+        // retrieval count. See `Touch::shown`.
+        if self.associate.enabled {
+            let recalled = self.associated(&results).await;
+            if !recalled.is_empty() {
+                self.mark_seen(&recalled, &HashMap::new(), false);
+                results.extend(recalled);
+            }
         }
         tracing::info!(
             q = %query.q,
@@ -1330,6 +1422,8 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                via: None,
+                reason: None,
             })
             .collect()
     }
@@ -1619,5 +1713,213 @@ mod tests {
         core.search(&q("alpha text"), Door::Judge).await.unwrap();
         core.search(&q("alpha text"), Door::Ask).await.unwrap();
         assert_eq!(captured_events(&core).await, 0);
+    }
+
+    /// The id of the artifact whose text is exactly this. Ordering from
+    /// `list_all_artifact_ids` is not promised, and a test that assumed one
+    /// would pass or fail on which row SQLite happened to return first.
+    async fn id_of(core: &crate::core::Core, text: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
+            .bind(text)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_linked_artifact_is_recalled_beside_the_answer_and_says_what_recalled_it() {
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+
+        assert_eq!(out.len(), 2, "the association was not appended: {out:?}");
+        assert_eq!(out[0].artifact_id, a);
+        assert_eq!(
+            out[0].via, None,
+            "a ranked hit was not recalled by anything"
+        );
+        assert_eq!(out[1].artifact_id, b);
+        assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_artifact_already_in_the_answer_is_not_recalled_again() {
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "one",
+            &[("alpha text", "note", &[]), ("alpha other", "note", &[])],
+        )
+        .await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "alpha other").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let out = core.search(&q("alpha"), Door::Ui).await.unwrap();
+        let seen: std::collections::HashSet<&str> =
+            out.iter().map(|r| r.artifact_id.as_str()).collect();
+        assert_eq!(seen.len(), out.len(), "an artifact was returned twice");
+    }
+
+    /// The captured pool, as `(role, shown)` ordered by rank — `role` is `"a"`
+    /// or `"b"` depending on which of the two seeded ids the row names, so two
+    /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
+    /// equal) can still be compared for shape.
+    async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT artifact_id, shown FROM search_candidates ORDER BY rank")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(id, shown)| {
+                let role = if id == a {
+                    "a"
+                } else if id == b {
+                    "b"
+                } else {
+                    "?"
+                };
+                (role, shown)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_recalled_artifact_does_not_feed_the_learning_that_produced_it() {
+        // The failure mode of any Hebbian system: a link recalls an artifact, is
+        // strengthened by having done so, and recalls it harder next time. Both
+        // loops have to be closed by construction: the recalled hit must not be
+        // written as a candidate, and must not count as a retrieval.
+        //
+        // This cannot be checked by asking "is `b` absent from
+        // `search_candidates`" directly: on a base this small, `b` is a
+        // legitimate low-ranked candidate of the plain hybrid search with or
+        // without any link — `feedback.candidates` over-fetches wider than the
+        // two-artifact corpus, so the ordinary capture path records it anyway,
+        // unshown. That is correct and expected, and unrelated to association.
+        // What has to be proven instead is a control comparison: the captured
+        // pool is identical whether or not the link exists, which is what shows
+        // the link changed nothing about what was recorded — plus a check that
+        // the treatment side effect (the link) actually took hold, or the
+        // comparison would pass vacuously on a run where nothing associated at
+        // all. A later reader tempted to simplify this back to a direct
+        // absence check would reintroduce a test that fails on an artifact of
+        // the fixture rather than a bug.
+        async fn seeded() -> (crate::core::Core, String, String) {
+            let mut core = test_core().await;
+            core.feedback.enabled = true;
+            seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+            seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+            reembed_all(&core).await;
+            let a = id_of(&core, "alpha text").await;
+            let b = id_of(&core, "something else entirely").await;
+            (core, a, b)
+        }
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+
+        // Unlinked control.
+        let (unlinked, a_u, b_u) = seeded().await;
+        let unlinked_out = unlinked.search(&query, Door::Ui).await.unwrap();
+        unlinked.background.wait_idle().await;
+        let unlinked_pool = captured_pool(&unlinked, &a_u, &b_u).await;
+
+        // Linked treatment.
+        let (linked, a, b) = seeded().await;
+        linked
+            .store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+        let before = linked
+            .store
+            .activation_of(std::slice::from_ref(&b))
+            .await
+            .unwrap()[&b]
+            .0;
+        let linked_out = linked.search(&query, Door::Ui).await.unwrap();
+        linked.background.wait_idle().await;
+        let linked_pool = captured_pool(&linked, &a, &b).await;
+        let after = linked
+            .store
+            .activation_of(std::slice::from_ref(&b))
+            .await
+            .unwrap()[&b]
+            .0;
+
+        // 3. The treatment actually took effect, or the comparison below is
+        // vacuous.
+        assert_eq!(unlinked_out.len(), 1, "got: {unlinked_out:?}");
+        assert_eq!(linked_out.len(), 2, "got: {linked_out:?}");
+        assert_eq!(linked_out[1].artifact_id, b);
+        assert_eq!(linked_out[1].via.as_deref(), Some(a.as_str()));
+
+        // 1. The captured pool — id and shown, in rank order — is identical
+        // either way: the link changed nothing about what the search recorded.
+        assert_eq!(
+            unlinked_pool, linked_pool,
+            "the link changed what the search recorded as a candidate"
+        );
+
+        // 2. Being recalled did not count as a retrieval.
+        assert!(
+            (after - before).abs() < 1e-9,
+            "being recalled raised activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_artifact_is_never_recalled_by_association() {
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+        core.deprecate(&b).await.unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_weak_link_is_not_strong_enough_to_recall_anything() {
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        // One co-appearance, against a `show_min` of 2.0.
+        core.store
+            .bump_link(&a, &b, 1.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
     }
 }

@@ -2431,6 +2431,8 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            via: None,
+            reason: None,
         };
 
         let loose = render_hit(0, result(true));
