@@ -20,6 +20,26 @@ pub const JUDGED_AFTER: &str = "associate.judged_after";
 /// catches up over a few sweeps instead of holding one worker for minutes.
 const REPLAY_LIMIT: i64 = 2_000;
 
+/// Learning links read per prune pass. Whatever the cap leaves is pruned by the
+/// next sweep — a bound on one tick's work, not on what is eventually forgotten.
+const PRUNE_SCAN_LIMIT: i64 = 5_000;
+
+/// The queue name of one link. Canonical, so the same pair never gets two units.
+pub fn link_target(a: &str, b: &str) -> String {
+    let (a, b) = crate::store::links::canonical(a, b);
+    format!("{a}|{b}")
+}
+
+/// The newest `created_at` a settled event may still have. An event is
+/// settled once `created_at < settled_cutoff(at, coalesce_secs)` — the exact
+/// complement of `record_search`'s fold predicate at
+/// `src/store/feedback.rs:206` (`at - created <= coalesce_secs`), so there is
+/// no instant where both are true and an event still a keystroke away from
+/// folding gets replayed early.
+fn settled_cutoff(at: i64, coalesce_secs: i64) -> i64 {
+    at - coalesce_secs.max(0)
+}
+
 /// One sweep over everything learned since the last one.
 pub async fn run(core: &Core) -> Result<()> {
     if !core.associate.enabled || !core.feedback.enabled {
@@ -28,7 +48,60 @@ pub async fn run(core: &Core) -> Result<()> {
     let at = crate::store::now();
     let bound = replay_events(core, at).await?;
     let confirmed = replay_verdicts(core, at).await?;
-    tracing::info!(events = bound, verdicts = confirmed, "association sweep");
+
+    let forgotten = core
+        .store
+        .prune_learning_links(
+            core.associate.prune_below,
+            core.associate.half_life_days,
+            at,
+            PRUNE_SCAN_LIMIT,
+        )
+        .await?;
+    // A re-embed of either side reopens the verdict before anything is armed,
+    // so a link whose text changed is re-asked in this same sweep rather than
+    // waiting out another interval.
+    let reopened = core
+        .store
+        .reopen_stale_judged_links(PRUNE_SCAN_LIMIT)
+        .await?;
+
+    let mut armed = 0;
+    for l in core
+        .store
+        .links_to_judge(
+            core.associate.judge_min,
+            core.associate.judge_min_queries,
+            core.associate.half_life_days,
+            at,
+            core.associate.judge_per_sweep,
+        )
+        .await?
+    {
+        let target = link_target(&l.a_id, &l.b_id);
+        // A link whose judgement is already queued is already going to be
+        // judged; arming it again is a no-op that costs another link its turn.
+        if core
+            .store
+            .live_job(crate::store::jobs::Stage::LinkJudge, &target)
+            .await?
+        {
+            continue;
+        }
+        core.store
+            .rearm_idle_seq(crate::store::jobs::Stage::LinkJudge, "link", &target, armed)
+            .await?;
+        armed += 1;
+    }
+
+    tracing::info!(
+        events = bound,
+        verdicts = confirmed,
+        forgotten,
+        reopened,
+        armed,
+        "association sweep"
+    );
     Ok(())
 }
 
@@ -45,7 +118,7 @@ async fn replay_events(core: &Core, at: i64) -> Result<usize> {
         .await?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let settled = at - core.feedback.coalesce_secs.max(0);
+    let settled = settled_cutoff(at, core.feedback.coalesce_secs);
 
     let events = sqlx::query(
         "SELECT id, query, created_at FROM search_events
@@ -371,26 +444,37 @@ mod tests {
     #[tokio::test]
     async fn an_event_exactly_at_the_fold_boundary_waits_one_more_sweep() {
         // `record_search` treats an event as still foldable while
-        // `(at - created_at) <= coalesce_secs` (src/store/feedback.rs). The
-        // sweep's read must be the complement of that with nothing shared, or
-        // there is an instant where both are true and the sweep binds an
-        // event a further keystroke could still fold into — the exact
-        // double-binding this whole two-watermark design exists to prevent.
+        // `(at - created_at) <= coalesce_secs` (src/store/feedback.rs:206).
+        // The sweep's read must be the complement of that with nothing
+        // shared, or there is an instant where both are true and the sweep
+        // binds an event a further keystroke could still fold into — the
+        // exact double-binding this whole two-watermark design exists to
+        // prevent.
+        //
+        // `run()` reads `now()` itself, and reading it a second time here to
+        // compute the aged `created_at` would race it: if the two calls
+        // straddle a wall-clock second, the event ends up one second older
+        // than intended and the assertion flips (roughly 1-in-200). So this
+        // reads back the `created_at` `record_search` actually stamped and
+        // derives everything from that one value, and drives `replay_events`
+        // directly with an `at` computed from it — the same arithmetic
+        // `run()` would use, with no live clock involved at all.
         let mut core = test_core().await;
         on(&mut core).await;
         core.feedback.coalesce_secs = 15;
         let ids = seed(&core, 2).await;
         let ev = record(&core, "fat", &[&ids[0], &ids[1]], &[]).await;
+        let created_at: i64 =
+            sqlx::query_scalar("SELECT created_at FROM search_events WHERE id = ?")
+                .bind(&ev)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
 
-        // Aged to exactly the boundary: still foldable, so the sweep must not
-        // replay it yet.
-        sqlx::query("UPDATE search_events SET created_at = created_at - ? WHERE id = ?")
-            .bind(core.feedback.coalesce_secs)
-            .bind(&ev)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        run(&core).await.unwrap();
+        // `at` placed exactly `coalesce_secs` after the event: still
+        // foldable, so the sweep must not replay it yet.
+        let at = created_at + core.feedback.coalesce_secs;
+        replay_events(&core, at).await.unwrap();
         assert!(
             core.store
                 .get_link(&ids[0], &ids[1])
@@ -401,12 +485,7 @@ mod tests {
         );
 
         // One second further: no longer foldable, so the next sweep replays it.
-        sqlx::query("UPDATE search_events SET created_at = created_at - 1 WHERE id = ?")
-            .bind(&ev)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        run(&core).await.unwrap();
+        replay_events(&core, at + 1).await.unwrap();
         assert!(
             core.store
                 .get_link(&ids[0], &ids[1])
@@ -415,6 +494,38 @@ mod tests {
                 .is_some(),
             "an event one second past the boundary was still withheld"
         );
+    }
+
+    #[test]
+    fn settled_cutoff_is_the_exact_complement_of_the_fold_predicate() {
+        // `replay_events` folds an event's watermark against `settled_cutoff`
+        // with `<`. `record_search` (src/store/feedback.rs:206) treats an
+        // event as still foldable while `at - created <= coalesce_secs`. For
+        // the two to share no instant, `created < settled_cutoff(at, cs)`
+        // must be false exactly where `at - created <= cs` is true, and true
+        // everywhere else — checked here arithmetically, with no clock
+        // involved.
+        let at = 1_000_000;
+        let coalesce_secs = 15;
+        let cutoff = settled_cutoff(at, coalesce_secs);
+
+        let is_fresh = |created: i64| at - created <= coalesce_secs;
+        let is_settled = |created: i64| created < cutoff;
+
+        for created in (at - coalesce_secs - 2)..=(at - coalesce_secs + 2) {
+            assert_eq!(
+                is_settled(created),
+                !is_fresh(created),
+                "created_at {created} disagreed with the fold predicate"
+            );
+        }
+
+        // A window of zero turns folding off entirely, so nothing is ever
+        // "still folding" and the cutoff is `at` itself.
+        assert_eq!(settled_cutoff(at, 0), at);
+        // A clock or config that hands in a negative window must not make
+        // the cutoff run past `at`.
+        assert_eq!(settled_cutoff(at, -5), at);
     }
 
     #[tokio::test]
@@ -548,6 +659,127 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((l.weight - 1.0).abs() < 1e-6, "weight was {}", l.weight);
+    }
+
+    #[tokio::test]
+    async fn a_faded_link_is_forgotten_and_a_judged_one_is_not() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 4).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 1.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        core.store
+            .bump_link(&ids[2], &ids[3], 1.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(
+                &ids[2],
+                &ids[3],
+                LinkState::Related,
+                Some("why"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none(),
+            "a link last used at the epoch has decayed to nothing"
+        );
+        assert!(
+            core.store
+                .get_link(&ids[2], &ids[3])
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strong_cross_corpus_link_is_armed_for_the_judge_exactly_once() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 2).await;
+        for q in ["one", "two", "three", "four"] {
+            core.store
+                .bump_link(&ids[0], &ids[1], 1.0, Some(q), 30.0, crate::store::now())
+                .await
+                .unwrap();
+        }
+
+        run(&core).await.unwrap();
+        let target = link_target(&ids[0], &ids[1]);
+        assert!(
+            core.store
+                .live_job(crate::store::jobs::Stage::LinkJudge, &target)
+                .await
+                .unwrap()
+        );
+
+        // A second sweep must not wind the queued unit's attempts back.
+        run(&core).await.unwrap();
+        let mut seen = 0;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            if j.stage == crate::store::jobs::Stage::LinkJudge {
+                seen += 1;
+                assert_eq!(j.attempts, 1, "the unit was re-armed underneath itself");
+            }
+        }
+        assert_eq!(seen, 1);
+    }
+
+    #[tokio::test]
+    async fn a_judged_link_is_reopened_when_its_text_changes_under_it() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 9.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(
+                &ids[0],
+                &ids[1],
+                LinkState::Unrelated,
+                Some("coincidence"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        core.store
+            .update_artifact_text(&ids[0], "rewritten")
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            l.state,
+            LinkState::Learning,
+            "the judge read text that is gone"
+        );
+    }
+
+    #[test]
+    fn a_link_names_itself_the_same_way_round_however_it_is_armed() {
+        assert_eq!(link_target("b", "a"), link_target("a", "b"));
+        assert_eq!(link_target("a", "b"), "a|b");
     }
 
     #[tokio::test]
