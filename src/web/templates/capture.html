@@ -73,10 +73,14 @@
    afterwards go through exactly the same fragment. #}
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
 
-{# Reachable, not advertised. What is left on Ops is reference — what is hidden,
-   what is stale, what is retrying — and none of it is work waiting on you; the
-   part that was moved up to "Needs you". #}
+{# Reachable, not advertised. What is left on Housekeeping is reference — what
+   is hidden, what is stale, what is retrying — and none of it is work waiting
+   on you; the part that was is moved up to "Needs you". Settings is the other
+   half of what that page used to be: what is true about this installation
+   rather than about what is in it. Neither belongs in the top row, which stays
+   three destinations wide. #}
 <a class="quiet-link" href="/ui/ops">Housekeeping</a>
+<a class="quiet-link" href="/ui/settings" style="margin-left:1rem">Settings</a>
 <script>
   (function () {
     var box = document.querySelector('textarea[name="text"]');

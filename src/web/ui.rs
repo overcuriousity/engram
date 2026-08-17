@@ -505,14 +505,21 @@ struct OpsTemplate {
     merged: Vec<MergedRow>,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
-    tokens: Vec<TokenRow>,
-    /// `None` when capture is switched off, which renders nothing at all: a
-    /// section about a log nobody is keeping is noise.
-    feedback: Option<crate::store::feedback::Stats>,
     /// `None` when nothing is being learned, which renders nothing at all: a
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
+}
+
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
+    tokens: Vec<TokenRow>,
+    /// `None` when capture is switched off, which renders nothing at all: a
+    /// section about a log nobody is keeping is noise.
+    feedback: Option<crate::store::feedback::Stats>,
 }
 
 struct MergedRow {
@@ -1412,21 +1419,9 @@ async fn reconcile_categories(st: &AppState) -> Result<usize> {
     Ok(fixed)
 }
 
-async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
-    use sqlx::Row;
-
-    // Best effort: a vector store that is down must not make the page that
-    // explains what is wrong the one page that will not open.
-    if let Err(e) = reconcile_categories(&st).await {
-        tracing::warn!(error = %e, "category payload repair deferred");
-    }
-
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&st.core.store.pool)
-        .await?
-        .get("n");
-
-    let tokens = st
+/// The API tokens, formatted for a table.
+async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
+    Ok(st
         .core
         .store
         .list_tokens()
@@ -1442,7 +1437,42 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 .unwrap_or_else(|| "never".into()),
             revoked: t.revoked_at.is_some(),
         })
-        .collect();
+        .collect())
+}
+
+/// What is true about this installation, as opposed to what is in it.
+///
+/// Split off Housekeeping, which had grown to hold six tables about the corpus
+/// plus the extension, the tokens and the feedback purge — so revoking a token
+/// meant scrolling past every merge and every hidden artifact first. Reached
+/// from the same quiet line under Capture, and no more advertised than
+/// Housekeeping is: neither belongs in a top row that is three destinations
+/// wide on purpose.
+async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    Ok(HtmlTemplate(SettingsTemplate {
+        judge_pending: crate::web::state::judge_pending(&st).await,
+        tokens: token_rows(&st).await?,
+        feedback: match st.core.feedback.enabled {
+            true => Some(st.core.store.feedback_stats().await?),
+            false => None,
+        },
+    })
+    .into_response())
+}
+
+async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    use sqlx::Row;
+
+    // Best effort: a vector store that is down must not make the page that
+    // explains what is wrong the one page that will not open.
+    if let Err(e) = reconcile_categories(&st).await {
+        tracing::warn!(error = %e, "category payload repair deferred");
+    }
+
+    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+        .fetch_one(&st.core.store.pool)
+        .await?
+        .get("n");
 
     // Not a queue of chores: work that hit something and is waiting to try
     // again on its own. Nothing here needs a person.
@@ -1566,11 +1596,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
-        tokens,
-        feedback: match st.core.feedback.enabled {
-            true => Some(st.core.store.feedback_stats().await?),
-            false => None,
-        },
         links: match st.core.associating() {
             true => Some(st.core.store.link_counts().await?),
             false => None,
@@ -1598,7 +1623,9 @@ async fn undo_merge_ui(
 async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let n = st.core.store.purge_feedback().await?;
     tracing::info!(dropped = n, "captured searches deleted by the operator");
-    Ok(Redirect::to("/ui/ops").into_response())
+    // Back to the page the button is on. The route keeps its /ui/ops prefix —
+    // the two pages split, the endpoints did not.
+    Ok(Redirect::to("/ui/settings").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1627,7 +1654,7 @@ async fn revoke_token_ui(
     Path(tid): Path<String>,
 ) -> Result<Response> {
     crate::auth::tokens::revoke(&st.core.store, &tid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to("/ui/settings").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -2173,6 +2200,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         .route("/ui/ops", get(ops))
+        .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
@@ -3882,7 +3910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_shows_queue_state_and_tokens() {
+    async fn ops_shows_queue_state() {
         let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(
@@ -3898,7 +3926,8 @@ mod tests {
         let html = body_of(res).await;
         // The counts read as a sentence now rather than as a row of badges.
         assert!(html.contains("artifacts,"), "the counts are still stated");
-        assert!(html.contains("API tokens"));
+        // The tokens moved to Settings; `the_installation_lives_on_its_own_page`
+        // is where they are asserted now.
         // An empty base says so once, instead of answering five headings with
         // "None."
         assert!(html.contains("Nothing deprecated"));
@@ -4149,6 +4178,30 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn the_installation_lives_on_its_own_page() {
+        let (app, cookie) = app_with_session().await;
+
+        let settings = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(settings.contains("API tokens"), "{settings}");
+        assert!(settings.contains("Browser extension"), "{settings}");
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            !ops.contains("API tokens"),
+            "housekeeping is about the corpus: {ops}"
+        );
+        assert!(!ops.contains("Browser extension"), "{ops}");
+    }
+
+    #[tokio::test]
+    async fn both_pages_are_reachable_from_capture() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("/ui/ops"), "{page}");
+        assert!(page.contains("/ui/settings"), "{page}");
     }
 
     #[tokio::test]
