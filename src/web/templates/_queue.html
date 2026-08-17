@@ -26,10 +26,18 @@
          The status is the only thing worth saying about these rows. #}
       {% else if !r.settled %}
         <span class="badge {{ r.badge }}">{{ r.status }}</span>
+      {# One shape for every settled row. A low reading used to render as a
+         badge and a healthy one as plain text, so two rows saying the same kind
+         of thing looked like two different kinds of thing — and the badge's
+         width moved the timestamp beside it around. The warning is carried by
+         the colour of the number and by the fact that it is now a link: it
+         used to state a problem and offer nowhere to go. #}
       {% else if r.low_coverage %}
-        <span class="badge badge-warning" title="fraction of this capture that ended up inside an artifact">{{ r.coverage }} covered</span>
+        <span>{{ r.artifact_count }} artifacts ·
+          <a class="qcov-low" href="/ui/corpora/{{ r.id }}#uncovered"
+             title="Some of this capture never reached an artifact — see which lines">{{ r.coverage }} covered</a></span>
       {% else %}
-        <span>{{ r.artifact_count }} artifacts · {{ r.coverage }}</span>
+        <span>{{ r.artifact_count }} artifacts · {{ r.coverage }} covered</span>
       {% endif %}
       <span class="qtime">{{ r.created }}</span>
     </span>

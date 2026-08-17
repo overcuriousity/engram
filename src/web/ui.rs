@@ -3996,6 +3996,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_settled_recent_row_states_artifacts_and_coverage_the_same_way() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        // Embedding is what settles a corpus; `finish` alone leaves it in
+        // flight, and an in-flight row states its status rather than a count.
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains("artifacts · ") && frag.contains(" covered"),
+            "a settled row states both, in one shape: {frag}"
+        );
+        assert!(
+            !frag.contains("badge-warning"),
+            "the warning is carried by colour on the number, not by a badge: {frag}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_low_coverage_row_links_to_the_lines_that_were_missed() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // After embedding, which is what settles the corpus and recomputes the
+        // real coverage — this is the reading the row has to warn about.
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.31))
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains(&format!("/ui/corpora/{}#uncovered", out.id)),
+            "a warning has to lead somewhere: {frag}"
+        );
+        assert!(frag.contains("qcov-low"), "{frag}");
+    }
+
+    #[tokio::test]
     async fn a_pending_pair_leads_with_the_titles_not_with_the_verdict() {
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(
