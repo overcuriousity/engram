@@ -492,6 +492,17 @@ struct RawVisionRole {
     ceiling_param: Option<CeilingParam>,
 }
 
+/// What `[infer.synthesize]` and `[infer.ask]` can hand to a tier: every
+/// endpoint field they have.
+const ENDPOINT_KEYS: &str = "base_url, model, api_key, context_tokens and max_output_tokens";
+
+/// What `[infer.vision]` can hand to a tier, which is much less. `model` is
+/// required on the role and is never inherited — a vision model is the point of
+/// the block, not a property of the server — and `max_output_tokens` is
+/// deliberately not inherited either, so both have to stay where they are.
+const VISION_ENDPOINT_KEYS: &str = "base_url and api_key (model stays here: it is required on the role and \
+     never comes from a tier)";
+
 /// The endpoint a role runs on: the tier it names, or `None` when it carries
 /// one inline and the caller builds an anonymous tier from the role's own
 /// fields.
@@ -500,11 +511,19 @@ struct RawVisionRole {
 /// prevents is a typo running every call of one role against a different model
 /// than the operator wrote down — a divergence no later stage could notice,
 /// let alone report.
+///
+/// `movable_keys` is the caller's because the roles do not share one list. A
+/// migration warning is an instruction someone follows literally, and telling
+/// `[infer.vision]` to move its `model` into a tier would delete the one key it
+/// requires and cannot inherit — the block would stop loading. A shim that
+/// warns instead of refusing has nothing to offer but the accuracy of the
+/// sentence.
 fn resolve_endpoint(
     role: &str,
     tier_name: Option<&str>,
     tiers: &HashMap<String, TierConfig>,
     inline_base_url: Option<&str>,
+    movable_keys: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Option<TierConfig>, String> {
     if let Some(name) = tier_name {
@@ -524,9 +543,9 @@ fn resolve_endpoint(
     }
     if inline_base_url.is_some() {
         warnings.push(format!(
-            "[infer.{role}] carries its endpoint inline. Move base_url, model, api_key, \
-             context_tokens and max_output_tokens into an [infer.tiers.<name>] block and \
-             write `tier = \"<name>\"` here. The inline form still works and will be removed."
+            "[infer.{role}] carries its endpoint inline. Move {movable_keys} into an \
+             [infer.tiers.<name>] block and write `tier = \"<name>\"` here. The inline form \
+             still works and will be removed."
         ));
         return Ok(None);
     }
@@ -561,6 +580,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
             s.tier.as_deref(),
             tiers,
             s.base_url.as_deref(),
+            ENDPOINT_KEYS,
             &mut legacy_warnings,
         )? {
             Some(t) => t,
@@ -603,6 +623,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
             a.tier.as_deref(),
             tiers,
             a.base_url.as_deref(),
+            ENDPOINT_KEYS,
             &mut legacy_warnings,
         )? {
             Some(t) => t,
@@ -629,6 +650,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
                 Some(name),
                 tiers,
                 None,
+                ENDPOINT_KEYS,
                 &mut legacy_warnings,
             )?,
             None => None,
@@ -654,9 +676,14 @@ impl TryFrom<RawInferConfig> for InferConfig {
             None => None,
             Some(v) => {
                 let vt = match v.tier.as_deref() {
-                    Some(name) => {
-                        resolve_endpoint("vision", Some(name), tiers, None, &mut legacy_warnings)?
-                    }
+                    Some(name) => resolve_endpoint(
+                        "vision",
+                        Some(name),
+                        tiers,
+                        None,
+                        VISION_ENDPOINT_KEYS,
+                        &mut legacy_warnings,
+                    )?,
                     None => {
                         if v.base_url.is_some() {
                             resolve_endpoint(
@@ -664,6 +691,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
                                 None,
                                 tiers,
                                 v.base_url.as_deref(),
+                                VISION_ENDPOINT_KEYS,
                                 &mut legacy_warnings,
                             )?;
                         }
@@ -2096,6 +2124,176 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(cfg.infer.ask.context_tokens, 32768);
         assert_eq!(cfg.infer.ask.max_output_tokens, 4096);
-        assert!(!cfg.infer.ask.follow_up);
+    }
+    /// A tiered config with one endpoint everything can point at, so the tests
+    /// below say only the thing they are about. `[infer.ask]` is last, which is
+    /// what lets a test append a key to it.
+    const TIERED: &str = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        api_key = "tier-key"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        timeout_secs = 600
+        ceiling_param = "max_completion_tokens"
+        [infer.synthesize]
+        tier = "efficient"
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        tier = "efficient"
+    "#;
+
+    /// Vision is the one role folded by hand rather than through
+    /// `resolve_endpoint`, and the two halves of that are asymmetric on
+    /// purpose: a timeout describes the server, so it travels with the tier,
+    /// and an output ceiling describes what the reply is for, so it does not.
+    /// A later tidy-up that ran vision through the shared path would give it a
+    /// fifteen-minute timeout and the segmenter's ceiling with a green suite,
+    /// so the asymmetry is pinned here rather than left to a comment.
+    #[test]
+    fn a_vision_role_takes_its_endpoint_from_a_tier_but_not_its_output_ceiling() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{TIERED}\n[infer.vision]\nmodel = \"qwen-vl\"\ntier = \"efficient\"\n"
+        ))
+        .unwrap();
+        let v = cfg.infer.vision.as_ref().expect("configured");
+        assert_eq!(v.base_url.as_deref(), Some("http://localhost:8000/v1"));
+        assert_eq!(v.api_key.as_deref(), Some("tier-key"));
+        assert_eq!(
+            v.timeout_secs, 600,
+            "a timeout is a property of the server, so it comes from the tier"
+        );
+        assert_eq!(
+            v.ceiling_param,
+            Some(CeilingParam::MaxCompletionTokens),
+            "so is the name the ceiling is sent under"
+        );
+        assert_eq!(
+            v.max_output_tokens,
+            default_vision_max_output_tokens(),
+            "the tier's 16384 is sized for the segmenter; a description is \
+             stored as a corpus and keeps its own bound"
+        );
+        assert!(
+            cfg.infer.legacy_warnings.is_empty(),
+            "a fully tiered config has nothing to migrate: {:?}",
+            cfg.infer.legacy_warnings
+        );
+        assert!(!cfg.redacted().contains("tier-key"), "tier key leaked");
+    }
+
+    /// A vision block with no endpoint at all is the documented common case —
+    /// one server hosting a multimodal model — not a legacy shape. Warning
+    /// about it would train operators to ignore the warning that matters.
+    #[test]
+    fn a_vision_role_borrowing_the_synthesize_endpoint_is_not_a_legacy_shape() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!("{TIERED}\n[infer.vision]\nmodel = \"qwen-vl\"\n")).unwrap();
+        let v = cfg.infer.vision.as_ref().expect("configured");
+        assert!(
+            v.base_url.is_none(),
+            "`None` is what `resolve` reads as: use the synthesize endpoint"
+        );
+        assert_eq!(
+            v.timeout_secs,
+            default_vision_timeout_secs(),
+            "with no tier to take one from, the role keeps its own two minutes"
+        );
+        assert_eq!(
+            v.resolve(&cfg.infer.synthesize).0,
+            cfg.infer.synthesize.base_url
+        );
+        assert!(
+            cfg.infer.legacy_warnings.is_empty(),
+            "borrowing the synthesize endpoint is not something to migrate: {:?}",
+            cfg.infer.legacy_warnings
+        );
+    }
+
+    /// The migration warning is an instruction someone follows literally, so
+    /// per role it must name only the keys that role can actually move. Told to
+    /// move `model` out of `[infer.vision]`, an operator would delete the one
+    /// key the block requires and cannot inherit, and vision would stop loading
+    /// entirely — a shim doing more damage than the shape it deprecates.
+    #[test]
+    fn the_vision_warning_names_only_the_keys_vision_can_move() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{TIERED}\n[infer.vision]\nmodel = \"qwen-vl\"\nbase_url = \"http://vision:9000/v1\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.infer.legacy_warnings.len(),
+            1,
+            "only vision carries an endpoint inline here"
+        );
+        let w = &cfg.infer.legacy_warnings[0];
+        assert!(w.contains("[infer.vision]"), "{w}");
+        assert!(w.contains("base_url and api_key"), "{w}");
+        assert!(
+            w.contains("model stays here"),
+            "the message has to say what not to move: {w}"
+        );
+        assert!(
+            !w.contains("context_tokens"),
+            "not a vision key at all: {w}"
+        );
+        // And the endpoint it named is still the one it calls.
+        let v = cfg.infer.vision.as_ref().expect("configured");
+        assert_eq!(v.resolve(&cfg.infer.synthesize).0, "http://vision:9000/v1");
+    }
+
+    /// The follow-up call's whole reason to name a tier is to run somewhere
+    /// cheaper than the answer it feeds, so the endpoint has to arrive resolved
+    /// and complete — the completer is handed this, not a role.
+    #[test]
+    fn a_follow_up_tier_resolves_to_a_complete_endpoint() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!("{TIERED}\nfollow_up_tier = \"efficient\"\n")).unwrap();
+        let f = cfg
+            .infer
+            .ask
+            .follow_up_endpoint
+            .as_ref()
+            .expect("the named tier resolved");
+        assert_eq!(f.base_url, "http://localhost:8000/v1");
+        assert_eq!(f.model, "qwen");
+        assert_eq!(f.max_output_tokens, 16384);
+        assert_eq!(f.api_key.as_deref(), Some("tier-key"));
+        assert!(
+            !cfg.redacted().contains("tier-key"),
+            "the follow-up endpoint's key leaked"
+        );
+    }
+
+    /// Resolved at startup for the same reason every other tier name is: a typo
+    /// must fail where the operator can see it, not on the first question
+    /// somebody asks.
+    #[test]
+    fn a_follow_up_tier_that_does_not_exist_is_refused_like_any_other() {
+        let _guard = env_guard();
+        let err = load_infer(&format!("{TIERED}\nfollow_up_tier = \"efficent\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("follow_up_tier"), "name the key: {err}");
+        assert!(
+            err.contains("efficent"),
+            "the error must name the typo: {err}"
+        );
+        assert!(err.contains("efficient"), "and what was available: {err}");
     }
 }

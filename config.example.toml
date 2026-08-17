@@ -95,7 +95,11 @@ max_output_tokens = 16384
 # and `reasoning_effort` is not.
 #
 # The name belongs to the server, not to the role — which is why it lives on
-# the tier. A role that overrides it overrides it for itself only.
+# the tier. It is still keyed by (base_url, model) rather than by tier name, so
+# two tiers pointed at the same server and model — which is exactly what
+# `efficient` and `deep` are below, by default — share one learned name. Where
+# two of them are told different things, startup warns and the first one wins;
+# what an operator states beats what another role inferred.
 # ceiling_param = "max_tokens"
 
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
@@ -198,20 +202,32 @@ tier = "deep"
 
 # Reading captured images. Optional and disabled by default: with this block
 # absent the image door is closed and the capture page offers text only.
-# `model` is required. `base_url` and `api_key` default to the synthesize
-# role's, which is the common case — one local server hosting a multimodal
-# model. Set them when a separate vision endpoint serves the images.
+#
+# `model` is required and stays here whatever else moves: it names the vision
+# model, which is the point of the block, and it is never taken from a tier.
+# With no `tier` and no `base_url`, the role calls the synthesize endpoint —
+# the common case, one local server hosting a multimodal model too, and not a
+# shape that gets warned about. Give it a `tier` or a `base_url` when a
+# separate endpoint serves the images.
 # [infer.vision]
 # model = "qwen2.5-vl-7b"
+# tier = "efficient"
 # base_url = "http://localhost:8002/v1"
 # api_key = ""
+# Seconds before one description is given up on. Defaults to 120 — about one
+# image, and short on purpose, since a person is usually waiting on a capture.
+# A role pointed at a tier takes the tier's timeout instead, because a timeout
+# describes the server; set it here to keep the shorter bound anyway.
 # timeout_secs = 120
 # Hard cap on output tokens per description, sent on every call. Defaults to
-# 4096. What comes back is stored as a corpus and segmented from there, so an
-# endpoint left to apply its own ceiling is a document nobody sized.
+# 4096 and is never taken from a tier, however this block gets its endpoint: a
+# tier's ceiling is sized for the role it was written for, and what comes back
+# here is stored as a corpus and segmented from there, so an endpoint left to
+# apply its own ceiling is a document nobody sized.
 # max_output_tokens = 4096
-# See [infer.synthesize].ceiling_param. Inherited from that role when this block
-# has no base_url of its own, since then it is the same endpoint.
+# See [infer.tiers.efficient].ceiling_param. Taken from the tier when this
+# block names one, and from the synthesize role when it has no endpoint of its
+# own — in both cases because it is then the same server.
 # ceiling_param = "max_tokens"
 
 # ── Authentication ──────────────────────────────────────────────────────────
