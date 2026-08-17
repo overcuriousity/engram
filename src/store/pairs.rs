@@ -60,10 +60,14 @@ pub enum PairState {
     /// at a time leaves A pointing at a B that is itself hidden — which is what
     /// the sweep's union-find exists to prevent.
     NearIdentical,
-    /// The component this pair belongs to draws on more captured roots than
-    /// `merge_max_roots`. Not merged, and surfaced instead: a merge of forty
-    /// sources is no longer one atomic piece of knowledge, which is what an
-    /// artifact is defined to be.
+    /// Deprecated and never written. The variant survives one release so that
+    /// rows already carrying it still parse.
+    ///
+    /// It meant the component this pair belonged to drew on more captured roots
+    /// than `merge_max_roots` — terminal, and reached before any call was made,
+    /// so nothing could ever return to it. The unit judges two artifacts at a
+    /// time now, which removes the condition, and `reopen_oversized` puts the
+    /// rows left behind back in the queue.
     Oversized,
 }
 

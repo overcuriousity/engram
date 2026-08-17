@@ -207,7 +207,7 @@ the file — the loader warns if it finds one.
 | `infer.ask.*` | Completion model, used only by `ask`: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
-| `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`, `merge_max_roots`. |
+| `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`. |
 | `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |

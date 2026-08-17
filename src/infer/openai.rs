@@ -836,11 +836,12 @@ impl HttpCompleter {
 
 #[async_trait]
 impl Completer for HttpCompleter {
-    /// The judges come through here, and neither budgets its prompt against the
-    /// window: `dedupe_prompt` concatenates up to `merge_max_roots` whole
-    /// artifacts, and asking for the full configured ceiling beside that is a
-    /// request the endpoint refuses. So the ceiling is measured against what the
-    /// prompt costs, the way `ask` measures its own.
+    /// The judges come through here, and neither asks for a ceiling that fits
+    /// what it sent: `dedupe_prompt` carries two whole artifacts and, behind a
+    /// merged one, the captured sources it was written from — and asking for the
+    /// full configured ceiling beside that is a request the endpoint refuses. So
+    /// the ceiling is measured against what the prompt costs, the way `ask`
+    /// measures its own.
     ///
     /// A prompt that leaves no room for a reply is refused here rather than
     /// sent under a ceiling of 1. The clamped call does not fail cleanly: it
@@ -1662,11 +1663,11 @@ mod tests {
         );
     }
 
-    /// Neither judge budgets its prompt against the window — `dedupe_prompt`
-    /// concatenates up to `merge_max_roots` whole artifacts — so asking for the
-    /// configured ceiling regardless is a request the endpoint refuses outright.
-    /// That 400 is permanent, the pair is re-armed at the same size on every
-    /// later sweep, and the group never gets judged at all.
+    /// Neither judge's prompt is small — `dedupe_prompt` carries two whole
+    /// artifacts and the captured sources behind a merged one — so asking for
+    /// the configured ceiling regardless is a request the endpoint refuses
+    /// outright. That 400 is permanent, the pair is re-armed at the same size on
+    /// every later sweep, and it never gets judged at all.
     #[tokio::test]
     async fn a_judge_prompt_that_fills_the_window_shrinks_its_own_ceiling() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;

@@ -236,13 +236,17 @@ pub struct ConsolidateConfig {
     /// Zero switches the model off entirely: pairs are still found, recorded and
     /// clustered — all of which is free — and nothing is ever asked about.
     pub max_dedupe_per_tick: usize,
-    /// How many captured roots one merged artifact may be written from.
+    /// Deprecated and unread. Kept for one release so that an existing config
+    /// file still loads.
     ///
-    /// Above this the component is left alone and surfaced instead. A merge of
-    /// forty sources is no longer one atomic piece of knowledge, which is what
-    /// `schema.sql` defines an artifact to be — so past the cap the honest
-    /// answer is to stop rather than to write something nobody asked for.
-    pub merge_max_roots: usize,
+    /// It capped how many captured roots one merged artifact could be written
+    /// from, and a component past it was settled `Oversized` — terminal, and
+    /// reached before any call was made. The default of eight was never typed
+    /// by anyone and switched merging off for every cluster past eight sources;
+    /// sixteen pairs sat refused with no attempt against them. The unit merges
+    /// two artifacts at a time now and lets the results be merged again, so
+    /// fan-in is not something one call has to survive.
+    pub merge_max_roots: Option<usize>,
     /// An active artifact not confirmed accurate (`last_verified_at`) in this
     /// many days becomes a deprecation-review candidate — never anything more
     /// automatic than that. See `stale_max_hits`.
@@ -283,7 +287,7 @@ impl Default for ConsolidateConfig {
             interval_hours: 24,
             dedupe_interval_mins: 15,
             max_dedupe_per_tick: 5,
-            merge_max_roots: 8,
+            merge_max_roots: None,
             stale_after_days: 365,
             stale_max_hits: 0,
             judge: None,
@@ -834,19 +838,11 @@ impl Config {
             );
             self.feedback.candidates = ceiling;
         }
-        // Same argument as above: every judgeable component flattens to at
-        // least two roots, so a cap of zero or one settles all of them
-        // Oversized before any call — merging silently off from a number
-        // nobody types meaning that.
-        if self.consolidate.merge_max_roots < 2 {
-            let d = ConsolidateConfig::default().merge_max_roots;
+        if self.consolidate.merge_max_roots.is_some() {
             tracing::warn!(
-                configured = self.consolidate.merge_max_roots,
-                using = d,
-                "consolidate.merge_max_roots below 2 would settle every component \
-                 as oversized; using the default"
+                "consolidate.merge_max_roots is deprecated and ignored: merging is \
+                 pairwise now, so there is no fan-in for one call to survive"
             );
-            self.consolidate.merge_max_roots = d;
         }
         // The association widths multiply each other on the search path to
         // size one SQL `LIMIT`, and `interval_mins` is multiplied by sixty to
@@ -1126,20 +1122,19 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_cap_below_two_goes_back_to_the_default() {
-        // The same put-back as feedback.candidates: every judgeable component
-        // flattens to at least two roots, so a cap of 0 or 1 settles all of
-        // them Oversized before any call — merging silently off.
+    fn the_merge_cap_is_accepted_and_ignored() {
+        // The key stays parseable for one release so an existing config file
+        // still loads, and says nothing about how the sweep behaves. Left live,
+        // its default of eight quietly switched merging off for every cluster
+        // past eight sources.
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             &dir,
             &format!("{MINIMAL}\n[consolidate]\nmerge_max_roots = 1\n"),
         );
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(
-            cfg.consolidate.merge_max_roots,
-            ConsolidateConfig::default().merge_max_roots
-        );
+        assert_eq!(cfg.consolidate.merge_max_roots, Some(1));
+        assert_eq!(ConsolidateConfig::default().merge_max_roots, None);
     }
 
     #[test]
