@@ -45,7 +45,9 @@ Reply with JSON only, no commentary, in exactly this shape:
 {"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end],"caveats":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
-- category: one lowercase word, e.g. procedure, concept, reference, snippet.
+- category: exactly one of: concept, procedure, reference, snippet,
+  configuration, definition, example, other. This is what kind of thing the
+  artifact is, never what subject it is about.
 - tags: 1-5 lowercase keywords for filtering.
 - corpus_lines: the 1-based line range in the input this artifact came from.
 - caveats: 0-3 short sentences for conditions under which this artifact does
@@ -540,7 +542,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         merged: r.merged.map(|m| MergedDraft {
             title: m.title,
             text: m.text,
-            category: m.category,
+            category: m.category.map(|c| normalize_category(&c)),
             tags: m.tags,
             caveats: m.caveats,
         }),
@@ -567,6 +569,43 @@ struct RawArtifact {
     caveats: Vec<String>,
 }
 
+/// What kind of thing an artifact is.
+///
+/// A field about *form*, not about subject. These words are true of a corpus of
+/// recipes, of case law, or of forensics notes alike, which is what makes them
+/// safe to state here: naming forms hard-codes no domain.
+///
+/// Closed, because leaving it open is what let a domain in. Given a free
+/// string the model answered "System Administration" and "Forensic Science /
+/// Criminalistics" — subject words in a form field, which the filter row then
+/// offered beside `concept` and `procedure` as though they were the same kind
+/// of choice, in a second unlabelled taxonomy nothing had asked for. Anything
+/// off this list becomes `other`.
+pub const CATEGORIES: &[&str] = &[
+    "concept",
+    "procedure",
+    "reference",
+    "snippet",
+    "configuration",
+    "definition",
+    "example",
+    "other",
+];
+
+/// The stored form of whatever the model answered.
+///
+/// Never rejects: a good artifact carrying an unrecognised label is still a
+/// good artifact, and refusing it would spend the call again to get the same
+/// text back with a different word beside it.
+pub fn normalize_category(raw: &str) -> String {
+    let t = raw.trim().to_ascii_lowercase();
+    if CATEGORIES.contains(&t.as_str()) {
+        t
+    } else {
+        "other".to_string()
+    }
+}
+
 /// The shape `parse_response` will accept, as a JSON Schema for the endpoint to
 /// constrain generation with.
 ///
@@ -588,7 +627,7 @@ pub fn artifacts_schema() -> serde_json::Value {
                     "properties": {
                         "text": {"type": "string"},
                         "title": {"type": "string"},
-                        "category": {"type": "string"},
+                        "category": {"type": "string", "enum": CATEGORIES},
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "corpus_lines": {
                             "type": "array",
@@ -652,7 +691,7 @@ pub fn dedupe_schema() -> serde_json::Value {
         "properties": {
             "text": {"type": "string"},
             "title": {"type": "string"},
-            "category": {"type": "string"},
+            "category": {"type": "string", "enum": CATEGORIES},
             "tags": {"type": "array", "items": {"type": "string"}},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
@@ -857,7 +896,15 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
         .map(|c| ProposedArtifact {
             text: c.text.trim().to_string(),
             title: c.title.filter(|t| !t.trim().is_empty()),
-            category: c.category.filter(|t| !t.trim().is_empty()),
+            // An absent category stays absent: a model that answered nothing
+            // made no claim, and `other` is a claim. Anything it did answer is
+            // held to the list — the schema asks for one of them, and a model
+            // that ignores an enum would otherwise put its own word straight
+            // into the filter row.
+            category: c
+                .category
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| normalize_category(&t)),
             tags: c
                 .tags
                 .into_iter()
@@ -931,6 +978,41 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_category_off_the_list_becomes_other() {
+        // Subject words are what an unconstrained field collects: a corpus of
+        // forensics notes filled it with "Forensic Science / Criminalistics",
+        // which then appeared in the filter row beside "concept" as though it
+        // were the same kind of choice. The field is about form, and the enum
+        // is what keeps a domain out of the schema.
+        assert_eq!(
+            normalize_category("Forensic Science / Criminalistics"),
+            "other"
+        );
+        assert_eq!(normalize_category("System Administration"), "other");
+        assert_eq!(normalize_category(""), "other");
+    }
+
+    #[test]
+    fn a_category_on_the_list_survives_case_and_padding() {
+        assert_eq!(normalize_category("Procedure"), "procedure");
+        assert_eq!(normalize_category("  snippet "), "snippet");
+        assert_eq!(normalize_category("reference"), "reference");
+    }
+
+    #[test]
+    fn the_schema_constrains_the_category_to_the_list() {
+        let schema = artifacts_schema();
+        let cat = &schema["properties"]["artifacts"]["items"]["properties"]["category"];
+        let listed: Vec<&str> = cat["enum"]
+            .as_array()
+            .expect("the category is an enum, not a free string")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(listed, CATEGORIES);
+    }
 
     #[test]
     fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
