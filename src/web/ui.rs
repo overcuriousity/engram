@@ -409,8 +409,6 @@ struct ResultsTemplate {
     all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
-    /// `embed 41ms · total 138ms`, swapped into the header out of band.
-    timing: String,
 }
 
 #[derive(Template)]
@@ -793,7 +791,6 @@ async fn search_results(
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         })
         .into_response());
     }
@@ -847,7 +844,7 @@ async fn search_results(
         .into_iter()
         .map(|h| render_hit(0, h, &titles))
         .collect();
-    Ok(HtmlTemplate(ResultsTemplate {
+    let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
         // "nothing matches" over a list that plainly does would train the
@@ -858,9 +855,15 @@ async fn search_results(
         results,
         associated,
         terms,
-        timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
-    .into_response())
+    .into_response();
+    // Measured as before, reported where a browser already knows to show it.
+    // On the page it was a line of debug telemetry floated beside the results
+    // — a number nobody searching has a use for, in a place the eye lands.
+    if let Ok(v) = format!("embed;dur={}, total;dur={}", t.embed_ms, t.total_ms).parse() {
+        res.headers_mut().insert("server-timing", v);
+    }
+    Ok(res)
 }
 
 fn render_hit(
@@ -3236,7 +3239,6 @@ mod tests {
             associated: vec![],
             all_weak: true,
             terms: String::new(),
-            timing: String::new(),
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -3278,7 +3280,6 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         }
         .render()
         .unwrap();
@@ -3300,7 +3301,6 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         }
         .render()
         .unwrap();
@@ -3322,7 +3322,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -3338,7 +3337,6 @@ mod tests {
             )],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
@@ -3389,7 +3387,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -3402,7 +3399,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -3420,7 +3416,6 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         }
         .render()
         .unwrap();
@@ -4148,6 +4143,45 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn the_result_list_says_how_many_and_keeps_debug_timing_off_the_page() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=alpha")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Still measured, and still reported — to the place a browser already
+        // knows to show it rather than to the operator's page.
+        assert!(
+            res.headers().contains_key("server-timing"),
+            "the measurement moved to a header, it was not dropped"
+        );
+        let frag = body_of(res).await;
+        assert!(frag.contains("result-count"), "the count is stated: {frag}");
+        assert!(
+            !frag.contains("embed ") && !frag.contains("hx-swap-oob"),
+            "timing is not operator-facing: {frag}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_result_carries_the_id_the_selection_handler_matches_on() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let frag = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(
+            frag.contains(r#"role="option" aria-selected="false""#),
+            "{frag}"
+        );
+        assert!(frag.contains("/ui/artifacts/"), "{frag}");
     }
 
     #[tokio::test]

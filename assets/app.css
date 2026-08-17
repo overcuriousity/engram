@@ -349,9 +349,13 @@ body { overflow-x: hidden; }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
 .rail-title { font-weight: 600; font-size: 0.875rem; }
+/* Two lines at most, and a floor under it: an artifact whose excerpt came back
+   empty collapsed to a bare title, so card heights swung between one line and
+   four down a list that is read by scanning. */
 .rail-snippet {
   font-size: 0.8125rem; color: var(--color-fg-secondary); margin-top: 0.25rem;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 2.4em;
 }
 .pane { min-width: 0; }
 
@@ -364,6 +368,15 @@ body { overflow-x: hidden; }
   color: var(--color-fg-muted);
 }
 .rail-why { font-size: 0.8125rem; color: var(--color-fg-muted); margin-top: 0.25rem; }
+/* Recalled by association, not ranked against the query — so it must not
+   borrow the shape of something that was. The rule and the heading above said
+   so already, and the identical card underneath them said otherwise. */
+.rail-assoc { border-style: dashed; background: transparent; }
+/* The count, above the list. */
+.result-count {
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted); margin-bottom: 0.5rem;
+}
 
 /* Where the ranked list's relevance falls off. The rows past it are still
    ranked — they placed — but they no longer read as answers. */
