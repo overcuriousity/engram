@@ -261,6 +261,13 @@ pub fn spawn_retention_ticker(
     tokio::spawn(async move {
         if core.feedback.retain_days <= 0 {
             tracing::info!("captured searches and questions kept indefinitely");
+            // Nothing to expire, and with capture off nothing to group either:
+            // the ticker would wake every `sweep_hours` for the rest of the
+            // process to do nothing at all. The line above is the whole of what
+            // this task has to say, so it says it and stops.
+            if !core.feedback.enabled {
+                return;
+            }
         }
         let period = std::time::Duration::from_secs(core.feedback.sweep_hours.max(1) * 3600);
         let mut tick = tokio::time::interval(period);
@@ -599,6 +606,25 @@ mod tests {
         let _ = tx.send(true);
         let _ = h.await;
         assert_eq!(captured(&core).await, 1, "`0` must keep them forever");
+    }
+
+    /// Nothing to expire and, with capture off, nothing to group either. The
+    /// task used to return here; it lost the `return` when the gap sweep moved
+    /// in, and went on waking every `sweep_hours` for the life of the process to
+    /// do nothing at all.
+    #[tokio::test]
+    async fn a_ticker_with_nothing_to_do_stops_instead_of_idling() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.retain_days = 0;
+        core.feedback.enabled = false;
+
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_retention_ticker(core.clone(), rx);
+        // No shutdown is sent: it has to end on its own account.
+        tokio::time::timeout(Duration::from_secs(2), h)
+            .await
+            .expect("the ticker sat waiting for a tick it has no work for")
+            .unwrap();
     }
 
     #[tokio::test]
