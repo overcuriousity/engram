@@ -355,7 +355,7 @@ mod tests {
                 text: format!("chunk {i} ") + &"filler ".repeat(size),
                 corpus_span: None,
                 title: Some(format!("t{i}")),
-                category: Some("note".into()),
+                category: Some("reference".into()),
                 tags: vec![],
                 segment_idx: None,
                 caveats: vec![],

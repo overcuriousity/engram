@@ -31,13 +31,16 @@
   <p id="search-hint" class="muted hint">A sentence or a whole paragraph finds
     more than keywords do — paste what you are looking at.</p>
 
-  {% if !facets.categories.is_empty() || !facets.tags.is_empty() %}
+  {# One row, and one taxonomy in it. The tag row is gone: subject words have no
+     vocabulary that can be closed, so `forensics` and `forensik` sat beside
+     each other as two filters over one idea with nothing able to tell they were
+     the same. Deep links carrying `?tags=` still filter — what is gone is the
+     offer to pick from a list that drifts.
+
+     Labelled in the page, not only in `aria-label`: the row starts with "All",
+     and an unlabelled "All" is not a statement about anything. #}
+  {% if !facets.categories.is_empty() %}
   <div class="facets">
-    {# Labelled in the page, not only in `aria-label`: two unlabelled rows both
-       starting with "All" left the same word appearing in both with different
-       numbers beside it, which read as a contradiction rather than as a kind
-       and a tag. #}
-    {% if !facets.categories.is_empty() %}
     <div class="facet-row">
     <span class="facet-label">Kind</span>
     <div class="chips" role="group" aria-label="Kind">
@@ -54,26 +57,6 @@
       {% endfor %}
     </div>
     </div>
-    {% endif %}
-
-    {% if !facets.tags.is_empty() %}
-    <div class="facet-row">
-    <span class="facet-label">Tag</span>
-    <div class="chips" role="group" aria-label="Tag">
-      <label class="chip">
-        <input type="radio" name="tags" value="" {% if tag.is_empty() %}checked{% endif %}>
-        <span>All</span>
-      </label>
-      {% for f in facets.tags %}
-      <label class="chip">
-        <input type="radio" name="tags" value="{{ f.value }}"
-               {% if tag == f.value %}checked{% endif %}>
-        <span>{{ f.value }}</span>
-      </label>
-      {% endfor %}
-    </div>
-    </div>
-    {% endif %}
   </div>
   {% endif %}
 </form>

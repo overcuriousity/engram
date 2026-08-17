@@ -392,10 +392,9 @@ struct SearchTemplate {
     /// What this collection can actually be narrowed by. Rendered as chips, so
     /// choosing a category never means knowing in advance that it exists.
     facets: crate::vector::Facets,
-    /// The chips a deep link arrived with, so the form comes back selected
+    /// The chip a deep link arrived with, so the form comes back selected
     /// rather than reset to "all".
     category: String,
-    tag: String,
 }
 
 #[derive(Template)]
@@ -715,21 +714,16 @@ async fn search_page(
             tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
             Default::default()
         });
-    // The form is single-select, so only the first tag of a multi-tag deep
-    // link can be shown as chosen. The query still runs with all of them.
-    let tag = split_tags(p.tags).first().cloned().unwrap_or_default();
     let category = p.category.unwrap_or_default();
     // A deep link can name a value that falls outside the top `FACET_LIMIT`, or
     // one nothing carries at all. The rail is narrowed by it either way, so the
     // chip row has to show it: otherwise the page reads as unfiltered while the
     // results are not, and there is no chip to click to get back out.
     ensure_facet(&mut facets.categories, &category);
-    ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
-        tag,
         category,
     })
     .into_response())
@@ -2794,16 +2788,15 @@ mod tests {
         let (app, cookie) = app_with_embedded_corpus().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
 
-        // The fake synthesizer files everything under `note` and tags it
-        // `fake`, so those are exactly the values the payload index holds.
+        // The fake synthesizer files everything under `reference`, so that is
+        // the value the payload index holds. There is no tag row to render:
+        // subject words have no vocabulary that can be closed, so nothing
+        // offers a list of them.
         assert!(
-            html.contains(r#"name="category" value="note""#),
+            html.contains(r#"name="category" value="reference""#),
             "no category chip was rendered"
         );
-        assert!(
-            html.contains(r#"name="tags" value="fake""#),
-            "no tag chip was rendered"
-        );
+        assert!(!html.contains(r#"name="tags""#), "the tag row is gone");
         assert!(
             html.contains(r#"name="category" value="" checked"#),
             "there must be a selected way back to every category"
@@ -2856,8 +2849,18 @@ mod tests {
     #[tokio::test]
     async fn a_chip_narrows_the_result_list() {
         let (app, cookie) = app_with_embedded_corpus().await;
-        let matching = get(&app, "/ui/search/results?q=alpha&category=note", &cookie).await;
-        let missing = get(&app, "/ui/search/results?q=alpha&category=recipe", &cookie).await;
+        let matching = get(
+            &app,
+            "/ui/search/results?q=alpha&category=reference",
+            &cookie,
+        )
+        .await;
+        let missing = get(
+            &app,
+            "/ui/search/results?q=alpha&category=procedure",
+            &cookie,
+        )
+        .await;
 
         assert!(matching.contains("rail-item"), "the filter matched nothing");
         assert!(
@@ -4144,6 +4147,39 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn tags_are_stored_and_filterable_but_never_rendered() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].clone();
+        core.store
+            .update_artifact_tags(&c.id, &["forensik".into()])
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{}", c.id)).await;
+        assert!(
+            !page.contains("forensik"),
+            "no chips on the artifact: {page}"
+        );
+
+        let search = get_body(&app, &cookie, "/ui/search").await;
+        assert!(
+            !search.contains(r#"aria-label="Tag""#),
+            "no tag facet row: {search}"
+        );
+
+        // Still true, still stored, still the channel pinning rides on.
+        assert_eq!(
+            core.store.get_artifact(&c.id).await.unwrap().tags,
+            vec!["forensik".to_string()]
         );
     }
 

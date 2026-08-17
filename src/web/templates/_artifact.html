@@ -5,7 +5,6 @@
   </div>
   <div class="md">{{ c.html|safe }}</div>
   <div class="chips">
-    {% for t in c.tags %}<span class="badge">{{ t }}</span>{% endfor %}
     <button class="btn btn-ghost btn-sm"
             onclick="document.getElementById('edit-{{ c.id }}').style.display='block';this.style.display='none'">
       edit

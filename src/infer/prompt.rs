@@ -42,13 +42,12 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end],"caveats":["..."]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
 - category: exactly one of: concept, procedure, reference, snippet,
   configuration, definition, example, other. This is what kind of thing the
   artifact is, never what subject it is about.
-- tags: 1-5 lowercase keywords for filtering.
 - corpus_lines: the 1-based line range in the input this artifact came from.
 - caveats: 0-3 short sentences for conditions under which this artifact does
   not hold — a prerequisite, a version or platform it is specific to, a
@@ -190,7 +189,7 @@ When you answer "duplicate", the merged text must contain every number, version,
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}}
+{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
 
 - relation: one of "duplicate", "replaced", "conflict", "distinct".
 - detail: one short sentence saying why. Always.
@@ -461,8 +460,6 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         #[serde(default)]
         category: Option<String>,
         #[serde(default)]
-        tags: Vec<String>,
-        #[serde(default)]
         caveats: Vec<String>,
     }
 
@@ -543,7 +540,10 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
             title: m.title,
             text: m.text,
             category: m.category.map(|c| normalize_category(&c)),
-            tags: m.tags,
+            // Same rule as a synthesised artifact: nothing writes tags on a
+            // caller's behalf, and a merge inventing its own would be the
+            // drifting vocabulary arriving by a second door.
+            tags: Vec::new(),
             caveats: m.caveats,
         }),
     })
@@ -561,8 +561,6 @@ struct RawArtifact {
     title: Option<String>,
     #[serde(default)]
     category: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
     #[serde(default)]
     corpus_lines: Option<Vec<i64>>,
     #[serde(default)]
@@ -615,7 +613,7 @@ pub fn normalize_category(raw: &str) -> String {
 ///
 /// Every field is required. The optional ones are optional to *serde*, so an
 /// older reply still parses, but there is no reason to let a model that is
-/// being told the shape anyway omit the line range or the tags.
+/// being told the shape anyway omit the line range or the caveats.
 pub fn artifacts_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -628,7 +626,6 @@ pub fn artifacts_schema() -> serde_json::Value {
                         "text": {"type": "string"},
                         "title": {"type": "string"},
                         "category": {"type": "string", "enum": CATEGORIES},
-                        "tags": {"type": "array", "items": {"type": "string"}},
                         "corpus_lines": {
                             "type": "array",
                             "items": {"type": "integer"},
@@ -637,7 +634,7 @@ pub fn artifacts_schema() -> serde_json::Value {
                         },
                         "caveats": {"type": "array", "items": {"type": "string"}}
                     },
-                    "required": ["text", "title", "category", "tags", "corpus_lines", "caveats"],
+                    "required": ["text", "title", "category", "corpus_lines", "caveats"],
                     "additionalProperties": false
                 }
             }
@@ -692,16 +689,15 @@ pub fn dedupe_schema() -> serde_json::Value {
             "text": {"type": "string"},
             "title": {"type": "string"},
             "category": {"type": "string", "enum": CATEGORIES},
-            "tags": {"type": "array", "items": {"type": "string"}},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
         // Every field, for the reason `artifacts_schema` requires every field:
-        // a model being told the shape anyway has no reason to omit the tags,
+        // a model being told the shape anyway has no reason to omit a field,
         // and `strict` makes the rule structural rather than stylistic — a
         // property a strict schema lists and does not require is a schema the
         // hosted APIs reject outright, which fails the call rather than
         // loosening it.
-        "required": ["text", "title", "category", "tags", "caveats"],
+        "required": ["text", "title", "category", "caveats"],
         "additionalProperties": false
     });
     serde_json::json!({
@@ -905,11 +901,14 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 .category
                 .filter(|t| !t.trim().is_empty())
                 .map(|t| normalize_category(&t)),
-            tags: c
-                .tags
-                .into_iter()
-                .filter(|t| !t.trim().is_empty())
-                .collect(),
+            // Nothing writes tags automatically any more. No domain-agnostic
+            // vocabulary exists for subject words, so a generated one is a
+            // vocabulary that drifts: `forensics` and `forensik`, `security`
+            // and `sicherheit`, two filters over one idea and nothing able to
+            // tell they are the same. The field stays — it is the channel
+            // pinning rides on and a public API filter — written by a caller
+            // who means a particular tag.
+            tags: Vec::new(),
             corpus_lines: match c.corpus_lines.as_deref() {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
@@ -978,6 +977,23 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_schema_no_longer_asks_for_tags() {
+        // No domain-agnostic vocabulary exists for subject words, so a
+        // generated one is a vocabulary that drifts: `forensics` and `forensik`
+        // became two filters over one idea. The field survives for callers who
+        // mean a particular tag; nothing writes it on their behalf.
+        let items = &artifacts_schema()["properties"]["artifacts"]["items"];
+        assert!(items["properties"]["tags"].is_null());
+        let required: Vec<&str> = items["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(!required.contains(&"tags"), "{required:?}");
+    }
 
     #[test]
     fn a_category_off_the_list_becomes_other() {
@@ -1494,7 +1510,9 @@ mod tests {
         let m = d.merged.as_ref().unwrap();
         assert_eq!(m.text, "Use mount --bind.");
         assert_eq!(m.title.as_deref(), Some("Bind mounts"));
-        assert_eq!(m.tags, vec!["mount".to_string()]);
+        // Offered by the model and not kept: a merge writes no tags of its own,
+        // for the same reason synthesis does not.
+        assert!(m.tags.is_empty());
     }
 
     #[test]
@@ -1642,10 +1660,10 @@ mod tests {
         let out = parse_response(GOOD).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("Mount an E01 image"));
-        assert_eq!(
-            out[0].tags,
-            vec!["forensics".to_string(), "linux".to_string()]
-        );
+        // The reply still carries tags and they are still dropped: the schema
+        // stopped asking, and what a model volunteers anyway is the same
+        // drifting vocabulary by another route.
+        assert!(out[0].tags.is_empty());
         assert_eq!(out[0].corpus_lines, Some((3, 9)));
     }
 
