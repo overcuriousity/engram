@@ -9,6 +9,7 @@
 //! whatever documents the operator actually wants to search. What lives here is
 //! the shape of the files and the arithmetic over ranks.
 
+pub mod claims;
 pub mod export;
 pub mod metrics;
 

@@ -343,6 +343,40 @@ pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
     )
 }
 
+/// The claim check behind the ask harness. It never runs on a request path.
+pub const CLAIMS_SYSTEM: &str = r#"You check an answer against the excerpts it was written from. Split the answer into its atomic factual claims — one statement each, in the answer's own words. For every claim, list the numbers of the excerpts that state or directly entail it. A claim no excerpt supports gets an empty list. Do not judge whether a claim is true, only whether the excerpts say it. Reply with JSON only: {"claims":[{"claim":"…","supported_by":[1,3]}]}"#;
+
+pub fn claims_prompt(answer: &str, excerpts: &[String]) -> String {
+    format!(
+        "Answer:\n{answer}\n\nExcerpts:\n\n{}",
+        excerpts.join("\n\n---\n\n")
+    )
+}
+
+/// The shape `eval::claims::parse_claims` reads. Rooted in an object and
+/// closed, like every judge schema.
+pub fn claims_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string"},
+                        "supported_by": {"type": "array", "items": {"type": "integer"}}
+                    },
+                    "required": ["claim", "supported_by"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["claims"],
+        "additionalProperties": false
+    })
+}
+
 /// The verdict inside the envelope, or the reply itself if it came without one.
 ///
 /// `dedupe_schema` and `link_schema` both wrap their union under `verdict`,
@@ -1100,6 +1134,7 @@ mod tests {
         for (name, schema) in [
             ("dedupe", dedupe_schema()),
             ("link", link_schema()),
+            ("claims", claims_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the

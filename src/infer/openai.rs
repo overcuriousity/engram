@@ -805,6 +805,12 @@ impl HttpCompleter {
         Self::judging(cfg, ("link", prompt::link_schema()))
     }
 
+    /// The claim check behind the ask harness: same endpoint and settings as
+    /// the judges, its own response shape.
+    pub fn for_claim_checking(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("claims", prompt::claims_schema()))
+    }
+
     fn judging(cfg: &SynthesizeRole, schema: (&'static str, serde_json::Value)) -> Self {
         Self {
             ep: Endpoint::new(

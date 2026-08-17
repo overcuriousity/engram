@@ -32,9 +32,97 @@ pub fn mrr(ranks: &[Option<usize>]) -> f64 {
     total / ranks.len() as f64
 }
 
+/// One question's citation recall: the fraction of its carriers that were
+/// cited. Each carrier is a list of ids that satisfy it — itself and whatever
+/// superseded it. No carriers is nothing to miss, and scores 1.
+pub fn fraction_cited(carriers: &[Vec<String>], cited: &[String]) -> f64 {
+    if carriers.is_empty() {
+        return 1.0;
+    }
+    let hit = carriers
+        .iter()
+        .filter(|alts| alts.iter().any(|a| cited.contains(a)))
+        .count();
+    hit as f64 / carriers.len() as f64
+}
+
+/// The four corners of "did it say nothing here when it should have".
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Abstention {
+    pub should_and_did: usize,
+    pub should_and_did_not: usize,
+    pub should_not_did: usize,
+    pub should_not_did_not: usize,
+}
+
+impl Abstention {
+    /// `(expected, observed)` per question.
+    pub fn tally(pairs: &[(bool, bool)]) -> Self {
+        let mut t = Self::default();
+        for &(expected, observed) in pairs {
+            match (expected, observed) {
+                (true, true) => t.should_and_did += 1,
+                (true, false) => t.should_and_did_not += 1,
+                (false, true) => t.should_not_did += 1,
+                (false, false) => t.should_not_did_not += 1,
+            }
+        }
+        t
+    }
+}
+
+/// `(answers with no unsupported item, answers)`.
+pub fn fully_supported(unsupported_counts: &[usize]) -> (usize, usize) {
+    (
+        unsupported_counts.iter().filter(|n| **n == 0).count(),
+        unsupported_counts.len(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fraction_cited_counts_each_carrier_once_and_accepts_a_successor() {
+        let carriers = vec![
+            vec!["a".to_string()],
+            vec!["b".to_string(), "b2".to_string()],
+        ];
+        assert_eq!(fraction_cited(&carriers, &["a".into(), "x".into()]), 0.5);
+        assert_eq!(fraction_cited(&carriers, &["a".into(), "b2".into()]), 1.0);
+        assert_eq!(
+            fraction_cited(&[], &["a".into()]),
+            1.0,
+            "no carriers is nothing to miss"
+        );
+    }
+
+    #[test]
+    fn abstention_tallies_the_four_corners() {
+        let t = Abstention::tally(&[
+            (true, true),
+            (true, false),
+            (false, true),
+            (false, false),
+            (false, false),
+        ]);
+        assert_eq!(
+            (
+                t.should_and_did,
+                t.should_and_did_not,
+                t.should_not_did,
+                t.should_not_did_not
+            ),
+            (1, 1, 1, 2)
+        );
+    }
+
+    #[test]
+    fn fully_supported_counts_answers_with_nothing_unsupported() {
+        assert_eq!(fully_supported(&[0, 2, 0]), (2, 3));
+        assert_eq!(fully_supported(&[]), (0, 0));
+    }
 
     #[test]
     fn recall_counts_a_hit_anywhere_within_k() {
