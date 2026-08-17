@@ -1,0 +1,85 @@
+{% extends "layout.html" %}
+{% block title %}Settings — engram{% endblock %}
+{% block content %}
+
+{# Everything true about this installation rather than about what is in it.
+   The two were one page, which meant scrolling past every merge and every
+   hidden artifact to revoke a token. Reachable from the same quiet line under
+   Capture as Housekeeping, and no more advertised than it is. #}
+<p class="crumb"><a href="/ui/capture">Capture</a> › Settings</p>
+
+<h3>Browser extension</h3>
+{# The extension mints its own token through /ui/pair, so it needs nothing from
+   the form below. Listed here because this is where the tokens it creates show
+   up. #}
+<p><a href="/extension/install">Install it</a> — capture the page you are
+reading, and search from a panel beside it.</p>
+
+<h3>API tokens</h3>
+<div id="token-result"></div>
+<form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"
+      class="row" style="margin-bottom:1rem">
+  <input class="input" name="name" placeholder="Token name, e.g. claude-code" style="max-width:20rem">
+  <button class="btn btn-accent" type="submit">Mint</button>
+</form>
+
+<table class="grid">
+  <thead><tr><th>Name</th><th>Minted by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
+  <tbody>
+  {% for t in tokens %}
+    <tr>
+      <td>{{ t.name }}</td>
+      <td class="muted">{{ t.minted_by }}</td>
+      <td class="muted mono">{{ t.created }}</td>
+      <td class="muted mono">{{ t.last_used }}</td>
+      <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>
+          {% else %}<span class="badge badge-success">active</span>{% endif %}</td>
+      <td>
+        {% if !t.revoked %}
+        {# Confirmed, and naming what it is about to break: anything holding
+           this token stops working the moment it is pressed, and two tokens can
+           carry the same name.
+
+           The name is read back out of `data-name` rather than written into the
+           handler — escaped into an attribute it survives, escaped into a
+           string literal inside an attribute it does not, and one apostrophe
+           would make the handler a syntax error that fails open. #}
+        <form method="post" action="/ui/ops/tokens/{{ t.id }}/revoke"
+              data-name="{{ t.name }}"
+              onsubmit="return confirm('Revoke “' + this.dataset.name + '”? Anything using it stops working immediately.')">
+          <button class="btn btn-sm btn-danger" type="submit">Revoke</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% match feedback %}
+{% when Some with (f) %}
+<h3>Feedback</h3>
+{# Said plainly and where the operator already looks. A recording indicator
+   beside the search box would be in view during every keystroke; this is the
+   page for things that are true about the installation. #}
+<p class="muted">
+  Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
+  {% if f.pending > 0 %}<a href="/ui/judge">Judge them</a>{% endif %}
+</p>
+{# Counted here beside the searches because one purge takes both. The judged
+   count is what the button below destroys and what nothing can reproduce: a
+   verdict on a question is a person's own work, and the only material
+   `--export-eval` builds questions.json from. #}
+{% match asks %}
+{% when Some with (a) %}
+<p class="muted">
+  Questions too — {{ a.asked }} asked, {{ a.judged }} judged.
+</p>
+{% when None %}
+{% endmatch %}
+<form method="post" action="/ui/ops/feedback/purge"
+      onsubmit="return confirm('Delete every captured search and every recorded question, with every verdict given on one? The judged questions cannot be recovered — they are what the ask harness is measured against.')">
+  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches and questions</button>
+</form>
+{% when None %}
+{% endmatch %}
+{% endblock %}

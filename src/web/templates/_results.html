@@ -1,8 +1,11 @@
-<span id="timing-value" hx-swap-oob="innerHTML:#timing">{{ timing }}</span>
 {% if results.is_empty() && associated.is_empty() %}
   <p class="muted">No matches.</p>
 {% else %}
 <div data-terms="{{ terms }}">
+  {# Counted off the list rather than passed in beside it, so the number and
+     the rows cannot disagree. Said once above them: a ranked list with no
+     count is a list you cannot tell is complete. #}
+  <div class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}</div>
   {# Said once, above the list, rather than repeated on every card: when the
      whole answer is loose the useful statement is about the search, not about
      each result. Retrieval always returns its best candidates however bad they
@@ -19,11 +22,16 @@
   </div>
   {% endif %}
   {% for r in results %}
+  {# Once, before the first row past it: the ranks continue — those hits did
+     place — but the page stops claiming each of them is an answer. #}
+  {% if r.past_cliff && (loop.first || !results[loop.index0 - 1].past_cliff) %}
+  <div class="cliff-rule" role="separator">Relevance falls off here</div>
+  {% endif %}
   {# The delete control is a sibling of the link rather than a child: a button
      inside an anchor is invalid, and the anchor must keep being the
      `.rail-item` the arrow keys move between. #}
   <div class="rail-row">
-    <a class="rail-item" role="option" aria-selected="false"
+    <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
        href="/ui/artifacts/{{ r.artifact_id }}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
        hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">

@@ -1846,7 +1846,6 @@ impl VectorStore for QdrantVectors {
     async fn facets(&self, limit: usize) -> Result<Facets> {
         Ok(Facets {
             categories: self.facet("category", limit).await?,
-            tags: self.facet("tags", limit).await?,
         })
     }
 

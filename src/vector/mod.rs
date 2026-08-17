@@ -121,12 +121,17 @@ pub struct FacetCount {
     pub count: u64,
 }
 
-/// What the search page offers to narrow by. Both lists arrive already sorted
-/// by count, descending, because that is the order the chips are rendered in.
+/// What the search page offers to narrow by, already sorted by count,
+/// descending, because that is the order the chips are rendered in.
+///
+/// Categories only. A tag row was here too, and the page stopped rendering it
+/// when the vocabulary folded onto a closed list of form words — counting a
+/// facet nothing displays cost a round trip per page load. Tags are still
+/// stored, still what pinning rides on, and still filter
+/// `/ui/search/results?tags=`; nothing offers them as chips.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct Facets {
     pub categories: Vec<FacetCount>,
-    pub tags: Vec<FacetCount>,
 }
 
 /// One artifact to stamp as shown, and the `hit_count` the caller already read

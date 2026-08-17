@@ -642,14 +642,17 @@ impl Store {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(sqlx::query(
+        let searches = sqlx::query(
             "DELETE FROM search_events
                  WHERE created_at < ? AND (verdict IS NULL OR verdict = 'discard')",
         )
         .bind(now() - retain_days * 86_400)
         .execute(&self.pool)
         .await?
-        .rows_affected())
+        .rows_affected();
+        // One promise, both tables. A question is the same class of personal
+        // data as a query and ages under the same window.
+        Ok(searches + self.expire_asks(retain_days).await?)
     }
 
     /// Everything captured, gone. Judgements included: they are statements
@@ -657,10 +660,11 @@ impl Store {
     /// record of anything.
     pub async fn purge_feedback(&self) -> Result<u64> {
         // `search_candidates` goes with it through ON DELETE CASCADE.
-        Ok(sqlx::query("DELETE FROM search_events")
+        let searches = sqlx::query("DELETE FROM search_events")
             .execute(&self.pool)
             .await?
-            .rows_affected())
+            .rows_affected();
+        Ok(searches + self.purge_asks().await?)
     }
 }
 

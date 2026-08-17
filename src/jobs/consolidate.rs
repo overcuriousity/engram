@@ -194,6 +194,74 @@ pub(crate) async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     Ok(rows.len())
 }
 
+/// How many rows one round of the category repair rewrites before reading the
+/// next. The pass drains, so this bounds a round trip's worth of memory rather
+/// than the work.
+const CATEGORY_REPAIR_BATCH: i64 = 200;
+
+/// Bring vector payloads back in step with the rows the category fold changed.
+///
+/// SQLite is migrated on connect; Qdrant is a separate store with no such hook,
+/// so a folded row and its payload disagree until something rewrites the point.
+/// It runs here, on the repair ticker, rather than where it started — inside the
+/// Housekeeping page handler. Two reasons, and the second is the real one: two
+/// hundred sequential payload round trips held the one page an operator opens
+/// when something is wrong; and, until they had opened it enough times to drain
+/// the whole backlog, `/ui/search` went on building its category chips from the
+/// stale payload, offering folded subject words as filters and a `?category=`
+/// that matched nothing. A migration's visible effect cannot be deferred to a
+/// page nobody is told to visit.
+///
+/// Drains rather than doing one batch: every row it touches is stamped, so the
+/// query strictly shrinks and the loop ends. Payload only — nothing the embedder
+/// was shown has changed, so no vector is recomputed. The same reasoning as the
+/// tag edit in `api.rs`.
+pub(crate) async fn repair_category_payloads(core: &Core) -> Result<usize> {
+    let mut fixed = 0;
+    loop {
+        let batch = core
+            .store
+            .artifacts_needing_category_repair(CATEGORY_REPAIR_BATCH)
+            .await?;
+        if batch.is_empty() {
+            break;
+        }
+        for c in batch {
+            // A chunk still waiting to be embedded has no point to rewrite, and
+            // the pending embed job writes the whole payload anyway. Stamped
+            // regardless, so it is not looked at again.
+            if c.embed_state == crate::store::artifacts::EmbedState::Embedded {
+                core.vectors
+                    .set_payload(&crate::vector::VectorPayload {
+                        artifact_id: c.id.clone(),
+                        corpus_id: c.corpus_id.clone().unwrap_or_default(),
+                        text: c.text.clone(),
+                        title: c.title.clone(),
+                        category: c.category.clone(),
+                        tags: c.tags.clone(),
+                        created_at: c.created_at,
+                        last_seen_at: None,
+                        hit_count: None,
+                        superseded: None,
+                        status: None,
+                        last_verified_at: None,
+                        superseded_by: None,
+                    })
+                    .await?;
+                fixed += 1;
+            }
+            core.store.mark_payload_synced(&c.id).await?;
+        }
+    }
+    if fixed > 0 {
+        tracing::info!(
+            repaired = fixed,
+            "rewrote vector payloads the category fold had left behind"
+        );
+    }
+    Ok(fixed)
+}
+
 pub async fn run(core: &Core) -> Result<Outcome> {
     let cfg = &core.consolidate;
     if !cfg.enabled {
@@ -432,6 +500,99 @@ pub(crate) mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::pairs::PairState;
     use crate::vector::{VectorPayload, VectorPoint};
+
+    #[tokio::test]
+    async fn the_repair_pass_drains_the_payloads_the_category_fold_changed() {
+        // It used to run inside the Housekeeping page handler, two hundred rows
+        // per visit. Here it drains in one pass on the ticker, so search stops
+        // offering folded subject words as chips without anyone being told to go
+        // and open a page.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Through the fold itself, not by writing `other` over the rows: a row
+        // written by the current vocabulary is stamped at birth and is *not*
+        // owed a repair, which is what keeps this pass from rewriting the
+        // payload of every new `other` capture on every tick. Only the migration
+        // clears that stamp, and only on what it changed.
+        sqlx::query("UPDATE artifacts SET category = 'System Administration'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store.migrate().await.unwrap();
+        let owed = core
+            .store
+            .artifacts_needing_category_repair(CATEGORY_REPAIR_BATCH)
+            .await
+            .unwrap()
+            .len();
+        assert!(
+            owed > 0,
+            "there is something to repair before the pass runs"
+        );
+
+        assert_eq!(repair_category_payloads(&core).await.unwrap(), owed);
+        assert!(
+            core.store
+                .artifacts_needing_category_repair(CATEGORY_REPAIR_BATCH)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the pass drains rather than doing one batch"
+        );
+        assert_eq!(
+            repair_category_payloads(&core).await.unwrap(),
+            0,
+            "and on a base already in step it rewrites nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_capture_is_never_owed_a_category_repair() {
+        // `other` is what `normalize_category` folds every unrecognised kind to,
+        // so a large share of every capture carries it. Matching those meant the
+        // pass never drained: on each tick it issued a `set_payload` per new
+        // artifact, rewriting the payload the embed job had just written.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let ids: Vec<String> = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert!(!ids.is_empty(), "the fixture must capture something");
+        for id in &ids {
+            core.store
+                .update_artifact_category(id, Some("other"))
+                .await
+                .unwrap();
+        }
+        assert!(
+            core.store
+                .artifacts_needing_category_repair(CATEGORY_REPAIR_BATCH)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing folded these rows, so nothing owes their payloads a rewrite"
+        );
+        assert_eq!(repair_category_payloads(&core).await.unwrap(), 0);
+    }
 
     /// Sweep, then work the judge units it armed.
     ///

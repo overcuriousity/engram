@@ -13,6 +13,7 @@ use axum::routing::{get, post};
 
 // ── View models ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct RenderedResult {
     /// What the rail entry links to: the detail pane for this chunk.
     pub artifact_id: String,
@@ -41,6 +42,10 @@ pub struct RenderedResult {
     /// This hit moved up on activation. A small marker, because the claim is
     /// small: it passed a near-tie, it did not become a better match.
     pub primed: bool,
+    /// Past the point where this list's relevance falls off. Greyed, under a
+    /// rule; the rank stays, because it did place — the claim withdrawn is
+    /// "this is an answer", not "this is fifth". See `search::cliff`.
+    pub past_cliff: bool,
     /// The title of the ranked hit that recalled this one. Set only on an
     /// associated hit, and it is what the row names.
     pub via_title: Option<String>,
@@ -62,6 +67,12 @@ pub struct QueueRow {
     /// formatted. `—` for a capture that has not been read yet.
     pub coverage: String,
     pub low_coverage: bool,
+    /// Whether the loss can be placed in the source. False for a capture with
+    /// no segment rows — one read before per-segment windows existed, whose
+    /// coverage is still measured against the whole document but whose lines
+    /// cannot be attributed to anything. The warning stays; the link to
+    /// `#uncovered` does not, because that section renders nothing for it.
+    pub locatable: bool,
     /// Still on its way through the pipeline. Only these announce themselves;
     /// a finished capture is a title and a count.
     pub in_flight: bool,
@@ -198,6 +209,11 @@ pub struct ParkedRow {
 pub struct SupersededRow {
     pub id: String,
     pub title: String,
+    /// When it was written and how it opens. Two artifacts can carry the same
+    /// title — a merge of two documents that named a section identically
+    /// produces exactly that — and a table of them is unreadable without
+    /// something that differs between the rows.
+    pub subtitle: String,
     pub winner_id: String,
     pub winner_title: String,
 }
@@ -247,6 +263,10 @@ pub struct TokenRow {
     pub name: String,
     pub created: String,
     pub last_used: String,
+    /// What asked for the token, as it announced itself, or `—` for one minted
+    /// before this was recorded. The extension names every token it mints the
+    /// same thing, so this is what tells two of those rows apart.
+    pub minted_by: String,
     pub revoked: bool,
 }
 
@@ -338,6 +358,31 @@ struct CaptureTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the page offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// The holes, grouped and named by the sweep. Empty when feedback is off.
+    gaps: Vec<GapGroup>,
+    /// Open gaps the sweep has not grouped yet.
+    loose: Vec<GapMember>,
+}
+
+/// One unanswered question or gap search, as the capture page lists it.
+pub struct GapMember {
+    /// `ask` or `search`, for the dismiss route.
+    pub kind: String,
+    pub id: String,
+    pub text: String,
+}
+
+pub struct GapGroup {
+    pub label: String,
+    pub members: Vec<GapMember>,
+}
+
+fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
+    GapMember {
+        kind: g.kind.as_str().into(),
+        id: g.id,
+        text: g.text,
+    }
 }
 
 #[derive(Template)]
@@ -362,10 +407,9 @@ struct SearchTemplate {
     /// What this collection can actually be narrowed by. Rendered as chips, so
     /// choosing a category never means knowing in advance that it exists.
     facets: crate::vector::Facets,
-    /// The chips a deep link arrived with, so the form comes back selected
+    /// The chip a deep link arrived with, so the form comes back selected
     /// rather than reset to "all".
     category: String,
-    tag: String,
 }
 
 #[derive(Template)]
@@ -380,8 +424,6 @@ struct ResultsTemplate {
     all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
-    /// `embed 41ms · total 138ms`, swapped into the header out of band.
-    timing: String,
 }
 
 #[derive(Template)]
@@ -427,6 +469,18 @@ struct CorpusTemplate {
     /// — but the original is not stored, so this is the only place they exist.
     exif_rows: Vec<(String, String)>,
     note: Option<String>,
+    /// Stretches of this capture that no artifact carried. Where the coverage
+    /// warning on Recent lands: the percentage says how much was lost, and this
+    /// says which parts, which is the half that can be acted on.
+    uncovered: Vec<UncoveredRange>,
+}
+
+/// A stretch of a capture that no artifact carried, for the corpus page.
+pub struct UncoveredRange {
+    pub from: i64,
+    /// `line 42` or `lines 42–96` — the same singular rule the source pane
+    /// label follows.
+    pub label: String,
 }
 
 #[derive(Template)]
@@ -464,21 +518,44 @@ struct OpsTemplate {
     /// Artifacts the dedupe pass wrote out of several others, with what they
     /// were written from and an undo.
     merged: Vec<MergedRow>,
+    /// The list is capped; there are rows this page is not showing. Said out
+    /// loud, because a table that stops without saying so reads as a table of
+    /// everything there is.
+    more_merged: bool,
+    more_superseded: bool,
+    /// `TABLE_CAP`, so the line that says how many rows are showing says the
+    /// number the code actually truncated to. Written out twice in the
+    /// template, it drifted from the constant the first time either moved.
+    table_cap: i64,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
-    tokens: Vec<TokenRow>,
-    /// `None` when capture is switched off, which renders nothing at all: a
-    /// section about a log nobody is keeping is noise.
-    feedback: Option<crate::store::feedback::Stats>,
     /// `None` when nothing is being learned, which renders nothing at all: a
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
 }
 
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
+    tokens: Vec<TokenRow>,
+    /// `None` when capture is switched off, which renders nothing at all: a
+    /// section about a log nobody is keeping is noise.
+    feedback: Option<crate::store::feedback::Stats>,
+    /// The questions, counted beside the searches. Set exactly when `feedback`
+    /// is: one switch records both, one purge takes both, and a page that named
+    /// only the searches let an operator clear their query log without knowing
+    /// the judged questions went with it.
+    asks: Option<crate::store::asks::AskStats>,
+}
+
 struct MergedRow {
     id: String,
     title: String,
+    /// See `SupersededRow::subtitle`: what tells two rows with one title apart.
+    subtitle: String,
     /// What it was written from, in the order the lineage stores them.
     sources: Vec<SourceRow>,
     /// True when a source has been deleted since, so the artifact claims less
@@ -489,9 +566,22 @@ struct MergedRow {
 pub struct SourceRow {
     pub id: String,
     pub title: String,
+    /// See `SupersededRow::subtitle`. A merge written from two sources that
+    /// shared a title listed that title twice and said nothing else.
+    pub subtitle: String,
     /// Empty when the source belongs to no corpus — a merge of merges resolves
     /// to captured roots, so in practice this is always set.
     pub corpus_id: String,
+}
+
+/// When an artifact was written and how it opens, for a table where the title
+/// alone may not be unique.
+fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
+    format!(
+        "{} · {}",
+        fmt_time(c.created_at),
+        markdown::snippet(&c.text, 60)
+    )
 }
 
 /// The source list a merge renders: its lineage roots, fetched and titled.
@@ -517,6 +607,7 @@ async fn source_rows(
             sources.push(SourceRow {
                 corpus_id: r.corpus_id.clone().unwrap_or_default(),
                 title: title_of(&r),
+                subtitle: row_subtitle(&r),
                 id: r.id,
             });
         }
@@ -535,6 +626,14 @@ struct TokenCreatedTemplate {
 struct AskTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// A question to prefill the box with — a gap's "ask again".
+    q: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AskPrefill {
+    #[serde(default)]
+    q: String,
 }
 
 #[derive(Template)]
@@ -547,19 +646,78 @@ struct AnswerTemplate {
     /// same reason: a cut-off answer is otherwise indistinguishable from a
     /// finished one.
     truncated: bool,
+    /// The answer said "not in the base"; badged so the operator sees what
+    /// the harness will count.
+    abstained: bool,
+    /// Set when the question was recorded; the verdict bar exists only then.
+    event_id: Option<String>,
+    /// The bar, rendered — empty when there is no event.
+    verdict_bar: String,
+}
+
+#[derive(Template)]
+#[template(path = "_ask_verdict.html")]
+struct AskVerdictTemplate {
+    event_id: String,
+    /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
+    verdict: Option<String>,
+    /// Marks the bar to swap itself out-of-band. Set when it rides along with
+    /// something else — the carrier toggle — and not when it is the response
+    /// the click already targets.
+    oob: bool,
+}
+
+#[derive(Template)]
+#[template(path = "_ask_carried.html")]
+struct AskCarriedTemplate {
+    event_id: String,
+    n: i64,
+    carried: bool,
+    /// The bar, rendered, to swap out-of-band. Always `Some` from the route.
+    bar: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
+    // Read, never computed: the page shows what the sweep grouped and named,
+    // and whatever has been judged since sits under itself until the next
+    // pass. Nothing here embeds or calls a model.
+    let (gaps, loose) = if st.core.feedback.enabled {
+        let (rows, loose) = st.core.store.gap_rows(st.core.embedder.model()).await?;
+        (
+            rows.into_iter()
+                .map(|r| GapGroup {
+                    label: r.label,
+                    members: r.members.into_iter().map(gap_member).collect(),
+                })
+                .collect(),
+            loose.into_iter().map(gap_member).collect(),
+        )
+    } else {
+        (vec![], vec![])
+    };
     Ok(HtmlTemplate(CaptureTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
         vision_enabled: st.core.describer.is_some(),
+        gaps,
+        loose,
     })
     .into_response())
+}
+
+async fn gap_dismiss(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<Response> {
+    let kind = crate::store::gaps::GapKind::parse(&kind)
+        .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
+    st.core.store.dismiss_gap(kind, &id).await?;
+    Ok(axum::http::StatusCode::OK.into_response())
 }
 
 /// Text and nothing else. The label field is gone: a name arrives from
@@ -610,21 +768,16 @@ async fn search_page(
             tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
             Default::default()
         });
-    // The form is single-select, so only the first tag of a multi-tag deep
-    // link can be shown as chosen. The query still runs with all of them.
-    let tag = split_tags(p.tags).first().cloned().unwrap_or_default();
     let category = p.category.unwrap_or_default();
     // A deep link can name a value that falls outside the top `FACET_LIMIT`, or
     // one nothing carries at all. The rail is narrowed by it either way, so the
     // chip row has to show it: otherwise the page reads as unfiltered while the
     // results are not, and there is no chip to click to get back out.
     ensure_facet(&mut facets.categories, &category);
-    ensure_facet(&mut facets.tags, &tag);
     Ok(HtmlTemplate(SearchTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         q: p.q,
         facets,
-        tag,
         category,
     })
     .into_response())
@@ -694,7 +847,6 @@ async fn search_results(
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         })
         .into_response());
     }
@@ -748,7 +900,7 @@ async fn search_results(
         .into_iter()
         .map(|h| render_hit(0, h, &titles))
         .collect();
-    Ok(HtmlTemplate(ResultsTemplate {
+    let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
         // "nothing matches" over a list that plainly does would train the
@@ -759,9 +911,15 @@ async fn search_results(
         results,
         associated,
         terms,
-        timing: format!("embed {}ms · total {}ms", t.embed_ms, t.total_ms),
     })
-    .into_response())
+    .into_response();
+    // Measured as before, reported where a browser already knows to show it.
+    // On the page it was a line of debug telemetry floated beside the results
+    // — a number nobody searching has a use for, in a place the eye lands.
+    if let Ok(v) = format!("embed;dur={}, total;dur={}", t.embed_ms, t.total_ms).parse() {
+        res.headers_mut().insert("server-timing", v);
+    }
+    Ok(res)
 }
 
 fn render_hit(
@@ -787,6 +945,7 @@ fn render_hit(
         },
         weak: h.weak,
         primed: h.primed,
+        past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
     }
@@ -816,6 +975,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
         rows.push(QueueRow {
             progress,
+            locatable: total > 0,
             coverage: s
                 .coverage
                 .map(|c| format!("{:.0}%", c * 100.0))
@@ -855,6 +1015,141 @@ struct LineRange {
     to: Option<i64>,
 }
 
+/// Whether a capture's coverage is final — whether what no artifact carried is
+/// a loss rather than a window nobody has read yet.
+///
+/// `synthesize::plan` writes every window up front in state `pending`, so a
+/// capture still being read has segment rows and no artifacts for most of them.
+/// Measured then, every unread line looks uncovered, and the page said so: it
+/// named lines that were about to arrive as never reached, and offered to pay
+/// for reading them a second time.
+///
+/// These are the states synthesis sets once every window has resolved. `partial`
+/// and `failed` are in the list on purpose — they are where a real loss lives,
+/// and gating on `ready` alone would hide the section from exactly the captures
+/// that have something to show it.
+fn coverage_final(status: &CorpusStatus) -> bool {
+    matches!(
+        status,
+        CorpusStatus::Ready | CorpusStatus::Partial | CorpusStatus::Failed
+    )
+}
+
+/// The line ranges of `source` that no artifact carried.
+///
+/// Measured against exactly the shape `recompute_coverage` measures the
+/// percentage against — each segment's line range beside the text of every
+/// artifact made from it — because the warning that brings someone here and
+/// the ranges they find must be answering the same question.
+///
+/// Empty for a corpus with no segment rows: one predating per-segment windows
+/// has no ranges to attribute a loss to, and naming the whole document would
+/// offer a re-read of everything. Empty as well until the capture's coverage is
+/// final — see `coverage_final`.
+async fn uncovered_for(
+    st: &AppState,
+    source: &crate::store::corpora::Corpus,
+    chunks: &[crate::store::artifacts::Chunk],
+) -> Result<Vec<(i64, i64)>> {
+    if !coverage_final(&source.status) {
+        return Ok(Vec::new());
+    }
+    let segments = st.core.store.segments_for_corpus(&source.id).await?;
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let made: Vec<(i64, i64, String)> = segments
+        .iter()
+        .map(|w| {
+            let text = chunks
+                .iter()
+                .filter(|c| c.segment_idx == Some(w.idx))
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (w.start_line, w.end_line, text)
+        })
+        .collect();
+    Ok(crate::infer::verify::uncovered_ranges(
+        &source.raw_text,
+        &made,
+    ))
+}
+
+/// Read the lines no artifact carried, again.
+///
+/// One `SegmentWindow` job per window holding a loss, rather than a whole
+/// re-segment: the parts that did arrive are fine, and re-reading them would
+/// pay for the same artifacts twice and then hand the duplicates to the dedupe
+/// sweep to clean up after it.
+async fn reread_uncovered_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+) -> Result<Response> {
+    let s = st.core.store.get_corpus(&cid).await?;
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let segments = st.core.store.segments_for_corpus(&cid).await?;
+
+    // One window can hold several uncovered ranges, and reading it once reads
+    // all of them, so the windows are collected before anything is queued.
+    //
+    // Every window the range overlaps, not the one its first line falls in: a
+    // range is merged across everything that was lost in a row, which does not
+    // stop at a window boundary, and matching on the first line alone re-read
+    // the opening of the loss and left the rest of it exactly as it was.
+    let mut windows: Vec<i64> = Vec::new();
+    for (from, to) in uncovered_for(&st, &s, &chunks).await? {
+        for w in segments
+            .iter()
+            .filter(|w| w.start_line <= to && from <= w.end_line)
+        {
+            if !windows.contains(&w.idx) {
+                windows.push(w.idx);
+            }
+        }
+    }
+
+    for idx in windows {
+        // A window something is already going to read is left alone. `enqueue`
+        // re-arms a conflicting row whatever state it is in, running included,
+        // so pressing this button while an earlier re-read is still in flight
+        // handed the same window to a second worker: two paid model calls and
+        // two sets of artifacts for one loss, then the dedupe sweep to clean up
+        // after them — the outcome reading only the lost windows exists to
+        // avoid.
+        if st
+            .core
+            .store
+            .live_job(
+                crate::store::jobs::Stage::SegmentWindow,
+                &crate::jobs::window::unit_target(&cid, idx),
+            )
+            .await?
+        {
+            continue;
+        }
+        // `window::run` returns early on a window already marked done, so the
+        // state goes back to pending first — this is the "re-run this window"
+        // case `reset_segment` exists for.
+        //
+        // Keeping what the window already produced: those artifacts are the
+        // parts of it that did arrive, they may have been edited, retagged or
+        // verified since, and none of that is what this button is about. A
+        // duplicate of something already captured goes to the dedupe sweep.
+        st.core.store.reset_segment(&cid, idx, true).await?;
+        st.core
+            .store
+            .enqueue(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(&cid, idx),
+            )
+            .await?;
+    }
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}#uncovered")).into_response())
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
@@ -862,13 +1157,19 @@ async fn corpus_detail(
     Query(range): Query<LineRange>,
 ) -> Result<Response> {
     let s = st.core.store.get_corpus(&cid).await?;
-    let artifacts = st
-        .core
-        .store
-        .artifacts_for_corpus(&cid)
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let artifacts = chunks.iter().map(artifact_view).collect();
+    let uncovered = uncovered_for(&st, &s, &chunks)
         .await?
-        .iter()
-        .map(artifact_view)
+        .into_iter()
+        .map(|(from, to)| UncoveredRange {
+            from,
+            label: if from == to {
+                format!("line {from}")
+            } else {
+                format!("lines {from}–{to}")
+            },
+        })
         .collect();
     // Numbered rather than one blob of text, so an artifact can link to the
     // exact lines it was drawn from and the browser can scroll to them. Every
@@ -908,6 +1209,7 @@ async fn corpus_detail(
         exif_rows,
         note,
         artifacts,
+        uncovered,
     })
     .into_response())
 }
@@ -1177,14 +1479,9 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     Ok((pairs, more))
 }
 
-async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
-    use sqlx::Row;
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&st.core.store.pool)
-        .await?
-        .get("n");
-
-    let tokens = st
+/// The API tokens, formatted for a table.
+async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
+    Ok(st
         .core
         .store
         .list_tokens()
@@ -1198,9 +1495,54 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                 .last_used_at
                 .map(fmt_time)
                 .unwrap_or_else(|| "never".into()),
+            // What asked for it. Two tokens can carry one name — the extension
+            // gives every token it mints the same one — and when neither has
+            // been used yet, this is the only thing that differs.
+            minted_by: t.user_agent.clone().unwrap_or_else(|| "—".into()),
             revoked: t.revoked_at.is_some(),
         })
-        .collect();
+        .collect())
+}
+
+/// What is true about this installation, as opposed to what is in it.
+///
+/// Split off Housekeeping, which had grown to hold six tables about the corpus
+/// plus the extension, the tokens and the feedback purge — so revoking a token
+/// meant scrolling past every merge and every hidden artifact first. Reached
+/// from the same quiet line under Capture, and no more advertised than
+/// Housekeeping is: neither belongs in a top row that is three destinations
+/// wide on purpose.
+async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    Ok(HtmlTemplate(SettingsTemplate {
+        judge_pending: crate::web::state::judge_pending(&st).await,
+        tokens: token_rows(&st).await?,
+        feedback: match st.core.feedback.enabled {
+            true => Some(st.core.store.feedback_stats().await?),
+            false => None,
+        },
+        asks: match st.core.feedback.enabled {
+            true => Some(st.core.store.ask_stats().await?),
+            false => None,
+        },
+    })
+    .into_response())
+}
+
+/// Rows of one housekeeping table before it says there are more.
+///
+/// These tables are read to answer "what happened to X", and the answer to
+/// that is a search for X rather than a scroll — so the cap is stated and the
+/// rest arrive as these are cleared, instead of growing a pager nobody would
+/// page through.
+const TABLE_CAP: i64 = 25;
+
+async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    use sqlx::Row;
+
+    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+        .fetch_one(&st.core.store.pool)
+        .await?
+        .get("n");
 
     // Not a queue of chores: work that hit something and is waiting to try
     // again on its own. Nothing here needs a person.
@@ -1239,7 +1581,10 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut superseded = Vec::new();
-    for c in st.core.store.superseded_artifacts(50).await? {
+    // One past the cap, so the page can say it is capped rather than truncate
+    // in silence — a table that stops at 25 with nothing said reads as a table
+    // of everything there is.
+    for c in st.core.store.superseded_artifacts(TABLE_CAP + 1).await? {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
         let winner_title = match st.core.store.get_artifact(&winner_id).await {
             Ok(w) => title_of(&w),
@@ -1247,6 +1592,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         };
         superseded.push(SupersededRow {
             title: title_of(&c),
+            subtitle: row_subtitle(&c),
             id: c.id,
             winner_id,
             winner_title,
@@ -1254,7 +1600,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut merged = Vec::new();
-    let merged_chunks = st.core.store.merged_artifacts(50).await?;
+    let merged_chunks = st.core.store.merged_artifacts(TABLE_CAP + 1).await?;
     // One lineage call per page, not one per row: `roots_of` takes the batch.
     let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
     let roots = st
@@ -1273,10 +1619,16 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         merged.push(MergedRow {
             orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
             title: title_of(&c),
+            subtitle: row_subtitle(&c),
             id: c.id,
             sources,
         });
     }
+
+    let more_merged = merged.len() > TABLE_CAP as usize;
+    merged.truncate(TABLE_CAP as usize);
+    let more_superseded = superseded.len() > TABLE_CAP as usize;
+    superseded.truncate(TABLE_CAP as usize);
 
     let deprecated = st
         .core
@@ -1316,6 +1668,9 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         parked,
         superseded,
         merged,
+        more_merged,
+        more_superseded,
+        table_cap: TABLE_CAP,
         deprecated,
         stale,
         job_counts: st.core.store.job_counts().await?,
@@ -1324,11 +1679,6 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
         vector_count: st.core.vectors.count().await.unwrap_or(0),
-        tokens,
-        feedback: match st.core.feedback.enabled {
-            true => Some(st.core.store.feedback_stats().await?),
-            false => None,
-        },
         links: match st.core.associating() {
             true => Some(st.core.store.link_counts().await?),
             false => None,
@@ -1348,15 +1698,25 @@ async fn undo_merge_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-/// Forget every captured search.
+/// Forget every captured search and every recorded question.
 ///
 /// Judgements go with them: a verdict is a statement about a query, and one
 /// whose query no longer exists records nothing. Accepted settings and their
 /// history stay, because they describe how the application is configured now.
+///
+/// Both tables, because one switch records both and `expire_feedback` ages both
+/// under one window — but the questions are the harder loss, being the only
+/// source `--export-eval` has for `questions.json`, so the button and its
+/// confirmation name them rather than leaving them to the word "searches".
 async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let n = st.core.store.purge_feedback().await?;
-    tracing::info!(dropped = n, "captured searches deleted by the operator");
-    Ok(Redirect::to("/ui/ops").into_response())
+    tracing::info!(
+        dropped = n,
+        "captured searches and questions deleted by the operator"
+    );
+    // Back to the page the button is on. The route keeps its /ui/ops prefix —
+    // the two pages split, the endpoints did not.
+    Ok(Redirect::to("/ui/settings").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1367,6 +1727,7 @@ struct MintForm {
 async fn mint_token(
     State(st): State<AppState>,
     id: Identity,
+    headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
 ) -> Result<Response> {
     let name = if f.name.trim().is_empty() {
@@ -1374,7 +1735,13 @@ async fn mint_token(
     } else {
         f.name.trim()
     };
-    let (_, plaintext) = crate::auth::tokens::mint(&st.core.store, name, &id.subject).await?;
+    let (_, plaintext) = crate::auth::tokens::mint(
+        &st.core.store,
+        name,
+        &id.subject,
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    )
+    .await?;
     // Shown once, here, and never stored in plaintext anywhere.
     Ok(HtmlTemplate(TokenCreatedTemplate { token: plaintext }).into_response())
 }
@@ -1385,7 +1752,7 @@ async fn revoke_token_ui(
     Path(tid): Path<String>,
 ) -> Result<Response> {
     crate::auth::tokens::revoke(&st.core.store, &tid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to("/ui/settings").into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1549,9 +1916,14 @@ async fn verify_ui(
     Ok(Redirect::to(back.path()).into_response())
 }
 
-async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
+async fn ask_page(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<AskPrefill>,
+) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        q: p.q,
     })
 }
 
@@ -1562,17 +1934,20 @@ struct AskForm {
 
 async fn ask_submit(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
     let out = st
         .core
-        .ask(&crate::core::ask::AskRequest {
-            q: f.q,
-            limit: None,
-            tags: vec![],
-            category: None,
-        })
+        .ask(
+            &crate::core::ask::AskRequest {
+                q: f.q,
+                limit: None,
+                tags: vec![],
+                category: None,
+            },
+            crate::store::feedback::Door::Ui.by(id.subject),
+        )
         .await?;
     Ok(HtmlTemplate(AnswerTemplate {
         // The answer is model output too, so it goes through the same
@@ -1586,6 +1961,83 @@ async fn ask_submit(
             .collect(),
         dropped: out.dropped,
         truncated: out.truncated,
+        abstained: out.abstained,
+        verdict_bar: match &out.event_id {
+            Some(id) => AskVerdictTemplate {
+                event_id: id.clone(),
+                verdict: None,
+                oob: false,
+            }
+            .render()
+            .map_err(|e| Error::Internal(e.to_string()))?,
+            None => String::new(),
+        },
+        event_id: out.event_id,
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct VerdictForm {
+    verdict: String,
+}
+
+fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
+    use crate::store::asks::AskVerdict::*;
+    match v {
+        Right => "right",
+        Wrong => "wrong",
+        NothingHere => "nothing here",
+    }
+    .into()
+}
+
+async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
+    let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
+    AskVerdictTemplate {
+        event_id: ev.id,
+        verdict: ev.verdict.map(verdict_label),
+        oob,
+    }
+    .render()
+    .map_err(|e| Error::Internal(e.to_string()))
+}
+
+async fn ask_verdict(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+    Form(f): Form<VerdictForm>,
+) -> Result<Response> {
+    match f.verdict.as_str() {
+        "none" => st.core.store.unjudge_ask(&id).await?,
+        v => {
+            let verdict = crate::store::asks::AskVerdict::parse(v)
+                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
+            st.core.store.judge_ask(&id, verdict).await?;
+        }
+    }
+    Ok(axum::response::Html(ask_verdict_bar(&st, &id, false).await?).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct CarriedForm {
+    n: i64,
+}
+
+async fn ask_carried(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+    Form(f): Form<CarriedForm>,
+) -> Result<Response> {
+    let carried = st.core.store.toggle_carried(&id, f.n).await?;
+    let bar = ask_verdict_bar(&st, &id, true).await?;
+    Ok(HtmlTemplate(AskCarriedTemplate {
+        event_id: id,
+        n: f.n,
+        carried,
+        bar: Some(bar),
     })
     .into_response())
 }
@@ -1835,6 +2287,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
+        .route("/ui/corpora/{id}/reread", post(reread_uncovered_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
@@ -1843,7 +2296,11 @@ pub fn ui_router() -> Router<AppState> {
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
+        .route("/ui/ask/{id}/verdict", post(ask_verdict))
+        .route("/ui/ask/{id}/carried", post(ask_carried))
+        .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         .route("/ui/ops", get(ops))
+        .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
@@ -2054,7 +2511,13 @@ mod tests {
             d.slice_lines.iter().any(|l| l.in_span),
             "at least one line must be marked as the span"
         );
-        assert!(d.slice_label.starts_with("lines "));
+        // Either form: this artifact's span may be one line or several, and
+        // the label says which rather than always saying "lines".
+        assert!(
+            d.slice_label.starts_with("line ") || d.slice_label.starts_with("lines "),
+            "{}",
+            d.slice_label
+        );
     }
 
     #[tokio::test]
@@ -2462,16 +2925,15 @@ mod tests {
         let (app, cookie) = app_with_embedded_corpus().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
 
-        // The fake synthesizer files everything under `note` and tags it
-        // `fake`, so those are exactly the values the payload index holds.
+        // The fake synthesizer files everything under `reference`, so that is
+        // the value the payload index holds. There is no tag row to render:
+        // subject words have no vocabulary that can be closed, so nothing
+        // offers a list of them.
         assert!(
-            html.contains(r#"name="category" value="note""#),
+            html.contains(r#"name="category" value="reference""#),
             "no category chip was rendered"
         );
-        assert!(
-            html.contains(r#"name="tags" value="fake""#),
-            "no tag chip was rendered"
-        );
+        assert!(!html.contains(r#"name="tags""#), "the tag row is gone");
         assert!(
             html.contains(r#"name="category" value="" checked"#),
             "there must be a selected way back to every category"
@@ -2524,8 +2986,18 @@ mod tests {
     #[tokio::test]
     async fn a_chip_narrows_the_result_list() {
         let (app, cookie) = app_with_embedded_corpus().await;
-        let matching = get(&app, "/ui/search/results?q=alpha&category=note", &cookie).await;
-        let missing = get(&app, "/ui/search/results?q=alpha&category=recipe", &cookie).await;
+        let matching = get(
+            &app,
+            "/ui/search/results?q=alpha&category=reference",
+            &cookie,
+        )
+        .await;
+        let missing = get(
+            &app,
+            "/ui/search/results?q=alpha&category=procedure",
+            &cookie,
+        )
+        .await;
 
         assert!(matching.contains("rail-item"), "the filter matched nothing");
         assert!(
@@ -2886,6 +3358,7 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            past_cliff: false,
             via: None,
             reason: None,
         };
@@ -2900,7 +3373,6 @@ mod tests {
             associated: vec![],
             all_weak: true,
             terms: String::new(),
-            timing: String::new(),
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -2919,9 +3391,55 @@ mod tests {
             rank: String::new(),
             weak: false,
             primed: false,
+            past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
         }
+    }
+
+    /// The rule is drawn once, before the first row past the cliff, and the
+    /// rows past it are greyed but keep their ranks: they placed, they just
+    /// stopped being answers.
+    #[test]
+    fn the_rail_draws_the_cliff_once_and_greys_what_lies_past_it() {
+        let mut above = rendered(None, None);
+        above.rank = "#1".into();
+        let mut past = rendered(None, None);
+        past.rank = "#3".into();
+        past.past_cliff = true;
+        let mut also_past = past.clone();
+        also_past.rank = "#4".into();
+        let body = ResultsTemplate {
+            results: vec![above.clone(), above.clone(), past, also_past],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert_eq!(
+            body.matches("Relevance falls off here").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches("rail-past").count(), 2, "{body}");
+        assert!(body.contains("#3") && body.contains("#4"), "{body}");
+        // The rule comes after the second row and before the third.
+        let rule = body.find("Relevance falls off here").unwrap();
+        assert!(body.find("#3").unwrap() > rule, "{body}");
+        assert!(body.rfind("#1").unwrap() < rule, "{body}");
+
+        // No cliff, no rule.
+        let flat = ResultsTemplate {
+            results: vec![above.clone(), above.clone(), above],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(!flat.contains("Relevance falls off here"), "{flat}");
+        assert!(!flat.contains("rail-past"), "{flat}");
     }
 
     #[tokio::test]
@@ -2938,7 +3456,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -2954,7 +3471,6 @@ mod tests {
             )],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
@@ -2987,6 +3503,7 @@ mod tests {
             rank: if weak { String::new() } else { "#1".into() },
             weak,
             primed: false,
+            past_cliff: false,
             via_title: None,
             reason: None,
         }
@@ -3004,7 +3521,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -3017,7 +3533,6 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -3035,7 +3550,6 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
-            timing: String::new(),
         }
         .render()
         .unwrap();
@@ -3496,7 +4010,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_shows_queue_state_and_tokens() {
+    async fn ops_shows_queue_state() {
         let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(
@@ -3512,7 +4026,8 @@ mod tests {
         let html = body_of(res).await;
         // The counts read as a sentence now rather than as a row of badges.
         assert!(html.contains("artifacts,"), "the counts are still stated");
-        assert!(html.contains("API tokens"));
+        // The tokens moved to Settings; `the_installation_lives_on_its_own_page`
+        // is where they are asserted now.
         // An empty base says so once, instead of answering five headings with
         // "None."
         assert!(html.contains("Nothing deprecated"));
@@ -3766,6 +4281,545 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_counts_say_what_they_count() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            page.contains("jobs") || page.contains("No jobs queued"),
+            "a job count must not read as an artifact count: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_reversals_are_called_the_same_thing() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["kept one", "hidden one"]).await;
+        core.store
+            .set_superseded_by(&ids[1], Some(&ids[0]))
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(!page.contains("Put it back"), "{page}");
+        assert!(!page.contains("Undo merge"), "{page}");
+        assert!(page.contains(">Undo<"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn identically_titled_rows_are_told_apart() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["Windows Update-Typen", "Windows Update-Typen"]).await;
+        core.store
+            .set_superseded_by(&ids[1], Some(&ids[0]))
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            page.contains("body of Windows Update-Typen"),
+            "a row has to say which artifact it is, and two can share a title: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_tokens_with_one_name_are_still_tellable_apart() {
+        // The extension mints every token under the same name, so two rows
+        // called "browser extension" and neither used yet were the same row
+        // twice — and one of them was the one currently working.
+        let (app, cookie, core) = app_session_and_core().await;
+        crate::auth::tokens::mint(
+            &core.store,
+            "browser extension",
+            "user-1",
+            Some("Firefox/141.0"),
+        )
+        .await
+        .unwrap();
+        crate::auth::tokens::mint(
+            &core.store,
+            "browser extension",
+            "user-1",
+            Some("Chrome/152.0"),
+        )
+        .await
+        .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(page.contains("Firefox"), "{page}");
+        assert!(page.contains("Chrome"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_installation_lives_on_its_own_page() {
+        let (app, cookie) = app_with_session().await;
+
+        let settings = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(settings.contains("API tokens"), "{settings}");
+        assert!(settings.contains("Browser extension"), "{settings}");
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            !ops.contains("API tokens"),
+            "housekeeping is about the corpus: {ops}"
+        );
+        assert!(!ops.contains("Browser extension"), "{ops}");
+    }
+
+    #[tokio::test]
+    async fn both_pages_are_reachable_from_capture() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("/ui/ops"), "{page}");
+        assert!(page.contains("/ui/settings"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_result_list_says_how_many_and_keeps_debug_timing_off_the_page() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=alpha")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Still measured, and still reported — to the place a browser already
+        // knows to show it rather than to the operator's page.
+        assert!(
+            res.headers().contains_key("server-timing"),
+            "the measurement moved to a header, it was not dropped"
+        );
+        let frag = body_of(res).await;
+        assert!(frag.contains("result-count"), "the count is stated: {frag}");
+        assert!(
+            !frag.contains("embed ") && !frag.contains("hx-swap-oob"),
+            "timing is not operator-facing: {frag}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_result_carries_the_id_the_selection_handler_matches_on() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let frag = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        assert!(
+            frag.contains(r#"role="option" aria-selected="false""#),
+            "{frag}"
+        );
+        assert!(frag.contains("/ui/artifacts/"), "{frag}");
+    }
+
+    #[tokio::test]
+    async fn tags_are_stored_and_filterable_but_never_rendered() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].clone();
+        core.store
+            .update_artifact_tags(&c.id, &["forensik".into()])
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{}", c.id)).await;
+        assert!(
+            !page.contains("forensik"),
+            "no chips on the artifact: {page}"
+        );
+
+        let search = get_body(&app, &cookie, "/ui/search").await;
+        assert!(
+            !search.contains(r#"aria-label="Tag""#),
+            "no tag facet row: {search}"
+        );
+
+        // Still true, still stored, still the channel pinning rides on.
+        assert_eq!(
+            core.store.get_artifact(&c.id).await.unwrap().tags,
+            vec!["forensik".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corpus_shows_which_lines_were_missed_and_offers_to_read_them_again() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest(
+                "alpha beta gamma\n\nomega sigma tau\n\ndelta epsilon zeta",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Force a hole: artifacts carrying only the first line's vocabulary.
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            core.store
+                .update_artifact_text(&c.id, "alpha beta gamma")
+                .await
+                .unwrap();
+        }
+        crate::jobs::synthesize::recompute_coverage(&core, &out.id)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains(r#"id="uncovered""#),
+            "the anchor the warning links to: {page}"
+        );
+        assert!(page.contains("Read these again"), "{page}");
+        assert!(
+            page.contains("#L3"),
+            "a range links to the lines it names: {page}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        // The window holding the missed lines is back in the queue's path.
+        let pending = core.store.pending_segments(&out.id).await.unwrap();
+        assert!(!pending.is_empty(), "nothing was queued to be read again");
+    }
+
+    /// `synthesize::plan` writes every window up front as `pending`, so a
+    /// capture still being read has windows and no artifacts for the ones nobody
+    /// has reached. Measured then, the whole unread remainder is a loss — the
+    /// page named lines that were on their way as never reached, and offered to
+    /// pay for reading them again.
+    #[tokio::test]
+    async fn a_capture_still_being_read_names_no_loss_and_offers_no_re_read() {
+        use crate::store::segments::NewSegment;
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha beta\ngamma delta", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "alpha beta\ngamma delta",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Segmenting)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            !page.contains(r#"id="uncovered""#),
+            "an unread window was named as a loss: {page}"
+        );
+        assert!(!page.contains("Read these again"), "{page}");
+
+        // And the form behind that button, reached directly, arms nothing.
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            !core
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&out.id, 0)
+                )
+                .await
+                .unwrap(),
+            "a window that had not been read yet was queued to be read again"
+        );
+    }
+
+    /// `enqueue` re-arms a conflicting row whatever state it is in, running
+    /// included. Pressing the button twice therefore handed one window to two
+    /// workers: two paid model calls and two sets of artifacts for one loss.
+    #[tokio::test]
+    async fn a_window_already_queued_is_not_re_read_a_second_time() {
+        use crate::store::segments::{NewSegment, SegmentState};
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest(
+                "alpha beta\ngamma delta\nomega sigma\nkappa lambda",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[
+                    NewSegment {
+                        start_line: 1,
+                        end_line: 2,
+                        text: "alpha beta\ngamma delta",
+                        carry_lines: 0,
+                    },
+                    NewSegment {
+                        start_line: 3,
+                        end_line: 4,
+                        text: "omega sigma\nkappa lambda",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        for idx in [0, 1] {
+            core.store
+                .set_segment_state(&out.id, idx, SegmentState::Done, None)
+                .await
+                .unwrap();
+        }
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Partial)
+            .await
+            .unwrap();
+        // The first window is already on its way — an earlier press of the same
+        // button, or the read that is about to fill it.
+        core.store
+            .enqueue(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(&out.id, 0),
+            )
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+        let states: Vec<SegmentState> = core
+            .store
+            .segments_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|w| w.state)
+            .collect();
+        assert_eq!(
+            states,
+            vec![SegmentState::Done, SegmentState::Pending],
+            "the window already queued was reset under the worker holding it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loss_crossing_a_window_boundary_re_reads_both_windows() {
+        // Uncovered lines are merged into one range across everything lost in
+        // a row, and nothing stops that run at a window boundary. Matching the
+        // range's first line alone re-read the window the loss opened in and
+        // left the rest of it exactly as it was.
+        use crate::store::segments::{NewSegment, SegmentState};
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("one\ntwo\nthree\nfour\nfive\nsix", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[
+                    NewSegment {
+                        start_line: 1,
+                        end_line: 3,
+                        text: "one\ntwo\nthree",
+                        carry_lines: 0,
+                    },
+                    NewSegment {
+                        start_line: 4,
+                        end_line: 6,
+                        text: "four\nfive\nsix",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        // Both settled and neither producing an artifact: the whole document
+        // is one uncovered range spanning both windows.
+        for idx in [0, 1] {
+            core.store
+                .set_segment_state(&out.id, idx, SegmentState::Done, None)
+                .await
+                .unwrap();
+        }
+        // And the capture itself has finished being read — `partial` is what
+        // synthesis sets for a document whose windows resolved without
+        // covering it, and `coverage_final` requires it before naming a loss.
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Partial)
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+        let pending: Vec<i64> = core
+            .store
+            .pending_segments(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|w| w.idx)
+            .collect();
+        assert_eq!(pending, vec![0, 1], "the tail of the loss was left unread");
+    }
+
+    #[tokio::test]
+    async fn a_fully_covered_corpus_shows_no_uncovered_section() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha beta gamma", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            !page.contains(r#"id="uncovered""#),
+            "nothing to say: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_settled_recent_row_states_artifacts_and_coverage_the_same_way() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        // Embedding is what settles a corpus; `finish` alone leaves it in
+        // flight, and an in-flight row states its status rather than a count.
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains("artifacts · ") && frag.contains(" covered"),
+            "a settled row states both, in one shape: {frag}"
+        );
+        assert!(
+            !frag.contains("badge-warning"),
+            "the warning is carried by colour on the number, not by a badge: {frag}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_low_coverage_row_links_to_the_lines_that_were_missed() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // After embedding, which is what settles the corpus and recomputes the
+        // real coverage — this is the reading the row has to warn about.
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.31))
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains(&format!("/ui/corpora/{}#uncovered", out.id)),
+            "a warning has to lead somewhere: {frag}"
+        );
+        assert!(frag.contains("qcov-low"), "{frag}");
+    }
+
+    #[tokio::test]
+    async fn a_low_row_with_no_windows_warns_without_linking() {
+        // A capture read before per-segment windows existed. Its coverage is
+        // still measured — against the whole document — but nothing can say
+        // which lines were lost, so `#uncovered` renders nothing and the
+        // warning must not send anyone there.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        core.store.clear_segments(&out.id).await.unwrap();
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.31))
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains("qcov-low"),
+            "the reading is still worth warning about: {frag}"
+        );
+        assert!(
+            !frag.contains(&format!("/ui/corpora/{}#uncovered", out.id)),
+            "linked to a section that renders nothing: {frag}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_pair_leads_with_the_titles_not_with_the_verdict() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &["Speicherorte der MS Mail App", "MS Mail App File Locations"],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.94)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let title = page
+            .find("Speicherorte der MS Mail App")
+            .expect("a title is on the card");
+        let verdict = page
+            .find("cover the same ground")
+            .expect("the verdict is on the card");
+        assert!(
+            title < verdict,
+            "the titles are the content and lead the sentence: {page}"
+        );
+    }
+
+    #[tokio::test]
     async fn minting_a_token_shows_the_plaintext_exactly_once() {
         let (app, cookie) = app_with_session().await;
         let res = app
@@ -3779,11 +4833,13 @@ mod tests {
             "the token must be shown once: {html}"
         );
 
-        // It is not recoverable from any later page.
+        // It is not recoverable from any later page. Settings, not Housekeeping:
+        // that is the page the token table moved to, and asserting against a
+        // page that renders no tokens at all asserts nothing.
         let page = body_of(
             app.oneshot(
                 Request::builder()
-                    .uri("/ui/ops")
+                    .uri("/ui/settings")
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -3793,9 +4849,279 @@ mod tests {
         )
         .await;
         assert!(
-            !page.contains("engram_"),
-            "a stored token leaked into the ops page"
+            page.contains("claude-code"),
+            "the minted token's row must be on the page this asserts against: {page}"
         );
+        assert!(
+            !page.contains("engram_"),
+            "a stored token leaked into the settings page"
+        );
+    }
+
+    /// A feedback-enabled session over an embedded base, an ask on it, and the
+    /// recorded event id. Built like `app_with_embedded_corpus`: synthesis and
+    /// embedding are run on the core before the router takes it, because a
+    /// capture through the page alone leaves nothing to retrieve.
+    async fn ask_recorded() -> (axum::Router, String, crate::core::Core, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .clone()
+            .oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert_eq!(
+            handle.store.ask_stats().await.unwrap().asked,
+            1,
+            "the UI ask was not recorded"
+        );
+        let id: String = sqlx::query_scalar("SELECT id FROM ask_events LIMIT 1")
+            .fetch_one(&handle.store.pool)
+            .await
+            .unwrap();
+        (app, cookie, handle, html, id)
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_offers_a_verdict_when_the_question_was_recorded() {
+        let (_app, _cookie, _core, html, id) = ask_recorded().await;
+        assert!(html.contains(&format!("/ui/ask/{id}/verdict")), "{html}");
+        assert!(html.contains("Nothing here"), "{html}");
+        assert!(html.contains(&format!("/ui/ask/{id}/carried")), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_offers_no_verdict_when_feedback_is_off() {
+        let (app, cookie) = app_with_session().await;
+        app.clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=alpha+para%0A%0Abeta+para",
+            ))
+            .await
+            .unwrap();
+        let html = body_of(
+            app.oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("/verdict"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_is_recorded_and_can_be_undone() {
+        let (app, cookie, core, _, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ask/{id}/verdict"),
+                &cookie,
+                "verdict=wrong",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bar = body_of(res).await;
+        assert!(bar.contains("wrong") && bar.contains("undo"), "{bar}");
+        assert_eq!(
+            core.store.ask_event(&id).await.unwrap().unwrap().verdict,
+            Some(crate::store::asks::AskVerdict::Wrong)
+        );
+
+        let bar = body_of(
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/ask/{id}/verdict"),
+                    &cookie,
+                    "verdict=none",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(bar.contains("Nothing here"), "the buttons are back: {bar}");
+        assert!(
+            core.store
+                .ask_event(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .verdict
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band() {
+        let (app, cookie, core, _, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/ask/{id}/carried"), &cookie, "n=1"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("hx-swap-oob"),
+            "the verdict bar must follow the toggle: {html}"
+        );
+        assert!(html.contains("right"), "{html}");
+        // One `#ask-verdict` in the response, not a wrapper repeating the id of
+        // the bar inside it: two would nest after the first click, and the
+        // click after that would match both.
+        assert_eq!(
+            html.matches(r#"id="ask-verdict""#).count(),
+            1,
+            "the swapped-in bar carries the id twice: {html}"
+        );
+        let ev = core.store.ask_event(&id).await.unwrap().unwrap();
+        assert_eq!(ev.verdict, Some(crate::store::asks::AskVerdict::Right));
+        assert!(ev.citations[0].carried);
+    }
+
+    #[tokio::test]
+    async fn judging_an_unknown_question_is_not_found() {
+        let (app, cookie) = app_with_session().await;
+        let res = app
+            .oneshot(form("/ui/ask/nope/verdict", &cookie, "verdict=right"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_lists_knowledge_gaps_by_group_and_lets_one_be_covered() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        // Two, because one gap is not a group: the sweep leaves a lone question
+        // ungrouped rather than buying a name that restates it.
+        let mut ids = Vec::new();
+        for q in ["how do I mount an E01", "mounting E01 images read only"] {
+            let id = core
+                .store
+                .record_ask(crate::store::asks::NewAsk {
+                    question: q.into(),
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; 8],
+                    embed_model: core.embedder.model().to_string(),
+                    answer: "Not in the knowledge base.".into(),
+                    abstained: true,
+                    dropped: 0,
+                    truncated: false,
+                    citations: vec![],
+                })
+                .await
+                .unwrap();
+            core.store
+                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let id = ids[0].clone();
+
+        // Before the sweep: listed, not yet grouped.
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("Knowledge gaps"), "{page}");
+        assert!(page.contains("not yet grouped"), "{page}");
+        assert!(page.contains("mount an E01"), "{page}");
+
+        crate::jobs::gaps::sweep(&core).await.unwrap();
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("Fake topic"), "{page}");
+        assert!(
+            page.contains(&format!("/ui/gaps/ask/{id}/dismiss")),
+            "{page}"
+        );
+        assert!(page.contains("/ui/ask?q=how"), "{page}");
+
+        for id in &ids {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/gaps/ask/{id}/dismiss"), &cookie, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(
+            !page.contains("Knowledge gaps"),
+            "a covered gap must leave the page: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_shows_no_gaps_block_when_feedback_is_off() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(!page.contains("Knowledge gaps"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_capture_button_comes_after_every_field_it_submits() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+
+        let note = page
+            .find(r#"name="note""#)
+            .expect("the note input is on the page");
+        // The button, not the nav link of the same name above it.
+        let button = page
+            .find(r#"type="submit" form="capture""#)
+            .expect("the capture button is there");
+        assert!(
+            note < button,
+            "the note field must precede the button that sits under it: {page}"
+        );
+
+        // Outside the posted form still: that form posts urlencoded and the
+        // file this note describes goes multipart to a different endpoint.
+        assert!(page.contains(r#"form="capture""#), "{page}");
+        assert!(
+            page.contains("the file you drop next"),
+            "the note must say it is for a file that has not arrived yet: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
+        let (app, cookie) = app_with_session().await;
+
+        let search = get_body(&app, &cookie, "/ui/search").await;
+        assert!(
+            search.contains(r#"class="shell shell-wide""#),
+            "search is a three-pane page and must not be held at the reading measure: {search}"
+        );
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(ops.contains(r#"class="shell shell-wide""#), "{ops}");
+
+        let capture = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(
+            capture.contains(r#"class="shell""#) && !capture.contains("shell-wide"),
+            "capture is prose and keeps the reading measure: {capture}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ask_page_prefills_a_question_from_the_query_string() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
+        assert!(page.contains(r#"value="mount an E01""#), "{page}");
     }
 
     #[tokio::test]

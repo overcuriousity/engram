@@ -1,18 +1,26 @@
 {% extends "layout.html" %}
 {% block title %}Ops — engram{% endblock %}
+{% block shell_class %}shell shell-wide{% endblock %}
 {% block content %}
 
 <p class="crumb"><a href="/ui/capture">Capture</a> › Housekeeping</p>
 
 {# The counts as a sentence rather than as `done: 17`-style badges: this is a
    page you open to reassure yourself, and a row of key-value chips reads as a
-   debug dump of something going wrong. #}
+   debug dump of something going wrong.
+
+   Every number says what it counts. "1523 done" sat beside "1236 artifacts"
+   and read as a count of artifacts — of which there cannot be more done than
+   there are — when it was a count of jobs. Same for the links: a bare "45
+   links, 0 named" says nothing about what is linked to what. #}
 <p class="muted">
   {{ artifact_count }} artifacts, {{ vector_count }} embedded.
-  {% for j in job_counts %}{{ j.1 }} {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}{% if job_counts.is_empty() %}Nothing queued{% endif %}.
+  {% if job_counts.is_empty() %}No jobs queued.{% else %}
+  {% for j in job_counts %}{{ j.1 }} jobs {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
   {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
   {% if let Some(l) = links %}
-  {{ l.total }} links, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
+  {{ l.total }} links between artifacts, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
   {% endif %}
 </p>
 
@@ -25,12 +33,13 @@
   does not simply do it again.
 </p>
 <table class="grid">
-  <thead><tr><th>Artifact</th><th>Written from</th><th></th></tr></thead>
+  <thead><tr><th>Artifact</th><th>Written from</th><th>Reverse</th></tr></thead>
   <tbody>
   {% for m in merged %}
     <tr>
       <td>
         <a href="/ui/artifacts/{{ m.id }}">{{ m.title }}</a>
+        <div class="muted row-sub">{{ m.subtitle }}</div>
         {% if m.orphaned %}
         {# Not data loss: the text still says what the deleted source said. It
            is a claim of provenance the artifact can no longer support, and
@@ -40,18 +49,24 @@
       </td>
       <td>
         {% for src in m.sources %}
-        <div><a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a></div>
+        <div>
+          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
+          <div class="muted row-sub">{{ src.subtitle }}</div>
+        </div>
         {% endfor %}
       </td>
       <td>
         <form method="post" action="/ui/ops/merges/{{ m.id }}/undo">
-          <button class="btn btn-sm" type="submit">Undo merge</button>
+          <button class="btn btn-sm" type="submit">Undo</button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% if more_merged %}
+<p class="muted">Showing {{ table_cap }} — the rest appear as these are cleared.</p>
+{% endif %}
 {% endif %}
 
 {% if !deprecated.is_empty() %}
@@ -118,21 +133,27 @@
 <h3>Hidden as near-identical</h3>
 <p class="muted">Still stored and still readable; kept out of results only.</p>
 <table class="grid">
-  <thead><tr><th>Hidden</th><th>Kept</th><th></th></tr></thead>
+  <thead><tr><th>Hidden</th><th>Kept</th><th>Reverse</th></tr></thead>
   <tbody>
   {% for s in superseded %}
     <tr>
-      <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
+      <td>
+        <a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a>
+        <div class="muted row-sub">{{ s.subtitle }}</div>
+      </td>
       <td><a href="/ui/artifacts/{{ s.winner_id }}">{{ s.winner_title }}</a></td>
       <td>
         <form method="post" action="/ui/ops/artifacts/{{ s.id }}/unsupersede">
-          <button class="btn btn-sm" type="submit">Put it back</button>
+          <button class="btn btn-sm" type="submit">Undo</button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% if more_superseded %}
+<p class="muted">Showing {{ table_cap }} — the rest appear as these are cleared.</p>
+{% endif %}
 {% endif %}
 
 {% if !parked.is_empty() %}
@@ -189,57 +210,4 @@
 {% if deprecated.is_empty() && stale.is_empty() && superseded.is_empty() && merged.is_empty() && parked.is_empty() && retrying.is_empty() %}
 <p class="muted">Nothing deprecated, nothing hidden, nothing waiting on a decision, nothing retrying.</p>
 {% endif %}
-
-<h3>Browser extension</h3>
-{# The extension mints its own token through /ui/pair, so it needs nothing
-   from the form below. Listed here because this is where the tokens it
-   creates show up. #}
-<p><a href="/extension/install">Install it</a> — capture the page you are
-reading, and search from a panel beside it.</p>
-
-<h3>API tokens</h3>
-<div id="token-result"></div>
-<form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"
-      class="row" style="margin-bottom:1rem">
-  <input class="input" name="name" placeholder="Token name, e.g. claude-code" style="max-width:20rem">
-  <button class="btn btn-accent" type="submit">Mint</button>
-</form>
-
-<table class="grid">
-  <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
-  <tbody>
-  {% for t in tokens %}
-    <tr>
-      <td>{{ t.name }}</td>
-      <td class="muted mono">{{ t.created }}</td>
-      <td class="muted mono">{{ t.last_used }}</td>
-      <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>
-          {% else %}<span class="badge badge-success">active</span>{% endif %}</td>
-      <td>
-        {% if !t.revoked %}
-        <form method="post" action="/ui/ops/tokens/{{ t.id }}/revoke">
-          <button class="btn btn-sm btn-danger" type="submit">Revoke</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% match feedback %}
-{% when Some with (f) %}
-<h3>Feedback</h3>
-{# Said plainly and where the operator already looks. A recording indicator
-   beside the search box would be in view during every keystroke; this is the
-   page for things that are true about the installation. #}
-<p class="muted">
-  Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
-  {% if f.pending > 0 %}<a href="/ui/judge">Judge them</a>{% endif %}
-</p>
-<form method="post" action="/ui/ops/feedback/purge"
-      onsubmit="return confirm('Delete every captured search and every verdict given on one?')">
-  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches</button>
-</form>
-{% when None %}
-{% endmatch %}
 {% endblock %}

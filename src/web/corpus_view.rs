@@ -72,12 +72,23 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
 
     CorpusSlice {
         lines,
-        label: format!(
-            "{}lines {}–{}",
-            if transcript { "transcription " } else { "" },
-            span.start_line,
-            span.end_line
-        ),
+        // Singular when the span is one line. "lines 576–576" is a range with
+        // one thing in it, and a pane that says it has not checked what it is
+        // about to claim.
+        label: if span.start_line == span.end_line {
+            format!(
+                "{}line {}",
+                if transcript { "transcription " } else { "" },
+                span.start_line
+            )
+        } else {
+            format!(
+                "{}lines {}–{}",
+                if transcript { "transcription " } else { "" },
+                span.start_line,
+                span.end_line
+            )
+        },
     }
 }
 
@@ -89,6 +100,36 @@ mod tests {
     async fn a_corpus(raw: &str) -> Corpus {
         let s = crate::store::Store::memory().await.unwrap();
         s.insert_corpus(raw, "web", None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_one_line_span_is_not_a_range() {
+        // "lines 576–576" is a range with one thing in it, which reads as a
+        // system that did not check what it was about to say.
+        let src = a_corpus("l1\nl2\nl3").await;
+        let slice = slice(
+            &src,
+            Some(&CorpusSpan {
+                start_line: 2,
+                end_line: 2,
+            }),
+            0,
+        );
+        assert_eq!(slice.label, "line 2");
+    }
+
+    #[tokio::test]
+    async fn a_real_range_still_reads_as_one() {
+        let src = a_corpus("l1\nl2\nl3").await;
+        let slice = slice(
+            &src,
+            Some(&CorpusSpan {
+                start_line: 1,
+                end_line: 3,
+            }),
+            0,
+        );
+        assert_eq!(slice.label, "lines 1–3");
     }
 
     #[tokio::test]
@@ -174,7 +215,7 @@ mod tests {
                 0
             )
             .label,
-            "transcription lines 2–2"
+            "transcription line 2"
         );
         assert_eq!(slice(&src, None, 0).label, "transcription");
     }

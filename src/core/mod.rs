@@ -2,6 +2,7 @@ pub mod ask;
 pub mod background;
 pub mod extract;
 pub mod fetch;
+pub mod gaps;
 pub mod image;
 pub mod ingest;
 pub mod search;
@@ -81,6 +82,9 @@ pub struct Core {
     /// sends is part of the completer: a link asked under the duplicate
     /// grammar can only answer with a duplicate verdict.
     pub link_judge: Arc<dyn Completer>,
+    /// The model that names a knowledge gap from the questions in it. Same
+    /// endpoint as the judges, its own response shape, background only.
+    pub gap_namer: Arc<dyn Completer>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
@@ -152,6 +156,7 @@ impl Core {
             completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
             judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
             link_judge: Arc::new(HttpCompleter::for_link_judging(&cfg.infer.synthesize)),
+            gap_namer: Arc::new(HttpCompleter::for_gap_naming(&cfg.infer.synthesize)),
             describer: cfg.infer.vision.as_ref().map(|v| {
                 Arc::new(HttpDescriber::new(v, &cfg.infer.synthesize)) as Arc<dyn Describer>
             }),
@@ -281,6 +286,9 @@ pub mod test_support {
             completer: Arc::new(FakeCompleter::default()),
             judge: Arc::new(FakeCompleter::default()),
             link_judge: Arc::new(FakeCompleter::default()),
+            gap_namer: Arc::new(FakeCompleter {
+                reply: Some(r#"{"label":"Fake topic"}"#.into()),
+            }),
             describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),

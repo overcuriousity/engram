@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS artifacts (
   caveats          TEXT NOT NULL DEFAULT '[]',
   status           TEXT NOT NULL DEFAULT 'active',
   last_verified_at INTEGER,
+  -- Stamped once the vector payload has been brought back into step with this
+  -- row after the category fold. SQLite is migrated on connect and Qdrant has
+  -- no such hook, so the repair runs from the housekeeping page and uses this
+  -- to know what it has already done.
+  payload_synced_at INTEGER,
   activation       REAL    NOT NULL DEFAULT 1.0,
   -- Current accessibility above is raised by being captured, retrieved,
   -- opened and confirmed; read through the same lazy decay as a link's
@@ -182,6 +187,11 @@ CREATE TABLE IF NOT EXISTS segments (
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  -- Set when this window is being read again to pick up lines the first read
+  -- missed, and cleared once the window reaches `done`. It is what tells
+  -- `window::write_segment_artifacts` to append rather than replace: see there
+  -- for why the two reasons to re-run a window want opposite answers.
+  keep_artifacts INTEGER NOT NULL DEFAULT 0,
   -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
   -- is the count that governs its backoff and its settling, and two counters for
   -- one thing is exactly what made the incident behind that change so hard to
@@ -279,7 +289,9 @@ CREATE TABLE IF NOT EXISTS search_events (
   judged_at   INTEGER,
   verdict     TEXT,
   expect_id   TEXT,
-  skips       INTEGER NOT NULL DEFAULT 0
+  skips       INTEGER NOT NULL DEFAULT 0,
+  -- Set when the operator says a `gap` search has since been covered.
+  dismissed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -298,6 +310,56 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   similarity  REAL,
   shown       INTEGER NOT NULL,
   PRIMARY KEY (event_id, rank)
+);
+
+-- ── Ask feedback ─────────────────────────────────────────────────────────────
+-- A question asked on the page, the answer it got and the excerpts the model
+-- was shown — so a verdict given later can be scored against exactly what
+-- happened. Only the UI door records; see `Core::ask`.
+CREATE TABLE IF NOT EXISTS ask_events (
+  id           TEXT PRIMARY KEY,
+  question     TEXT NOT NULL,
+  scope        TEXT,
+  filters      TEXT NOT NULL DEFAULT '{}',
+  -- Stored so a "nothing here" can be clustered with other gaps later without
+  -- paying for the embedding again.
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  answer       TEXT NOT NULL,
+  abstained    INTEGER NOT NULL,
+  dropped      INTEGER NOT NULL,
+  truncated    INTEGER NOT NULL,
+  created_at   INTEGER NOT NULL,
+  judged_at    INTEGER,
+  verdict      TEXT,
+  -- Set when the operator says a "nothing here" gap has since been covered.
+  dismissed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_asks_verdict ON ask_events(verdict, dismissed_at);
+CREATE INDEX IF NOT EXISTS idx_asks_created ON ask_events(created_at);
+
+CREATE TABLE IF NOT EXISTS ask_citations (
+  event_id    TEXT NOT NULL REFERENCES ask_events(id) ON DELETE CASCADE,
+  -- The [n] the model was shown, 1-based, in the order it was shown.
+  n           INTEGER NOT NULL,
+  artifact_id TEXT NOT NULL,
+  score       REAL NOT NULL,
+  -- The operator said this excerpt carried the answer.
+  carried     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (event_id, n)
+);
+
+-- ── Knowledge gaps ───────────────────────────────────────────────────────────
+-- Unanswered questions and gap searches, grouped by their stored vectors and
+-- named once. Membership is identity: a group whose members change is a new
+-- row with a new name, so the same members are never named twice.
+CREATE TABLE IF NOT EXISTS gap_clusters (
+  key         TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  labelled_by TEXT NOT NULL,
+  members     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
 );
 
 -- ── Association ──────────────────────────────────────────────────────────────
@@ -358,5 +420,9 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   subject      TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER,
-  revoked_at   INTEGER
+  revoked_at   INTEGER,
+  -- What asked for the token, as it announced itself. The extension mints
+  -- every one of its tokens under the same name, so without this two rows can
+  -- be identical in everything a person can read.
+  user_agent   TEXT
 );

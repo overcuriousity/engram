@@ -1,8 +1,10 @@
 pub mod artifacts;
+pub mod asks;
 pub mod attachments;
 pub mod auth;
 pub mod corpora;
 pub mod feedback;
+pub mod gaps;
 pub mod jobs;
 pub mod lineage;
 pub mod links;
@@ -118,6 +120,20 @@ impl Store {
             // `created_at`, which is when it was in fact last activated.
             ("artifacts", "activation", "REAL NOT NULL DEFAULT 1.0"),
             ("artifacts", "activated_at", "INTEGER NOT NULL DEFAULT 0"),
+            // Arrived with knowledge gaps. NULL on every existing row: nothing
+            // predating it was covered.
+            ("search_events", "dismissed_at", "INTEGER"),
+            // Arrived with the category fold. NULL on every row predating it,
+            // which is what makes the payload repair finite: it stamps what it
+            // rewrites and empties itself.
+            ("artifacts", "payload_synced_at", "INTEGER"),
+            // Arrived with the settings page. NULL on every token minted
+            // before it, which is the truth: nothing recorded what asked.
+            ("api_tokens", "user_agent", "TEXT"),
+            // Arrived with the uncovered-lines re-read. 0 on every existing
+            // row, which is the truth: no window predating it is mid-re-read,
+            // and a plain retry replaces as it always did.
+            ("segments", "keep_artifacts", "INTEGER NOT NULL DEFAULT 0"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -193,6 +209,39 @@ impl Store {
         sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
             .execute(&self.pool)
             .await?;
+        // The kind became a closed vocabulary of form words. Rows written while
+        // it was a free string hold subject words — "System Administration",
+        // "Forensic Science / Criminalistics" — and the search page builds its
+        // filter row from whatever is stored, so closing the schema alone would
+        // change nothing an operator can see.
+        //
+        // Folded rather than dropped: `other` is true of them, and the text,
+        // the title and the vector are untouched. Idempotent like everything
+        // else here — a second run matches nothing.
+        //
+        // The `AssertSqlSafe` audit: every value interpolated comes from
+        // `CATEGORIES`, a compile-time constant. No caller, request or database
+        // value reaches this string.
+        let listed = crate::infer::prompt::CATEGORIES
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        //
+        // `payload_synced_at` back to NULL on the rows it touches, because those
+        // rows are the whole queue `repair_category_payloads` works from. New
+        // captures are stamped at birth — their category was written by this
+        // vocabulary and their payload was built from it — so without this the
+        // repair would have no way to tell a folded row from a fresh one, and it
+        // would either miss the fold or re-write every new `other` capture on
+        // every tick.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "UPDATE artifacts SET category = 'other', payload_synced_at = NULL
+             WHERE category IS NOT NULL AND category NOT IN ({listed})"
+        )))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         // The one default an append cannot state: `activated_at` has to be the
         // artifact's own creation time, not zero. Left at zero every artifact
         // predating this column reads as decayed to nothing since 1970 — the
@@ -571,6 +620,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrate_folds_categories_off_the_list_into_other() {
+        // Rows written while the kind was a free string hold subject words, and
+        // the filter row is built from whatever is stored — so until these are
+        // folded, closing the schema changes nothing an operator can see.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "alpha".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: Some("Forensic Science / Criminalistics".into()),
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "bravo".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: Some("procedure".into()),
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+
+        let mut kinds: Vec<String> =
+            sqlx::query_scalar("SELECT category FROM artifacts ORDER BY ordinal")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec!["other".to_string(), "procedure".to_string()],
+            "a subject word folds to `other`; a form word is left alone"
+        );
+    }
+
+    #[tokio::test]
     async fn a_base_captured_before_activation_gains_it_with_a_real_stamp() {
         // The append can only state a constant, and zero is the wrong stamp:
         // it reads as an artifact last reached in 1970. The backfill is what
@@ -739,6 +839,7 @@ mod tests {
                 "text",
                 "carry_lines",
                 "state",
+                "keep_artifacts",
                 "attempts",
                 "last_error",
             ],

@@ -2,7 +2,9 @@ use super::Core;
 use super::search::{SearchQuery, SearchResult};
 use crate::error::{Error, Result};
 use crate::infer::budget::pack_by_budget;
-use crate::infer::prompt::{ASK_SYSTEM, ask_excerpt, ask_prompt};
+use crate::infer::prompt::{ABSTAIN_PREFIX, ASK_SYSTEM, abstained, ask_excerpt, ask_prompt};
+use crate::store::asks::{NewAsk, NewAskCitation};
+use crate::store::feedback::{Door, Origin};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AskRequest {
@@ -29,10 +31,18 @@ pub struct AskResponse {
     /// fix — a higher `ask.max_output_tokens` — belongs to whoever is reading
     /// it.
     pub truncated: bool,
+    /// The answer opened with `prompt::ABSTAIN_PREFIX`, or there was nothing
+    /// to show the model. What the harness counts as "said nothing here".
+    pub abstained: bool,
+    /// The recorded question, when this door records — the UI, with feedback
+    /// on. The page shows a verdict bar only when this is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 impl Core {
-    pub async fn ask(&self, req: &AskRequest) -> Result<AskResponse> {
+    pub async fn ask(&self, req: &AskRequest, origin: impl Into<Origin>) -> Result<AskResponse> {
+        let origin = origin.into();
         if req.q.trim().is_empty() {
             return Err(Error::Validation("question is empty".into()));
         }
@@ -72,13 +82,17 @@ impl Core {
 
         if hits.is_empty() {
             // No retrieval, no completion: spending a model call to say
-            // "nothing found" is pure latency.
-            return Ok(AskResponse {
-                answer: "Nothing in the knowledge base matches that question.".into(),
+            // "nothing found" is pure latency. Opens with the sentinel so the
+            // page and the harness read it as the abstention it is.
+            let response = AskResponse {
+                answer: format!("{ABSTAIN_PREFIX}. Nothing matches that question."),
                 citations: vec![],
                 dropped: 0,
                 truncated: false,
-            });
+                abstained: true,
+                event_id: None,
+            };
+            return self.record_ask(req, &origin, response).await;
         }
 
         // Caveats are the conditions under which an excerpt does not apply, and
@@ -145,13 +159,17 @@ impl Core {
         }
 
         if kept == 0 {
-            return Ok(AskResponse {
+            let response = AskResponse {
                 answer: "The best matching excerpt is too large for the configured context window."
                     .into(),
                 citations: vec![],
                 dropped,
                 truncated: false,
-            });
+                // A configuration failure, not a statement about the base.
+                abstained: false,
+                event_id: None,
+            };
+            return self.record_ask(req, &origin, response).await;
         }
 
         let user = ask_prompt(&req.q, &blocks[..kept]);
@@ -178,12 +196,62 @@ impl Core {
             );
         }
 
-        Ok(AskResponse {
+        let response = AskResponse {
+            abstained: abstained(&answer.text),
             answer: answer.text,
             citations: hits.into_iter().take(kept).collect(),
             dropped,
             truncated: answer.truncated,
-        })
+            event_id: None,
+        };
+        self.record_ask(req, &origin, response).await
+    }
+
+    /// Record the question when this door records. Only the UI, and only with
+    /// feedback on: a question is personal data of the same kind as a query,
+    /// and API and MCP callers asked for the smallest footprint. Recorded
+    /// synchronously — the id goes back to the page — and after the answer,
+    /// which has already taken seconds; one insert costs nothing beside it.
+    /// A failure to record must not cost the answer: it is logged and the
+    /// response goes out without an id.
+    async fn record_ask(
+        &self,
+        req: &AskRequest,
+        origin: &Origin,
+        mut response: AskResponse,
+    ) -> Result<AskResponse> {
+        if !(self.feedback.enabled && origin.door == Door::Ui) {
+            return Ok(response);
+        }
+        let ask = NewAsk {
+            question: req.q.trim().to_string(),
+            scope: origin.scope.clone(),
+            filters: serde_json::json!({
+                "tags": req.tags,
+                "category": req.category,
+                "limit": req.limit.unwrap_or(8),
+            })
+            .to_string(),
+            query_vec: self.cached_query_vector(&req.q).unwrap_or_default(),
+            embed_model: self.embedder.model().to_string(),
+            answer: response.answer.clone(),
+            abstained: response.abstained,
+            dropped: response.dropped,
+            truncated: response.truncated,
+            citations: response
+                .citations
+                .iter()
+                .map(|c| NewAskCitation {
+                    artifact_id: c.artifact_id.clone(),
+                    score: c.score,
+                })
+                .collect(),
+        };
+        match self.store.record_ask(ask).await {
+            Ok(id) => response.event_id = Some(id),
+            Err(e) => tracing::warn!(error = %e, "could not record the question"),
+        }
+        Ok(response)
     }
 }
 
@@ -192,6 +260,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::store::artifacts::NewArtifact;
+    use crate::store::feedback::Door;
 
     /// A completer that asks, from inside the model call, whether background
     /// work could start right now. That is the question the lane exists to
@@ -233,12 +302,15 @@ mod tests {
         core.completer = probe.clone();
         seed(&core, 3, 4).await;
 
-        core.ask(&AskRequest {
-            q: "chunk".into(),
-            limit: Some(3),
-            tags: vec![],
-            category: None,
-        })
+        core.ask(
+            &AskRequest {
+                q: "chunk".into(),
+                limit: Some(3),
+                tags: vec![],
+                category: None,
+            },
+            Door::Api,
+        )
         .await
         .unwrap();
 
@@ -257,12 +329,15 @@ mod tests {
         let core = test_core().await;
         seed(&core, 3, 4).await;
 
-        core.ask(&AskRequest {
-            q: "chunk".into(),
-            limit: Some(3),
-            tags: vec![],
-            category: None,
-        })
+        core.ask(
+            &AskRequest {
+                q: "chunk".into(),
+                limit: Some(3),
+                tags: vec![],
+                category: None,
+            },
+            Door::Api,
+        )
         .await
         .unwrap();
 
@@ -280,7 +355,7 @@ mod tests {
                 text: format!("chunk {i} ") + &"filler ".repeat(size),
                 corpus_span: None,
                 title: Some(format!("t{i}")),
-                category: Some("note".into()),
+                category: Some("reference".into()),
                 tags: vec![],
                 segment_idx: None,
                 caveats: vec![],
@@ -305,7 +380,10 @@ mod tests {
     async fn ask_returns_an_answer_with_the_chunks_it_used() {
         let core = test_core().await;
         seed(&core, 2, 2).await;
-        let out = core.ask(&req("how do I do the thing")).await.unwrap();
+        let out = core
+            .ask(&req("how do I do the thing"), Door::Api)
+            .await
+            .unwrap();
         assert_eq!(out.answer, "fake answer");
         assert!(
             !out.citations.is_empty(),
@@ -341,7 +419,10 @@ mod tests {
             .unwrap();
         crate::jobs::embed::run(&core, &made[0].id).await.unwrap();
 
-        let out = core.ask(&req("how do I format a device")).await.unwrap();
+        let out = core
+            .ask(&req("how do I format a device"), Door::Api)
+            .await
+            .unwrap();
         assert!(
             out.answer
                 .contains("Caveat: Destroys every existing file on the device."),
@@ -356,7 +437,7 @@ mod tests {
         // FakeCompleter reports a 4096-token context; oversized excerpts force
         // some to be left out.
         seed(&core, 20, 400).await;
-        let out = core.ask(&req("anything")).await.unwrap();
+        let out = core.ask(&req("anything"), Door::Api).await.unwrap();
         assert!(
             out.dropped > 0,
             "a silently dropped citation is worse than a reported one"
@@ -434,7 +515,7 @@ mod tests {
             seed(&core, 20, context / 20).await;
             let mut r = req("anything");
             r.limit = Some(20);
-            let out = core.ask(&r).await.unwrap();
+            let out = core.ask(&r, Door::Api).await.unwrap();
 
             // The echoed prompt is what actually went to the endpoint, and the
             // recorded ceiling is what the call asked for on top of it.
@@ -477,7 +558,7 @@ mod tests {
         let mut core = test_core().await;
         core.completer = std::sync::Arc::new(Ceilinged::new(4096, 4096));
         seed(&core, 3, 4).await;
-        let out = core.ask(&req("chunk")).await.unwrap();
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
             !out.citations.is_empty(),
             "nothing was packed, so nothing was answered: {}",
@@ -518,7 +599,7 @@ mod tests {
         let mut core = test_core().await;
         core.completer = std::sync::Arc::new(Truncating);
         seed(&core, 3, 4).await;
-        let out = core.ask(&req("chunk")).await.unwrap();
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
             out.truncated,
             "a cut-off answer was reported as a whole one"
@@ -529,7 +610,7 @@ mod tests {
     async fn citations_match_exactly_what_the_model_was_shown() {
         let core = test_core().await;
         seed(&core, 20, 400).await;
-        let out = core.ask(&req("anything")).await.unwrap();
+        let out = core.ask(&req("anything"), Door::Api).await.unwrap();
         assert_eq!(
             out.citations.len() + out.dropped,
             8,
@@ -540,7 +621,10 @@ mod tests {
     #[tokio::test]
     async fn ask_with_no_matches_says_so_without_calling_the_model() {
         let core = test_core().await;
-        let out = core.ask(&req("nothing is stored")).await.unwrap();
+        let out = core
+            .ask(&req("nothing is stored"), Door::Api)
+            .await
+            .unwrap();
         assert!(out.citations.is_empty());
         assert!(
             out.answer.to_lowercase().contains("nothing"),
@@ -553,8 +637,98 @@ mod tests {
     async fn empty_question_is_rejected() {
         let core = test_core().await;
         assert!(matches!(
-            core.ask(&req("  ")).await,
+            core.ask(&req("  "), Door::Api).await,
             Err(crate::error::Error::Validation(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_ui_ask_is_recorded_with_its_citations_when_feedback_is_on() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
+        let id = out.event_id.expect("a UI ask is recorded");
+        let ev = core.store.ask_event(&id).await.unwrap().expect("stored");
+        assert_eq!(ev.question, "chunk");
+        assert_eq!(ev.answer, out.answer);
+        assert_eq!(
+            ev.citations
+                .iter()
+                .map(|c| c.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            out.citations
+                .iter()
+                .map(|c| c.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            "the stored citations must be exactly the excerpts the model saw, in order"
+        );
+        assert!(!out.abstained);
+        // The vector it retrieved with travels with it, so a gap can be
+        // clustered later without re-embedding.
+        let dim: i64 = sqlx::query_scalar("SELECT vec_dim FROM ask_events WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(dim > 0);
+    }
+
+    #[tokio::test]
+    async fn an_api_or_mcp_ask_is_never_recorded() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed(&core, 3, 4).await;
+        for door in [Door::Api, Door::Mcp] {
+            let out = core.ask(&req("chunk"), door).await.unwrap();
+            assert!(out.event_id.is_none(), "{door:?} recorded a question");
+        }
+        assert_eq!(core.store.ask_stats().await.unwrap().asked, 0);
+    }
+
+    #[tokio::test]
+    async fn a_ui_ask_is_not_recorded_when_feedback_is_off() {
+        let core = test_core().await;
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
+        assert!(out.event_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_ask_with_no_hits_is_recorded_as_an_abstention_without_a_model_call() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let out = core
+            .ask(&req("nothing is stored"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        assert!(out.abstained);
+        assert!(
+            crate::infer::prompt::abstained(&out.answer),
+            "{}",
+            out.answer
+        );
+        let ev = core
+            .store
+            .ask_event(out.event_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ev.abstained && ev.citations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_opens_with_the_sentinel_is_flagged_abstained() {
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("Not in the knowledge base. The excerpts cover chunks only.".into()),
+        });
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
+        assert!(out.abstained);
+        assert!(
+            !out.citations.is_empty(),
+            "abstaining does not hide what was shown"
+        );
     }
 }

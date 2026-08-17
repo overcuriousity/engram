@@ -24,3 +24,8 @@ extension/*/shared/
 assets/extension/chrome.zip
 assets/extension/firefox.xpi
 assets/extension/firefox.signed
+
+# Isolated worktrees for in-progress work, and the subagent-driven-development
+# workspace (ledgers, briefs, review packages). Scratch, never the record.
+/.claude/worktrees/
+/.superpowers/

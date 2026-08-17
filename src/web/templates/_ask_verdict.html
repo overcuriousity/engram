@@ -1,0 +1,22 @@
+{# The bar under an answer. Its id is what the carrier toggle swaps
+   out-of-band, so a click on a card and a click on the bar land in one place.
+
+   The toggle sets `oob`, which marks this element itself rather than wrapping
+   it: a wrapper carrying the same id left one `#ask-verdict` nested inside
+   another after the first click, and the click after that matched both. #}
+<div id="ask-verdict" class="row ask-verdict"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% match verdict %}
+  {% when Some with (v) %}
+    <span class="muted">judged <b>{{ v }}</b></span>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"none"}' hx-target="#ask-verdict" hx-swap="outerHTML">undo</button>
+  {% when None %}
+    <span class="muted">Was this right?</span>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"right"}' hx-target="#ask-verdict" hx-swap="outerHTML">Right</button>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"wrong"}' hx-target="#ask-verdict" hx-swap="outerHTML">Wrong</button>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"nothing_here"}' hx-target="#ask-verdict" hx-swap="outerHTML">Nothing here</button>
+  {% endmatch %}
+</div>

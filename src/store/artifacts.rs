@@ -274,8 +274,8 @@ impl Store {
             last_verified_at: Some(created_at),
         };
         sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
-             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?)",
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, payload_synced_at)
+             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
         )
         .bind(&c.id)
         .bind(c.source_count)
@@ -288,6 +288,10 @@ impl Store {
         .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
         .bind(c.status.as_str())
         .bind(c.last_verified_at)
+        .bind(c.created_at)
+        // Stamped at birth: this row's category was written by the current
+        // vocabulary, so the payload the embed job builds from it cannot be one
+        // the fold left stale. See `artifacts_needing_category_repair`.
         .bind(c.created_at)
         .execute(&mut *tx)
         .await?;
@@ -346,8 +350,8 @@ impl Store {
                 last_verified_at: Some(created_at),
             };
             sqlx::query(
-                "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
-                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
+                "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, payload_synced_at)
+                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
@@ -363,6 +367,11 @@ impl Store {
             .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
             .bind(c.status.as_str())
             .bind(c.last_verified_at)
+            .bind(c.created_at)
+            // See the same bind on the merged insert above: a row written by the
+            // current vocabulary is not one the category fold can have left
+            // behind, and leaving it NULL put every new `other` capture in the
+            // repair pass's path for good.
             .bind(c.created_at)
             .execute(&mut *tx)
             .await?;
@@ -829,6 +838,39 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// Artifacts whose vector payload may still disagree with the row.
+    ///
+    /// A row folded to `other` by the category migration is the only way the
+    /// two can diverge, so this is bounded by how many such rows there were and
+    /// empties itself as they are rewritten.
+    ///
+    /// That bound rests entirely on `insert_artifacts` stamping
+    /// `payload_synced_at` at birth. Without it the predicate matches every new
+    /// capture that normalises to `other` — which `normalize_category` makes a
+    /// large share of them — and the pass issues a `set_payload` per artifact on
+    /// every tick, rewriting what the embed job had just written correctly.
+    pub async fn artifacts_needing_category_repair(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+              WHERE category = 'other' AND payload_synced_at IS NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Stamped once the vector payload has been brought back into step.
+    pub async fn mark_payload_synced(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET payload_synced_at = ? WHERE id = ?")
+            .bind(crate::store::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Artifacts currently hidden by consolidation, newest first.

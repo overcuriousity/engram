@@ -693,7 +693,9 @@ async fn ask(
     _id: Identity,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
-    Ok(Json(st.core.ask(&req).await?))
+    Ok(Json(
+        st.core.ask(&req, crate::store::feedback::Door::Api).await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -739,10 +741,16 @@ async fn patch_artifact(
         .title
         .map(|t| clean_optional(t, MAX_TITLE_LEN, "title"))
         .transpose()?;
+    // Held to the same closed list synthesis is. This is the other door into
+    // the field, and a door that accepts any string is the one the subject
+    // words came through in the first place. Folded rather than rejected, for
+    // the same reason: the edit is about the text, and refusing the whole
+    // request over a label helps nobody.
     let category = req
         .category
         .map(|c| clean_optional(c, MAX_CATEGORY_LEN, "category"))
-        .transpose()?;
+        .transpose()?
+        .map(|c| c.map(|v| crate::infer::prompt::normalize_category(&v)));
     let tags = req.tags.as_deref().map(clean_tags).transpose()?;
 
     st.core.store.get_artifact(&cid).await?;
@@ -1323,7 +1331,7 @@ pub(crate) mod tests {
                     text: "the loop device is what makes this work".into(),
                     corpus_span: None,
                     title: Some("loop".into()),
-                    category: Some("note".into()),
+                    category: Some("reference".into()),
                     tags: vec![],
                     segment_idx: None,
                     caveats: vec![],
@@ -1372,7 +1380,7 @@ pub(crate) mod tests {
                     text: "the loop device is what makes this work".into(),
                     corpus_span: None,
                     title: Some("loop".into()),
-                    category: Some("note".into()),
+                    category: Some("reference".into()),
                     tags: vec![],
                     segment_idx: None,
                     caveats: vec![],

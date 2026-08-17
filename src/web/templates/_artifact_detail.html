@@ -134,8 +134,11 @@
         </div>
         {% endif %}
         <div class="chips">
+          {# The kind, and nothing else. Tags are still stored and still
+             filterable through the API; they are no longer written by the
+             model, so a chip row here would show whatever a caller set on this
+             one artifact and nothing on the rest. #}
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
-          {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}
         </div>
       </div>
 
@@ -210,7 +213,9 @@
          orphan notice matters most. #}
       {% if !d.merged %}
       <div class="pane-label">
-        <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
+        {# "highlighted" was doing no work: the highlight is visible in the table
+           directly below, and the label already names the lines. #}
+        <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }}
       </div>
       <div class="raw">
         <table>

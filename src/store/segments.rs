@@ -183,12 +183,23 @@ impl Store {
         state: SegmentState,
         last_error: Option<&str>,
     ) -> Result<()> {
+        // Reaching `done` is also what spends `keep_artifacts`, in the same
+        // statement so there is no window between the two. The write that
+        // honoured the mark is not the end of the run — `flag_unverified`, this
+        // state change and `settle` all follow it, and `SQLITE_BUSY` is routine
+        // now that two workers can be in one corpus — so clearing at the write
+        // meant any of those failing retried the window with the mark already
+        // gone, and the retry deleted the curated originals the mark exists to
+        // protect. Spending it here costs at worst one duplicated set of
+        // artifacts, which the dedupe sweep folds.
         sqlx::query(
-            "UPDATE segments SET state = ?, last_error = ?
+            "UPDATE segments SET state = ?, last_error = ?,
+                    keep_artifacts = CASE WHEN ? = 'done' THEN 0 ELSE keep_artifacts END
              WHERE corpus_id = ? AND idx = ?",
         )
         .bind(state.as_str())
         .bind(last_error)
+        .bind(state.as_str())
         .bind(corpus_id)
         .bind(idx)
         .execute(&self.pool)
@@ -196,18 +207,46 @@ impl Store {
         Ok(())
     }
 
-    /// Put a window back in the queue's path. The operator's "re-segment this
-    /// window" button, and nothing else, calls this.
-    pub async fn reset_segment(&self, corpus_id: &str, idx: i64) -> Result<()> {
+    /// Put a window back in the queue's path, and say whether what it has
+    /// already produced survives the second read.
+    ///
+    /// `keep_artifacts` is the whole difference between the two reasons to run a
+    /// window twice. A window whose read was *wrong* is being replaced, and the
+    /// artifacts it wrote go with it. A window that was read correctly but
+    /// missed lines — the uncovered-lines button — is being *added to*, and
+    /// deleting what it already produced would throw away artifacts an operator
+    /// may have edited, tagged or verified since, for lines that were never the
+    /// problem. See `window::write_segment_artifacts`.
+    pub async fn reset_segment(
+        &self,
+        corpus_id: &str,
+        idx: i64,
+        keep_artifacts: bool,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE segments SET state = 'pending', attempts = 0, last_error = NULL
+            "UPDATE segments SET state = 'pending', attempts = 0, last_error = NULL,
+                    keep_artifacts = ?
              WHERE corpus_id = ? AND idx = ?",
         )
+        .bind(keep_artifacts as i64)
         .bind(corpus_id)
         .bind(idx)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Is this window mid-re-read, so that a write appends rather than replaces?
+    pub async fn segment_keeps_artifacts(&self, corpus_id: &str, idx: i64) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT keep_artifacts FROM segments WHERE corpus_id = ? AND idx = ?",
+        )
+        .bind(corpus_id)
+        .bind(idx)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(0)
+            != 0)
     }
 
     /// `(resolved, total)`, where resolved counts both a clean window and one
@@ -425,11 +464,31 @@ mod tests {
             .await
             .unwrap();
 
-        s.reset_segment(&src.id, 0).await.unwrap();
+        s.reset_segment(&src.id, 0, false).await.unwrap();
         let w = &s.segments_for_corpus(&src.id).await.unwrap()[0];
         assert_eq!(w.state, SegmentState::Pending);
         assert_eq!(w.attempts, 0);
         assert_eq!(w.last_error, None);
+        assert!(
+            !s.segment_keeps_artifacts(&src.id, 0).await.unwrap(),
+            "a plain reset replaces what the window produced"
+        );
+
+        // The uncovered-lines re-read asks for the opposite, and the mark is
+        // spent by the window reaching `done` so a later retry replaces again.
+        s.reset_segment(&src.id, 0, true).await.unwrap();
+        assert!(s.segment_keeps_artifacts(&src.id, 0).await.unwrap());
+        s.set_segment_state(&src.id, 0, SegmentState::Failed, Some("boom"))
+            .await
+            .unwrap();
+        assert!(
+            s.segment_keeps_artifacts(&src.id, 0).await.unwrap(),
+            "a failed attempt must leave the mark for the retry to honour"
+        );
+        s.set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+        assert!(!s.segment_keeps_artifacts(&src.id, 0).await.unwrap());
     }
 
     #[tokio::test]
