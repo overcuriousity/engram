@@ -1,6 +1,10 @@
 {# The bar under an answer. Its id is what the carrier toggle swaps
-   out-of-band, so a click on a card and a click on the bar land in one place. #}
-<div id="ask-verdict" class="row ask-verdict">
+   out-of-band, so a click on a card and a click on the bar land in one place.
+
+   The toggle sets `oob`, which marks this element itself rather than wrapping
+   it: a wrapper carrying the same id left one `#ask-verdict` nested inside
+   another after the first click, and the click after that matched both. #}
+<div id="ask-verdict" class="row ask-verdict"{% if oob %} hx-swap-oob="true"{% endif %}>
   {% match verdict %}
   {% when Some with (v) %}
     <span class="muted">judged <b>{{ v }}</b></span>

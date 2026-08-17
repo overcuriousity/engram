@@ -632,11 +632,6 @@ impl Core {
             .0)
     }
 
-    /// `search`, with the per-source cap chosen by the caller and what the
-    /// search cost. `cap` of `None` lets a single source supply every result:
-    /// `ask` wants that, since a question is often answered by one document.
-    /// The UI shows the timing faintly, so a sluggish box points at the
-    /// embedder or the vector store without anyone opening a log.
     /// The embedding of `q`, if a search just made it. `search_with` caches the
     /// query vector under the whitespace-normalised query; a caller that ran a
     /// search a moment ago and wants to store the vector it used reads it here
@@ -647,6 +642,11 @@ impl Core {
         self.query_cache.lock().ok().and_then(|c| c.get(&key))
     }
 
+    /// `search`, with the per-source cap chosen by the caller and what the
+    /// search cost. `cap` of `None` lets a single source supply every result:
+    /// `ask` wants that, since a question is often answered by one document.
+    /// The timing is reported as a `server-timing` header, so a sluggish box
+    /// points at the embedder or the vector store without anyone opening a log.
     pub async fn search_with(
         &self,
         query: &SearchQuery,

@@ -318,14 +318,21 @@ fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, b
 /// being named.
 pub fn uncovered_ranges(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, i64)> {
     let mut out: Vec<(i64, i64)> = Vec::new();
+    // Whether the line before this one was also lost. Consecutive line numbers
+    // cannot be the test: `line_coverage` has already dropped the blank lines,
+    // so the numbers jump across every paragraph break, and comparing them
+    // splits the range at exactly the places prose puts one.
+    let mut running = false;
     for (n, ok) in line_coverage(raw_text, segments) {
         if ok {
+            running = false;
             continue;
         }
         match out.last_mut() {
-            Some(last) if last.1 + 1 == n => last.1 = n,
+            Some(last) if running => last.1 = n,
             _ => out.push((n, n)),
         }
+        running = true;
     }
     out
 }
@@ -351,9 +358,33 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_line_between_two_lost_lines_does_not_split_the_range() {
+        // What was missed is a passage, and a paragraph break inside it is not
+        // a second loss. Prose is mostly blank-separated, so splitting there
+        // turns one range into the wall of single-line ranges the merge exists
+        // to prevent.
+        let raw = "alpha beta\n\nomega sigma\n\ntau upsilon";
+        let made = vec![(1, 5, "alpha beta".to_string())];
+        assert_eq!(uncovered_ranges(raw, &made), vec![(3, 5)]);
+    }
+
+    #[test]
+    fn a_line_that_was_carried_does_split_the_range() {
+        // The other half of the same rule: a range is broken by something
+        // arriving, never by the shape of the source.
+        let raw = "alpha beta\nomega sigma\ntau upsilon";
+        let made = vec![(1, 3, "omega sigma".to_string())];
+        assert_eq!(uncovered_ranges(raw, &made), vec![(1, 1), (3, 3)]);
+    }
+
+    #[test]
     fn a_line_outside_every_segment_is_uncovered() {
-        // A segment that failed leaves its lines in no range at all, which is
-        // exactly the case the measure exists to make visible.
+        // Not reachable through the splitter, which tiles the document, nor
+        // through a window that failed, which keeps its row and so keeps its
+        // range. It is what the measure does when it is handed a partial
+        // account of the document — a corpus read before per-segment windows
+        // existed, whose ranges are supplied from somewhere else — and the
+        // answer has to be "lost", never "covered".
         let raw = "alpha beta\nomega sigma";
         let made = vec![(1, 1, "alpha beta".to_string())];
         assert_eq!(uncovered_ranges(raw, &made), vec![(2, 2)]);

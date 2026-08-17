@@ -32,10 +32,17 @@
          width moved the timestamp beside it around. The warning is carried by
          the colour of the number and by the fact that it is now a link: it
          used to state a problem and offer nowhere to go. #}
-      {% else if r.low_coverage %}
+      {% else if r.low_coverage && r.locatable %}
         <span>{{ r.artifact_count }} artifacts ·
           <a class="qcov-low" href="/ui/corpora/{{ r.id }}#uncovered"
              title="Some of this capture never reached an artifact — see which lines">{{ r.coverage }} covered</a></span>
+      {# Same warning, no link: a capture with no windows has nothing to point
+         at, and a link to a section that renders nothing is worse than the
+         number alone. #}
+      {% else if r.low_coverage %}
+        <span>{{ r.artifact_count }} artifacts ·
+          <span class="qcov-low"
+                title="Some of this capture never reached an artifact — it was read before engram recorded which lines each artifact came from, so the loss cannot be placed">{{ r.coverage }} covered</span></span>
       {% else %}
         <span>{{ r.artifact_count }} artifacts · {{ r.coverage }} covered</span>
       {% endif %}

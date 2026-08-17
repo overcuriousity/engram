@@ -34,8 +34,10 @@
   {# One row, and one taxonomy in it. The tag row is gone: subject words have no
      vocabulary that can be closed, so `forensics` and `forensik` sat beside
      each other as two filters over one idea with nothing able to tell they were
-     the same. Deep links carrying `?tags=` still filter — what is gone is the
-     offer to pick from a list that drifts.
+     the same. Nothing on this page carries a tag any more, so `?tags=` in a
+     link to it is inert — tags are still stored, still what pinning rides on,
+     and still filter `/ui/search/results?tags=` when something asks that
+     endpoint directly.
 
      Labelled in the page, not only in `aria-label`: the row starts with "All",
      and an unlabelled "All" is not a statement about anything. #}

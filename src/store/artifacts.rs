@@ -831,7 +831,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Artifacts currently hidden by consolidation, newest first.
     /// Artifacts whose vector payload may still disagree with the row.
     ///
     /// A row folded to `other` by the category migration is the only way the
@@ -859,6 +858,7 @@ impl Store {
         Ok(())
     }
 
+    /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL

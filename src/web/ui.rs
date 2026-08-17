@@ -67,6 +67,12 @@ pub struct QueueRow {
     /// formatted. `—` for a capture that has not been read yet.
     pub coverage: String,
     pub low_coverage: bool,
+    /// Whether the loss can be placed in the source. False for a capture with
+    /// no segment rows — one read before per-segment windows existed, whose
+    /// coverage is still measured against the whole document but whose lines
+    /// cannot be attributed to anything. The warning stays; the link to
+    /// `#uncovered` does not, because that section renders nothing for it.
+    pub locatable: bool,
     /// Still on its way through the pipeline. Only these announce themselves;
     /// a finished capture is a title and a count.
     pub in_flight: bool,
@@ -646,6 +652,10 @@ struct AskVerdictTemplate {
     event_id: String,
     /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
     verdict: Option<String>,
+    /// Marks the bar to swap itself out-of-band. Set when it rides along with
+    /// something else — the carrier toggle — and not when it is the response
+    /// the click already targets.
+    oob: bool,
 }
 
 #[derive(Template)]
@@ -956,6 +966,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
         rows.push(QueueRow {
             progress,
+            locatable: total > 0,
             coverage: s
                 .coverage
                 .map(|c| format!("{:.0}%", c * 100.0))
@@ -1049,14 +1060,20 @@ async fn reread_uncovered_ui(
 
     // One window can hold several uncovered ranges, and reading it once reads
     // all of them, so the windows are collected before anything is queued.
+    //
+    // Every window the range overlaps, not the one its first line falls in: a
+    // range is merged across everything that was lost in a row, which does not
+    // stop at a window boundary, and matching on the first line alone re-read
+    // the opening of the loss and left the rest of it exactly as it was.
     let mut windows: Vec<i64> = Vec::new();
-    for (from, _) in uncovered_for(&st, &s, &chunks).await? {
-        if let Some(w) = segments
+    for (from, to) in uncovered_for(&st, &s, &chunks).await? {
+        for w in segments
             .iter()
-            .find(|w| w.start_line <= from && from <= w.end_line)
-            && !windows.contains(&w.idx)
+            .filter(|w| w.start_line <= to && from <= w.end_line)
         {
-            windows.push(w.idx);
+            if !windows.contains(&w.idx) {
+                windows.push(w.idx);
+            }
         }
     }
 
@@ -1929,6 +1946,7 @@ async fn ask_submit(
             Some(id) => AskVerdictTemplate {
                 event_id: id.clone(),
                 verdict: None,
+                oob: false,
             }
             .render()
             .map_err(|e| Error::Internal(e.to_string()))?,
@@ -1954,11 +1972,12 @@ fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
     .into()
 }
 
-async fn ask_verdict_bar(st: &AppState, id: &str) -> Result<String> {
+async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
     let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
     AskVerdictTemplate {
         event_id: ev.id,
         verdict: ev.verdict.map(verdict_label),
+        oob,
     }
     .render()
     .map_err(|e| Error::Internal(e.to_string()))
@@ -1978,7 +1997,7 @@ async fn ask_verdict(
             st.core.store.judge_ask(&id, verdict).await?;
         }
     }
-    Ok(axum::response::Html(ask_verdict_bar(&st, &id).await?).into_response())
+    Ok(axum::response::Html(ask_verdict_bar(&st, &id, false).await?).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1993,7 +2012,7 @@ async fn ask_carried(
     Form(f): Form<CarriedForm>,
 ) -> Result<Response> {
     let carried = st.core.store.toggle_carried(&id, f.n).await?;
-    let bar = ask_verdict_bar(&st, &id).await?;
+    let bar = ask_verdict_bar(&st, &id, true).await?;
     Ok(HtmlTemplate(AskCarriedTemplate {
         event_id: id,
         n: f.n,
@@ -4496,6 +4515,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_loss_crossing_a_window_boundary_re_reads_both_windows() {
+        // Uncovered lines are merged into one range across everything lost in
+        // a row, and nothing stops that run at a window boundary. Matching the
+        // range's first line alone re-read the window the loss opened in and
+        // left the rest of it exactly as it was.
+        use crate::store::segments::{NewSegment, SegmentState};
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("one\ntwo\nthree\nfour\nfive\nsix", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[
+                    NewSegment {
+                        start_line: 1,
+                        end_line: 3,
+                        text: "one\ntwo\nthree",
+                        carry_lines: 0,
+                    },
+                    NewSegment {
+                        start_line: 4,
+                        end_line: 6,
+                        text: "four\nfive\nsix",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        // Both settled and neither producing an artifact: the whole document
+        // is one uncovered range spanning both windows.
+        for idx in [0, 1] {
+            core.store
+                .set_segment_state(&out.id, idx, SegmentState::Done, None)
+                .await
+                .unwrap();
+        }
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+        let pending: Vec<i64> = core
+            .store
+            .pending_segments(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|w| w.idx)
+            .collect();
+        assert_eq!(pending, vec![0, 1], "the tail of the loss was left unread");
+    }
+
+    #[tokio::test]
     async fn a_fully_covered_corpus_shows_no_uncovered_section() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("alpha beta gamma", "web", None).await.unwrap();
@@ -4560,6 +4638,38 @@ mod tests {
             "a warning has to lead somewhere: {frag}"
         );
         assert!(frag.contains("qcov-low"), "{frag}");
+    }
+
+    #[tokio::test]
+    async fn a_low_row_with_no_windows_warns_without_linking() {
+        // A capture read before per-segment windows existed. Its coverage is
+        // still measured — against the whole document — but nothing can say
+        // which lines were lost, so `#uncovered` renders nothing and the
+        // warning must not send anyone there.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        core.store.clear_segments(&out.id).await.unwrap();
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.31))
+            .await
+            .unwrap();
+
+        let frag = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            frag.contains("qcov-low"),
+            "the reading is still worth warning about: {frag}"
+        );
+        assert!(
+            !frag.contains(&format!("/ui/corpora/{}#uncovered", out.id)),
+            "linked to a section that renders nothing: {frag}"
+        );
     }
 
     #[tokio::test]
@@ -4743,6 +4853,14 @@ mod tests {
             "the verdict bar must follow the toggle: {html}"
         );
         assert!(html.contains("right"), "{html}");
+        // One `#ask-verdict` in the response, not a wrapper repeating the id of
+        // the bar inside it: two would nest after the first click, and the
+        // click after that would match both.
+        assert_eq!(
+            html.matches(r#"id="ask-verdict""#).count(),
+            1,
+            "the swapped-in bar carries the id twice: {html}"
+        );
         let ev = core.store.ask_event(&id).await.unwrap().unwrap();
         assert_eq!(ev.verdict, Some(crate::store::asks::AskVerdict::Right));
         assert!(ev.citations[0].carried);
