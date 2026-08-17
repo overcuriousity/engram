@@ -497,6 +497,9 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 @keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
 @media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
 
+/* The stretches of a capture nothing was written from. */
+.uncovered { margin: 0 0 0.75rem; padding-left: 1.25rem; font-size: 0.875rem; }
+
 /* ── An artifact's own controls ──────────────────────────────────────────── */
 
 /* Delete is not one of the other two. It sits at the far end so the control

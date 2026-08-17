@@ -457,6 +457,18 @@ struct CorpusTemplate {
     /// — but the original is not stored, so this is the only place they exist.
     exif_rows: Vec<(String, String)>,
     note: Option<String>,
+    /// Stretches of this capture that no artifact carried. Where the coverage
+    /// warning on Recent lands: the percentage says how much was lost, and this
+    /// says which parts, which is the half that can be acted on.
+    uncovered: Vec<UncoveredRange>,
+}
+
+/// A stretch of a capture that no artifact carried, for the corpus page.
+pub struct UncoveredRange {
+    pub from: i64,
+    /// `line 42` or `lines 42–96` — the same singular rule the source pane
+    /// label follows.
+    pub label: String,
 }
 
 #[derive(Template)]
@@ -949,6 +961,88 @@ struct LineRange {
     to: Option<i64>,
 }
 
+/// The line ranges of `source` that no artifact carried.
+///
+/// Measured against exactly the shape `recompute_coverage` measures the
+/// percentage against — each segment's line range beside the text of every
+/// artifact made from it — because the warning that brings someone here and
+/// the ranges they find must be answering the same question.
+///
+/// Empty for a corpus with no segment rows: one predating per-segment windows
+/// has no ranges to attribute a loss to, and naming the whole document would
+/// offer a re-read of everything.
+async fn uncovered_for(
+    st: &AppState,
+    source: &crate::store::corpora::Corpus,
+    chunks: &[crate::store::artifacts::Chunk],
+) -> Result<Vec<(i64, i64)>> {
+    let segments = st.core.store.segments_for_corpus(&source.id).await?;
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let made: Vec<(i64, i64, String)> = segments
+        .iter()
+        .map(|w| {
+            let text = chunks
+                .iter()
+                .filter(|c| c.segment_idx == Some(w.idx))
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (w.start_line, w.end_line, text)
+        })
+        .collect();
+    Ok(crate::infer::verify::uncovered_ranges(
+        &source.raw_text,
+        &made,
+    ))
+}
+
+/// Read the lines no artifact carried, again.
+///
+/// One `SegmentWindow` job per window holding a loss, rather than a whole
+/// re-segment: the parts that did arrive are fine, and re-reading them would
+/// pay for the same artifacts twice and then hand the duplicates to the dedupe
+/// sweep to clean up after it.
+async fn reread_uncovered_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(cid): Path<String>,
+) -> Result<Response> {
+    let s = st.core.store.get_corpus(&cid).await?;
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let segments = st.core.store.segments_for_corpus(&cid).await?;
+
+    // One window can hold several uncovered ranges, and reading it once reads
+    // all of them, so the windows are collected before anything is queued.
+    let mut windows: Vec<i64> = Vec::new();
+    for (from, _) in uncovered_for(&st, &s, &chunks).await? {
+        if let Some(w) = segments
+            .iter()
+            .find(|w| w.start_line <= from && from <= w.end_line)
+            && !windows.contains(&w.idx)
+        {
+            windows.push(w.idx);
+        }
+    }
+
+    for idx in windows {
+        // `window::run` returns early on a window already marked done, so the
+        // state goes back to pending first — this is the "re-run this window"
+        // case `reset_segment` exists for.
+        st.core.store.reset_segment(&cid, idx).await?;
+        st.core
+            .store
+            .enqueue(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(&cid, idx),
+            )
+            .await?;
+    }
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}#uncovered")).into_response())
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
@@ -956,13 +1050,19 @@ async fn corpus_detail(
     Query(range): Query<LineRange>,
 ) -> Result<Response> {
     let s = st.core.store.get_corpus(&cid).await?;
-    let artifacts = st
-        .core
-        .store
-        .artifacts_for_corpus(&cid)
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let artifacts = chunks.iter().map(artifact_view).collect();
+    let uncovered = uncovered_for(&st, &s, &chunks)
         .await?
-        .iter()
-        .map(artifact_view)
+        .into_iter()
+        .map(|(from, to)| UncoveredRange {
+            from,
+            label: if from == to {
+                format!("line {from}")
+            } else {
+                format!("lines {from}–{to}")
+            },
+        })
         .collect();
     // Numbered rather than one blob of text, so an artifact can link to the
     // exact lines it was drawn from and the browser can scroll to them. Every
@@ -1002,6 +1102,7 @@ async fn corpus_detail(
         exif_rows,
         note,
         artifacts,
+        uncovered,
     })
     .into_response())
 }
@@ -2012,6 +2113,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
+        .route("/ui/corpora/{id}/reread", post(reread_uncovered_ui))
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
@@ -3992,6 +4094,70 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corpus_shows_which_lines_were_missed_and_offers_to_read_them_again() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest(
+                "alpha beta gamma\n\nomega sigma tau\n\ndelta epsilon zeta",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Force a hole: artifacts carrying only the first line's vocabulary.
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            core.store
+                .update_artifact_text(&c.id, "alpha beta gamma")
+                .await
+                .unwrap();
+        }
+        crate::jobs::synthesize::recompute_coverage(&core, &out.id)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains(r#"id="uncovered""#),
+            "the anchor the warning links to: {page}"
+        );
+        assert!(page.contains("Read these again"), "{page}");
+        assert!(
+            page.contains("#L3"),
+            "a range links to the lines it names: {page}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        // The window holding the missed lines is back in the queue's path.
+        let pending = core.store.pending_segments(&out.id).await.unwrap();
+        assert!(!pending.is_empty(), "nothing was queued to be read again");
+    }
+
+    #[tokio::test]
+    async fn a_fully_covered_corpus_shows_no_uncovered_section() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha beta gamma", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            !page.contains(r#"id="uncovered""#),
+            "nothing to say: {page}"
         );
     }
 

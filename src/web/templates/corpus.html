@@ -108,6 +108,26 @@
   </div>
 </div>
 
+{% if !uncovered.is_empty() %}
+{# Where the coverage warning on Recent lands. The percentage there says how
+   much of this capture never reached an artifact; this says which parts, and
+   offers the one thing that can be done about it. #}
+<h3 id="uncovered">Never reached an artifact</h3>
+<p class="muted">
+  These lines are stored and readable above, but nothing was written from them
+  — so nothing here answers a search about what they say.
+</p>
+<ul class="uncovered">
+  {% for u in uncovered %}
+  <li><a href="#L{{ u.from }}">{{ u.label }}</a></li>
+  {% endfor %}
+</ul>
+<form method="post" action="/ui/corpora/{{ id }}/reread"
+      onsubmit="return confirm('Read these lines again? Each window holding them is one model call.')">
+  <button class="btn btn-sm" type="submit">Read these again</button>
+</form>
+{% endif %}
+
 <h3>Artifacts</h3>
 {% for c in artifacts %}{% include "_artifact.html" %}{% endfor %}
 {% if artifacts.is_empty() %}<p class="muted">Not synthesised yet.</p>{% endif %}
