@@ -181,16 +181,27 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
 /// then a number with its reasoning beside it is more honest than a knob.
 pub const CLIFF_FACTOR: f32 = 3.0;
 
+/// And it must be at least this share of the top score.
+///
+/// Without a floor, a plateau made any difference at all a cliff: when every
+/// other gap is exactly zero — which is what a saturated reranker produces once
+/// several hits round to the same f32 — their mean is zero, and every positive
+/// number exceeds three times zero. The page then drew its line through a pair
+/// of hits that were numerically tied. A share of the top score rather than a
+/// fixed gap keeps the rule scale-free, which is the same reason `CLIFF_FACTOR`
+/// measures a step against the list's other steps instead of against a number.
+pub const CLIFF_MIN_SHARE: f32 = 0.01;
+
 /// Where the relevance falls off in a ranked list, as the number of hits above
 /// the fall — or `None` when no single step stands out.
 ///
 /// Hybrid scores are fused ranks and mean nothing across queries; reranker
 /// scores and the recency stage live on other scales again. A step compared
 /// against its own list's other steps is scale-free: the cliff is the one gap
-/// that is larger than `CLIFF_FACTOR` times the mean of all the others. Below
-/// three hits there is one gap and nothing to compare it to. Gaps are read in
-/// list order and a negative one — a primed near-tie lifted past its neighbour
-/// — is a near-tie, not a fall.
+/// that is larger than `CLIFF_FACTOR` times the mean of all the others, and at
+/// least `CLIFF_MIN_SHARE` of the top score. Below three hits there is one gap
+/// and nothing to compare it to. Gaps are read in list order and a negative one
+/// — a primed near-tie lifted past its neighbour — is a near-tie, not a fall.
 ///
 /// This is also where `ask` will stop packing excerpts, which is why it is a
 /// function over scores rather than a step inside `search_with`.
@@ -208,6 +219,10 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
             |best, (i, g)| if g > best.1 { (i, g) } else { best },
         );
     if largest <= 0.0 {
+        return None;
+    }
+    // A tie is not a fall, whatever the comparison below makes of it.
+    if largest <= CLIFF_MIN_SHARE * scores[0].abs() {
         return None;
     }
     let others = (gaps.iter().sum::<f32>() - largest) / (gaps.len() - 1) as f32;
@@ -2594,6 +2609,22 @@ mod tests {
         assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.2, 0.2]), Some(3));
         // And an entirely flat list has no fall at all.
         assert_eq!(cliff(&[0.5, 0.5, 0.5, 0.5]), None);
+    }
+
+    /// The same plateau, with a drop too small to mean anything: three hits a
+    /// reranker scored alike and a fourth a rounding error below them. The mean
+    /// of the other gaps is zero here too, so without a floor every positive
+    /// number cleared three times zero and the page drew its line between two
+    /// hits that were tied.
+    #[test]
+    fn a_tie_at_the_foot_of_a_plateau_is_not_a_cliff() {
+        assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.9999]), None);
+        // The floor is a share of the top score rather than a fixed gap, so the
+        // same shape in fused-rank space — where the scores, and every real gap
+        // between them, are two orders of magnitude smaller — is read the same
+        // way, and a genuine fall there is still a cliff.
+        assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.0159]), None);
+        assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.004]), Some(3));
     }
 
     /// Priming may lift a near-tie past its neighbour, which reads as a
