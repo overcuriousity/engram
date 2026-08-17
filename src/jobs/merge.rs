@@ -95,8 +95,9 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
     // out of this merge stays in results, and this repair path — re-run by the
     // sweep for as long as the merge stands — must not undo that decision on
     // every tick.
-    for root in core.store.roots_to_hide(&m.id).await? {
-        let Ok(r) = core.store.get_artifact(&root).await else {
+    let hiding = core.store.roots_to_hide(&m.id).await?;
+    for root in &hiding {
+        let Ok(r) = core.store.get_artifact(root).await else {
             continue;
         };
         if !r.in_results() {
@@ -106,14 +107,15 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // active, and an operator deprecating a root between the read and here
         // is an ordinary race rather than a reason to abandon the other roots —
         // the sweep's repair reaches whatever is left.
-        crate::jobs::try_supersede(core, &root, &m.id, "a merged artifact's root").await;
+        crate::jobs::try_supersede(core, root, &m.id, "a merged artifact's root").await;
     }
 
     // And any earlier merge this one subsumes. Superseding only the roots would
     // leave that merge active and near-identical to this one, so the relate unit
     // would file the pair again on the next sweep and the two would churn
     // against each other for as long as they both existed.
-    for older in core.store.subsumed_merges(&m.id).await? {
+    let subsumed = core.store.subsumed_merges(&m.id).await?;
+    for older in &subsumed {
         // Everything the older merge was hiding has to be re-pointed first.
         // Those roots are already superseded — by `older` — so `finish`'s loop
         // above skipped them, and hiding `older` behind this merge without
@@ -121,13 +123,40 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // itself out of results. That is the exact failure `Clusters` exists to
         // prevent on the sweep's side, and the reader who opens a root would be
         // sent to a dead end.
-        for hidden in core.store.artifacts_superseded_by(&older).await? {
+        for hidden in core.store.artifacts_superseded_by(older).await? {
             if let Err(e) = core.repoint_supersession(&hidden, &m.id).await {
                 tracing::warn!(artifact = %hidden, to = %m.id, error = %e,
                     "could not re-point a supersession; it still names a hidden winner");
             }
         }
-        crate::jobs::try_supersede(core, &older, &m.id, "a merge this one subsumes").await;
+        crate::jobs::try_supersede(core, older, &m.id, "a merge this one subsumes").await;
+    }
+
+    // The open questions its members carried are now questions about the merge.
+    // C was a duplicate of B; B is inside M; so C is a duplicate of M. Left
+    // alone the pair dies with B — `run` dismisses a pair whose member is out of
+    // results — and the duplication only comes back when M has embedded and a
+    // later similarity sweep re-files the same question, which is a whole tick
+    // per generation of a cluster.
+    //
+    // Here and not in `write`: at this point the merge is indexed and what it
+    // replaced is hidden. Re-pointing at write time would arm a unit that could
+    // merge this artifact into a further one before it had ever superseded its
+    // own sources, leaving them active underneath a chain whose middle is out of
+    // results — the dead end `repoint_supersession` exists to prevent above.
+    //
+    // Warn and carry on, like the loops above. A pair that could not be moved is
+    // a question filed against an artifact that is now hidden, which the sweep
+    // re-files against the merge; losing the whole repair over it would be the
+    // more expensive failure.
+    let mut swallowed = hiding;
+    swallowed.extend(subsumed);
+    match core.store.repoint_open_pairs(&swallowed, &m.id).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(merged = %m.id, pairs = n, "moved open pairs onto a merge"),
+        Err(e) => {
+            tracing::warn!(merged = %m.id, error = %e, "could not move open pairs onto a merge")
+        }
     }
     Ok(())
 }
@@ -1039,5 +1068,76 @@ mod tests {
         ];
         let d = draft("Port 8080 is the default and the timeout is 30s.");
         assert_eq!(losses(&roots, &d), vec!["5".to_string()]);
+    }
+
+
+    /// C was a duplicate of B; B is now inside M. Without this the question
+    /// dies with B and only comes back once M has embedded and a later
+    /// similarity sweep re-files it — a whole tick per generation of a cluster.
+    #[tokio::test]
+    async fn finishing_a_merge_moves_its_members_open_pairs_onto_it() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.99, 0.05]),
+                ("c text", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[1], &ids[2], 0.91).await.unwrap();
+        let m = write(
+            &core,
+            &draft("a text and b text"),
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+
+        finish(&core, &m.id).await.unwrap();
+
+        assert_eq!(
+            core.store.pair_state_between(&ids[2], &m.id).await.unwrap(),
+            Some(crate::store::pairs::PairState::Pending),
+            "the surviving duplicate has no question against the merge"
+        );
+    }
+
+    /// `finish` is re-run by the sweep for as long as the merge stands, so a
+    /// second pass must not put back a question the first one already moved.
+    #[tokio::test]
+    async fn re_pointing_is_safe_to_run_twice() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.99, 0.05]),
+                ("c text", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[1], &ids[2], 0.91).await.unwrap();
+        let m = write(
+            &core,
+            &draft("a text and b text"),
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+
+        finish(&core, &m.id).await.unwrap();
+        finish(&core, &m.id).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a second finish duplicated the question"
+        );
     }
 }
