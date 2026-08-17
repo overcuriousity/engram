@@ -53,19 +53,40 @@ pub struct GapRow {
     pub members: Vec<Gap>,
 }
 
+/// How many open gaps one pass reads, per kind.
+///
+/// A cap rather than the whole table, because both readers scale badly in this
+/// number and neither says so: `jobs::gaps::sweep` compares every pair of them
+/// on every retention tick, and `ui::capture_page` — the page the app opens on —
+/// walks the same list with its full query vectors on every load. `cluster`'s
+/// "N is tens, so the quadratic pass is fine" was an assumption about an
+/// operator's habits, not a property of the query; a few thousand searches
+/// judged `gap` made both costs real.
+///
+/// Newest first, so what is dropped is the oldest — a gap judged this week is
+/// the one someone is still trying to fill. `judged_at` is whole seconds, which
+/// on its own leaves everything judged inside one second in whatever order the
+/// table hands back; the id breaks the tie, and being uuid v7 it breaks it by
+/// creation, so the cap never cuts across a single second arbitrarily. `open_gaps` logs when the cap bites,
+/// because a grouping that quietly left half the gaps out would read on the page
+/// exactly like a grouping of all of them.
+pub const MAX_OPEN_GAPS: i64 = 500;
+
 impl Store {
-    /// Every open gap with a vector under `embed_model`. A vector under another
-    /// model is not comparable and is left out; an empty one (the cache had
-    /// evicted it) likewise.
+    /// Every open gap with a vector under `embed_model`, newest first, up to
+    /// `MAX_OPEN_GAPS` of each kind. A vector under another model is not
+    /// comparable and is left out; an empty one (the cache had evicted it)
+    /// likewise.
     pub async fn open_gaps(&self, embed_model: &str) -> Result<Vec<Gap>> {
         let mut out = Vec::new();
         for r in sqlx::query(
             "SELECT id, question AS text, query_vec FROM ask_events
              WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
                AND embed_model = ? AND vec_dim > 0
-             ORDER BY judged_at DESC",
+             ORDER BY judged_at DESC, id DESC LIMIT ?",
         )
         .bind(embed_model)
+        .bind(MAX_OPEN_GAPS)
         .fetch_all(&self.pool)
         .await?
         {
@@ -76,13 +97,15 @@ impl Store {
                 vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
             });
         }
+        let asks = out.len();
         for r in sqlx::query(
             "SELECT id, query AS text, query_vec FROM search_events
              WHERE verdict = 'gap' AND dismissed_at IS NULL AND embed_model = ?
                AND vec_dim > 0
-             ORDER BY judged_at DESC",
+             ORDER BY judged_at DESC, id DESC LIMIT ?",
         )
         .bind(embed_model)
+        .bind(MAX_OPEN_GAPS)
         .fetch_all(&self.pool)
         .await?
         {
@@ -92,6 +115,16 @@ impl Store {
                 text: r.get("text"),
                 vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
             });
+        }
+        // Counted per kind, because each was capped on its own.
+        let searches = out.len() - asks;
+        if asks as i64 == MAX_OPEN_GAPS || searches as i64 == MAX_OPEN_GAPS {
+            tracing::info!(
+                cap = MAX_OPEN_GAPS,
+                asks,
+                searches,
+                "more open gaps than one pass reads; the oldest are left out of this one"
+            );
         }
         Ok(out)
     }
@@ -278,6 +311,24 @@ mod tests {
             vec!["q1", "s1"]
         );
         assert!(store.open_gaps("other-model").await.unwrap().is_empty());
+    }
+
+    /// The sweep compares every pair of open gaps and the capture page walks
+    /// the same list on every load, so the number of them has to be bounded
+    /// somewhere. Newest first, so what a cap drops is the oldest.
+    #[tokio::test]
+    async fn one_pass_reads_at_most_the_newest_cap_worth_of_gaps() {
+        let store = Store::memory().await.unwrap();
+        for i in 0..MAX_OPEN_GAPS + 1 {
+            nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
+        }
+        let gaps = store.open_gaps("fake").await.unwrap();
+        assert_eq!(gaps.len() as i64, MAX_OPEN_GAPS);
+        assert_eq!(
+            gaps[0].text,
+            format!("q{MAX_OPEN_GAPS}"),
+            "the newest gap is the one a bounded pass must not drop"
+        );
     }
 
     #[tokio::test]
