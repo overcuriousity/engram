@@ -107,6 +107,23 @@ their real ids, so running it again does not invalidate the pairs. Nothing
 leaves the machine, `enabled` is off until you turn it on, and Ops has a button
 that forgets all of it.
 
+Questions get the same treatment. With `feedback.enabled`, every question asked
+on the ask page is recorded with the excerpts the model saw, and the answer
+carries a verdict bar — right, wrong, nothing here — plus a "carried the
+answer" toggle on each excerpt. An answer that opens with *Not in the knowledge
+base* is an abstention and is badged as one. `--export-eval` writes the judged
+questions to `questions.json`, and
+
+```bash
+ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval evaluate_ask -- --ignored --nocapture
+```
+
+measures citation recall, abstention accuracy and faithfulness by literals;
+`ENGRAM_EVAL_CLAIMS=1` adds a claim-by-claim check by the synthesize model.
+Questions judged "nothing here" and searches judged `gap` are the base's holes:
+they are grouped by meaning, named once by the synthesize model, and listed as
+**Knowledge gaps** on the capture page until you mark them covered.
+
 ## Requirements
 
 - Rust 1.94+ (the floor comes from sqlx 0.9).

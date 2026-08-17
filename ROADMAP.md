@@ -19,8 +19,11 @@ and image capture; hybrid search inside Qdrant; the evaluation harness fed from
 judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`);
 Hebbian links learned from co-retrieval with bounded priming and one-hop
 association in the results; the cliff — where a ranked list's relevance falls
-off — marked on the rail, over the API and over MCP; a single-shot ask endpoint — retrieve, pack by
-score, one completion, cite by number, dropped excerpts and truncation reported.
+off — marked on the rail, over the API and over MCP; a single-shot ask endpoint
+— retrieve, pack by score, one completion, cite by number, dropped excerpts and
+truncation reported; judged questions with a second harness — citation recall,
+abstention, faithfulness by literals and by claim check; knowledge gaps grouped
+and named on the capture page.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -104,18 +107,19 @@ Model tiers: ask already runs on a larger, thinking model than synthesis does.
 The config grows two named tiers, **deep** and **efficient**, and every role
 points at one of them (synthesize, situations and judges → efficient; ask and
 its retrieval loop → deep) instead of each role carrying its own endpoint.
-Plumbing, done by whichever item below needs the second tier first.
+Plumbing, done by whichever item below needs the second tier first. The claim
+check and the gap namer already run on the synthesize endpoint under their own
+response shapes (`HttpCompleter::for_claim_checking`, `for_gap_naming`), so the
+split is a rename waiting for the first item that needs the deep tier elsewhere.
 
-1. **Ask harness and ask feedback.** Judged questions rather than judged
-   searches: an answer gets a verdict on the page (right, wrong, "nothing here"
-   — and which citation carried it), and the export grows a second pairs file.
-   The harness measures citation recall, faithfulness (does every claim trace to
-   a shown excerpt) and abstention accuracy — did it say "not in the base" when
-   that was true, and only then. "Nothing here" is also the sharpest signal
-   engram has about what to capture next, and it is surfaced as such. Nothing
-   after this item is a number until this one exists.
+The ask harness and ask feedback — item 1 of the original list — are built
+(spec `2026-08-17-ask-harness-design.md`): verdicts on the answer page with
+carriers, `questions.json` in the export, `evaluate_ask` measuring citation
+recall, abstention accuracy and faithfulness by literals and by claim check,
+and "nothing here" surfaced as knowledge gaps on the capture page. The numbers
+below now exist.
 
-2. **Situation vectors.** People type situations; artifacts are embedded as
+1. **Situation vectors.** People type situations; artifacts are embedded as
    passages, and a question matches a question far better than it matches a
    passage. At ingest the efficient model writes the three to five situations
    an artifact answers, each embedded as an additional named vector on the same
@@ -123,7 +127,7 @@ Plumbing, done by whichever item below needs the second tier first.
    Write-time inference, zero query cost, and the largest single retrieval gain
    on the list. Text untouched; the harness decides whether it stays on.
 
-3. **Streaming ask.** The completion streams to the page — reasoning tokens
+2. **Streaming ask.** The completion streams to the page — reasoning tokens
    included, when the deep model emits them — so the operator watches the model
    think instead of a spinner. `[n]` in the answer is a link: it opens the
    artifact in the detail pane, hover shows the excerpt, and the excerpt rail
@@ -134,7 +138,7 @@ Plumbing, done by whichever item below needs the second tier first.
    records that the text was model-written and from what, and synthesis then
    treats it like any other paste.
 
-4. **The retrieval loop.** Built on streaming, so each step is visible as it
+3. **The retrieval loop.** Built on streaming, so each step is visible as it
    happens. Pack to the relevance cliff, not to the window — noise excerpts
    make the answer worse and the call dearer. Pull the neighbours of the top
    hits (same corpus, adjacent ordinal; one-hop associations) as candidates,
@@ -158,7 +162,7 @@ Plumbing, done by whichever item below needs the second tier first.
 ## [Retrieval]
 
 What ask learns at write time, search inherits. From the [Ask] list: situation
-vectors (item 2) change what search matches against; ask verdicts join judged
+vectors (item 1) change what search matches against; ask verdicts join judged
 searches as access cues under **access reconsolidation** above. The cliff is
 built (`search::cliff`, spec `2026-08-17-cliff-design.md`) and waits for ask's
 retrieval loop to pack to it. The items here are search's own.

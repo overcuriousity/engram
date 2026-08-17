@@ -73,7 +73,7 @@ nothing new otherwise.
   "below the relevance cliff", because an agent reading a numbered list has no
   grey to see.
 - **API**: the flag on the result.
-- **Ask**: not yet. Item 4 of the [Ask] list packs to the cliff, and that
+- **Ask**: not yet. The retrieval loop of the [Ask] list packs to the cliff, and that
   changes answers; it waits for the ask harness (item 1) to exist. The function
   is where it will need it.
 
