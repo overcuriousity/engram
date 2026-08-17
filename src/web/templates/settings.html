@@ -65,9 +65,20 @@ reading, and search from a panel beside it.</p>
   Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
   {% if f.pending > 0 %}<a href="/ui/judge">Judge them</a>{% endif %}
 </p>
+{# Counted here beside the searches because one purge takes both. The judged
+   count is what the button below destroys and what nothing can reproduce: a
+   verdict on a question is a person's own work, and the only material
+   `--export-eval` builds questions.json from. #}
+{% match asks %}
+{% when Some with (a) %}
+<p class="muted">
+  Questions too — {{ a.asked }} asked, {{ a.judged }} judged.
+</p>
+{% when None %}
+{% endmatch %}
 <form method="post" action="/ui/ops/feedback/purge"
-      onsubmit="return confirm('Delete every captured search and every verdict given on one?')">
-  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches</button>
+      onsubmit="return confirm('Delete every captured search and every recorded question, with every verdict given on one? The judged questions cannot be recovered — they are what the ask harness is measured against.')">
+  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches and questions</button>
 </form>
 {% when None %}
 {% endmatch %}

@@ -130,6 +130,10 @@ impl Store {
             // Arrived with the settings page. NULL on every token minted
             // before it, which is the truth: nothing recorded what asked.
             ("api_tokens", "user_agent", "TEXT"),
+            // Arrived with the uncovered-lines re-read. 0 on every existing
+            // row, which is the truth: no window predating it is mid-re-read,
+            // and a plain retry replaces as it always did.
+            ("segments", "keep_artifacts", "INTEGER NOT NULL DEFAULT 0"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -223,8 +227,16 @@ impl Store {
             .map(|c| format!("'{c}'"))
             .collect::<Vec<_>>()
             .join(",");
+        //
+        // `payload_synced_at` back to NULL on the rows it touches, because those
+        // rows are the whole queue `repair_category_payloads` works from. New
+        // captures are stamped at birth — their category was written by this
+        // vocabulary and their payload was built from it — so without this the
+        // repair would have no way to tell a folded row from a fresh one, and it
+        // would either miss the fold or re-write every new `other` capture on
+        // every tick.
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "UPDATE artifacts SET category = 'other'
+            "UPDATE artifacts SET category = 'other', payload_synced_at = NULL
              WHERE category IS NOT NULL AND category NOT IN ({listed})"
         )))
         .execute(&self.pool)
@@ -827,6 +839,7 @@ mod tests {
                 "text",
                 "carry_lines",
                 "state",
+                "keep_artifacts",
                 "attempts",
                 "last_error",
             ],

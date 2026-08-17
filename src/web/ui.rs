@@ -523,6 +523,10 @@ struct OpsTemplate {
     /// everything there is.
     more_merged: bool,
     more_superseded: bool,
+    /// `TABLE_CAP`, so the line that says how many rows are showing says the
+    /// number the code actually truncated to. Written out twice in the
+    /// template, it drifted from the constant the first time either moved.
+    table_cap: i64,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     /// `None` when nothing is being learned, which renders nothing at all: a
@@ -540,6 +544,11 @@ struct SettingsTemplate {
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
     feedback: Option<crate::store::feedback::Stats>,
+    /// The questions, counted beside the searches. Set exactly when `feedback`
+    /// is: one switch records both, one purge takes both, and a page that named
+    /// only the searches let an operator clear their query log without knowing
+    /// the judged questions went with it.
+    asks: Option<crate::store::asks::AskStats>,
 }
 
 struct MergedRow {
@@ -565,11 +574,6 @@ pub struct SourceRow {
     pub corpus_id: String,
 }
 
-/// The source list a merge renders: its lineage roots, fetched and titled.
-/// One shape for Ops and the detail pane — the two must stay behaviorally
-/// identical (same self-guard, same tolerance for deleted sources, same
-/// corpus fallback), and a copy in each is how they come to disagree about
-/// what a merge was made of.
 /// When an artifact was written and how it opens, for a table where the title
 /// alone may not be unique.
 fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
@@ -580,6 +584,11 @@ fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
     )
 }
 
+/// The source list a merge renders: its lineage roots, fetched and titled.
+/// One shape for Ops and the detail pane — the two must stay behaviorally
+/// identical (same self-guard, same tolerance for deleted sources, same
+/// corpus fallback), and a copy in each is how they come to disagree about
+/// what a merge was made of.
 async fn source_rows(
     store: &crate::store::Store,
     merged_id: &str,
@@ -1123,7 +1132,12 @@ async fn reread_uncovered_ui(
         // `window::run` returns early on a window already marked done, so the
         // state goes back to pending first — this is the "re-run this window"
         // case `reset_segment` exists for.
-        st.core.store.reset_segment(&cid, idx).await?;
+        //
+        // Keeping what the window already produced: those artifacts are the
+        // parts of it that did arrive, they may have been edited, retagged or
+        // verified since, and none of that is what this button is about. A
+        // duplicate of something already captured goes to the dedupe sweep.
+        st.core.store.reset_segment(&cid, idx, true).await?;
         st.core
             .store
             .enqueue(
@@ -1465,49 +1479,6 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     Ok((pairs, more))
 }
 
-/// Bring vector payloads back in step with rows the category fold changed.
-///
-/// SQLite is migrated on connect; Qdrant is a separate store with no such hook,
-/// so a folded row and its payload disagree until something rewrites the point.
-/// Rather than a startup sweep over every point in the collection, this runs
-/// where an operator already goes when something looks wrong, costs one query
-/// over the rows that can still disagree, and does nothing at all once they
-/// agree — which is after the first visit.
-///
-/// Payload only: nothing the embedder was shown has changed, so no vector is
-/// recomputed. The same reasoning as the tag edit in `api.rs`.
-async fn reconcile_categories(st: &AppState) -> Result<usize> {
-    let mut fixed = 0;
-    for c in st.core.store.artifacts_needing_category_repair(200).await? {
-        // A chunk still waiting to be embedded has no point to rewrite, and the
-        // pending embed job writes the whole payload anyway. Stamped regardless,
-        // so it is not looked at again.
-        if c.embed_state == crate::store::artifacts::EmbedState::Embedded {
-            st.core
-                .vectors
-                .set_payload(&crate::vector::VectorPayload {
-                    artifact_id: c.id.clone(),
-                    corpus_id: c.corpus_id.clone().unwrap_or_default(),
-                    text: c.text.clone(),
-                    title: c.title.clone(),
-                    category: c.category.clone(),
-                    tags: c.tags.clone(),
-                    created_at: c.created_at,
-                    last_seen_at: None,
-                    hit_count: None,
-                    superseded: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                })
-                .await?;
-            fixed += 1;
-        }
-        st.core.store.mark_payload_synced(&c.id).await?;
-    }
-    Ok(fixed)
-}
-
 /// The API tokens, formatted for a table.
 async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
     Ok(st
@@ -1549,6 +1520,10 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
             true => Some(st.core.store.feedback_stats().await?),
             false => None,
         },
+        asks: match st.core.feedback.enabled {
+            true => Some(st.core.store.ask_stats().await?),
+            false => None,
+        },
     })
     .into_response())
 }
@@ -1563,12 +1538,6 @@ const TABLE_CAP: i64 = 25;
 
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
-
-    // Best effort: a vector store that is down must not make the page that
-    // explains what is wrong the one page that will not open.
-    if let Err(e) = reconcile_categories(&st).await {
-        tracing::warn!(error = %e, "category payload repair deferred");
-    }
 
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&st.core.store.pool)
@@ -1701,6 +1670,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         merged,
         more_merged,
         more_superseded,
+        table_cap: TABLE_CAP,
         deprecated,
         stale,
         job_counts: st.core.store.job_counts().await?,
@@ -1728,14 +1698,22 @@ async fn undo_merge_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-/// Forget every captured search.
+/// Forget every captured search and every recorded question.
 ///
 /// Judgements go with them: a verdict is a statement about a query, and one
 /// whose query no longer exists records nothing. Accepted settings and their
 /// history stay, because they describe how the application is configured now.
+///
+/// Both tables, because one switch records both and `expire_feedback` ages both
+/// under one window — but the questions are the harder loss, being the only
+/// source `--export-eval` has for `questions.json`, so the button and its
+/// confirmation name them rather than leaving them to the word "searches".
 async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let n = st.core.store.purge_feedback().await?;
-    tracing::info!(dropped = n, "captured searches deleted by the operator");
+    tracing::info!(
+        dropped = n,
+        "captured searches and questions deleted by the operator"
+    );
     // Back to the page the button is on. The route keeps its /ui/ops prefix —
     // the two pages split, the endpoints did not.
     Ok(Redirect::to("/ui/settings").into_response())
@@ -4468,47 +4446,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_housekeeping_repairs_payload_categories_the_fold_changed() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let out = core
-            .ingest("alpha line\n\nbravo line", "web", None)
-            .await
-            .unwrap();
-        crate::jobs::synthesize::segment_all(&core, &out.id).await;
-        crate::jobs::embed::run_corpus(&core, &out.id)
-            .await
-            .unwrap();
-        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
-            core.store
-                .update_artifact_category(&c.id, Some("other"))
-                .await
-                .unwrap();
-        }
-
-        assert!(
-            !core
-                .store
-                .artifacts_needing_category_repair(200)
-                .await
-                .unwrap()
-                .is_empty(),
-            "there is something to repair before the page is opened"
-        );
-
-        let _ = get_body(&app, &cookie, "/ui/ops").await;
-
-        assert!(
-            core.store
-                .artifacts_needing_category_repair(200)
-                .await
-                .unwrap()
-                .is_empty(),
-            "opening the page brought the payloads back into step, and the pass \
-             does not run again on the next visit"
-        );
-    }
-
-    #[tokio::test]
     async fn a_corpus_shows_which_lines_were_missed_and_offers_to_read_them_again() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core
@@ -4896,11 +4833,13 @@ mod tests {
             "the token must be shown once: {html}"
         );
 
-        // It is not recoverable from any later page.
+        // It is not recoverable from any later page. Settings, not Housekeeping:
+        // that is the page the token table moved to, and asserting against a
+        // page that renders no tokens at all asserts nothing.
         let page = body_of(
             app.oneshot(
                 Request::builder()
-                    .uri("/ui/ops")
+                    .uri("/ui/settings")
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -4910,8 +4849,12 @@ mod tests {
         )
         .await;
         assert!(
+            page.contains("claude-code"),
+            "the minted token's row must be on the page this asserts against: {page}"
+        );
+        assert!(
             !page.contains("engram_"),
-            "a stored token leaked into the ops page"
+            "a stored token leaked into the settings page"
         );
     }
 
@@ -5063,26 +5006,33 @@ mod tests {
     #[tokio::test]
     async fn the_capture_page_lists_knowledge_gaps_by_group_and_lets_one_be_covered() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
-        let id = core
-            .store
-            .record_ask(crate::store::asks::NewAsk {
-                question: "how do I mount an E01".into(),
-                scope: None,
-                filters: "{}".into(),
-                query_vec: vec![1.0; 8],
-                embed_model: core.embedder.model().to_string(),
-                answer: "Not in the knowledge base.".into(),
-                abstained: true,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
-            })
-            .await
-            .unwrap();
-        core.store
-            .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
-            .await
-            .unwrap();
+        // Two, because one gap is not a group: the sweep leaves a lone question
+        // ungrouped rather than buying a name that restates it.
+        let mut ids = Vec::new();
+        for q in ["how do I mount an E01", "mounting E01 images read only"] {
+            let id = core
+                .store
+                .record_ask(crate::store::asks::NewAsk {
+                    question: q.into(),
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; 8],
+                    embed_model: core.embedder.model().to_string(),
+                    answer: "Not in the knowledge base.".into(),
+                    abstained: true,
+                    dropped: 0,
+                    truncated: false,
+                    citations: vec![],
+                })
+                .await
+                .unwrap();
+            core.store
+                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let id = ids[0].clone();
 
         // Before the sweep: listed, not yet grouped.
         let page = get_body(&app, &cookie, "/ui/capture").await;
@@ -5099,12 +5049,14 @@ mod tests {
         );
         assert!(page.contains("/ui/ask?q=how"), "{page}");
 
-        let res = app
-            .clone()
-            .oneshot(form(&format!("/ui/gaps/ask/{id}/dismiss"), &cookie, ""))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        for id in &ids {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/gaps/ask/{id}/dismiss"), &cookie, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
         let page = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
             !page.contains("Knowledge gaps"),

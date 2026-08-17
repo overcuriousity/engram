@@ -59,6 +59,11 @@ pub struct EvalPair {
 /// answer. `expect` is empty for `wrong` and `nothing_here`, and for a `right`
 /// answer that was a synthesis with no single carrier — those still measure
 /// abstention, not citation recall.
+///
+/// The first half of that is an invariant `export` enforces rather than one the
+/// store upholds: marking a carrier does not overrule a verdict already given,
+/// so a `wrong` answer can carry marks, and a carrier behind `wrong` is not a
+/// statement that the artifact should have been cited.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvalQuestion {
     pub question: String,

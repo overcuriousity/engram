@@ -37,7 +37,8 @@
      the same. Nothing on this page carries a tag any more, so `?tags=` in a
      link to it is inert — tags are still stored, still what pinning rides on,
      and still filter `/ui/search/results?tags=` when something asks that
-     endpoint directly.
+     endpoint directly. `Facets` stopped counting them with it: a facet nothing
+     renders was a round trip against the vector store on every page load.
 
      Labelled in the page, not only in `aria-label`: the row starts with "All",
      and an unlabelled "All" is not a statement about anything. #}

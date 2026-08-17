@@ -203,6 +203,15 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
             "could not finish interrupted lifecycle writes; retrying on the next pass"
         );
     }
+    // Empties itself: it is bounded by how many rows the category fold changed,
+    // and each is stamped as it is rewritten. On a base that has already drained
+    // it is one query that returns nothing.
+    if let Err(e) = crate::jobs::consolidate::repair_category_payloads(core).await {
+        tracing::warn!(
+            error = %e,
+            "could not bring every folded category payload back in step; retrying on the next pass"
+        );
+    }
     // Duplicate detection is the per-artifact `Relate` unit, armed when an
     // artifact is indexed. This backstops that arming: an artifact whose unit
     // never got a row — the arm failed after the embed committed — is asked for
@@ -631,26 +640,30 @@ mod tests {
     async fn the_ticker_groups_the_gaps_on_its_first_tick() {
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.enabled = true;
-        let id = core
-            .store
-            .record_ask(crate::store::asks::NewAsk {
-                question: "mount an E01".into(),
-                scope: None,
-                filters: "{}".into(),
-                query_vec: vec![1.0; 4],
-                embed_model: core.embedder.model().to_string(),
-                answer: "Not in the knowledge base.".into(),
-                abstained: true,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
-            })
-            .await
-            .unwrap();
-        core.store
-            .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
-            .await
-            .unwrap();
+        // Two of them: one gap is not a group, and the sweep no longer spends a
+        // naming call restating a single question.
+        for q in ["mount an E01", "mounting E01 images"] {
+            let id = core
+                .store
+                .record_ask(crate::store::asks::NewAsk {
+                    question: q.into(),
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; 4],
+                    embed_model: core.embedder.model().to_string(),
+                    answer: "Not in the knowledge base.".into(),
+                    abstained: true,
+                    dropped: 0,
+                    truncated: false,
+                    citations: vec![],
+                })
+                .await
+                .unwrap();
+            core.store
+                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+                .await
+                .unwrap();
+        }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
         let h = spawn_retention_ticker(core.clone(), rx);

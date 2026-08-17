@@ -122,8 +122,11 @@
   <li><a href="#L{{ u.from }}">{{ u.label }}</a></li>
   {% endfor %}
 </ul>
+{# Says what it costs and what it does not: nothing already written from this
+   capture is replaced. What comes back is added, and anything it repeats is
+   folded by the dedupe sweep like any other near-duplicate. #}
 <form method="post" action="/ui/corpora/{{ id }}/reread"
-      onsubmit="return confirm('Read these lines again? Each window holding them is one model call.')">
+      onsubmit="return confirm('Read these lines again? Each window holding them is one model call. Nothing already written from this capture is replaced — what comes back is added to it.')">
   <button class="btn btn-sm" type="submit">Read these again</button>
 </form>
 {% endif %}

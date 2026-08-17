@@ -251,10 +251,11 @@ fn interpret(
     pairs: Vec<ArtifactPair>,
 ) -> Settlement {
     let mut relation = v.relation;
-    // The judge's own line, carried through unchanged. Nothing here writes one
-    // any more: the loss check used to, and what it had to say was a list of
-    // tokens rather than a finding.
-    let detail = v.detail;
+    // The judge's own line. Nothing here writes one any more: the loss check
+    // used to, and what it had to say was a list of tokens rather than a
+    // finding. It is dropped rather than carried on the one path that turns the
+    // verdict into its opposite — see the loss check below.
+    let mut detail = v.detail;
     let mut merged = v.merged;
     let mut obsolete = None;
 
@@ -300,8 +301,13 @@ fn interpret(
             // lost tokens — those are as often a bare "1, 4" as a version
             // number, which is evidence too thin to put on a card someone has
             // to act on, in a voice unlike every other line beside it. The
-            // judge's own detail, where it wrote one, still stands.
+            // judge's own detail goes with it: it was written to say why the
+            // two are the *same* ("same claim"), and under Contradiction the
+            // card renders it directly beneath "these two disagree", so the
+            // pair states the opposite of its own finding to the person the
+            // escalation exists to hand it to.
             relation = Relation::Conflict;
+            detail = None;
             merged = None;
         }
     }
@@ -848,14 +854,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(found.len(), 1);
-        assert!(
-            !found[0]
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("would have lost"),
-            "the loss sentence is no longer written: {:?}",
-            found[0].detail
+        assert_eq!(
+            found[0].detail, None,
+            "no loss sentence is written, and the judge's own line said the two \
+             were the same — rendered under \"these two disagree\" it would \
+             contradict the card it sits on"
         );
         for id in &ids {
             assert!(

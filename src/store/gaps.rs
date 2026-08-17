@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::store::feedback::blob_to_vec;
 use sqlx::Row;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GapKind {
     Ask,
     Search,
@@ -28,18 +28,52 @@ impl GapKind {
     }
 }
 
+/// One open gap: a question the base could not answer, or a search judged to
+/// have no answer.
 #[derive(Debug, Clone)]
 pub struct Gap {
     pub kind: GapKind,
     pub id: String,
     pub text: String,
+}
+
+/// A gap and the query vector it was found by.
+///
+/// Only the sweep needs the vector, and it is by far the expensive half of the
+/// row: at bge-m3's 1024 dimensions a full pass is four million floats to read
+/// out of SQLite and decode. The display path reads `Gap` alone — see
+/// `open_gap_refs` — because nothing on the capture page looks at a vector.
+#[derive(Debug, Clone)]
+pub struct GapVec {
+    pub gap: Gap,
     pub vec: Vec<f32>,
+}
+
+/// What one bounded pass read, and whether the bound bit.
+///
+/// `capped` is not only for the log. `jobs::gaps::sweep` deletes every cluster
+/// whose key it did not see as stale, and a cluster whose members the cap left
+/// out was never seen — deleting it took those gaps off the capture page
+/// altogether rather than merely leaving them ungrouped.
+pub struct OpenGaps {
+    pub gaps: Vec<GapVec>,
+    pub capped: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct GapCluster {
     pub key: String,
     pub label: String,
+    /// `model` or `terms`.
+    pub labelled_by: String,
+    pub members: Vec<(GapKind, String)>,
+}
+
+/// A stored cluster as `cluster_keys` reads it back: what it is keyed on and
+/// how it was named, without the label the page renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCluster {
+    pub key: String,
     /// `model` or `terms`.
     pub labelled_by: String,
     pub members: Vec<(GapKind, String)>,
@@ -72,59 +106,179 @@ pub struct GapRow {
 /// exactly like a grouping of all of them.
 pub const MAX_OPEN_GAPS: i64 = 500;
 
+/// The predicate both readers of the open gaps share, once.
+///
+/// Two projections over one `WHERE`: the sweep needs `query_vec`, the capture
+/// page needs only the words. Written as a macro rather than as four statements
+/// because the two projections drifting apart would mean the page and the sweep
+/// disagreeing about what is open — and because nothing from a request reaches
+/// the statement text either way, the `embed_model` being bound.
+macro_rules! ask_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT id, question AS text",
+            $cols,
+            " FROM ask_events
+              WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
+                AND embed_model = ? AND vec_dim > 0
+              ORDER BY judged_at DESC, id DESC LIMIT ?"
+        )
+    };
+}
+
+macro_rules! search_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT id, query AS text",
+            $cols,
+            " FROM search_events
+              WHERE verdict = 'gap' AND dismissed_at IS NULL
+                AND embed_model = ? AND vec_dim > 0
+              ORDER BY judged_at DESC, id DESC LIMIT ?"
+        )
+    };
+}
+
+/// How many stored query vectors the linkage calibration reads, per table.
+///
+/// Every recorded search and question counts, not only the gaps: what
+/// `core::gaps::link_threshold` measures is what *unrelated* queries score
+/// under this embedder, and a sample drawn from one topic's worth of holes is
+/// the one sample that cannot say. Two hundred a side is 79,800 pairs, well
+/// under what the sweep's own clustering already costs.
+pub const CALIBRATION_SAMPLE: i64 = 200;
+
 impl Store {
     /// Every open gap with a vector under `embed_model`, newest first, up to
     /// `MAX_OPEN_GAPS` of each kind. A vector under another model is not
     /// comparable and is left out; an empty one (the cache had evicted it)
     /// likewise.
-    pub async fn open_gaps(&self, embed_model: &str) -> Result<Vec<Gap>> {
-        let mut out = Vec::new();
-        for r in sqlx::query(
-            "SELECT id, question AS text, query_vec FROM ask_events
-             WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
-               AND embed_model = ? AND vec_dim > 0
-             ORDER BY judged_at DESC, id DESC LIMIT ?",
-        )
-        .bind(embed_model)
-        .bind(MAX_OPEN_GAPS)
-        .fetch_all(&self.pool)
-        .await?
+    ///
+    /// Newest first across both kinds, not within each. The cap is per kind, so
+    /// the two are read separately, but appending one list after the other left
+    /// a cluster of mixed kinds ordered ask-then-search — and `sweep` hands that
+    /// order to `gap_label_prompt`, which keeps the first twelve. A group with a
+    /// dozen questions in it named itself from those and never saw a search gap,
+    /// however recent.
+    pub async fn open_gaps(&self, embed_model: &str) -> Result<OpenGaps> {
+        // `(judged_at, GapVec)`: the sort key is not part of what the caller
+        // gets, only of the order it gets it in.
+        let mut out: Vec<(i64, GapVec)> = Vec::new();
+        // One row past the cap, and truncated below. Reading exactly the cap and
+        // calling that capped cannot tell a table with precisely `MAX_OPEN_GAPS`
+        // open gaps — nothing left out — from one that was truncated, and now
+        // that `sweep` changes what it does when capped, that false positive
+        // would leave a base at exactly the cap never cleaning up a group again.
+        for r in sqlx::query(ask_gaps_sql!(", query_vec, judged_at"))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS + 1)
+            .fetch_all(&self.pool)
+            .await?
         {
-            out.push(Gap {
-                kind: GapKind::Ask,
-                id: r.get("id"),
-                text: r.get("text"),
-                vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-            });
+            out.push((
+                r.get("judged_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Ask,
+                        id: r.get("id"),
+                        text: r.get("text"),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
         }
+        let asks_capped = out.len() as i64 > MAX_OPEN_GAPS;
+        out.truncate(MAX_OPEN_GAPS as usize);
         let asks = out.len();
-        for r in sqlx::query(
-            "SELECT id, query AS text, query_vec FROM search_events
-             WHERE verdict = 'gap' AND dismissed_at IS NULL AND embed_model = ?
-               AND vec_dim > 0
-             ORDER BY judged_at DESC, id DESC LIMIT ?",
-        )
-        .bind(embed_model)
-        .bind(MAX_OPEN_GAPS)
-        .fetch_all(&self.pool)
-        .await?
+        for r in sqlx::query(search_gaps_sql!(", query_vec, judged_at"))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS + 1)
+            .fetch_all(&self.pool)
+            .await?
         {
-            out.push(Gap {
-                kind: GapKind::Search,
-                id: r.get("id"),
-                text: r.get("text"),
-                vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-            });
+            out.push((
+                r.get("judged_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Search,
+                        id: r.get("id"),
+                        text: r.get("text"),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
         }
         // Counted per kind, because each was capped on its own.
+        let searches_capped = (out.len() - asks) as i64 > MAX_OPEN_GAPS;
+        out.truncate(asks + MAX_OPEN_GAPS as usize);
         let searches = out.len() - asks;
-        if asks as i64 == MAX_OPEN_GAPS || searches as i64 == MAX_OPEN_GAPS {
+        let capped = asks_capped || searches_capped;
+        // The same key each half was already read by, applied across both:
+        // whole-second `judged_at`, ties broken by a uuid v7 id, so a second's
+        // worth of gaps is still ordered by when they were recorded.
+        out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.gap.id.cmp(&a.1.gap.id)));
+        let out: Vec<GapVec> = out.into_iter().map(|(_, g)| g).collect();
+        if capped {
             tracing::info!(
                 cap = MAX_OPEN_GAPS,
                 asks,
                 searches,
                 "more open gaps than one pass reads; the oldest are left out of this one"
             );
+        }
+        Ok(OpenGaps { gaps: out, capped })
+    }
+
+    /// The same open gaps, without their vectors: what the capture page renders.
+    ///
+    /// The page shows a gap's words, its kind and its id and nothing else, and
+    /// it is the page the app opens on. Reading the vectors for it decoded four
+    /// million floats per load to throw all of them away.
+    pub async fn open_gap_refs(&self, embed_model: &str) -> Result<Vec<Gap>> {
+        let mut out = Vec::new();
+        for (sql, kind) in [
+            (ask_gaps_sql!(""), GapKind::Ask),
+            (search_gaps_sql!(""), GapKind::Search),
+        ] {
+            for r in sqlx::query(sql)
+                .bind(embed_model)
+                .bind(MAX_OPEN_GAPS)
+                .fetch_all(&self.pool)
+                .await?
+            {
+                out.push(Gap {
+                    kind,
+                    id: r.get("id"),
+                    text: r.get("text"),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Query vectors from every recorded search and question under this
+    /// embedder — gap or not, judged or not — newest first, `CALIBRATION_SAMPLE`
+    /// of each. What `core::gaps::link_threshold` measures the embedder's own
+    /// geometry from.
+    pub async fn calibration_vecs(&self, embed_model: &str) -> Result<Vec<Vec<f32>>> {
+        let mut out = Vec::new();
+        for sql in [
+            "SELECT query_vec FROM ask_events WHERE embed_model = ? AND vec_dim > 0
+             ORDER BY id DESC LIMIT ?",
+            "SELECT query_vec FROM search_events WHERE embed_model = ? AND vec_dim > 0
+             ORDER BY id DESC LIMIT ?",
+        ] {
+            for r in sqlx::query(sql)
+                .bind(embed_model)
+                .bind(CALIBRATION_SAMPLE)
+                .fetch_all(&self.pool)
+                .await?
+            {
+                let v = blob_to_vec(&r.get::<Vec<u8>, _>("query_vec"));
+                if !v.is_empty() {
+                    out.push(v);
+                }
+            }
         }
         Ok(out)
     }
@@ -154,13 +308,34 @@ impl Store {
         Ok(())
     }
 
-    pub async fn cluster_keys(&self) -> Result<Vec<(String, String)>> {
-        Ok(sqlx::query("SELECT key, labelled_by FROM gap_clusters")
+    /// Every stored cluster, with the members it was keyed on.
+    ///
+    /// The members are what lets `jobs::gaps::sweep` tell a key this pass has
+    /// replaced from one it merely did not reach, which is the difference
+    /// between removing a stale heading and taking a live gap off the page.
+    pub async fn cluster_keys(&self) -> Result<Vec<StoredCluster>> {
+        let mut out = Vec::new();
+        for r in sqlx::query("SELECT key, labelled_by, members FROM gap_clusters")
             .fetch_all(&self.pool)
             .await?
-            .iter()
-            .map(|r| (r.get("key"), r.get("labelled_by")))
-            .collect())
+        {
+            let raw: Vec<serde_json::Value> = serde_json::from_str(&r.get::<String, _>("members"))
+                .map_err(|e| Error::Internal(e.to_string()))?;
+            out.push(StoredCluster {
+                key: r.get("key"),
+                labelled_by: r.get("labelled_by"),
+                members: raw
+                    .iter()
+                    .filter_map(|m| {
+                        Some((
+                            GapKind::parse(m["kind"].as_str()?)?,
+                            m["id"].as_str()?.to_string(),
+                        ))
+                    })
+                    .collect(),
+            });
+        }
+        Ok(out)
     }
 
     pub async fn delete_clusters(&self, keys: &[String]) -> Result<()> {
@@ -201,8 +376,14 @@ impl Store {
     /// dismissed since the sweep is simply absent from its row; a row left with
     /// no members is not returned.
     pub async fn gap_rows(&self, embed_model: &str) -> Result<(Vec<GapRow>, Vec<Gap>)> {
-        let open = self.open_gaps(embed_model).await?;
-        let mut unclustered: Vec<Gap> = open.clone();
+        let open = self.open_gap_refs(embed_model).await?;
+        // Indexed once, not scanned per member. Resolving with a linear `find`
+        // and then a `retain` over the whole list cost two passes over every
+        // open gap for every member of every cluster — a million moves at the
+        // cap, on the page the app opens on.
+        let index: std::collections::HashMap<(GapKind, &str), &Gap> =
+            open.iter().map(|g| ((g.kind, g.id.as_str()), g)).collect();
+        let mut clustered: std::collections::HashSet<(GapKind, &str)> = Default::default();
         let mut rows = Vec::new();
         for r in sqlx::query(
             "SELECT label, labelled_by, members FROM gap_clusters ORDER BY created_at DESC",
@@ -214,14 +395,14 @@ impl Store {
                 serde_json::from_str(&r.get::<String, _>("members"))
                     .map_err(|e| Error::Internal(e.to_string()))?;
             let mut resolved = Vec::new();
-            for m in members {
+            for m in &members {
                 let kind = m["kind"].as_str().and_then(GapKind::parse);
                 let id = m["id"].as_str();
                 if let (Some(kind), Some(id)) = (kind, id)
-                    && let Some(g) = open.iter().find(|g| g.kind == kind && g.id == id)
+                    && let Some(g) = index.get(&(kind, id))
                 {
-                    resolved.push(g.clone());
-                    unclustered.retain(|u| !(u.kind == kind && u.id == id));
+                    resolved.push((*g).clone());
+                    clustered.insert((g.kind, g.id.as_str()));
                 }
             }
             if !resolved.is_empty() {
@@ -232,6 +413,13 @@ impl Store {
                 });
             }
         }
+        // Newest first, the order the query returned: a gap judged this morning
+        // is the one someone is still trying to fill.
+        let unclustered = open
+            .iter()
+            .filter(|g| !clustered.contains(&(g.kind, g.id.as_str())))
+            .cloned()
+            .collect();
         Ok((rows, unclustered))
     }
 }
@@ -305,12 +493,33 @@ mod tests {
             .unwrap();
         store.judge_ask(&right, AskVerdict::Right).await.unwrap();
         nothing_here(&store, "no vector", vec![]).await;
-        let gaps = store.open_gaps("fake").await.unwrap();
+        let gaps = store.open_gaps("fake").await.unwrap().gaps;
+        // Newest first across both kinds. Judged inside the same second, so the
+        // uuid v7 ids break the tie — and being time-ordered they break it the
+        // same way the stamps would have: the search was recorded second.
         assert_eq!(
-            gaps.iter().map(|g| g.text.as_str()).collect::<Vec<_>>(),
+            gaps.iter().map(|g| g.gap.text.as_str()).collect::<Vec<_>>(),
+            vec!["s1", "q1"]
+        );
+        assert!(
+            gaps.iter().all(|g| !g.vec.is_empty()),
+            "the sweep's reader is the one that must carry the vectors"
+        );
+        assert!(
+            store
+                .open_gaps("other-model")
+                .await
+                .unwrap()
+                .gaps
+                .is_empty()
+        );
+
+        // The display path reads the same gaps and no vectors.
+        let refs = store.open_gap_refs("fake").await.unwrap();
+        assert_eq!(
+            refs.iter().map(|g| g.text.as_str()).collect::<Vec<_>>(),
             vec!["q1", "s1"]
         );
-        assert!(store.open_gaps("other-model").await.unwrap().is_empty());
     }
 
     /// The sweep compares every pair of open gaps and the capture page walks
@@ -322,13 +531,38 @@ mod tests {
         for i in 0..MAX_OPEN_GAPS + 1 {
             nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
         }
-        let gaps = store.open_gaps("fake").await.unwrap();
-        assert_eq!(gaps.len() as i64, MAX_OPEN_GAPS);
+        let open = store.open_gaps("fake").await.unwrap();
+        assert_eq!(open.gaps.len() as i64, MAX_OPEN_GAPS);
         assert_eq!(
-            gaps[0].text,
+            open.gaps[0].gap.text,
             format!("q{MAX_OPEN_GAPS}"),
             "the newest gap is the one a bounded pass must not drop"
         );
+        assert!(
+            open.capped,
+            "a pass that left gaps out has to say so: the sweep reads a partial \
+             pass as a set of dismissals otherwise"
+        );
+        assert_eq!(
+            store.open_gap_refs("fake").await.unwrap().len() as i64,
+            MAX_OPEN_GAPS,
+            "the display path is bounded by the same cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_table_holding_exactly_the_cap_has_left_nothing_out() {
+        // Reading `MAX_OPEN_GAPS` rows and calling that capped cannot tell a
+        // full page from a truncated one, and `sweep` now keeps every group it
+        // could not reach when the pass was partial — so at exactly the cap a
+        // base would stop cleaning up stale groups altogether, for good.
+        let store = Store::memory().await.unwrap();
+        for i in 0..MAX_OPEN_GAPS {
+            nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
+        }
+        let open = store.open_gaps("fake").await.unwrap();
+        assert_eq!(open.gaps.len() as i64, MAX_OPEN_GAPS);
+        assert!(!open.capped, "nothing was left out of this pass");
     }
 
     #[tokio::test]
@@ -337,9 +571,9 @@ mod tests {
         let a = nothing_here(&store, "q1", vec![1.0]).await;
         let s = gap_search(&store, "s1", vec![1.0]).await;
         store.dismiss_gap(GapKind::Ask, &a).await.unwrap();
-        assert_eq!(store.open_gaps("fake").await.unwrap().len(), 1);
+        assert_eq!(store.open_gaps("fake").await.unwrap().gaps.len(), 1);
         store.dismiss_gap(GapKind::Search, &s).await.unwrap();
-        assert!(store.open_gaps("fake").await.unwrap().is_empty());
+        assert!(store.open_gaps("fake").await.unwrap().gaps.is_empty());
         assert!(matches!(
             store.dismiss_gap(GapKind::Ask, "nope").await,
             Err(Error::NotFound)
@@ -395,10 +629,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            store.cluster_keys().await.unwrap(),
-            vec![("k".to_string(), "model".to_string())]
-        );
+        let keys = store.cluster_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, "k");
+        assert_eq!(keys[0].labelled_by, "model");
+        assert_eq!(keys[0].members, c.members);
         store.delete_clusters(&["k".into()]).await.unwrap();
         assert!(store.cluster_keys().await.unwrap().is_empty());
     }

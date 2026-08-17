@@ -187,6 +187,11 @@ CREATE TABLE IF NOT EXISTS segments (
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
   state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  -- Set when this window is being read again to pick up lines the first read
+  -- missed, and cleared once the window reaches `done`. It is what tells
+  -- `window::write_segment_artifacts` to append rather than replace: see there
+  -- for why the two reasons to re-run a window want opposite answers.
+  keep_artifacts INTEGER NOT NULL DEFAULT 0,
   -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
   -- is the count that governs its backoff and its settling, and two counters for
   -- one thing is exactly what made the incident behind that change so hard to

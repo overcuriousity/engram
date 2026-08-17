@@ -1385,13 +1385,9 @@ async fn facets_count_what_the_collection_can_be_narrowed_by() {
             .find(|c| c.value == name)
             .map(|c| c.count)
     };
-    let tag = |name: &str| f.tags.iter().find(|t| t.value == name).map(|t| t.count);
 
     assert_eq!(cat("procedure"), Some(2));
     assert_eq!(cat("concept"), Some(1));
-    // A tag is an array field, so every element of every point is counted.
-    assert_eq!(tag("shared"), Some(3));
-    assert_eq!(tag("linux"), Some(1));
     assert_eq!(
         f.categories[0].value, "procedure",
         "facets arrive most frequent first"

@@ -79,6 +79,7 @@ pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize, usize)> 
     let mut lost_carriers = 0usize;
     for r in &asks {
         let id: String = r.get("id");
+        let verdict: String = r.get("verdict");
         let carriers: Vec<String> = sqlx::query_scalar(
             "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND carried = 1 ORDER BY n",
         )
@@ -88,10 +89,21 @@ pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize, usize)> 
         let (kept, lost): (Vec<String>, Vec<String>) =
             carriers.into_iter().partition(|c| known.contains(c));
         lost_carriers += lost.len();
+        // The invariant `EvalQuestion` documents, enforced at the one place
+        // that writes the file. `toggle_carried` deliberately does not overrule
+        // a verdict already given, so an operator who judges `wrong` and then
+        // marks what the answer leaned on leaves a carrier behind a verdict
+        // that says the answer was not right — and a carrier under `wrong` is
+        // not a statement that the artifact should have been cited, which is
+        // the only thing `expect` means.
+        let expect = match verdict.as_str() {
+            "right" => kept,
+            _ => Vec::new(),
+        };
         questions.push(EvalQuestion {
             question: r.get("question"),
-            verdict: r.get("verdict"),
-            expect: kept,
+            verdict,
+            expect,
             note: Some(format!("judged {}", r.get::<i64, _>("judged_at"))),
         });
     }
@@ -327,5 +339,33 @@ mod tests {
         let none = qs.iter().find(|q| q.question == "not here").unwrap();
         assert_eq!(none.verdict, "nothing_here");
         assert!(none.expect.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_carrier_behind_a_wrong_verdict_is_not_exported_as_an_expectation() {
+        // `toggle_carried` does not overrule a verdict already given, so this
+        // order — judge wrong, then mark what the answer leaned on — is
+        // reachable from the page. A carrier under `wrong` says the answer used
+        // that artifact, not that it should have; exporting it as `expect`
+        // would score citation recall against an answer nobody stands behind.
+        let store = Store::memory().await.unwrap();
+        let art = seed_one_artifact(&store).await;
+        let id = record_ask(&store, "wrong but cited", &[&art]).await;
+        store
+            .judge_ask(&id, crate::store::asks::AskVerdict::Wrong)
+            .await
+            .unwrap();
+        store.toggle_carried(&id, 1).await.unwrap();
+        assert_eq!(
+            store.ask_event(&id).await.unwrap().unwrap().verdict,
+            Some(crate::store::asks::AskVerdict::Wrong),
+            "marking a carrier must not have promoted the verdict"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        export(&store, dir.path()).await.unwrap();
+        let qs = crate::eval::load_questions(dir.path()).unwrap();
+        assert_eq!(qs[0].verdict, "wrong");
+        assert!(qs[0].expect.is_empty(), "{:?}", qs[0].expect);
     }
 }

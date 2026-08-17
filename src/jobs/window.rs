@@ -300,9 +300,26 @@ pub(crate) fn resolve_span(
     }
 }
 
-/// Replace the chunks of one window. Same "replace, never append" guarantee as
-/// before; the key is the window rather than the whole source, so a retry of
-/// window 4 cannot disturb windows 0 to 3.
+/// Write the chunks of one window.
+///
+/// "Replace, never append" by default, keyed to the window rather than to the
+/// whole source, so a retry of window 4 cannot disturb windows 0 to 3. What the
+/// replacement is *for* is idempotency: the insert happens here and the window
+/// is marked done afterwards, so a process that dies in between re-runs this
+/// function, and without the delete that window's artifacts would be written
+/// twice.
+///
+/// The exception is a window the operator sent back to pick up lines the first
+/// read missed — `store::reset_segment` with `keep_artifacts` — where the delete
+/// is not idempotency but loss. Those artifacts are the parts of the window that
+/// *did* arrive; they may have been edited, retagged or verified since, and none
+/// of that was the problem the button was pressed about. So that read appends,
+/// and any duplicate of an already-captured claim goes to the dedupe sweep,
+/// which is what the sweep is for. The mark is not spent here, though it is
+/// honoured here: `set_segment_state` spends it on reaching `done`, because
+/// three more writes follow this one and a failure in any of them would
+/// otherwise retry the window with the mark already gone — deleting exactly the
+/// artifacts it exists to protect.
 ///
 /// The delete and the insert are one unit against the rest of the document: a
 /// `settle` running between them would renumber a document that is missing a
@@ -314,14 +331,20 @@ pub(crate) async fn write_segment_artifacts(
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
     let _corpus = core.corpus_lock(corpus_id).await;
-    let old = core
+    let keep = core
         .store
-        .artifact_ids_for_segment(corpus_id, segment_idx)
+        .segment_keeps_artifacts(corpus_id, segment_idx)
         .await?;
-    if !old.is_empty() {
-        core.vectors.delete_artifacts(&old).await?;
-        for id in &old {
-            core.store.delete_artifact(id).await?;
+    if !keep {
+        let old = core
+            .store
+            .artifact_ids_for_segment(corpus_id, segment_idx)
+            .await?;
+        if !old.is_empty() {
+            core.vectors.delete_artifacts(&old).await?;
+            for id in &old {
+                core.store.delete_artifact(id).await?;
+            }
         }
     }
     core.store.insert_artifacts(corpus_id, &new).await
@@ -456,6 +479,117 @@ mod tests {
                 .iter()
                 .all(|w| w.state == SegmentState::Pending),
             "a unit segmented a window that was not its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_replaces_a_window_unless_it_was_sent_back_for_missed_lines() {
+        // The two reasons to run a window twice want opposite answers. A retry
+        // must replace, or a process killed between the insert and the "done"
+        // mark writes that window's artifacts twice. A re-read for lines the
+        // first pass missed must not, or it deletes the artifacts that *did*
+        // arrive — with whatever an operator has edited, tagged or verified on
+        // them since — for lines that were never the problem.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let first = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        assert!(!first.is_empty(), "the fixture must write something");
+
+        // A plain reset: the second read stands in place of the first.
+        core.store.reset_segment(&out.id, 0, false).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let replaced = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        assert!(
+            replaced.iter().all(|id| !first.contains(id)),
+            "a retry left the first read's artifacts behind"
+        );
+
+        // Sent back for missed lines: the second read is added to the first.
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let kept = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        assert!(
+            replaced.iter().all(|id| kept.contains(id)),
+            "the re-read deleted what the window had already produced"
+        );
+        assert!(kept.len() > replaced.len(), "and it added what it read");
+        assert!(
+            !core
+                .store
+                .segment_keeps_artifacts(&out.id, 0)
+                .await
+                .unwrap(),
+            "the mark is spent, so the next ordinary retry replaces again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_re_read_mark_outlives_the_write_that_honoured_it() {
+        // Three DB writes follow `write_segment_artifacts` — `flag_unverified`,
+        // the state change and `settle` — and `SQLITE_BUSY` among them is
+        // routine now that two workers can be in one corpus. Spending the mark
+        // at the write meant the retry that followed such a failure replaced,
+        // deleting the very artifacts the mark exists to keep.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let first = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        write_segment_artifacts(&core, &out.id, 0, vec![])
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .segment_keeps_artifacts(&out.id, 0)
+                .await
+                .unwrap(),
+            "a write is not the end of the run; the mark must survive it"
+        );
+
+        // So the retry that a later failure forces still appends.
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let kept = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        assert!(
+            first.iter().all(|id| kept.contains(id)),
+            "the retry deleted what the first read had produced"
+        );
+        assert!(
+            !core
+                .store
+                .segment_keeps_artifacts(&out.id, 0)
+                .await
+                .unwrap(),
+            "and reaching `done` spends it"
         );
     }
 

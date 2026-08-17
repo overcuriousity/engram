@@ -308,18 +308,62 @@ than guessing. Cite excerpts by their number. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
 
-/// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace and
-/// markdown emphasis or heading marks are skipped, because models wrap an
-/// opening sentence in them no matter what they were told; the comparison is
-/// case-insensitive for the same reason. Mentioning the phrase later in a real
-/// answer is not an abstention.
+/// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
+/// emphasis, heading and list marks, and opening quotes are skipped, because
+/// models wrap an opening sentence in them no matter what they were told; the
+/// comparison is case-insensitive for the same reason. Mentioning the phrase
+/// later in a real answer is not an abstention.
+///
+/// Skipping an opening quote is what makes that last rule hard, because the one
+/// thing a quote mark can mean is that the phrase is being *quoted* — `"Not in
+/// the knowledge base" is the wrong read here; excerpt 3 covers it.` is an
+/// answer, not an abstention, and scoring it as one records a gap that is not
+/// there. So a lead-in that included a quote is only accepted when the phrase
+/// runs on: a quote closing immediately after it, with an answer behind that,
+/// is the shape of a quotation and nothing else. An abstention that was itself
+/// quoted closes after its full stop — `„Not in the knowledge base.“ Nothing
+/// covers it.` — and a bare quoted phrase with nothing behind it has no answer
+/// to be the quotation's point, so both still count.
+///
+/// Compared over characters rather than over a byte slice of the prefix's
+/// length: a non-ASCII lead-in — a typographic quote, a bullet — moves the
+/// prefix off a byte boundary, and slicing there yields `None`, which scored a
+/// correct abstention as a wrong answer.
 pub fn abstained(answer: &str) -> bool {
-    let opening = answer.trim_start_matches(|c: char| {
-        c.is_whitespace() || matches!(c, '*' | '_' | '#' | '>' | '`')
-    });
-    opening
-        .get(..ABSTAIN_PREFIX.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(ABSTAIN_PREFIX))
+    let quote = |c: char| matches!(c, '"' | '\'' | '„' | '“' | '”' | '‘' | '’' | '«' | '»');
+    let marks = |c: char| {
+        c.is_whitespace()
+            || quote(c)
+            || matches!(c, '*' | '_' | '#' | '>' | '`' | '-' | '+' | '•' | '·')
+    };
+    let opening = answer.trim_start_matches(marks);
+    // An ordered list marker — `1.` or `1)` — is the one lead-in that is not a
+    // single class of character.
+    let digits = opening.len()
+        - opening
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
+    let opening = match opening[digits..].strip_prefix(['.', ')']) {
+        Some(rest) if digits > 0 => rest.trim_start_matches(marks),
+        _ => opening,
+    };
+    let head: String = opening
+        .chars()
+        .take(ABSTAIN_PREFIX.chars().count())
+        .collect();
+    if !head.eq_ignore_ascii_case(ABSTAIN_PREFIX) {
+        return false;
+    }
+    if !answer[..answer.len() - opening.len()].contains(quote) {
+        return true;
+    }
+    // A quote was opened. Where it closes decides what it was doing: right after
+    // the phrase with an answer behind it, the phrase was being quoted.
+    let rest = &opening[head.len()..];
+    match rest.chars().next() {
+        Some(c) if quote(c) => rest[c.len_utf8()..].trim().is_empty(),
+        _ => true,
+    }
 }
 
 /// One retrieved excerpt, numbered so the answer can cite it.
@@ -382,11 +426,30 @@ pub fn claims_schema() -> serde_json::Value {
 /// answers: it names the hole, not the guess.
 pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
 
+/// How many questions one naming call is shown, and how much of each.
+///
+/// A cluster can hold every open gap of a kind, and every other prompt in this
+/// module packs to a budget while this one concatenated whatever it was handed.
+/// A prompt over the context window fails the call, the group falls back to a
+/// terms label, and — because a terms label is offered to the model again — it
+/// pays that failed call on every sweep for as long as the group lives. Twelve
+/// questions is far more than naming a subject needs, and a question long enough
+/// to be cut is a pasted paragraph rather than a question.
+pub const GAP_LABEL_MAX_QUESTIONS: usize = 12;
+pub const GAP_LABEL_MAX_CHARS: usize = 200;
+
+/// The caller passes its questions newest first, so the cap keeps the newest.
 pub fn gap_label_prompt(questions: &[&str]) -> String {
     let mut s = String::from("Questions:\n");
-    for q in questions {
+    for q in questions.iter().take(GAP_LABEL_MAX_QUESTIONS) {
         s.push_str("- ");
-        s.push_str(q);
+        match q.char_indices().nth(GAP_LABEL_MAX_CHARS) {
+            Some((cut, _)) => {
+                s.push_str(&q[..cut]);
+                s.push('…');
+            }
+            None => s.push_str(q),
+        }
         s.push('\n');
     }
     s
@@ -1775,6 +1838,30 @@ mod tests {
             "**Not in the knowledge base.** The excerpts describe…"
         ));
         assert!(abstained("# Not in the knowledge base\n\nThe excerpts…"));
+        // A non-ASCII lead-in puts the prefix off a byte boundary; a list
+        // marker is a lead-in the emphasis set does not cover.
+        assert!(abstained("„Not in the knowledge base.“ Nothing covers it."));
+        assert!(abstained(
+            "• Not in the knowledge base — the excerpts are about FAT."
+        ));
+        assert!(abstained("- Not in the knowledge base."));
+        assert!(abstained("1. Not in the knowledge base."));
+        // The whole answer, quoted and nothing behind it: there is no answer for
+        // the quotation to have been making a point about.
+        assert!(abstained("\"Not in the knowledge base\""));
+    }
+
+    #[test]
+    fn an_answer_that_quotes_the_phrase_to_argue_with_it_is_not_an_abstention() {
+        // The cost of skipping an opening quote. Scored as an abstention, this
+        // records a gap for a question the base did answer, and the gap sweep
+        // then groups and names it.
+        assert!(!abstained(
+            "\"Not in the knowledge base\" is the wrong read here; excerpt 3 covers it."
+        ));
+        assert!(!abstained(
+            "“Not in the knowledge base” would be wrong — see excerpt 1."
+        ));
     }
 
     #[test]
@@ -1801,5 +1888,31 @@ mod tests {
         );
         assert!(parse_gap_label(r#"{"label": ""}"#).is_err());
         assert!(parse_gap_label("nope").is_err());
+    }
+
+    #[test]
+    fn naming_a_gap_is_shown_a_bounded_number_of_bounded_questions() {
+        // A cluster can hold every open gap of a kind. Unbounded, the prompt
+        // goes over the context window, the call fails, the group falls back to
+        // a terms label — and a terms label is offered to the model again, so
+        // the failure is paid for on every sweep for as long as the group lives.
+        let long = "x".repeat(GAP_LABEL_MAX_CHARS + 50);
+        let mut qs: Vec<&str> = vec![long.as_str(); GAP_LABEL_MAX_QUESTIONS + 20];
+        qs[0] = "the newest question, which the caller passes first";
+        let p = gap_label_prompt(&qs);
+        assert_eq!(
+            p.lines().count(),
+            GAP_LABEL_MAX_QUESTIONS + 1,
+            "one header and {GAP_LABEL_MAX_QUESTIONS} questions: {p}"
+        );
+        assert!(
+            p.contains("the newest question"),
+            "the cap keeps the newest, which the caller passes first: {p}"
+        );
+        assert!(p.contains('…'), "an overlong question is cut: {p}");
+        assert!(
+            !p.contains(&long),
+            "no question reaches the prompt at full length"
+        );
     }
 }
