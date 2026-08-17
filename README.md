@@ -67,6 +67,14 @@ is a query you can paste rather than compose.
 
 Keywords still work; they are simply the weakest thing you can hand it.
 
+The list says what it knows about itself. A hit whose match is loose is
+labelled so; when every hit is loose, the page says nothing matches closely.
+And where the scores fall off — one step between two hits that is larger than
+all the other steps put together — the rail draws a rule, and the hits past it
+are greyed. They still placed and keep their rank; they have stopped claiming to
+be answers. Over the API the same hit carries `past_cliff: true`, and over MCP
+its meta line says "below the relevance cliff".
+
 ## Learning what the search got wrong
 
 Whether that ranking is any good is a question nothing in the app can answer on

@@ -19,11 +19,16 @@
   </div>
   {% endif %}
   {% for r in results %}
+  {# Once, before the first row past it: the ranks continue — those hits did
+     place — but the page stops claiming each of them is an answer. #}
+  {% if r.past_cliff && (loop.first || !results[loop.index0 - 1].past_cliff) %}
+  <div class="cliff-rule" role="separator">Relevance falls off here</div>
+  {% endif %}
   {# The delete control is a sibling of the link rather than a child: a button
      inside an anchor is invalid, and the anchor must keep being the
      `.rail-item` the arrow keys move between. #}
   <div class="rail-row">
-    <a class="rail-item" role="option" aria-selected="false"
+    <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
        href="/ui/artifacts/{{ r.artifact_id }}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
        hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">

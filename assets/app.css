@@ -355,6 +355,16 @@ body { overflow-x: hidden; }
 }
 .rail-why { font-size: 0.8125rem; color: var(--color-fg-muted); margin-top: 0.25rem; }
 
+/* Where the ranked list's relevance falls off. The rows past it are still
+   ranked — they placed — but they no longer read as answers. */
+.cliff-rule {
+  margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--color-border-subtle);
+  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+}
+.rail-past { opacity: 0.55; }
+.rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
+
 /* Neighbours under the artifact. Narrower than the rail on purpose: this is a
    way out of the pane, not a second set of results competing with it. */
 .related { display: flex; flex-direction: column; gap: 0.375rem; }

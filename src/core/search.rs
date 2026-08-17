@@ -85,6 +85,12 @@ pub struct SearchResult {
     /// order is silent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
+    /// This hit sits past the cliff: the one step in this list's scores that
+    /// accounts for more of the fall than the rest of the list together. See
+    /// `cliff`. It still competed and still placed — nothing is reordered or
+    /// dropped — but the page stops claiming it is an answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub past_cliff: bool,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +115,7 @@ impl From<SearchHit> for SearchResult {
             last_verified_at: h.payload.last_verified_at,
             weak: false,
             primed: false,
+            past_cliff: false,
             via: None,
             reason: None,
         }
@@ -166,6 +173,56 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
             )
         })
         .collect()
+}
+
+/// The largest gap must exceed this many times the mean of the other gaps to
+/// count as a cliff. A constant rather than configuration: a default that
+/// changes what the page claims moves after the harness has run, and until
+/// then a number with its reasoning beside it is more honest than a knob.
+pub const CLIFF_FACTOR: f32 = 3.0;
+
+/// Where the relevance falls off in a ranked list, as the number of hits above
+/// the fall — or `None` when no single step stands out.
+///
+/// Hybrid scores are fused ranks and mean nothing across queries; reranker
+/// scores and the recency stage live on other scales again. A step compared
+/// against its own list's other steps is scale-free: the cliff is the one gap
+/// that is larger than `CLIFF_FACTOR` times the mean of all the others. Below
+/// three hits there is one gap and nothing to compare it to. Gaps are read in
+/// list order and a negative one — a primed near-tie lifted past its neighbour
+/// — is a near-tie, not a fall.
+///
+/// This is also where `ask` will stop packing excerpts, which is why it is a
+/// function over scores rather than a step inside `search_with`.
+pub fn cliff(scores: &[f32]) -> Option<usize> {
+    if scores.len() < 3 {
+        return None;
+    }
+    let gaps: Vec<f32> = scores.windows(2).map(|w| (w[0] - w[1]).max(0.0)).collect();
+    let (at, largest) = gaps
+        .iter()
+        .copied()
+        .enumerate()
+        .fold(
+            (0usize, 0.0f32),
+            |best, (i, g)| if g > best.1 { (i, g) } else { best },
+        );
+    if largest <= 0.0 {
+        return None;
+    }
+    let others = (gaps.iter().sum::<f32>() - largest) / (gaps.len() - 1) as f32;
+    (largest > CLIFF_FACTOR * others).then_some(at + 1)
+}
+
+/// Flag every hit from the cliff on. The list is left in its order and at its
+/// length; nothing about the cliff is silent and nothing about it is a change.
+fn mark_past_cliff(results: &mut [SearchResult]) {
+    let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+    if let Some(above) = cliff(&scores) {
+        for r in results.iter_mut().skip(above) {
+            r.past_cliff = true;
+        }
+    }
 }
 
 /// Move hits up on activation, within hard bounds.
@@ -505,6 +562,7 @@ impl Core {
                 last_verified_at: c.last_verified_at,
                 weak: false,
                 primed: false,
+                past_cliff: false,
                 via: Some(l.via),
                 reason: l.reason,
             });
@@ -803,6 +861,10 @@ impl Core {
         }
 
         results.truncate(limit);
+        // On the list the caller will see, in its final order: after priming,
+        // after the truncate, and before association appends hits that never
+        // competed for a place. Marks, never reorders or drops.
+        mark_past_cliff(&mut results);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -1650,6 +1712,7 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                past_cliff: false,
                 via: None,
                 reason: None,
             })
@@ -2460,6 +2523,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            past_cliff: false,
             via: None,
             reason: None,
         };
@@ -2471,5 +2535,106 @@ mod tests {
             ids.contains(&d.as_str()),
             "an artifact linked only to the ranked hits, not among them, was not recalled: {ids:?}"
         );
+    }
+
+    // ── The cliff ────────────────────────────────────────────────────────────
+
+    /// Hybrid RRF as Qdrant fuses it: two hits both branches agreed on, then
+    /// hits only the dense branch found. The step between them is the cliff.
+    #[test]
+    fn a_hybrid_list_falls_off_where_only_one_branch_still_matches() {
+        let both = |r: f32| 1.0 / (60.0 + r) + 1.0 / (60.0 + r);
+        let one = |r: f32| 1.0 / (60.0 + r);
+        let scores = [both(1.0), both(2.0), one(3.0), one(4.0), one(5.0), one(6.0)];
+        assert_eq!(cliff(&scores), Some(2));
+    }
+
+    /// Dense-only RRF falls evenly, `1/(60+r)`: no step stands out, so the
+    /// list makes no claim about where its answers stop.
+    #[test]
+    fn an_evenly_falling_list_has_no_cliff() {
+        let scores: Vec<f32> = (1..=10).map(|r| 1.0 / (60.0 + r as f32)).collect();
+        assert_eq!(cliff(&scores), None);
+    }
+
+    #[test]
+    fn reranker_scores_fall_off_after_the_close_matches() {
+        assert_eq!(cliff(&[0.95, 0.90, 0.30, 0.28, 0.10]), Some(2));
+    }
+
+    /// Two comparable drops: the list is ambiguous and says nothing, rather
+    /// than picking one of them and calling the rest noise.
+    #[test]
+    fn an_ambiguous_list_says_nothing() {
+        assert_eq!(cliff(&[0.9, 0.5, 0.1, 0.05]), None);
+    }
+
+    /// One gap has nothing to be compared against.
+    #[test]
+    fn fewer_than_three_hits_have_no_cliff() {
+        assert_eq!(cliff(&[]), None);
+        assert_eq!(cliff(&[1.0]), None);
+        assert_eq!(cliff(&[1.0, 0.1]), None);
+    }
+
+    /// A plateau and then a drop is the clearest cliff there is; the mean of
+    /// the other gaps being zero must not turn it into a division that says no.
+    #[test]
+    fn a_plateau_followed_by_a_drop_is_a_cliff() {
+        assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.2, 0.2]), Some(3));
+        // And an entirely flat list has no fall at all.
+        assert_eq!(cliff(&[0.5, 0.5, 0.5, 0.5]), None);
+    }
+
+    /// Priming may lift a near-tie past its neighbour, which reads as a
+    /// negative gap. That is a near-tie, not a fall.
+    #[test]
+    fn a_primed_inversion_is_not_a_cliff() {
+        assert_eq!(cliff(&[0.90, 0.88, 0.89, 0.87, 0.30]), Some(4));
+        assert_eq!(cliff(&[0.50, 0.48, 0.49, 0.47, 0.46]), None);
+    }
+
+    #[test]
+    fn hits_past_the_cliff_are_marked_and_the_rest_are_not() {
+        let dummy = |id: &str, score: f32| SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            past_cliff: false,
+            via: None,
+            reason: None,
+        };
+        let mut results = vec![
+            dummy("a", 0.95),
+            dummy("b", 0.90),
+            dummy("c", 0.30),
+            dummy("d", 0.28),
+        ];
+        mark_past_cliff(&mut results);
+        assert_eq!(
+            results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, true, true]
+        );
+        // The list is neither reordered nor shortened.
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+
+        let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
+        mark_past_cliff(&mut flat);
+        assert!(flat.iter().all(|r| !r.past_cliff));
     }
 }

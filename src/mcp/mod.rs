@@ -32,9 +32,14 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
             } else {
                 format!("### {title}")
             };
+            // An agent reading a numbered list has no grey to see, so a hit
+            // past the cliff says so in words.
             let how = match (&r.via, &r.reason) {
                 (Some(_), Some(why)) => format!("recalled beside the answer — {why}"),
                 (Some(_), None) => "recalled beside the answer".to_string(),
+                (None, _) if r.past_cliff => {
+                    format!("score {:.3} · below the relevance cliff", r.score)
+                }
                 (None, _) => format!("score {:.3}", r.score),
             };
             format!(
@@ -299,9 +304,24 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            past_cliff: false,
             via: via.map(str::to_string),
             reason: None,
         }
+    }
+
+    /// An agent reading a numbered list has no grey to see; a hit past the
+    /// cliff has to say so in words, and one above it must not.
+    #[test]
+    fn a_result_past_the_cliff_says_so_and_keeps_its_number() {
+        let mut past = hit("tail", None);
+        past.past_cliff = true;
+        let out = format_search_results(&[hit("head", None), past]);
+        let head = out.find("### 1. head").unwrap();
+        let tail = out.find("### 2. tail").unwrap();
+        let note = out.find("below the relevance cliff").unwrap();
+        assert!(head < tail && tail < note, "{out}");
+        assert_eq!(out.matches("below the relevance cliff").count(), 1, "{out}");
     }
 
     #[test]

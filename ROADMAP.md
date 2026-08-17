@@ -18,7 +18,8 @@ complete pair coverage, merge-loss checks and undo; caveats on artifacts; text
 and image capture; hybrid search inside Qdrant; the evaluation harness fed from
 judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`);
 Hebbian links learned from co-retrieval with bounded priming and one-hop
-association in the results; a single-shot ask endpoint — retrieve, pack by
+association in the results; the cliff — where a ranked list's relevance falls
+off — marked on the rail, over the API and over MCP; a single-shot ask endpoint — retrieve, pack by
 score, one completion, cite by number, dropped excerpts and truncation reported.
 Design records live in `docs/superpowers/specs/`.
 
@@ -158,13 +159,10 @@ Plumbing, done by whichever item below needs the second tier first.
 
 What ask learns at write time, search inherits. From the [Ask] list: situation
 vectors (item 2) change what search matches against; ask verdicts join judged
-searches as access cues under **access reconsolidation** above. The items here
-are search's own.
+searches as access cues under **access reconsolidation** above. The cliff is
+built (`search::cliff`, spec `2026-08-17-cliff-design.md`) and waits for ask's
+retrieval loop to pack to it. The items here are search's own.
 
-- **The cliff, shown.** Hybrid scores mean nothing across queries, but the gap
-  between one hit and the next does. Where the relevance falls off, the rail
-  says so — a break, or hits past it greyed — so a page of ten results does not
-  claim ten answers. Same computation ask uses to stop packing.
 - **Continues in.** A hit whose neighbour in its corpus (adjacent ordinal) is
   also above the cliff says so, and one click reads on. The answer to a
   situation is often the paragraph after the one that matched.

@@ -13,6 +13,7 @@ use axum::routing::{get, post};
 
 // ── View models ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct RenderedResult {
     /// What the rail entry links to: the detail pane for this chunk.
     pub artifact_id: String,
@@ -41,6 +42,10 @@ pub struct RenderedResult {
     /// This hit moved up on activation. A small marker, because the claim is
     /// small: it passed a near-tie, it did not become a better match.
     pub primed: bool,
+    /// Past the point where this list's relevance falls off. Greyed, under a
+    /// rule; the rank stays, because it did place — the claim withdrawn is
+    /// "this is an answer", not "this is fifth". See `search::cliff`.
+    pub past_cliff: bool,
     /// The title of the ranked hit that recalled this one. Set only on an
     /// associated hit, and it is what the row names.
     pub via_title: Option<String>,
@@ -787,6 +792,7 @@ fn render_hit(
         },
         weak: h.weak,
         primed: h.primed,
+        past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
     }
@@ -2886,6 +2892,7 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            past_cliff: false,
             via: None,
             reason: None,
         };
@@ -2919,9 +2926,57 @@ mod tests {
             rank: String::new(),
             weak: false,
             primed: false,
+            past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
         }
+    }
+
+    /// The rule is drawn once, before the first row past the cliff, and the
+    /// rows past it are greyed but keep their ranks: they placed, they just
+    /// stopped being answers.
+    #[test]
+    fn the_rail_draws_the_cliff_once_and_greys_what_lies_past_it() {
+        let mut above = rendered(None, None);
+        above.rank = "#1".into();
+        let mut past = rendered(None, None);
+        past.rank = "#3".into();
+        past.past_cliff = true;
+        let mut also_past = past.clone();
+        also_past.rank = "#4".into();
+        let body = ResultsTemplate {
+            results: vec![above.clone(), above.clone(), past, also_past],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert_eq!(
+            body.matches("Relevance falls off here").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches("rail-past").count(), 2, "{body}");
+        assert!(body.contains("#3") && body.contains("#4"), "{body}");
+        // The rule comes after the second row and before the third.
+        let rule = body.find("Relevance falls off here").unwrap();
+        assert!(body.find("#3").unwrap() > rule, "{body}");
+        assert!(body.rfind("#1").unwrap() < rule, "{body}");
+
+        // No cliff, no rule.
+        let flat = ResultsTemplate {
+            results: vec![above.clone(), above.clone(), above],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            timing: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(!flat.contains("Relevance falls off here"), "{flat}");
+        assert!(!flat.contains("rail-past"), "{flat}");
     }
 
     #[tokio::test]
@@ -2987,6 +3042,7 @@ mod tests {
             rank: if weak { String::new() } else { "#1".into() },
             weak,
             primed: false,
+            past_cliff: false,
             via_title: None,
             reason: None,
         }
