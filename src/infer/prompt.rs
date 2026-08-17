@@ -187,6 +187,8 @@ These are NOT conflicts:
 
 When you answer "duplicate", the merged text must contain every number, version, date, path, flag, command and error string that appeared in any input, and must read as one self-contained artifact rather than a list of sources. If you cannot write one that keeps all of them, the answer is "conflict", not "duplicate".
 
+An artifact that was itself written by merging earlier ones is shown with those originals under "SOURCES OF A" or "SOURCES OF B". They are there for one reason: so that a detail an earlier merge dropped can go back into your answer. They are not under judgement. There are exactly two artifacts, A and B — never name a source in `supersedes`, and never treat a source as a third artifact.
+
 Reply with JSON only, no commentary, in exactly this shape:
 
 {"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
@@ -196,7 +198,19 @@ Reply with JSON only, no commentary, in exactly this shape:
 - supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
 - merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
 
-/// The artifacts, each under a letter and its title.
+/// The two artifacts, each under its letter and its title, each followed by its
+/// captured sources when it has any.
+///
+/// Exactly two, because the unit judges one pair. It used to letter as many
+/// artifacts as the connected component held, which is what made fan-in
+/// something one call had to survive and what `merge_max_roots` was capping —
+/// with the cap settling whole clusters before any call was made.
+///
+/// A merged member is shown its own text as the thing under judgement, with the
+/// originals it was written from beneath it as reference. Those are unlettered,
+/// so a verdict cannot name one: the mismatch between a lettered list of roots
+/// and a different list of members is what used to supersede artifacts the model
+/// had never been shown.
 ///
 /// The title is not decoration here, it is the subject. Synthesis writes a body
 /// that stands on its own within its segment, which is not the same as naming
@@ -236,20 +250,42 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// Zero adds nothing at all, so a first ask stays byte-identical between runs —
 /// and keeps hitting the cache when it should, on a group re-armed after a
 /// settled verdict was lost.
-pub fn dedupe_prompt(members: &[(&str, &str)], attempt: i64) -> String {
+pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -> String {
     let mut s = String::new();
     if attempt > 0 {
         s.push_str(&format!("(attempt {})\n", attempt + 1));
     }
-    for (i, (title, text)) in members.iter().enumerate() {
-        let letter = (b'a' + i as u8) as char;
+    for (letter, m) in [('A', a), ('B', b)] {
         s.push_str(&format!(
-            "----- ARTIFACT {} -----\nTitle: {title}\n\n{text}\n",
-            letter.to_ascii_uppercase()
+            "----- ARTIFACT {letter} -----\nTitle: {}\n\n{}\n",
+            m.title, m.text
         ));
+        if !m.sources.is_empty() {
+            s.push_str(&format!("----- SOURCES OF {letter} -----\n"));
+            for (title, text) in &m.sources {
+                s.push_str(&format!("Title: {title}\n\n{text}\n\n"));
+            }
+        }
     }
     s.push_str("----- END -----");
     s
+}
+
+/// One of the two artifacts under judgement, and — when it is itself a merge —
+/// the captured originals behind it.
+///
+/// `sources` is context and never an input. It is there so that a detail an
+/// earlier merge dropped can be put back into this one, which is what keeps
+/// repeated pairwise merging from walking away from the wording someone
+/// actually captured. It is unlettered so that no verdict can name it: `a` and
+/// `b` are the two members and nothing else, and a letter that could resolve to
+/// a source would supersede an artifact on the strength of a text the model was
+/// shown as reference.
+pub struct DedupeMember<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+    /// `(title, text)`, oldest first. Empty for a captured artifact.
+    pub sources: Vec<(&'a str, &'a str)>,
 }
 
 /// Two knowledge artifacts keep being retrieved by the same searches, and this
@@ -533,12 +569,14 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
 
-    // Any single letter, because `dedupe_prompt` letters as many artifacts as
-    // the component has and the fan-in cap — not this parser — is what bounds
-    // that. Stopping at "d" silently downgraded every direction named in a group
-    // of five or more to a conflict, which turned the cheapest and most faithful
-    // outcome, superseding one stored original by another, into a queue entry
-    // for a person.
+    // Any single letter, and not a range this parser enforces. The prompt now
+    // hands out exactly two, but a parser that pins the count is a parser that
+    // silently downgrades a perfectly good direction the day the prompt changes
+    // — which is what happened when it stopped at "d" against a prompt that
+    // lettered a whole component: every direction named in a group of five or
+    // more became a conflict, turning the cheapest and most faithful outcome,
+    // superseding one stored original by another, into a queue entry for a
+    // person.
     //
     // How far the letters actually run is the caller's to know: it resolves this
     // against the list it showed, and a letter past the end downgrades there.
@@ -1046,6 +1084,15 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// A captured artifact: one with nothing behind it to show as context.
+    fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
+        DedupeMember {
+            title,
+            text,
+            sources: vec![],
+        }
+    }
+
     #[test]
     fn the_schema_no_longer_asks_for_tags() {
         // No domain-agnostic vocabulary exists for subject words, so a
@@ -1427,10 +1474,8 @@ mod tests {
         // different numbers and called them a contradiction — which was the
         // only honest answer to the question it was actually asked.
         let p = dedupe_prompt(
-            &[
-                ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-                ("FAT32 Specifications", "32 Bit Clusternummern."),
-            ],
+            &member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+            &member("FAT32 Specifications", "32 Bit Clusternummern."),
             0,
         );
         assert!(p.contains("Title: FAT16 Specifications"), "{p}");
@@ -1439,13 +1484,49 @@ mod tests {
     }
 
     #[test]
-    fn a_component_is_lettered_so_a_direction_can_name_one() {
+    fn the_pair_is_lettered_so_a_direction_can_name_one() {
         // `supersedes` answers with a letter, so the letters have to be in the
         // prompt and in the same order the caller will read them back in.
-        let p = dedupe_prompt(&[("one", "a"), ("two", "b"), ("three", "c")], 0);
+        let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(p.contains("ARTIFACT C"), "{p}");
+        assert!(!p.contains("ARTIFACT C"), "a third letter exists to be named: {p}");
+    }
+
+    /// A merged member's own wording is what is being judged, and its captured
+    /// roots are there so the model can put back a detail the earlier merge
+    /// dropped. Both appear; only the member is lettered.
+    #[test]
+    fn a_merged_member_is_shown_with_its_sources_beneath_it() {
+        let a = DedupeMember {
+            title: "Pool sizing",
+            text: "the pool holds sixteen",
+            sources: vec![
+                ("Pool sizing, 2024", "max_connections is 16"),
+                ("Pool notes", "raise it for batch jobs"),
+            ],
+        };
+        let p = dedupe_prompt(&a, &member("Connections", "sixteen connections"), 0);
+
+        assert!(p.contains("ARTIFACT A"), "{p}");
+        assert!(p.contains("ARTIFACT B"), "{p}");
+        assert!(p.contains("the pool holds sixteen"), "{p}");
+        assert!(p.contains("max_connections is 16"), "a source was not shown: {p}");
+        assert!(p.contains("SOURCES OF A"), "{p}");
+        assert!(
+            !p.contains("SOURCES OF B"),
+            "a captured member was given a sources block: {p}"
+        );
+        assert!(!p.contains("ARTIFACT C"), "a source was lettered: {p}");
+    }
+
+    /// The letters a verdict may name are exactly the two artifacts under
+    /// judgement, and the system prompt has to say so — otherwise a merged
+    /// member's sources are fair game for `supersedes`.
+    #[test]
+    fn the_system_prompt_rules_the_sources_out_of_the_verdict() {
+        assert!(DEDUPE_SYSTEM.contains("SOURCES"));
+        assert!(DEDUPE_SYSTEM.contains("never name a source"));
     }
 
     #[test]
@@ -1460,17 +1541,11 @@ mod tests {
         // answer to the question it was handed. Nothing about the artifacts is
         // withheld by leaving the prior out; only the priming is.
         let p = dedupe_prompt(
-            &[
-                (
-                    "USB Device Registry Keys",
-                    "0066 = Last Connected (Win8-10)",
-                ),
-                (
-                    "USB-Geräte Registry-Werte",
-                    "Registry-Werte (Windows 7-10):",
-                ),
-                ("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
-            ],
+            &member("USB Device Registry Keys", "0066 = Last Connected (Win8-10)"),
+            &member(
+                "Plug and Play Logs",
+                "0066 für Last Connected (Windows 8-)",
+            ),
             0,
         );
         assert!(
@@ -1493,14 +1568,12 @@ mod tests {
         // milliseconds. A group whose reply the parser could not read is retried
         // up to `MAX_ATTEMPTS` times, and every one of those would have read the
         // same unreadable bytes back.
-        let members: &[(&str, &str)] = &[
-            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-            ("FAT32 Specifications", "32 Bit Clusternummern."),
-        ];
-        let first = dedupe_prompt(members, 0);
-        let second = dedupe_prompt(members, 1);
+        let a = member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB.");
+        let b = member("FAT32 Specifications", "32 Bit Clusternummern.");
+        let first = dedupe_prompt(&a, &b, 0);
+        let second = dedupe_prompt(&a, &b, 1);
         assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(members, 2));
+        assert_ne!(second, dedupe_prompt(&a, &b, 2));
         // A first ask stays exactly what it was, so the cache still earns its
         // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
@@ -1654,11 +1727,12 @@ mod tests {
 
     #[test]
     fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
-        // `dedupe_prompt` letters one artifact per component member, and the
-        // fan-in cap defaults to eight — so H is a letter the model is routinely
-        // invited to answer with. A parser that stopped at D turned every one of
-        // those into a conflict, which spends a person on a group the model had
-        // already resolved the cheap way.
+        // The prompt hands out A and B, and `interpret` is what refuses a letter
+        // past the end — deliberately, so that this parser does not have to be
+        // edited in lockstep with the prompt. It was pinned at D once, against a
+        // prompt that lettered a whole component, and turned every direction
+        // named in a group of five or more into a conflict: a person spent on a
+        // group the model had already resolved the cheap way.
         for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
             let d = parse_dedupe(&format!(
                 r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
