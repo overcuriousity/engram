@@ -1,3 +1,4 @@
+pub mod check;
 mod retrieve;
 
 use super::Core;
@@ -37,6 +38,12 @@ pub struct AskResponse {
     /// The answer opened with `prompt::ABSTAIN_PREFIX`, or there was nothing
     /// to show the model. What the harness counts as "said nothing here".
     pub abstained: bool,
+    /// Literals the answer carries that no excerpt it was shown does — the
+    /// fidelity thesis extended from synthesis to generation. `ask` is the one
+    /// place a model writes something a person reads as fact, and a command or
+    /// number here that is in no excerpt is the model's own rather than
+    /// something the base holds. Reported so the page can say which.
+    pub unsupported: Vec<String>,
     /// The recorded question, when this door records — the UI, with feedback
     /// on. The page shows a verdict bar only when this is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +100,8 @@ impl Core {
                 dropped: 0,
                 truncated: false,
                 abstained: true,
+                // Nothing was shown and nothing was claimed.
+                unsupported: vec![],
                 event_id: None,
             };
             return self.record_ask(req, &origin, response).await;
@@ -199,6 +208,7 @@ impl Core {
                 truncated: false,
                 // A configuration failure, not a statement about the base.
                 abstained: false,
+                unsupported: vec![],
                 event_id: None,
             };
             return self.record_ask(req, &origin, response).await;
@@ -228,12 +238,30 @@ impl Core {
             );
         }
 
+        // Checked against exactly the blocks that went into the prompt, so what
+        // the page flags is measured against what the model actually saw — not
+        // against the excerpts packing dropped, nor the raw artifact text the
+        // model was never shown. An abstention claims nothing, so there is
+        // nothing in it to check.
+        let abstained = abstained(&answer.text);
+        let unsupported = match abstained {
+            true => vec![],
+            false => check::unsupported_literals(&answer.text, &blocks[..kept]),
+        };
+        if !unsupported.is_empty() {
+            tracing::info!(
+                n = unsupported.len(),
+                "ask: the answer carries literals no excerpt does"
+            );
+        }
+
         let response = AskResponse {
-            abstained: abstained(&answer.text),
+            abstained,
             answer: answer.text,
             citations: hits.into_iter().take(kept).collect(),
             dropped,
             truncated: answer.truncated,
+            unsupported,
             event_id: None,
         };
         self.record_ask(req, &origin, response).await
@@ -1202,7 +1230,13 @@ mod tests {
     async fn an_answer_that_opens_with_the_sentinel_is_flagged_abstained() {
         let mut core = test_core().await;
         core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some("Not in the knowledge base. The excerpts cover chunks only.".into()),
+            // Carries a literal no excerpt does, so the abstention branch of
+            // the check is what keeps `unsupported` empty below rather than the
+            // reply happening to have nothing in it.
+            reply: Some(
+                "Not in the knowledge base. The excerpts cover `chunk 0` only, not `wipefs --all /dev/sdX`."
+                    .into(),
+            ),
         });
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
@@ -1211,5 +1245,38 @@ mod tests {
             !out.citations.is_empty(),
             "abstaining does not hide what was shown"
         );
+        assert!(
+            out.unsupported.is_empty(),
+            "an abstention claims nothing, so there is nothing in it to check: {:?}",
+            out.unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_invents_a_command_reports_it_as_unsupported() {
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("Run `wipefs --all /dev/sdX` first, then read chunk 0.".into()),
+        });
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
+        assert_eq!(
+            out.unsupported,
+            vec!["wipefs --all /dev/sdX".to_string()],
+            "the excerpts are filler text; the command is the model's own"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_quoting_only_its_excerpts_reports_nothing_unsupported() {
+        // The common case, and the one that must not badge every answer: the
+        // seeded artifacts read "chunk 0 filler filler …".
+        let mut core = test_core().await;
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("The excerpt says `chunk 0 filler` and nothing else.".into()),
+        });
+        seed(&core, 3, 4).await;
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
+        assert!(out.unsupported.is_empty(), "{:?}", out.unsupported);
     }
 }

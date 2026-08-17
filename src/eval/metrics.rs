@@ -79,6 +79,22 @@ pub fn fully_supported(unsupported_counts: &[usize]) -> (usize, usize) {
     )
 }
 
+/// Answers carrying at least one literal none of their excerpts did.
+///
+/// The number phase 2 exists to move. Zero is the target; a rise after a
+/// retrieval change means the change fed the model excerpts it then
+/// over-reached from. `counts` is one entry per judged answer: how many
+/// unsupported literals it carried.
+///
+/// The complement of `fully_supported`, as a single number: that one reports a
+/// pair for a reader, and this one is the thing to compare between runs.
+pub fn unsupported_rate(counts: &[usize]) -> f32 {
+    if counts.is_empty() {
+        return 0.0;
+    }
+    counts.iter().filter(|n| **n > 0).count() as f32 / counts.len() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +138,15 @@ mod tests {
     fn fully_supported_counts_answers_with_nothing_unsupported() {
         assert_eq!(fully_supported(&[0, 2, 0]), (2, 3));
         assert_eq!(fully_supported(&[]), (0, 0));
+    }
+
+    #[test]
+    fn the_unsupported_rate_counts_answers_not_literals() {
+        // An answer that invented five literals is one bad answer, not five.
+        // Counting literals would let a single florid answer swamp the number.
+        assert!((unsupported_rate(&[0, 5, 0, 1]) - 0.5).abs() < 1e-6);
+        assert_eq!(unsupported_rate(&[0, 0]), 0.0);
+        assert_eq!(unsupported_rate(&[]), 0.0);
     }
 
     #[test]

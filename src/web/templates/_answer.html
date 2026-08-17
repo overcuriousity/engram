@@ -7,6 +7,11 @@
     {% if truncated %}
       <span class="card-meta"><span class="badge badge-warning">cut off at the answer length limit (ask.max_output_tokens)</span></span>
     {% endif %}
+    {% if !unsupported.is_empty() %}
+      <span class="card-meta"><span class="badge badge-warning"
+        title="These appear in no cited excerpt. The model wrote them; the base does not hold them.">
+        {{ unsupported.len() }} unsupported literal(s)</span></span>
+    {% endif %}
     {% if dropped > 0 %}
       <span class="card-meta"><span class="badge badge-warning">{{ dropped }} excerpt(s) omitted for context budget</span></span>
     {% endif %}

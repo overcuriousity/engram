@@ -221,6 +221,14 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .md blockquote { margin: 0.5rem 0; padding-left: 0.75rem;
                  border-left: 2px solid var(--color-border-strong); color: var(--color-fg-secondary); }
 
+/* A literal no cited excerpt carries. Tinted rather than filled: it has to be
+   legible inside a code block, where it matters most, and keep the text colour
+   it already had. */
+mark.unsupported {
+  background: var(--color-warning-dim); color: inherit;
+  border-bottom: 1px dashed var(--color-warning); padding: 0 0.1em;
+}
+
 table.grid { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 table.grid th {
   text-align: left; font-weight: 500; font-size: 0.75rem;

@@ -649,6 +649,10 @@ struct AnswerTemplate {
     /// The answer said "not in the base"; badged so the operator sees what
     /// the harness will count.
     abstained: bool,
+    /// Literals the answer carries that no cited excerpt does. Badged, and
+    /// marked in `answer`, so a reader can tell what the base holds from what
+    /// the model wrote.
+    unsupported: Vec<String>,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
     /// The bar, rendered — empty when there is no event.
@@ -1951,8 +1955,13 @@ async fn ask_submit(
         .await?;
     Ok(HtmlTemplate(AnswerTemplate {
         // The answer is model output too, so it goes through the same
-        // sanitizing renderer as chunk text.
-        answer: markdown::render(&out.answer),
+        // sanitizing renderer as chunk text. Marking comes after sanitizing:
+        // it works on the escaped text a reader sees, and nothing it inserts
+        // needs cleaning.
+        answer: crate::core::ask::check::mark_unsupported(
+            &markdown::render(&out.answer),
+            &out.unsupported,
+        ),
         citations: out
             .citations
             .into_iter()
@@ -1962,6 +1971,7 @@ async fn ask_submit(
         dropped: out.dropped,
         truncated: out.truncated,
         abstained: out.abstained,
+        unsupported: out.unsupported,
         verdict_bar: match &out.event_id {
             Some(id) => AskVerdictTemplate {
                 event_id: id.clone(),
@@ -5141,5 +5151,33 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(body_of(res).await.contains("Answer"));
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_badges_and_marks_a_literal_no_excerpt_carries() {
+        let mut core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Swapped in after indexing, so only the answer comes from it.
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("First run `wipefs --all /dev/sdX`, then read alpha.".into()),
+        });
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("unsupported literal(s)"), "no badge: {html}");
+        assert!(
+            html.contains(r#"<mark class="unsupported">wipefs --all /dev/sdX</mark>"#),
+            "the invented command is not marked in the prose: {html}"
+        );
     }
 }
