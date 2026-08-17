@@ -306,19 +306,50 @@ impl Core {
 
         let ranked: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let ranked_len = ranked.len();
-        let ids: Vec<String> = reached.iter().map(|(id, _, _)| id.clone()).collect();
-        let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
 
-        for id in merged.into_iter().skip(ranked_len) {
-            let Some((_, via, reason)) = reached.iter().find(|(n, _, _)| *n == id).cloned() else {
+        // Hydration comes before the cap is spent, not after. A candidate whose
+        // row has since been superseded or deleted cannot be shown, and giving
+        // it one of the six places anyway would shrink the reach below its cap
+        // while live candidates queued behind it were never looked at. So a
+        // place is only ever spent on an artifact that can actually be cited.
+        //
+        // Bounded work: at most three anchors contribute two adjacent artifacts
+        // and `NEIGHBOUR_MAX` links each, and the loop stops as soon as it has
+        // the cap, so this is a handful of primary-key lookups in the worst
+        // case and none at all when nothing was reached.
+        let mut live: Vec<(crate::store::artifacts::Chunk, String, Option<String>)> = Vec::new();
+        let mut vetted: std::collections::HashSet<&str> =
+            ranked.iter().map(String::as_str).collect();
+        for (id, via, reason) in &reached {
+            if live.len() == retrieve::NEIGHBOUR_MAX {
+                break;
+            }
+            if !vetted.insert(id.as_str()) {
                 continue;
-            };
-            let Ok(c) = self.store.get_artifact(&id).await else {
+            }
+            let Ok(c) = self.store.get_artifact(id).await else {
                 continue;
             };
             if !c.in_results() {
                 continue;
             }
+            live.push((c, via.clone(), reason.clone()));
+        }
+
+        // Still routed through `append_neighbours`, which is the one place the
+        // ordering property is stated and tested. Its dedup and cap are belt
+        // and braces here — the loop above already satisfied both — and that is
+        // the right way round: the helper stays authoritative about where a
+        // neighbour may appear, and the caller only ever hands it candidates it
+        // could genuinely show.
+        let ids: Vec<String> = live.iter().map(|(c, _, _)| c.id.clone()).collect();
+        let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
+
+        for id in merged.into_iter().skip(ranked_len) {
+            let Some(i) = live.iter().position(|(c, _, _)| c.id == id) else {
+                continue;
+            };
+            let (c, via, reason) = live.swap_remove(i);
             hits.push(SearchResult {
                 artifact_id: c.id,
                 corpus_id: c.corpus_id.unwrap_or_default(),
@@ -901,6 +932,17 @@ mod tests {
             );
             assert!(!c.past_cliff && !c.primed && !c.weak);
         }
+
+        // The cap, asserted where it is actually spent. `the_neighbour_cap_holds`
+        // pins `append_neighbours` in isolation; nothing else pins the call
+        // site, so a wiring bug admitting fifty neighbours would pass every
+        // other test here.
+        assert!(
+            out.citations.len() <= ranked(&out) + retrieve::NEIGHBOUR_MAX,
+            "{} citations against {} ranked hits is past the cap",
+            out.citations.len(),
+            ranked(&out)
+        );
     }
 
     /// A reach that found nothing new must not report anything as lost. The
@@ -933,6 +975,116 @@ mod tests {
             out.dropped, 2,
             "only the two hits the cliff cut are missing from the answer"
         );
+    }
+
+    /// The other half of the reach, and the half adjacency cannot do: an
+    /// artifact linked to a hit by having been retrieved beside it before.
+    ///
+    /// The linked artifact is in a second corpus, so it shares its `ordinal`
+    /// sequence with nothing that was retrieved and adjacency provably cannot
+    /// be what brought it in. And `search_with` refuses to associate for
+    /// `Door::Ask` — text that never matched the question must not become
+    /// source material for the answer — so `via` on a citation here can only
+    /// have been set by `reach_sideways`.
+    #[tokio::test]
+    async fn an_artifact_linked_to_a_hit_is_reached_where_adjacency_cannot_go() {
+        let mut core = test_core().await;
+        // `associate.enabled` is already the shipped default; links are learned
+        // from recorded searches, so the reach stays shut until this is on too.
+        core.feedback.enabled = true;
+        seed(&core, 5, 4).await;
+
+        // A second corpus, on a subject the query does not ask about. Its raw
+        // text has to differ from `seed`'s: `insert_corpus` deduplicates on the
+        // document's shingle signature, so re-using "raw" hands back the corpus
+        // that is already there and the artifact below lands beside the seeded
+        // ones with a colliding ordinal — reachable by adjacency, which is
+        // precisely what this test must rule out.
+        let other = core
+            .store
+            .insert_corpus("a different document entirely", "web", None)
+            .await
+            .unwrap();
+        assert_ne!(
+            core.store
+                .get_artifact(&core.store.list_all_artifact_ids().await.unwrap()[0])
+                .await
+                .unwrap()
+                .corpus_id
+                .as_deref(),
+            Some(other.id.as_str()),
+            "the two corpora collapsed into one, and adjacency could reach across"
+        );
+        let made = core
+            .store
+            .insert_artifacts(
+                &other.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "Reconciling the quarterly ledger against the register.".into(),
+                    corpus_span: None,
+                    title: Some("ledger".into()),
+                    category: Some("reference".into()),
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // Deliberately never embedded. It has no vector, so retrieval provably
+        // cannot return it however the fake embedder happens to score things —
+        // structure is the only route to it, which is the whole claim here.
+        let far = made[0].id.clone();
+
+        // Linked to every artifact of the first corpus, so whichever of them
+        // place highest, the anchors have somewhere to hop. Weight well above
+        // `associate.show_min`, at the clock the reach decays to.
+        let now = crate::core::search::now_secs();
+        for id in core.store.list_all_artifact_ids().await.unwrap() {
+            core.store
+                .bump_link(
+                    &id,
+                    &far,
+                    9.0,
+                    Some("chunk"),
+                    core.associate.half_life_days,
+                    now,
+                )
+                .await
+                .unwrap();
+        }
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(3),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let cited = out
+            .citations
+            .iter()
+            .find(|c| c.artifact_id == far)
+            .expect("the linked artifact never reached the prompt");
+        let via = cited
+            .via
+            .as_deref()
+            .expect("the linked artifact arrived as though it had been retrieved");
+        assert!(
+            out.citations
+                .iter()
+                .take(ranked(&out))
+                .any(|r| r.artifact_id == via),
+            "a reached artifact named an anchor that is not one of the ranked hits"
+        );
+        assert_eq!(cited.score, 0.0, "a link is not a score");
     }
 
     #[tokio::test]
