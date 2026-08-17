@@ -39,7 +39,7 @@ pub async fn write(core: &Core, draft: &MergedDraft, roots: &[String]) -> Result
                 text: draft.text.clone(),
                 title: draft.title.clone(),
                 category: draft.category.clone(),
-                tags: draft.tags.clone(),
+                tags: carried_tags(core, draft, roots).await,
                 caveats: draft.caveats.clone(),
             },
             roots,
@@ -48,6 +48,35 @@ pub async fn write(core: &Core, draft: &MergedDraft, roots: &[String]) -> Result
     core.store.enqueue(Stage::Embed, "artifact", &m.id).await?;
     tracing::info!(merged = %m.id, sources = roots.len(), "wrote a merged artifact");
     Ok(m)
+}
+
+/// The merge's tags: the draft's, plus every tag its sources carried.
+///
+/// A tag is not model vocabulary — `parse_dedupe` refuses those, and should — it
+/// is what an operator or an API caller pinned by hand. `finish` then takes the
+/// sources out of results, so carrying only the draft's tags dropped the pin
+/// outright: a `GET /api/search?tags=pinned` that used to return that knowledge
+/// returned nothing, with the text still stored and no way left to reach it by
+/// the name it was filed under. Losing a filing decision nobody asked the merge
+/// to revisit is the same class of quiet loss as losing a number, which is what
+/// this module exists to refuse.
+///
+/// A source that cannot be read is skipped rather than fatal. The write is the
+/// step that preserves the knowledge; abandoning it over one unreadable row
+/// would lose more than a tag.
+async fn carried_tags(core: &Core, draft: &MergedDraft, roots: &[String]) -> Vec<String> {
+    let mut tags = draft.tags.clone();
+    for id in roots {
+        let Ok(r) = core.store.get_artifact(id).await else {
+            continue;
+        };
+        for t in r.tags {
+            if !tags.contains(&t) {
+                tags.push(t);
+            }
+        }
+    }
+    tags
 }
 
 /// Hide what an already-indexed merged artifact replaced.
@@ -290,6 +319,36 @@ mod tests {
             tags: vec![],
             caveats: vec![],
         }
+    }
+
+    /// A tag is a filing decision a person made, and the roots leave results
+    /// when the merge lands. Carrying only the draft's tags therefore unfiled
+    /// the knowledge: the text stayed stored and stopped answering the name it
+    /// was stored under.
+    #[tokio::test]
+    async fn a_merge_keeps_the_tags_its_sources_were_filed_under() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        core.store
+            .update_artifact_tags(&ids[0], &["pinned".into(), "shared".into()])
+            .await
+            .unwrap();
+        core.store
+            .update_artifact_tags(&ids[1], &["shared".into(), "runbook".into()])
+            .await
+            .unwrap();
+
+        let m = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+
+        // Every tag once, in the order the sources are read: a tag both sides
+        // carried is one tag on the merge, not two.
+        assert_eq!(m.tags, vec!["pinned", "shared", "runbook"]);
     }
 
     /// A captured artifact carrying only the text the checks read.

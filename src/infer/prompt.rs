@@ -542,7 +542,9 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
             category: m.category.map(|c| normalize_category(&c)),
             // Same rule as a synthesised artifact: nothing writes tags on a
             // caller's behalf, and a merge inventing its own would be the
-            // drifting vocabulary arriving by a second door.
+            // drifting vocabulary arriving by a second door. What the sources
+            // were already filed under is added back by `merge::carried_tags`,
+            // which is a different question from what the model may name.
             tags: Vec::new(),
             caveats: m.caveats,
         }),
