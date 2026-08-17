@@ -4225,6 +4225,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_capture_button_comes_after_every_field_it_submits() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+
+        let note = page
+            .find(r#"name="note""#)
+            .expect("the note input is on the page");
+        // The button, not the nav link of the same name above it.
+        let button = page
+            .find(r#"type="submit" form="capture""#)
+            .expect("the capture button is there");
+        assert!(
+            note < button,
+            "the note field must precede the button that sits under it: {page}"
+        );
+
+        // Outside the posted form still: that form posts urlencoded and the
+        // file this note describes goes multipart to a different endpoint.
+        assert!(page.contains(r#"form="capture""#), "{page}");
+        assert!(
+            page.contains("the file you drop next"),
+            "the note must say it is for a file that has not arrived yet: {page}"
+        );
+    }
+
+    #[tokio::test]
     async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
         let (app, cookie) = app_with_session().await;
 

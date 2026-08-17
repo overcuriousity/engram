@@ -6,7 +6,7 @@
    fetch itself again. Fired on the body rather than aimed at the queue, so the
    form does not have to know whether the fragment currently on screen is the
    polling one or the idle one. #}
-<form hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
+<form id="capture" hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if (event.detail.successful) { this.reset(); htmx.trigger(document.body, 'captured') }"
       class="stack">
   {# One line. The segment-count hint below the box says the expensive part,
@@ -34,16 +34,25 @@
     <span>…or drop a <code>.txt</code> file here.</span>
     {% endif %}
   </label>
-  <div class="row">
-    <button class="btn btn-accent" type="submit">Capture</button>
-    <span class="spinner">saving…</span>
-  </div>
 </form>
-{# Context for whatever file comes next: a sentence about what it is. Sent
-   with the file, then cleared. For an image the vision model reads it too.
-   Outside the form above on purpose, so a text paste does not send it. #}
+{# Context for whatever file comes next: a sentence about what it is. Sent with
+   the file, then cleared. For an image the vision model reads it too.
+
+   Directly under the drop zone it serves and above the button, because a
+   control that submits a field must not sit above that field — it did, and the
+   field it belonged to read as an afterthought below the thing that sends it.
+
+   It cannot be revealed on drop: a dropped file uploads immediately, so the
+   note has to be fillable before the file arrives, which is what the wording
+   now says. Still outside the form above on purpose — that form posts
+   urlencoded and this note rides a multipart request to the API — which is why
+   the button below carries `form`. #}
 <input class="input" type="text" name="note" maxlength="2000" style="margin-top:.6rem;width:100%"
-       placeholder="Add context for the file (optional) — what is it, why keep it?">
+       placeholder="Note for the file you drop next (optional) — what is it, why keep it?">
+<div class="row" style="margin-top:.6rem">
+  <button class="btn btn-accent" type="submit" form="capture">Capture</button>
+  <span class="spinner">saving…</span>
+</div>
 <div id="capture-result" style="margin-top:1rem"></div>
 
 {% if !pairs.is_empty() %}
