@@ -213,7 +213,9 @@
          orphan notice matters most. #}
       {% if !d.merged %}
       <div class="pane-label">
-        <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }} highlighted
+        {# "highlighted" was doing no work: the highlight is visible in the table
+           directly below, and the label already names the lines. #}
+        <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }}
       </div>
       <div class="raw">
         <table>

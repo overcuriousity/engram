@@ -2383,7 +2383,13 @@ mod tests {
             d.slice_lines.iter().any(|l| l.in_span),
             "at least one line must be marked as the span"
         );
-        assert!(d.slice_label.starts_with("lines "));
+        // Either form: this artifact's span may be one line or several, and
+        // the label says which rather than always saying "lines".
+        assert!(
+            d.slice_label.starts_with("line ") || d.slice_label.starts_with("lines "),
+            "{}",
+            d.slice_label
+        );
     }
 
     #[tokio::test]
