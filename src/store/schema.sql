@@ -279,7 +279,9 @@ CREATE TABLE IF NOT EXISTS search_events (
   judged_at   INTEGER,
   verdict     TEXT,
   expect_id   TEXT,
-  skips       INTEGER NOT NULL DEFAULT 0
+  skips       INTEGER NOT NULL DEFAULT 0,
+  -- Set when the operator says a `gap` search has since been covered.
+  dismissed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -336,6 +338,18 @@ CREATE TABLE IF NOT EXISTS ask_citations (
   -- The operator said this excerpt carried the answer.
   carried     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, n)
+);
+
+-- ── Knowledge gaps ───────────────────────────────────────────────────────────
+-- Unanswered questions and gap searches, grouped by their stored vectors and
+-- named once. Membership is identity: a group whose members change is a new
+-- row with a new name, so the same members are never named twice.
+CREATE TABLE IF NOT EXISTS gap_clusters (
+  key         TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  labelled_by TEXT NOT NULL,
+  members     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
 );
 
 -- ── Association ──────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod auth;
 pub mod corpora;
 pub mod feedback;
+pub mod gaps;
 pub mod jobs;
 pub mod lineage;
 pub mod links;
@@ -119,6 +120,9 @@ impl Store {
             // `created_at`, which is when it was in fact last activated.
             ("artifacts", "activation", "REAL NOT NULL DEFAULT 1.0"),
             ("artifacts", "activated_at", "INTEGER NOT NULL DEFAULT 0"),
+            // Arrived with knowledge gaps. NULL on every existing row: nothing
+            // predating it was covered.
+            ("search_events", "dismissed_at", "INTEGER"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
