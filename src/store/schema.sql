@@ -300,6 +300,44 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   PRIMARY KEY (event_id, rank)
 );
 
+-- ── Ask feedback ─────────────────────────────────────────────────────────────
+-- A question asked on the page, the answer it got and the excerpts the model
+-- was shown — so a verdict given later can be scored against exactly what
+-- happened. Only the UI door records; see `Core::ask`.
+CREATE TABLE IF NOT EXISTS ask_events (
+  id           TEXT PRIMARY KEY,
+  question     TEXT NOT NULL,
+  scope        TEXT,
+  filters      TEXT NOT NULL DEFAULT '{}',
+  -- Stored so a "nothing here" can be clustered with other gaps later without
+  -- paying for the embedding again.
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  answer       TEXT NOT NULL,
+  abstained    INTEGER NOT NULL,
+  dropped      INTEGER NOT NULL,
+  truncated    INTEGER NOT NULL,
+  created_at   INTEGER NOT NULL,
+  judged_at    INTEGER,
+  verdict      TEXT,
+  -- Set when the operator says a "nothing here" gap has since been covered.
+  dismissed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_asks_verdict ON ask_events(verdict, dismissed_at);
+CREATE INDEX IF NOT EXISTS idx_asks_created ON ask_events(created_at);
+
+CREATE TABLE IF NOT EXISTS ask_citations (
+  event_id    TEXT NOT NULL REFERENCES ask_events(id) ON DELETE CASCADE,
+  -- The [n] the model was shown, 1-based, in the order it was shown.
+  n           INTEGER NOT NULL,
+  artifact_id TEXT NOT NULL,
+  score       REAL NOT NULL,
+  -- The operator said this excerpt carried the answer.
+  carried     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (event_id, n)
+);
+
 -- ── Association ──────────────────────────────────────────────────────────────
 -- Two artifacts that keep being retrieved by the same searches. The other half
 -- of relatedness: `artifact_pairs` is about two texts saying the same thing,
