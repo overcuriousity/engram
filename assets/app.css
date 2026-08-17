@@ -367,6 +367,11 @@ body { overflow-x: hidden; }
 /* Judging an answer where it is read. */
 .ask-verdict { margin-top: 0.5rem; gap: 0.5rem; }
 .is-on { color: var(--color-accent); }
+
+/* The holes, on the capture page. */
+.gaps details { margin: 0.25rem 0; }
+.gaps summary { cursor: pointer; }
+.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
 
 /* Neighbours under the artifact. Narrower than the rail on purpose: this is a

@@ -343,6 +343,31 @@ struct CaptureTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the page offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// The holes, grouped and named by the sweep. Empty when feedback is off.
+    gaps: Vec<GapGroup>,
+    /// Open gaps the sweep has not grouped yet.
+    loose: Vec<GapMember>,
+}
+
+/// One unanswered question or gap search, as the capture page lists it.
+pub struct GapMember {
+    /// `ask` or `search`, for the dismiss route.
+    pub kind: String,
+    pub id: String,
+    pub text: String,
+}
+
+pub struct GapGroup {
+    pub label: String,
+    pub members: Vec<GapMember>,
+}
+
+fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
+    GapMember {
+        kind: g.kind.as_str().into(),
+        id: g.id,
+        text: g.text,
+    }
 }
 
 #[derive(Template)]
@@ -540,6 +565,14 @@ struct TokenCreatedTemplate {
 struct AskTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// A question to prefill the box with — a gap's "ask again".
+    q: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AskPrefill {
+    #[serde(default)]
+    q: String,
 }
 
 #[derive(Template)]
@@ -583,13 +616,43 @@ struct AskCarriedTemplate {
 
 async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
+    // Read, never computed: the page shows what the sweep grouped and named,
+    // and whatever has been judged since sits under itself until the next
+    // pass. Nothing here embeds or calls a model.
+    let (gaps, loose) = if st.core.feedback.enabled {
+        let (rows, loose) = st.core.store.gap_rows(st.core.embedder.model()).await?;
+        (
+            rows.into_iter()
+                .map(|r| GapGroup {
+                    label: r.label,
+                    members: r.members.into_iter().map(gap_member).collect(),
+                })
+                .collect(),
+            loose.into_iter().map(gap_member).collect(),
+        )
+    } else {
+        (vec![], vec![])
+    };
     Ok(HtmlTemplate(CaptureTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         pairs,
         more_pairs,
         vision_enabled: st.core.describer.is_some(),
+        gaps,
+        loose,
     })
     .into_response())
+}
+
+async fn gap_dismiss(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<Response> {
+    let kind = crate::store::gaps::GapKind::parse(&kind)
+        .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
+    st.core.store.dismiss_gap(kind, &id).await?;
+    Ok(axum::http::StatusCode::OK.into_response())
 }
 
 /// Text and nothing else. The label field is gone: a name arrives from
@@ -1580,9 +1643,14 @@ async fn verify_ui(
     Ok(Redirect::to(back.path()).into_response())
 }
 
-async fn ask_page(State(st): State<AppState>, _id: Identity) -> impl IntoResponse {
+async fn ask_page(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<AskPrefill>,
+) -> impl IntoResponse {
     HtmlTemplate(AskTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        q: p.q,
     })
 }
 
@@ -1954,6 +2022,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
         .route("/ui/ask/{id}/carried", post(ask_carried))
+        .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
@@ -4094,6 +4163,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_lists_knowledge_gaps_by_group_and_lets_one_be_covered() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let id = core
+            .store
+            .record_ask(crate::store::asks::NewAsk {
+                question: "how do I mount an E01".into(),
+                scope: None,
+                filters: "{}".into(),
+                query_vec: vec![1.0; 8],
+                embed_model: core.embedder.model().to_string(),
+                answer: "Not in the knowledge base.".into(),
+                abstained: true,
+                dropped: 0,
+                truncated: false,
+                citations: vec![],
+            })
+            .await
+            .unwrap();
+        core.store
+            .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+            .await
+            .unwrap();
+
+        // Before the sweep: listed, not yet grouped.
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("Knowledge gaps"), "{page}");
+        assert!(page.contains("not yet grouped"), "{page}");
+        assert!(page.contains("mount an E01"), "{page}");
+
+        crate::jobs::gaps::sweep(&core).await.unwrap();
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(page.contains("Fake topic"), "{page}");
+        assert!(
+            page.contains(&format!("/ui/gaps/ask/{id}/dismiss")),
+            "{page}"
+        );
+        assert!(page.contains("/ui/ask?q=how"), "{page}");
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/gaps/ask/{id}/dismiss"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(
+            !page.contains("Knowledge gaps"),
+            "a covered gap must leave the page: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_shows_no_gaps_block_when_feedback_is_off() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(!page.contains("Knowledge gaps"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_ask_page_prefills_a_question_from_the_query_string() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
+        assert!(page.contains(r#"value="mount an E01""#), "{page}");
     }
 
     #[tokio::test]
