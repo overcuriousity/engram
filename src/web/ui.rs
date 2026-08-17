@@ -557,6 +557,26 @@ struct AnswerTemplate {
     abstained: bool,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
+    /// The bar, rendered — empty when there is no event.
+    verdict_bar: String,
+}
+
+#[derive(Template)]
+#[template(path = "_ask_verdict.html")]
+struct AskVerdictTemplate {
+    event_id: String,
+    /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
+    verdict: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "_ask_carried.html")]
+struct AskCarriedTemplate {
+    event_id: String,
+    n: i64,
+    carried: bool,
+    /// The bar, rendered, to swap out-of-band. Always `Some` from the route.
+    bar: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -1601,7 +1621,80 @@ async fn ask_submit(
         dropped: out.dropped,
         truncated: out.truncated,
         abstained: out.abstained,
+        verdict_bar: match &out.event_id {
+            Some(id) => AskVerdictTemplate {
+                event_id: id.clone(),
+                verdict: None,
+            }
+            .render()
+            .map_err(|e| Error::Internal(e.to_string()))?,
+            None => String::new(),
+        },
         event_id: out.event_id,
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct VerdictForm {
+    verdict: String,
+}
+
+fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
+    use crate::store::asks::AskVerdict::*;
+    match v {
+        Right => "right",
+        Wrong => "wrong",
+        NothingHere => "nothing here",
+    }
+    .into()
+}
+
+async fn ask_verdict_bar(st: &AppState, id: &str) -> Result<String> {
+    let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
+    AskVerdictTemplate {
+        event_id: ev.id,
+        verdict: ev.verdict.map(verdict_label),
+    }
+    .render()
+    .map_err(|e| Error::Internal(e.to_string()))
+}
+
+async fn ask_verdict(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+    Form(f): Form<VerdictForm>,
+) -> Result<Response> {
+    match f.verdict.as_str() {
+        "none" => st.core.store.unjudge_ask(&id).await?,
+        v => {
+            let verdict = crate::store::asks::AskVerdict::parse(v)
+                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
+            st.core.store.judge_ask(&id, verdict).await?;
+        }
+    }
+    Ok(axum::response::Html(ask_verdict_bar(&st, &id).await?).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct CarriedForm {
+    n: i64,
+}
+
+async fn ask_carried(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+    Form(f): Form<CarriedForm>,
+) -> Result<Response> {
+    let carried = st.core.store.toggle_carried(&id, f.n).await?;
+    let bar = ask_verdict_bar(&st, &id).await?;
+    Ok(HtmlTemplate(AskCarriedTemplate {
+        event_id: id,
+        n: f.n,
+        carried,
+        bar: Some(bar),
     })
     .into_response())
 }
@@ -1859,6 +1952,8 @@ pub fn ui_router() -> Router<AppState> {
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
+        .route("/ui/ask/{id}/verdict", post(ask_verdict))
+        .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ops", get(ops))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
@@ -3862,6 +3957,143 @@ mod tests {
             !page.contains("engram_"),
             "a stored token leaked into the ops page"
         );
+    }
+
+    /// A feedback-enabled session over an embedded base, an ask on it, and the
+    /// recorded event id. Built like `app_with_embedded_corpus`: synthesis and
+    /// embedding are run on the core before the router takes it, because a
+    /// capture through the page alone leaves nothing to retrieve.
+    async fn ask_recorded() -> (axum::Router, String, crate::core::Core, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .clone()
+            .oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert_eq!(
+            handle.store.ask_stats().await.unwrap().asked,
+            1,
+            "the UI ask was not recorded"
+        );
+        let id: String = sqlx::query_scalar("SELECT id FROM ask_events LIMIT 1")
+            .fetch_one(&handle.store.pool)
+            .await
+            .unwrap();
+        (app, cookie, handle, html, id)
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_offers_a_verdict_when_the_question_was_recorded() {
+        let (_app, _cookie, _core, html, id) = ask_recorded().await;
+        assert!(html.contains(&format!("/ui/ask/{id}/verdict")), "{html}");
+        assert!(html.contains("Nothing here"), "{html}");
+        assert!(html.contains(&format!("/ui/ask/{id}/carried")), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_offers_no_verdict_when_feedback_is_off() {
+        let (app, cookie) = app_with_session().await;
+        app.clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=alpha+para%0A%0Abeta+para",
+            ))
+            .await
+            .unwrap();
+        let html = body_of(
+            app.oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("/verdict"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_is_recorded_and_can_be_undone() {
+        let (app, cookie, core, _, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ask/{id}/verdict"),
+                &cookie,
+                "verdict=wrong",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bar = body_of(res).await;
+        assert!(bar.contains("wrong") && bar.contains("undo"), "{bar}");
+        assert_eq!(
+            core.store.ask_event(&id).await.unwrap().unwrap().verdict,
+            Some(crate::store::asks::AskVerdict::Wrong)
+        );
+
+        let bar = body_of(
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/ask/{id}/verdict"),
+                    &cookie,
+                    "verdict=none",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(bar.contains("Nothing here"), "the buttons are back: {bar}");
+        assert!(
+            core.store
+                .ask_event(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .verdict
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band() {
+        let (app, cookie, core, _, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/ask/{id}/carried"), &cookie, "n=1"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("hx-swap-oob"),
+            "the verdict bar must follow the toggle: {html}"
+        );
+        assert!(html.contains("right"), "{html}");
+        let ev = core.store.ask_event(&id).await.unwrap().unwrap();
+        assert_eq!(ev.verdict, Some(crate::store::asks::AskVerdict::Right));
+        assert!(ev.citations[0].carried);
+    }
+
+    #[tokio::test]
+    async fn judging_an_unknown_question_is_not_found() {
+        let (app, cookie) = app_with_session().await;
+        let res = app
+            .oneshot(form("/ui/ask/nope/verdict", &cookie, "verdict=right"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

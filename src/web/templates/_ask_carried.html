@@ -1,0 +1,10 @@
+{# One toggle per citation card. Swaps itself; the bar follows out-of-band
+   because saying an excerpt carried the answer is saying the answer was right. #}
+<button class="btn btn-ghost btn-sm{% if carried %} is-on{% endif %}"
+        hx-post="/ui/ask/{{ event_id }}/carried" hx-vals='{"n":{{ n }}}'
+        hx-swap="outerHTML" title="This excerpt carried the answer">
+  {% if carried %}✓ carried the answer{% else %}carried the answer{% endif %}
+</button>
+{% if let Some(bar) = bar %}
+<div id="ask-verdict" hx-swap-oob="outerHTML:#ask-verdict">{{ bar|safe }}</div>
+{% endif %}

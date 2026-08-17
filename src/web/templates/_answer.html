@@ -1,6 +1,9 @@
 <div class="card">
   <div class="card-head">
     <span class="card-title">Answer</span>
+    {% if abstained %}
+      <span class="card-meta"><span class="badge" title="The answer says the base does not hold this">nothing here</span></span>
+    {% endif %}
     {% if truncated %}
       <span class="card-meta"><span class="badge badge-warning">cut off at the answer length limit (ask.max_output_tokens)</span></span>
     {% endif %}
@@ -9,6 +12,8 @@
     {% endif %}
   </div>
   <div class="md">{{ answer|safe }}</div>
+  {# Judged where it is read. Present only when the question was recorded. #}
+  {{ verdict_bar|safe }}
 </div>
 <h3>Artifacts used</h3>
 {% for r in citations %}
@@ -19,6 +24,11 @@
   </div>
   <div class="md">{{ r.html|safe }}</div>
   <div class="chips">
+    {% if let Some(id) = event_id %}
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ id }}/carried"
+            hx-vals='{"n":{{ loop.index }}}' hx-swap="outerHTML"
+            title="This excerpt carried the answer">carried the answer</button>
+    {% endif %}
     <a class="btn btn-ghost btn-sm" href="/ui/corpora/{{ r.corpus_id }}">source</a>
   </div>
 </div>
