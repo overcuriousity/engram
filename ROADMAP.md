@@ -94,14 +94,15 @@ in config. The items below are the mechanisms that come after it, in order.
 
 ## [Ask]
 
-Ask today is the 2023 baseline: one embedding, top eight, greedy pack, one
-completion. Nothing about it is measured, nothing it does feeds back, and the
-page shows a spinner and then a wall of text. The pieces below turn it into the
-part of engram that is allowed to think, without giving up the two things that
-make it engram's: an answer cannot carry a literal the excerpts did not, and a
-default moves only after the harness has run. Order matters — each item is
-built on the one before it — and the split is such that every write-time piece
-lands in [Retrieval] as well.
+Ask is still the 2023 baseline in how it answers: one embedding, top eight,
+greedy pack, one completion, and the page shows a spinner and then a wall of
+text. What has changed is that it is now measured and it now feeds back — every
+answer can be judged where it is read, and the harness turns a change to ask
+into a number. The pieces below turn it into the part of engram that is allowed
+to think, without giving up the two things that make it engram's: an answer
+cannot carry a literal the excerpts did not, and a default moves only after the
+harness has run. Order matters — each item is built on the one before it — and
+the split is such that every write-time piece lands in [Retrieval] as well.
 
 Model tiers: ask already runs on a larger, thinking model than synthesis does.
 The config grows two named tiers, **deep** and **efficient**, and every role
