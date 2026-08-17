@@ -1006,6 +1006,26 @@ struct LineRange {
     to: Option<i64>,
 }
 
+/// Whether a capture's coverage is final — whether what no artifact carried is
+/// a loss rather than a window nobody has read yet.
+///
+/// `synthesize::plan` writes every window up front in state `pending`, so a
+/// capture still being read has segment rows and no artifacts for most of them.
+/// Measured then, every unread line looks uncovered, and the page said so: it
+/// named lines that were about to arrive as never reached, and offered to pay
+/// for reading them a second time.
+///
+/// These are the states synthesis sets once every window has resolved. `partial`
+/// and `failed` are in the list on purpose — they are where a real loss lives,
+/// and gating on `ready` alone would hide the section from exactly the captures
+/// that have something to show it.
+fn coverage_final(status: &CorpusStatus) -> bool {
+    matches!(
+        status,
+        CorpusStatus::Ready | CorpusStatus::Partial | CorpusStatus::Failed
+    )
+}
+
 /// The line ranges of `source` that no artifact carried.
 ///
 /// Measured against exactly the shape `recompute_coverage` measures the
@@ -1015,12 +1035,16 @@ struct LineRange {
 ///
 /// Empty for a corpus with no segment rows: one predating per-segment windows
 /// has no ranges to attribute a loss to, and naming the whole document would
-/// offer a re-read of everything.
+/// offer a re-read of everything. Empty as well until the capture's coverage is
+/// final — see `coverage_final`.
 async fn uncovered_for(
     st: &AppState,
     source: &crate::store::corpora::Corpus,
     chunks: &[crate::store::artifacts::Chunk],
 ) -> Result<Vec<(i64, i64)>> {
+    if !coverage_final(&source.status) {
+        return Ok(Vec::new());
+    }
     let segments = st.core.store.segments_for_corpus(&source.id).await?;
     if segments.is_empty() {
         return Ok(Vec::new());
@@ -1078,6 +1102,24 @@ async fn reread_uncovered_ui(
     }
 
     for idx in windows {
+        // A window something is already going to read is left alone. `enqueue`
+        // re-arms a conflicting row whatever state it is in, running included,
+        // so pressing this button while an earlier re-read is still in flight
+        // handed the same window to a second worker: two paid model calls and
+        // two sets of artifacts for one loss, then the dedupe sweep to clean up
+        // after them — the outcome reading only the lost windows exists to
+        // avoid.
+        if st
+            .core
+            .store
+            .live_job(
+                crate::store::jobs::Stage::SegmentWindow,
+                &crate::jobs::window::unit_target(&cid, idx),
+            )
+            .await?
+        {
+            continue;
+        }
         // `window::run` returns early on a window already marked done, so the
         // state goes back to pending first — this is the "re-run this window"
         // case `reset_segment` exists for.
@@ -4514,6 +4556,141 @@ mod tests {
         assert!(!pending.is_empty(), "nothing was queued to be read again");
     }
 
+    /// `synthesize::plan` writes every window up front as `pending`, so a
+    /// capture still being read has windows and no artifacts for the ones nobody
+    /// has reached. Measured then, the whole unread remainder is a loss — the
+    /// page named lines that were on their way as never reached, and offered to
+    /// pay for reading them again.
+    #[tokio::test]
+    async fn a_capture_still_being_read_names_no_loss_and_offers_no_re_read() {
+        use crate::store::segments::NewSegment;
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha beta\ngamma delta", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "alpha beta\ngamma delta",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Segmenting)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            !page.contains(r#"id="uncovered""#),
+            "an unread window was named as a loss: {page}"
+        );
+        assert!(!page.contains("Read these again"), "{page}");
+
+        // And the form behind that button, reached directly, arms nothing.
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            !core
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&out.id, 0)
+                )
+                .await
+                .unwrap(),
+            "a window that had not been read yet was queued to be read again"
+        );
+    }
+
+    /// `enqueue` re-arms a conflicting row whatever state it is in, running
+    /// included. Pressing the button twice therefore handed one window to two
+    /// workers: two paid model calls and two sets of artifacts for one loss.
+    #[tokio::test]
+    async fn a_window_already_queued_is_not_re_read_a_second_time() {
+        use crate::store::segments::{NewSegment, SegmentState};
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest(
+                "alpha beta\ngamma delta\nomega sigma\nkappa lambda",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &out.id,
+                &[
+                    NewSegment {
+                        start_line: 1,
+                        end_line: 2,
+                        text: "alpha beta\ngamma delta",
+                        carry_lines: 0,
+                    },
+                    NewSegment {
+                        start_line: 3,
+                        end_line: 4,
+                        text: "omega sigma\nkappa lambda",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        for idx in [0, 1] {
+            core.store
+                .set_segment_state(&out.id, idx, SegmentState::Done, None)
+                .await
+                .unwrap();
+        }
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Partial)
+            .await
+            .unwrap();
+        // The first window is already on its way — an earlier press of the same
+        // button, or the read that is about to fill it.
+        core.store
+            .enqueue(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(&out.id, 0),
+            )
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+        let states: Vec<SegmentState> = core
+            .store
+            .segments_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|w| w.state)
+            .collect();
+        assert_eq!(
+            states,
+            vec![SegmentState::Done, SegmentState::Pending],
+            "the window already queued was reset under the worker holding it"
+        );
+    }
+
     #[tokio::test]
     async fn a_loss_crossing_a_window_boundary_re_reads_both_windows() {
         // Uncovered lines are merged into one range across everything lost in
@@ -4554,6 +4731,13 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // And the capture itself has finished being read — `partial` is what
+        // synthesis sets for a document whose windows resolved without
+        // covering it, and `coverage_final` requires it before naming a loss.
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Partial)
+            .await
+            .unwrap();
 
         let res = app
             .clone()
