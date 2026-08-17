@@ -7,13 +7,20 @@
 
 {# The counts as a sentence rather than as `done: 17`-style badges: this is a
    page you open to reassure yourself, and a row of key-value chips reads as a
-   debug dump of something going wrong. #}
+   debug dump of something going wrong.
+
+   Every number says what it counts. "1523 done" sat beside "1236 artifacts"
+   and read as a count of artifacts — of which there cannot be more done than
+   there are — when it was a count of jobs. Same for the links: a bare "45
+   links, 0 named" says nothing about what is linked to what. #}
 <p class="muted">
   {{ artifact_count }} artifacts, {{ vector_count }} embedded.
-  {% for j in job_counts %}{{ j.1 }} {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}{% if job_counts.is_empty() %}Nothing queued{% endif %}.
+  {% if job_counts.is_empty() %}No jobs queued.{% else %}
+  {% for j in job_counts %}{{ j.1 }} jobs {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
   {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
   {% if let Some(l) = links %}
-  {{ l.total }} links, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
+  {{ l.total }} links between artifacts, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
   {% endif %}
 </p>
 
@@ -26,12 +33,13 @@
   does not simply do it again.
 </p>
 <table class="grid">
-  <thead><tr><th>Artifact</th><th>Written from</th><th></th></tr></thead>
+  <thead><tr><th>Artifact</th><th>Written from</th><th>Reverse</th></tr></thead>
   <tbody>
   {% for m in merged %}
     <tr>
       <td>
         <a href="/ui/artifacts/{{ m.id }}">{{ m.title }}</a>
+        <div class="muted row-sub">{{ m.subtitle }}</div>
         {% if m.orphaned %}
         {# Not data loss: the text still says what the deleted source said. It
            is a claim of provenance the artifact can no longer support, and
@@ -41,18 +49,24 @@
       </td>
       <td>
         {% for src in m.sources %}
-        <div><a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a></div>
+        <div>
+          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
+          <div class="muted row-sub">{{ src.subtitle }}</div>
+        </div>
         {% endfor %}
       </td>
       <td>
         <form method="post" action="/ui/ops/merges/{{ m.id }}/undo">
-          <button class="btn btn-sm" type="submit">Undo merge</button>
+          <button class="btn btn-sm" type="submit">Undo</button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% if more_merged %}
+<p class="muted">Showing 25 — the rest appear as these are cleared.</p>
+{% endif %}
 {% endif %}
 
 {% if !deprecated.is_empty() %}
@@ -119,21 +133,27 @@
 <h3>Hidden as near-identical</h3>
 <p class="muted">Still stored and still readable; kept out of results only.</p>
 <table class="grid">
-  <thead><tr><th>Hidden</th><th>Kept</th><th></th></tr></thead>
+  <thead><tr><th>Hidden</th><th>Kept</th><th>Reverse</th></tr></thead>
   <tbody>
   {% for s in superseded %}
     <tr>
-      <td><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></td>
+      <td>
+        <a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a>
+        <div class="muted row-sub">{{ s.subtitle }}</div>
+      </td>
       <td><a href="/ui/artifacts/{{ s.winner_id }}">{{ s.winner_title }}</a></td>
       <td>
         <form method="post" action="/ui/ops/artifacts/{{ s.id }}/unsupersede">
-          <button class="btn btn-sm" type="submit">Put it back</button>
+          <button class="btn btn-sm" type="submit">Undo</button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% if more_superseded %}
+<p class="muted">Showing 25 — the rest appear as these are cleared.</p>
+{% endif %}
 {% endif %}
 
 {% if !parked.is_empty() %}

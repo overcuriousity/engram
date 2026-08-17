@@ -203,6 +203,11 @@ pub struct ParkedRow {
 pub struct SupersededRow {
     pub id: String,
     pub title: String,
+    /// When it was written and how it opens. Two artifacts can carry the same
+    /// title — a merge of two documents that named a section identically
+    /// produces exactly that — and a table of them is unreadable without
+    /// something that differs between the rows.
+    pub subtitle: String,
     pub winner_id: String,
     pub winner_title: String,
 }
@@ -503,6 +508,11 @@ struct OpsTemplate {
     /// Artifacts the dedupe pass wrote out of several others, with what they
     /// were written from and an undo.
     merged: Vec<MergedRow>,
+    /// The list is capped; there are rows this page is not showing. Said out
+    /// loud, because a table that stops without saying so reads as a table of
+    /// everything there is.
+    more_merged: bool,
+    more_superseded: bool,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     /// `None` when nothing is being learned, which renders nothing at all: a
@@ -525,6 +535,8 @@ struct SettingsTemplate {
 struct MergedRow {
     id: String,
     title: String,
+    /// See `SupersededRow::subtitle`: what tells two rows with one title apart.
+    subtitle: String,
     /// What it was written from, in the order the lineage stores them.
     sources: Vec<SourceRow>,
     /// True when a source has been deleted since, so the artifact claims less
@@ -535,6 +547,9 @@ struct MergedRow {
 pub struct SourceRow {
     pub id: String,
     pub title: String,
+    /// See `SupersededRow::subtitle`. A merge written from two sources that
+    /// shared a title listed that title twice and said nothing else.
+    pub subtitle: String,
     /// Empty when the source belongs to no corpus — a merge of merges resolves
     /// to captured roots, so in practice this is always set.
     pub corpus_id: String,
@@ -545,6 +560,16 @@ pub struct SourceRow {
 /// identical (same self-guard, same tolerance for deleted sources, same
 /// corpus fallback), and a copy in each is how they come to disagree about
 /// what a merge was made of.
+/// When an artifact was written and how it opens, for a table where the title
+/// alone may not be unique.
+fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
+    format!(
+        "{} · {}",
+        fmt_time(c.created_at),
+        markdown::snippet(&c.text, 60)
+    )
+}
+
 async fn source_rows(
     store: &crate::store::Store,
     merged_id: &str,
@@ -563,6 +588,7 @@ async fn source_rows(
             sources.push(SourceRow {
                 corpus_id: r.corpus_id.clone().unwrap_or_default(),
                 title: title_of(&r),
+                subtitle: row_subtitle(&r),
                 id: r.id,
             });
         }
@@ -1460,6 +1486,14 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
     .into_response())
 }
 
+/// Rows of one housekeeping table before it says there are more.
+///
+/// These tables are read to answer "what happened to X", and the answer to
+/// that is a search for X rather than a scroll — so the cap is stated and the
+/// rest arrive as these are cleared, instead of growing a pager nobody would
+/// page through.
+const TABLE_CAP: i64 = 25;
+
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
 
@@ -1511,7 +1545,10 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut superseded = Vec::new();
-    for c in st.core.store.superseded_artifacts(50).await? {
+    // One past the cap, so the page can say it is capped rather than truncate
+    // in silence — a table that stops at 25 with nothing said reads as a table
+    // of everything there is.
+    for c in st.core.store.superseded_artifacts(TABLE_CAP + 1).await? {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
         let winner_title = match st.core.store.get_artifact(&winner_id).await {
             Ok(w) => title_of(&w),
@@ -1519,6 +1556,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         };
         superseded.push(SupersededRow {
             title: title_of(&c),
+            subtitle: row_subtitle(&c),
             id: c.id,
             winner_id,
             winner_title,
@@ -1526,7 +1564,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut merged = Vec::new();
-    let merged_chunks = st.core.store.merged_artifacts(50).await?;
+    let merged_chunks = st.core.store.merged_artifacts(TABLE_CAP + 1).await?;
     // One lineage call per page, not one per row: `roots_of` takes the batch.
     let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
     let roots = st
@@ -1545,10 +1583,16 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         merged.push(MergedRow {
             orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
             title: title_of(&c),
+            subtitle: row_subtitle(&c),
             id: c.id,
             sources,
         });
     }
+
+    let more_merged = merged.len() > TABLE_CAP as usize;
+    merged.truncate(TABLE_CAP as usize);
+    let more_superseded = superseded.len() > TABLE_CAP as usize;
+    superseded.truncate(TABLE_CAP as usize);
 
     let deprecated = st
         .core
@@ -1588,6 +1632,8 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         parked,
         superseded,
         merged,
+        more_merged,
+        more_superseded,
         deprecated,
         stale,
         job_counts: st.core.store.job_counts().await?,
@@ -4177,6 +4223,47 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_counts_say_what_they_count() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            page.contains("jobs") || page.contains("No jobs queued"),
+            "a job count must not read as an artifact count: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_reversals_are_called_the_same_thing() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["kept one", "hidden one"]).await;
+        core.store
+            .set_superseded_by(&ids[1], Some(&ids[0]))
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(!page.contains("Put it back"), "{page}");
+        assert!(!page.contains("Undo merge"), "{page}");
+        assert!(page.contains(">Undo<"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn identically_titled_rows_are_told_apart() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["Windows Update-Typen", "Windows Update-Typen"]).await;
+        core.store
+            .set_superseded_by(&ids[1], Some(&ids[0]))
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(
+            page.contains("body of Windows Update-Typen"),
+            "a row has to say which artifact it is, and two can share a title: {page}"
         );
     }
 

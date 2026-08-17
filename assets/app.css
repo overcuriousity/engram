@@ -524,6 +524,15 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 /* The stretches of a capture nothing was written from. */
 .uncovered { margin: 0 0 0.75rem; padding-left: 1.25rem; font-size: 0.875rem; }
 
+/* What tells two rows with one title apart: when it was written, and how it
+   opens. Quiet, because it is a disambiguator and not a second title. */
+.row-sub { font-size: 0.75rem; }
+/* Four underlined links in a row read as a wall. The artifact each row is
+   about keeps its underline; what it was written from stays reachable and
+   recedes until pointed at. */
+.grid td div > a { text-decoration: none; }
+.grid td div > a:hover { text-decoration: underline; }
+
 /* ── An artifact's own controls ──────────────────────────────────────────── */
 
 /* Delete is not one of the other two. It sits at the far end so the control
