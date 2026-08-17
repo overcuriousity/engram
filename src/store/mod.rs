@@ -123,6 +123,10 @@ impl Store {
             // Arrived with knowledge gaps. NULL on every existing row: nothing
             // predating it was covered.
             ("search_events", "dismissed_at", "INTEGER"),
+            // Arrived with the category fold. NULL on every row predating it,
+            // which is what makes the payload repair finite: it stamps what it
+            // rewrites and empties itself.
+            ("artifacts", "payload_synced_at", "INTEGER"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,
@@ -198,6 +202,31 @@ impl Store {
         sqlx::query("UPDATE artifact_pairs SET state = 'pending' WHERE state = 'would_merge'")
             .execute(&self.pool)
             .await?;
+        // The kind became a closed vocabulary of form words. Rows written while
+        // it was a free string hold subject words — "System Administration",
+        // "Forensic Science / Criminalistics" — and the search page builds its
+        // filter row from whatever is stored, so closing the schema alone would
+        // change nothing an operator can see.
+        //
+        // Folded rather than dropped: `other` is true of them, and the text,
+        // the title and the vector are untouched. Idempotent like everything
+        // else here — a second run matches nothing.
+        //
+        // The `AssertSqlSafe` audit: every value interpolated comes from
+        // `CATEGORIES`, a compile-time constant. No caller, request or database
+        // value reaches this string.
+        let listed = crate::infer::prompt::CATEGORIES
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "UPDATE artifacts SET category = 'other'
+             WHERE category IS NOT NULL AND category NOT IN ({listed})"
+        )))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         // The one default an append cannot state: `activated_at` has to be the
         // artifact's own creation time, not zero. Left at zero every artifact
         // predating this column reads as decayed to nothing since 1970 — the
@@ -573,6 +602,57 @@ mod tests {
         let got = store.get_artifact(&made[0].id).await.unwrap();
         assert_eq!(got.provenance, artifacts::Provenance::Captured);
         assert_eq!(got.source_count, 0);
+    }
+
+    #[tokio::test]
+    async fn migrate_folds_categories_off_the_list_into_other() {
+        // Rows written while the kind was a free string hold subject words, and
+        // the filter row is built from whatever is stored — so until these are
+        // folded, closing the schema changes nothing an operator can see.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "alpha".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: Some("Forensic Science / Criminalistics".into()),
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "bravo".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: Some("procedure".into()),
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+
+        let mut kinds: Vec<String> =
+            sqlx::query_scalar("SELECT category FROM artifacts ORDER BY ordinal")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec!["other".to_string(), "procedure".to_string()],
+            "a subject word folds to `other`; a form word is left alone"
+        );
     }
 
     #[tokio::test]

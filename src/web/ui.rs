@@ -1372,8 +1372,58 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     Ok((pairs, more))
 }
 
+/// Bring vector payloads back in step with rows the category fold changed.
+///
+/// SQLite is migrated on connect; Qdrant is a separate store with no such hook,
+/// so a folded row and its payload disagree until something rewrites the point.
+/// Rather than a startup sweep over every point in the collection, this runs
+/// where an operator already goes when something looks wrong, costs one query
+/// over the rows that can still disagree, and does nothing at all once they
+/// agree — which is after the first visit.
+///
+/// Payload only: nothing the embedder was shown has changed, so no vector is
+/// recomputed. The same reasoning as the tag edit in `api.rs`.
+async fn reconcile_categories(st: &AppState) -> Result<usize> {
+    let mut fixed = 0;
+    for c in st.core.store.artifacts_needing_category_repair(200).await? {
+        // A chunk still waiting to be embedded has no point to rewrite, and the
+        // pending embed job writes the whole payload anyway. Stamped regardless,
+        // so it is not looked at again.
+        if c.embed_state == crate::store::artifacts::EmbedState::Embedded {
+            st.core
+                .vectors
+                .set_payload(&crate::vector::VectorPayload {
+                    artifact_id: c.id.clone(),
+                    corpus_id: c.corpus_id.clone().unwrap_or_default(),
+                    text: c.text.clone(),
+                    title: c.title.clone(),
+                    category: c.category.clone(),
+                    tags: c.tags.clone(),
+                    created_at: c.created_at,
+                    last_seen_at: None,
+                    hit_count: None,
+                    superseded: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                })
+                .await?;
+            fixed += 1;
+        }
+        st.core.store.mark_payload_synced(&c.id).await?;
+    }
+    Ok(fixed)
+}
+
 async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
+
+    // Best effort: a vector store that is down must not make the page that
+    // explains what is wrong the one page that will not open.
+    if let Err(e) = reconcile_categories(&st).await {
+        tracing::warn!(error = %e, "category payload repair deferred");
+    }
+
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&st.core.store.pool)
         .await?
@@ -4094,6 +4144,47 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_housekeeping_repairs_payload_categories_the_fold_changed() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
+            core.store
+                .update_artifact_category(&c.id, Some("other"))
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            !core
+                .store
+                .artifacts_needing_category_repair(200)
+                .await
+                .unwrap()
+                .is_empty(),
+            "there is something to repair before the page is opened"
+        );
+
+        let _ = get_body(&app, &cookie, "/ui/ops").await;
+
+        assert!(
+            core.store
+                .artifacts_needing_category_repair(200)
+                .await
+                .unwrap()
+                .is_empty(),
+            "opening the page brought the payloads back into step, and the pass \
+             does not run again on the next visit"
         );
     }
 

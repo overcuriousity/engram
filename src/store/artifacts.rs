@@ -832,6 +832,33 @@ impl Store {
     }
 
     /// Artifacts currently hidden by consolidation, newest first.
+    /// Artifacts whose vector payload may still disagree with the row.
+    ///
+    /// A row folded to `other` by the category migration is the only way the
+    /// two can diverge, so this is bounded by how many such rows there were and
+    /// empties itself as they are rewritten.
+    pub async fn artifacts_needing_category_repair(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+              WHERE category = 'other' AND payload_synced_at IS NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Stamped once the vector payload has been brought back into step.
+    pub async fn mark_payload_synced(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET payload_synced_at = ? WHERE id = ?")
+            .bind(crate::store::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL

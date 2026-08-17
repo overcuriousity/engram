@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS artifacts (
   caveats          TEXT NOT NULL DEFAULT '[]',
   status           TEXT NOT NULL DEFAULT 'active',
   last_verified_at INTEGER,
+  -- Stamped once the vector payload has been brought back into step with this
+  -- row after the category fold. SQLite is migrated on connect and Qdrant has
+  -- no such hook, so the repair runs from the housekeeping page and uses this
+  -- to know what it has already done.
+  payload_synced_at INTEGER,
   activation       REAL    NOT NULL DEFAULT 1.0,
   -- Current accessibility above is raised by being captured, retrieved,
   -- opened and confirmed; read through the same lazy decay as a link's
