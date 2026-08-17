@@ -12,6 +12,12 @@
 //!   ENGRAM__VECTOR__RECENCY_WEIGHT=0.0 …
 //!   ENGRAM_EVAL_CAP=none              (let one document fill the whole list)
 //!
+//! The ask harness runs the same way and needs the ask endpoint too:
+//!   ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval evaluate_ask -- --ignored --nocapture
+//! It measures citation recall, abstention accuracy and faithfulness by
+//! literals. With ENGRAM_EVAL_CLAIMS=1 it also asks the synthesize endpoint to
+//! trace every claim to an excerpt — one call per answered question.
+//!
 //! The corpus it reads is whatever the operator actually wants to search, and
 //! is not in this repository. Nothing here prints artifact text; a miss is named
 //! by the leading characters of its own query.
@@ -139,6 +145,194 @@ async fn evaluate_retrieval() {
     }
 
     report(&cfg, &artifacts, &pairs, &ranks, &misses, cap);
+    vectors.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn evaluate_ask() {
+    use engram::eval::claims::{parse_claims, supported};
+    use engram::eval::metrics::{Abstention, fraction_cited, fully_supported};
+    use engram::infer::Completer;
+    use engram::infer::prompt::{CLAIMS_SYSTEM, ask_excerpt, claims_prompt};
+    use engram::infer::verify::missing_literals;
+
+    let dir = eval_dir();
+    let (artifacts, questions) = match (load_artifacts(&dir), engram::eval::load_questions(&dir)) {
+        (Ok(a), Ok(q)) => (a, q),
+        (a, q) => {
+            let why = a.err().map(|e| e.to_string()).unwrap_or_default()
+                + &q.err().map(|e| format!(" {e}")).unwrap_or_default();
+            eprintln!(
+                "no judged questions at {} ({}). Ask on /ui/ask with feedback.enabled, judge the \
+                 answers, run `engram --export-eval <dir>` and set ENGRAM_EVAL_DIR to it.",
+                dir.display(),
+                why.trim()
+            );
+            return;
+        }
+    };
+    assert!(!questions.is_empty(), "questions.json is empty");
+
+    let mut cfg = Config::load(None).expect("config.toml");
+    cfg.vector.collection = COLLECTION.to_string();
+    let vectors = Arc::new(QdrantVectors::connect(&cfg.vector).await.unwrap());
+    vectors.drop_collection().await.unwrap();
+    vectors
+        .ensure_collection(cfg.infer.embed.dim)
+        .await
+        .unwrap();
+    let store = Store::memory().await.unwrap();
+    let core = Core::from_config(&cfg, vectors.clone(), store);
+    let translated = index(&core, &artifacts).await;
+
+    let check_claims = std::env::var("ENGRAM_EVAL_CLAIMS").is_ok_and(|v| v == "1");
+    let claim_checker =
+        engram::infer::openai::HttpCompleter::for_claim_checking(&cfg.infer.synthesize);
+
+    let mut recall: Vec<f64> = Vec::new();
+    let mut all_cited = (0usize, 0usize);
+    let mut abstention: Vec<(bool, bool)> = Vec::new();
+    let mut wrong_abstain: Vec<String> = Vec::new();
+    let mut wrong_answer: Vec<String> = Vec::new();
+    let mut unsupported_literals: Vec<usize> = Vec::new();
+    let mut literal_misses: Vec<(String, Vec<String>)> = Vec::new();
+    let mut claims_total = (0usize, 0usize);
+    let mut answers_fully = Vec::new();
+
+    for q in &questions {
+        let out = core
+            .ask(
+                &engram::core::ask::AskRequest {
+                    q: q.question.clone(),
+                    limit: None,
+                    tags: vec![],
+                    category: None,
+                },
+                // Never recorded: a benchmark is not someone asking.
+                engram::store::feedback::Door::Judge,
+            )
+            .await
+            .expect("ask failed");
+        let short: String = q.question.chars().take(48).collect();
+
+        // Abstention.
+        let expected = q.verdict == "nothing_here";
+        abstention.push((expected, out.abstained));
+        if expected && !out.abstained {
+            wrong_answer.push(short.clone());
+        }
+        if !expected && out.abstained {
+            wrong_abstain.push(short.clone());
+        }
+
+        // Citation recall, over right answers with carriers.
+        if q.verdict == "right" && !q.expect.is_empty() {
+            let mut carriers = Vec::new();
+            for e in &q.expect {
+                let stored = translated
+                    .get(e)
+                    .expect("questions.json names an artifact not in artifacts.json");
+                carriers.push(resolve_expected(&core, stored).await);
+            }
+            let cited: Vec<String> = out
+                .citations
+                .iter()
+                .map(|c| c.artifact_id.clone())
+                .collect();
+            let f = fraction_cited(&carriers, &cited);
+            recall.push(f);
+            all_cited.1 += 1;
+            if f >= 1.0 {
+                all_cited.0 += 1;
+            }
+        }
+
+        // Faithfulness, over answered questions.
+        if !out.abstained && !out.citations.is_empty() {
+            let excerpts: Vec<String> = out
+                .citations
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    ask_excerpt(i + 1, c.title.as_deref().unwrap_or_default(), &c.text, &[])
+                })
+                .collect();
+            let missing = missing_literals(&out.answer, &[], &excerpts.join("\n"));
+            unsupported_literals.push(missing.len());
+            if !missing.is_empty() {
+                literal_misses.push((short.clone(), missing));
+            }
+            if check_claims {
+                let reply = claim_checker
+                    .complete(CLAIMS_SYSTEM, &claims_prompt(&out.answer, &excerpts))
+                    .await
+                    .expect("claim check failed");
+                match parse_claims(&reply, excerpts.len()) {
+                    Ok(claims) => {
+                        let (s, t) = supported(&claims);
+                        claims_total.0 += s;
+                        claims_total.1 += t;
+                        answers_fully.push(t - s);
+                    }
+                    Err(e) => eprintln!("  claim check unreadable for {short:?}: {e}"),
+                }
+            }
+        }
+    }
+
+    // The settings line is part of the result, as it is for retrieval.
+    println!(
+        "\n{} questions over {} artifacts   (ask {}, embed {}, claims {})",
+        questions.len(),
+        artifacts.len(),
+        cfg.infer.ask.model,
+        cfg.infer.embed.model,
+        if check_claims { "on" } else { "off" }
+    );
+    if !recall.is_empty() {
+        println!(
+            "citation recall   {:.2}   (all carriers cited {}/{})",
+            recall.iter().sum::<f64>() / recall.len() as f64,
+            all_cited.0,
+            all_cited.1
+        );
+    }
+    let t = Abstention::tally(&abstention);
+    println!(
+        "abstained when it should   {}/{}\nanswered when it should    {}/{}",
+        t.should_and_did,
+        t.should_and_did + t.should_and_did_not,
+        t.should_not_did_not,
+        t.should_not_did_not + t.should_not_did
+    );
+    let (clean, answered) = fully_supported(&unsupported_literals);
+    println!("answers with no unsupported literal   {clean}/{answered}");
+    if check_claims {
+        let (fc, fa) = fully_supported(&answers_fully);
+        println!(
+            "claims supported   {}/{}   (answers fully supported {fc}/{fa})",
+            claims_total.0, claims_total.1
+        );
+    }
+    for (label, list) in [
+        ("answered when it should have abstained", &wrong_answer),
+        ("abstained when it should have answered", &wrong_abstain),
+    ] {
+        if !list.is_empty() {
+            println!("\n{label}:");
+            for q in list {
+                println!("  {q}");
+            }
+        }
+    }
+    if !literal_misses.is_empty() {
+        println!("\nunsupported literals:");
+        for (q, lits) in &literal_misses {
+            println!("  {q:<50} {}", lits.join(" · "));
+        }
+    }
+    println!();
     vectors.drop_collection().await.unwrap();
 }
 
