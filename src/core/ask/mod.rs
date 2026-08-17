@@ -1,3 +1,5 @@
+mod retrieve;
+
 use super::Core;
 use super::search::{SearchQuery, SearchResult};
 use crate::error::{Error, Result};
@@ -22,8 +24,9 @@ pub struct AskResponse {
     pub answer: String,
     /// Exactly the excerpts the model saw.
     pub citations: Vec<SearchResult>,
-    /// Retrieved but left out for budget. Reported so a missing citation is
-    /// visible rather than silent.
+    /// Retrieved but left out — below the relevance cliff, or past what the
+    /// context window holds. Reported so a missing citation is visible rather
+    /// than silent.
     pub dropped: usize,
     /// The answer stops where its output ceiling did, not where the model meant
     /// to. Reported for the same reason `dropped` is: an answer cut off
@@ -60,7 +63,7 @@ impl Core {
         // No per-source cap: an answer often lives in one document, and
         // withholding its paragraphs to keep the citation list varied would
         // make the answer worse, not fairer.
-        let (hits, _) = self
+        let (mut hits, _) = self
             .search_with(
                 &SearchQuery {
                     q: req.q.clone(),
@@ -94,6 +97,20 @@ impl Core {
             };
             return self.record_ask(req, &origin, response).await;
         }
+
+        // Cut the ranked list where its relevance falls off, before a single
+        // row is read for it: an excerpt below the cliff makes the answer worse
+        // as well as dearer, and its caveats are a lookup spent on something
+        // that will not be sent. `dropped` is still measured against everything
+        // retrieved, so a citation lost to the cliff is as visible as one lost
+        // to the window.
+        let retrieved = hits.len();
+        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
+        hits.truncate(retrieve::above_cliff(&scores));
+
+        // Artifacts reached sideways rather than retrieved are appended here,
+        // after the cliff has been taken — they carry no score comparable to a
+        // ranked hit, and must never enter the scores it is computed from.
 
         // Caveats are the conditions under which an excerpt does not apply, and
         // an answer that quotes "run `mkfs` on the device" without "destroys
@@ -153,9 +170,13 @@ impl Core {
 
         // Highest score first, so what gets cut is what mattered least.
         let kept = pack_by_budget(&blocks, &self.counter, budget);
-        let dropped = blocks.len() - kept;
+        let dropped = retrieved - kept;
         if dropped > 0 {
-            tracing::info!(dropped, kept, "ask: excerpts trimmed to fit the context");
+            tracing::info!(
+                dropped,
+                kept,
+                "ask: excerpts trimmed to the cliff and to what fits"
+            );
         }
 
         if kept == 0 {
