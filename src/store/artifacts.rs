@@ -408,6 +408,27 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
+    /// The artifacts either side of `ordinal` in the same corpus.
+    ///
+    /// The answer to a question is often the paragraph after the one that
+    /// matched. `ordinal` is already a continuous per-corpus sequence, which is
+    /// what makes this a lookup instead of a search. An edge returns the one
+    /// side that exists; `status = 'active'` keeps deprecated and superseded
+    /// artifacts out, exactly as an ordinary search would.
+    pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+             WHERE corpus_id = ? AND ordinal IN (?, ?) AND status = 'active'
+             ORDER BY ordinal",
+        )
+        .bind(corpus_id)
+        .bind(ordinal - 1)
+        .bind(ordinal + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query("SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal")
             .bind(corpus_id)
@@ -1029,6 +1050,52 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
+    }
+
+    /// The answer is often in the artifact next to the one that matched, and
+    /// `ordinal` is already a continuous per-corpus sequence, so this is a
+    /// lookup rather than a search.
+    #[tokio::test]
+    async fn adjacent_artifacts_returns_the_ordinals_either_side() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..5).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        s.insert_artifacts(&src.id, &new).await.unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 2).await.unwrap();
+        let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
+        assert_eq!(ordinals, vec![1, 3]);
+    }
+
+    /// The first artifact has no left neighbour, and asking for ordinal -1 must
+    /// return the one row that exists rather than an error or nothing.
+    #[tokio::test]
+    async fn adjacent_artifacts_at_the_edge_returns_only_the_side_that_exists() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..5).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        s.insert_artifacts(&src.id, &new).await.unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 0).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].ordinal, 1);
+    }
+
+    /// Reaching sideways must not resurrect what the lifecycle took out of
+    /// results: a deprecated neighbour is not an answer.
+    #[tokio::test]
+    async fn adjacent_artifacts_skips_a_neighbour_that_is_not_active() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..3).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        let made = s.insert_artifacts(&src.id, &new).await.unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 1).await.unwrap();
+        let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
+        assert_eq!(ordinals, vec![2]);
     }
 
     #[tokio::test]

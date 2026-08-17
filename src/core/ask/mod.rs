@@ -106,11 +106,16 @@ impl Core {
         // to the window.
         let retrieved = hits.len();
         let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
+        let cliff_at = crate::core::search::cliff(&scores);
         hits.truncate(retrieve::above_cliff(&scores));
 
         // Artifacts reached sideways rather than retrieved are appended here,
         // after the cliff has been taken — they carry no score comparable to a
         // ranked hit, and must never enter the scores it is computed from.
+        // `scores` is consumed above and never recomputed, so nothing appended
+        // from here on can reach `cliff` at all.
+        let ranked = hits.len();
+        self.reach_sideways(&mut hits, cliff_at).await;
 
         // Caveats are the conditions under which an excerpt does not apply, and
         // an answer that quotes "run `mkfs` on the device" without "destroys
@@ -170,7 +175,13 @@ impl Core {
 
         // Highest score first, so what gets cut is what mattered least.
         let kept = pack_by_budget(&blocks, &self.counter, budget);
-        let dropped = retrieved - kept;
+        // Measured over the retrieved hits alone. `dropped` answers "what did I
+        // ask for and not get shown", and nobody asked for a neighbour — one
+        // that does not fit was never owed a place, and counting it would make
+        // `dropped` grow every time the reach worked. Packing keeps a prefix
+        // and the neighbours sit after the ranked hits, so the ranked ones that
+        // survived are exactly `kept.min(ranked)`.
+        let dropped = retrieved - kept.min(ranked);
         if dropped > 0 {
             tracing::info!(
                 dropped,
@@ -226,6 +237,117 @@ impl Core {
             event_id: None,
         };
         self.record_ask(req, &origin, response).await
+    }
+
+    /// One hop sideways from the hits that placed best: the artifacts adjacent
+    /// in their corpus, and their one-hop associations.
+    ///
+    /// The answer is often in the artifact *next to* the one that matched — the
+    /// paragraph that names the caveat, the step after the step. Retrieval
+    /// cannot find those, because they do not contain the question's terms and
+    /// do not sit near it in the embedding space; they are only reachable
+    /// through structure, which is why this is a lookup rather than a second
+    /// search and costs no inference at all.
+    ///
+    /// Everything here is best-effort. A neighbour is a bonus, and no failure
+    /// to read one may cost the answer that was already retrievable.
+    async fn reach_sideways(&self, hits: &mut Vec<SearchResult>, cliff_at: Option<usize>) {
+        let anchors = retrieve::anchor_count(cliff_at, hits.len());
+        if anchors == 0 {
+            return;
+        }
+
+        let mut reached: Vec<(String, String, Option<String>)> = Vec::new();
+        for h in hits.iter().take(anchors) {
+            // Read for the ordinal, which the vector payload does not carry.
+            // The same row is read again below for its caveats; both are cheap
+            // SQLite lookups against the primary key.
+            if let Ok(anchor) = self.store.get_artifact(&h.artifact_id).await
+                && let Some(corpus) = anchor.corpus_id.as_deref()
+            {
+                match self.store.adjacent_artifacts(corpus, anchor.ordinal).await {
+                    Ok(next) => reached.extend(
+                        next.into_iter()
+                            .map(|c| (c.id, h.artifact_id.clone(), None)),
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "could not read adjacent artifacts"),
+                }
+            }
+
+            // Only when the associative layer is actually live: links are
+            // learned from recorded searches, and an install that never opted
+            // into `feedback` must not have that layer read on its behalf.
+            // Same half-life and same floor as the results rail, so the reach
+            // cannot surface a link the rail would have called too faint.
+            if !self.associating() {
+                continue;
+            }
+            match self
+                .store
+                .links_from(
+                    std::slice::from_ref(&h.artifact_id),
+                    &[
+                        crate::store::links::LinkState::Learning,
+                        crate::store::links::LinkState::Related,
+                    ],
+                    self.associate.half_life_days,
+                    crate::core::search::now_secs(),
+                    self.associate.show_min,
+                    retrieve::NEIGHBOUR_MAX as i64,
+                )
+                .await
+            {
+                Ok(links) => reached.extend(links.into_iter().map(|l| (l.other, l.via, l.reason))),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read links; the reach is adjacency only")
+                }
+            }
+        }
+
+        let ranked: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
+        let ranked_len = ranked.len();
+        let ids: Vec<String> = reached.iter().map(|(id, _, _)| id.clone()).collect();
+        let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
+
+        for id in merged.into_iter().skip(ranked_len) {
+            let Some((_, via, reason)) = reached.iter().find(|(n, _, _)| *n == id).cloned() else {
+                continue;
+            };
+            let Ok(c) = self.store.get_artifact(&id).await else {
+                continue;
+            };
+            if !c.in_results() {
+                continue;
+            }
+            hits.push(SearchResult {
+                artifact_id: c.id,
+                corpus_id: c.corpus_id.unwrap_or_default(),
+                title: c.title,
+                text: c.text,
+                category: c.category,
+                tags: c.tags,
+                // Not a rank and not a similarity: this artifact did not
+                // compete for a place in the list, it was reached beside one.
+                // Any other number would be a claim about relevance that
+                // nothing measured, and `record_ask` stores it.
+                score: 0.0,
+                status: Some(c.status),
+                superseded_by: c.superseded_by,
+                last_verified_at: c.last_verified_at,
+                // Weakness is read from a similarity to the query, and there is
+                // no similarity here to read. It has to be demonstrated, never
+                // assumed — in either direction.
+                weak: false,
+                primed: false,
+                // The cliff was computed over scores this one was never in.
+                past_cliff: false,
+                // What makes a reached artifact tellable apart from a retrieved
+                // one, by a reader and by a test alike: a ranked hit has no
+                // `via`, and this one names the hit it was reached from.
+                via: Some(via),
+                reason,
+            });
+        }
     }
 
     /// Record the question when this door records. Only the UI, and only with
@@ -671,15 +793,145 @@ mod tests {
             .await
             .unwrap();
 
+        // Counted over the ranked citations only. Reached neighbours are in
+        // this list too and are supposed to be: they never competed, so the
+        // cliff has nothing to say about them. `via` is what tells them apart.
         assert_eq!(
-            out.citations.len(),
+            ranked(&out),
             3,
             "the two excerpts below the cliff were still shown to the model"
         );
         assert_eq!(
-            out.citations.len() + out.dropped,
+            ranked(&out) + out.dropped,
             5,
             "an excerpt cut by the cliff must be reported, not lost silently"
+        );
+    }
+
+    /// Citations that placed in the ranking, as opposed to ones reached
+    /// sideways from those that did.
+    fn ranked(out: &AskResponse) -> usize {
+        out.citations.iter().filter(|c| c.via.is_none()).count()
+    }
+
+    /// The answer is often in the artifact next to the one that matched, and
+    /// retrieval cannot find it: it does not carry the question's terms and
+    /// does not sit near it in the embedding space. Only structure reaches it.
+    ///
+    /// The same cliff as the test above, so the artifact at ordinal 3 is one
+    /// the ranking cut and adjacency puts back — reached, not retrieved, and
+    /// marked as such.
+    #[tokio::test]
+    async fn the_artifact_beside_a_hit_is_reached_even_though_the_cliff_cut_it() {
+        let mut core = test_core().await;
+        core.reranker = Some(std::sync::Arc::new(Cliffed));
+        seed(&core, 5, 4).await;
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(5),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let reached: Vec<&SearchResult> =
+            out.citations.iter().filter(|c| c.via.is_some()).collect();
+        assert!(
+            !reached.is_empty(),
+            "nothing was reached sideways: {:?}",
+            out.citations
+                .iter()
+                .map(|c| c.title.as_deref())
+                .collect::<Vec<_>>()
+        );
+        for c in &reached {
+            let via = c.via.as_deref().unwrap();
+            assert!(
+                out.citations
+                    .iter()
+                    .take(ranked(&out))
+                    .any(|r| r.artifact_id == via),
+                "a neighbour named an anchor that is not one of the ranked hits"
+            );
+        }
+    }
+
+    /// The ordering is the safety property: a reached artifact carries no score
+    /// comparable to a retrieved one, so anything that reads this list as
+    /// ranked — the cliff, the packing order, `record_ask` — must find every
+    /// ranked hit ahead of every neighbour.
+    #[tokio::test]
+    async fn every_reached_artifact_sits_after_every_ranked_one_and_carries_no_score() {
+        let mut core = test_core().await;
+        core.reranker = Some(std::sync::Arc::new(Cliffed));
+        seed(&core, 5, 4).await;
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(5),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let first_reached = out.citations.iter().position(|c| c.via.is_some());
+        assert!(first_reached.is_some(), "nothing was reached sideways");
+        assert!(
+            out.citations
+                .iter()
+                .skip(first_reached.unwrap())
+                .all(|c| c.via.is_some()),
+            "a ranked hit was interleaved behind a neighbour"
+        );
+        for c in out.citations.iter().filter(|c| c.via.is_some()) {
+            assert_eq!(
+                c.score, 0.0,
+                "a reached artifact was given a score it never earned"
+            );
+            assert!(!c.past_cliff && !c.primed && !c.weak);
+        }
+    }
+
+    /// A reach that found nothing new must not report anything as lost. The
+    /// question asked for the retrieved hits, and `dropped` answers only for
+    /// those — otherwise it would grow every time the reach worked.
+    #[tokio::test]
+    async fn a_reached_neighbour_is_never_counted_as_a_dropped_citation() {
+        let mut core = test_core().await;
+        core.reranker = Some(std::sync::Arc::new(Cliffed));
+        seed(&core, 5, 4).await;
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(5),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            out.citations.len() > ranked(&out),
+            "the reach added nothing, so this proves nothing"
+        );
+        assert_eq!(
+            out.dropped, 2,
+            "only the two hits the cliff cut are missing from the answer"
         );
     }
 
@@ -689,7 +941,7 @@ mod tests {
         seed(&core, 20, 400).await;
         let out = core.ask(&req("anything"), Door::Api).await.unwrap();
         assert_eq!(
-            out.citations.len() + out.dropped,
+            ranked(&out) + out.dropped,
             8,
             "citations plus dropped must account for every retrieved excerpt"
         );
