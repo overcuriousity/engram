@@ -24,11 +24,12 @@ reading, and search from a panel beside it.</p>
 </form>
 
 <table class="grid">
-  <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>Minted by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
   <tbody>
   {% for t in tokens %}
     <tr>
       <td>{{ t.name }}</td>
+      <td class="muted">{{ t.minted_by }}</td>
       <td class="muted mono">{{ t.created }}</td>
       <td class="muted mono">{{ t.last_used }}</td>
       <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>

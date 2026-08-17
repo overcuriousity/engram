@@ -415,5 +415,9 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   subject      TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER,
-  revoked_at   INTEGER
+  revoked_at   INTEGER,
+  -- What asked for the token, as it announced itself. The extension mints
+  -- every one of its tokens under the same name, so without this two rows can
+  -- be identical in everything a person can read.
+  user_agent   TEXT
 );

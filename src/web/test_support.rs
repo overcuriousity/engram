@@ -32,7 +32,7 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
 
 /// A router over `core` plus a bearer token for `user-1`.
 pub async fn app_with_token(core: Core) -> (axum::Router, String) {
-    let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1")
+    let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1", None)
         .await
         .unwrap();
     (router(core, None), token)

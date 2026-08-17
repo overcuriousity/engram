@@ -127,6 +127,9 @@ impl Store {
             // which is what makes the payload repair finite: it stamps what it
             // rewrites and empties itself.
             ("artifacts", "payload_synced_at", "INTEGER"),
+            // Arrived with the settings page. NULL on every token minted
+            // before it, which is the truth: nothing recorded what asked.
+            ("api_tokens", "user_agent", "TEXT"),
         ];
 
         // Before the schema, not after. `schema.sql` builds an index over `seq`,

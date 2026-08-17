@@ -257,6 +257,10 @@ pub struct TokenRow {
     pub name: String,
     pub created: String,
     pub last_used: String,
+    /// What asked for the token, as it announced itself, or `—` for one minted
+    /// before this was recorded. The extension names every token it mints the
+    /// same thing, so this is what tells two of those rows apart.
+    pub minted_by: String,
     pub revoked: bool,
 }
 
@@ -1461,6 +1465,10 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
                 .last_used_at
                 .map(fmt_time)
                 .unwrap_or_else(|| "never".into()),
+            // What asked for it. Two tokens can carry one name — the extension
+            // gives every token it mints the same one — and when neither has
+            // been used yet, this is the only thing that differs.
+            minted_by: t.user_agent.clone().unwrap_or_else(|| "—".into()),
             revoked: t.revoked_at.is_some(),
         })
         .collect())
@@ -1682,6 +1690,7 @@ struct MintForm {
 async fn mint_token(
     State(st): State<AppState>,
     id: Identity,
+    headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
 ) -> Result<Response> {
     let name = if f.name.trim().is_empty() {
@@ -1689,7 +1698,13 @@ async fn mint_token(
     } else {
         f.name.trim()
     };
-    let (_, plaintext) = crate::auth::tokens::mint(&st.core.store, name, &id.subject).await?;
+    let (_, plaintext) = crate::auth::tokens::mint(
+        &st.core.store,
+        name,
+        &id.subject,
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    )
+    .await?;
     // Shown once, here, and never stored in plaintext anywhere.
     Ok(HtmlTemplate(TokenCreatedTemplate { token: plaintext }).into_response())
 }
@@ -4265,6 +4280,34 @@ mod tests {
             page.contains("body of Windows Update-Typen"),
             "a row has to say which artifact it is, and two can share a title: {page}"
         );
+    }
+
+    #[tokio::test]
+    async fn two_tokens_with_one_name_are_still_tellable_apart() {
+        // The extension mints every token under the same name, so two rows
+        // called "browser extension" and neither used yet were the same row
+        // twice — and one of them was the one currently working.
+        let (app, cookie, core) = app_session_and_core().await;
+        crate::auth::tokens::mint(
+            &core.store,
+            "browser extension",
+            "user-1",
+            Some("Firefox/141.0"),
+        )
+        .await
+        .unwrap();
+        crate::auth::tokens::mint(
+            &core.store,
+            "browser extension",
+            "user-1",
+            Some("Chrome/152.0"),
+        )
+        .await
+        .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(page.contains("Firefox"), "{page}");
+        assert!(page.contains("Chrome"), "{page}");
     }
 
     #[tokio::test]

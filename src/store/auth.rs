@@ -10,6 +10,10 @@ pub struct ApiToken {
     pub created_at: i64,
     pub last_used_at: Option<i64>,
     pub revoked_at: Option<i64>,
+    /// What asked for this token. `None` for one minted before it was
+    /// recorded, and for a caller that sent no `User-Agent` — which is most
+    /// scripts, and honest of them.
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +38,7 @@ impl Store {
         name: &str,
         hash: &str,
         subject: &str,
+        user_agent: Option<&str>,
     ) -> Result<ApiToken> {
         let t = ApiToken {
             id: id.to_string(),
@@ -42,12 +47,20 @@ impl Store {
             created_at: now(),
             last_used_at: None,
             revoked_at: None,
+            user_agent: user_agent.map(str::to_string),
         };
         sqlx::query(
-            "INSERT INTO api_tokens (id, name, token_hash, subject, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO api_tokens (id, name, token_hash, subject, created_at, user_agent)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(&t.id).bind(&t.name).bind(hash).bind(&t.subject).bind(t.created_at)
-        .execute(&self.pool).await?;
+        .bind(&t.id)
+        .bind(&t.name)
+        .bind(hash)
+        .bind(&t.subject)
+        .bind(t.created_at)
+        .bind(&t.user_agent)
+        .execute(&self.pool)
+        .await?;
         Ok(t)
     }
 
@@ -68,7 +81,7 @@ impl Store {
 
     pub async fn list_tokens(&self) -> Result<Vec<ApiToken>> {
         let rows = sqlx::query(
-            "SELECT id, name, subject, created_at, last_used_at, revoked_at
+            "SELECT id, name, subject, created_at, last_used_at, revoked_at, user_agent
              FROM api_tokens ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
@@ -82,6 +95,7 @@ impl Store {
                 created_at: r.get("created_at"),
                 last_used_at: r.get("last_used_at"),
                 revoked_at: r.get("revoked_at"),
+                user_agent: r.get("user_agent"),
             })
             .collect())
     }
