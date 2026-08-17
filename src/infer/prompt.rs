@@ -295,11 +295,31 @@ pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i
     s
 }
 
+/// The words an abstaining answer opens with. One definition for the string
+/// the model is told and the string `abstained` looks for, for the reason
+/// `Caveat:` is: splitting the two apart is how the agreement quietly breaks.
+pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
+
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
-say so plainly rather than guessing. Cite excerpts by their number. \
+begin your reply with the exact words `Not in the knowledge base.` and say what is missing rather \
+than guessing. Cite excerpts by their number. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
+
+/// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace and
+/// markdown emphasis or heading marks are skipped, because models wrap an
+/// opening sentence in them no matter what they were told; the comparison is
+/// case-insensitive for the same reason. Mentioning the phrase later in a real
+/// answer is not an abstention.
+pub fn abstained(answer: &str) -> bool {
+    let opening = answer.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '*' | '_' | '#' | '>' | '`')
+    });
+    opening
+        .get(..ABSTAIN_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(ABSTAIN_PREFIX))
+}
 
 /// One retrieved excerpt, numbered so the answer can cite it.
 ///
@@ -1561,5 +1581,36 @@ mod tests {
         assert!(!bare.contains("taken"), "{bare}");
         assert!(!bare.contains("GPS"), "{bare}");
         assert!(bare.contains("Read the image"), "{bare}");
+    }
+
+    #[test]
+    fn an_answer_that_opens_with_the_sentinel_is_an_abstention() {
+        assert!(abstained(
+            "Not in the knowledge base. Nothing covers mounting E01 images."
+        ));
+        assert!(abstained(
+            "  not in the knowledge base — the excerpts are about FAT."
+        ));
+        // Models wrap the opening in emphasis or a heading; that is still the opening.
+        assert!(abstained(
+            "**Not in the knowledge base.** The excerpts describe…"
+        ));
+        assert!(abstained("# Not in the knowledge base\n\nThe excerpts…"));
+    }
+
+    #[test]
+    fn an_answer_that_merely_mentions_the_phrase_is_not_an_abstention() {
+        assert!(!abstained(
+            "Mount it with `ewfmount`. (Details on E02 are not in the knowledge base.)"
+        ));
+        assert!(!abstained(""));
+        assert!(!abstained(
+            "Not in the manual, but in the excerpts: use -o ro."
+        ));
+    }
+
+    #[test]
+    fn the_system_prompt_tells_the_model_the_exact_sentinel_the_code_reads() {
+        assert!(ASK_SYSTEM.contains(ABSTAIN_PREFIX), "{ASK_SYSTEM}");
     }
 }
