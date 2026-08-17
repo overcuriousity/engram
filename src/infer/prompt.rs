@@ -377,6 +377,47 @@ pub fn claims_schema() -> serde_json::Value {
     })
 }
 
+/// Names a knowledge gap from the questions in it. Sees questions only, never
+/// answers: it names the hole, not the guess.
+pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
+
+pub fn gap_label_prompt(questions: &[&str]) -> String {
+    let mut s = String::from("Questions:\n");
+    for q in questions {
+        s.push_str("- ");
+        s.push_str(q);
+        s.push('\n');
+    }
+    s
+}
+
+pub fn gap_label_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "label": {"type": "string"} },
+        "required": ["label"],
+        "additionalProperties": false
+    })
+}
+
+/// The label out of the reply, trimmed of quotes and trailing punctuation;
+/// an empty label is an error, because a cluster must be called something.
+pub fn parse_gap_label(reply: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply))
+        .map_err(|e| Error::MalformedLlmOutput(format!("gap label was not JSON: {e}")))?;
+    let label = v["label"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
+        .trim()
+        .to_string();
+    if label.is_empty() {
+        return Err(Error::MalformedLlmOutput("gap label was empty".into()));
+    }
+    Ok(label)
+}
+
 /// The verdict inside the envelope, or the reply itself if it came without one.
 ///
 /// `dedupe_schema` and `link_schema` both wrap their union under `verdict`,
@@ -1135,6 +1176,7 @@ mod tests {
             ("dedupe", dedupe_schema()),
             ("link", link_schema()),
             ("claims", claims_schema()),
+            ("gap_label", gap_label_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the
@@ -1647,5 +1689,15 @@ mod tests {
     #[test]
     fn the_system_prompt_tells_the_model_the_exact_sentinel_the_code_reads() {
         assert!(ASK_SYSTEM.contains(ABSTAIN_PREFIX), "{ASK_SYSTEM}");
+    }
+
+    #[test]
+    fn a_gap_label_is_read_out_of_the_envelope_and_tidied() {
+        assert_eq!(
+            parse_gap_label(r#"{"label": "\"Forensic image mounting.\""}"#).unwrap(),
+            "Forensic image mounting"
+        );
+        assert!(parse_gap_label(r#"{"label": ""}"#).is_err());
+        assert!(parse_gap_label("nope").is_err());
     }
 }

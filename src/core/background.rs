@@ -244,21 +244,23 @@ pub(crate) async fn reconcile_stores_once(core: &crate::core::Core) {
     }
 }
 
-/// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after.
+/// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after,
+/// and regroup the knowledge gaps on the same beat.
 ///
 /// Its own ticker rather than a passenger on the consolidation sweep, which is
 /// where it used to live: an operator who switches duplicate hygiene off is not
 /// asking to keep their query log forever, and that is what the coupling
 /// quietly did. Runs even with capture disabled, so turning capture off also
-/// expires what it recorded while it was on.
+/// expires what it recorded while it was on. Grouping the gaps rides the same
+/// rhythm because it reads the same tables, and hours is the right cadence for
+/// something a person looks at when they next capture.
 pub fn spawn_retention_ticker(
     core: crate::core::Core,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if core.feedback.retain_days <= 0 {
-            tracing::info!("captured searches kept indefinitely");
-            return;
+            tracing::info!("captured searches and questions kept indefinitely");
         }
         let period = std::time::Duration::from_secs(core.feedback.sweep_hours.max(1) * 3600);
         let mut tick = tokio::time::interval(period);
@@ -268,16 +270,28 @@ pub fn spawn_retention_ticker(
                     if *shutdown.borrow() { break; }
                 }
                 _ = tick.tick() => {
-                    match core.store.expire_feedback(core.feedback.retain_days).await {
-                        Ok(n) if n > 0 => {
-                            tracing::info!(dropped = n, "expired captured searches")
+                    if core.feedback.retain_days > 0 {
+                        match core.store.expire_feedback(core.feedback.retain_days).await {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(dropped = n, "expired captured searches and questions")
+                            }
+                            // A failed sweep is retried on the next tick; there is
+                            // nothing here worth taking the process down for.
+                            Err(e) => {
+                                tracing::warn!(error = %e, "could not expire captured searches")
+                            }
+                            _ => {}
                         }
-                        // A failed sweep is retried on the next tick; there is
-                        // nothing here worth taking the process down for.
-                        Err(e) => {
-                            tracing::warn!(error = %e, "could not expire captured searches")
+                    }
+                    if core.feedback.enabled {
+                        match crate::jobs::gaps::sweep(&core).await {
+                            Ok(r) if r.named > 0 || r.removed > 0 => tracing::info!(
+                                clusters = r.clusters, named = r.named, removed = r.removed,
+                                "knowledge gaps regrouped"
+                            ),
+                            Err(e) => tracing::warn!(error = %e, "could not group knowledge gaps"),
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
@@ -572,14 +586,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeping_forever_starts_no_ticker() {
+    async fn keeping_forever_expires_nothing() {
         let core = crate::core::test_support::test_core().await; // retain_days defaults to 0
         seed_old_event(&core).await;
-        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let h = spawn_retention_ticker(core.clone(), rx);
-        // Returns rather than looping, so awaiting it cannot hang.
+        // Let the first tick land, then stop it. The ticker keeps running for
+        // the gap sweep, so it is stopped rather than awaited to its end.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        let _ = tx.send(true);
         let _ = h.await;
         assert_eq!(captured(&core).await, 1, "`0` must keep them forever");
+    }
+
+    #[tokio::test]
+    async fn the_ticker_groups_the_gaps_on_its_first_tick() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let id = core
+            .store
+            .record_ask(crate::store::asks::NewAsk {
+                question: "mount an E01".into(),
+                scope: None,
+                filters: "{}".into(),
+                query_vec: vec![1.0; 4],
+                embed_model: core.embedder.model().to_string(),
+                answer: "Not in the knowledge base.".into(),
+                abstained: true,
+                dropped: 0,
+                truncated: false,
+                citations: vec![],
+            })
+            .await
+            .unwrap();
+        core.store
+            .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_retention_ticker(core.clone(), rx);
+        for _ in 0..50 {
+            if !core.store.cluster_keys().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = tx.send(true);
+        let _ = h.await;
+        assert_eq!(
+            core.store.cluster_keys().await.unwrap().len(),
+            1,
+            "the gap was never grouped"
+        );
     }
 
     #[tokio::test]

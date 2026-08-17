@@ -811,6 +811,11 @@ impl HttpCompleter {
         Self::judging(cfg, ("claims", prompt::claims_schema()))
     }
 
+    /// The model that names a knowledge gap, on the judges' endpoint.
+    pub fn for_gap_naming(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
+    }
+
     fn judging(cfg: &SynthesizeRole, schema: (&'static str, serde_json::Value)) -> Self {
         Self {
             ep: Endpoint::new(
