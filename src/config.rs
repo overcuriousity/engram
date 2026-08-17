@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -357,15 +358,354 @@ fn default_weak_below() -> f32 {
     0.35
 }
 
+/// A named endpoint and its defaults. Roles point at one instead of each
+/// carrying its own, so "which model is this call worth" is a decision made
+/// once rather than repeated per role.
 #[derive(Debug, Deserialize, Clone)]
+pub struct TierConfig {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub context_tokens: usize,
+    pub max_output_tokens: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub ceiling_param: Option<CeilingParam>,
+    #[serde(default = "default_true")]
+    pub structured_output: bool,
+}
+
+/// The resolved roles. Deserialised through [`RawInferConfig`] so that tiers
+/// are flattened away before anything downstream sees a role: `HttpCompleter`
+/// and friends keep taking a struct whose every field is concrete, and a tier
+/// stays a spelling of the config file rather than a concept the call path has
+/// to know about.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(try_from = "RawInferConfig")]
 pub struct InferConfig {
     pub synthesize: SynthesizeRole,
     pub embed: EmbedRole,
     pub ask: AskRole,
-    #[serde(default)]
     pub rerank: Option<RerankRole>,
-    #[serde(default)]
     pub vision: Option<VisionRole>,
+    /// Emitted by `normalize`. Collected here rather than logged during
+    /// deserialization because a `TryFrom` runs before the subscriber is up,
+    /// and a warning written to nowhere is the same as no warning.
+    pub legacy_warnings: Vec<String>,
+}
+
+/// The file's shape, before tiers are folded into the roles. Every endpoint
+/// field on a role is optional here: it comes from the tier unless the role
+/// overrides it, and in the legacy shape the role carries it directly.
+#[derive(Debug, Deserialize)]
+pub struct RawInferConfig {
+    #[serde(default)]
+    tiers: HashMap<String, TierConfig>,
+    synthesize: RawSynthesizeRole,
+    embed: EmbedRole,
+    ask: RawAskRole,
+    #[serde(default)]
+    rerank: Option<RerankRole>,
+    #[serde(default)]
+    vision: Option<RawVisionRole>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSynthesizeRole {
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    context_tokens: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    ceiling_param: Option<CeilingParam>,
+    #[serde(default)]
+    structured_output: Option<bool>,
+    // Role-only, unchanged.
+    output_ratio: f32,
+    #[serde(default)]
+    tokenizer_path: Option<String>,
+    #[serde(default)]
+    cooldown_secs: Option<u64>,
+    #[serde(default = "default_context_opening_tokens")]
+    context_opening_tokens: usize,
+    #[serde(default = "default_context_overlap_tokens")]
+    context_overlap_tokens: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAskRole {
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    context_tokens: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    ceiling_param: Option<CeilingParam>,
+    // Role-only.
+    #[serde(default)]
+    follow_up: bool,
+    #[serde(default)]
+    follow_up_tier: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawVisionRole {
+    model: String,
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    ceiling_param: Option<CeilingParam>,
+}
+
+/// The endpoint a role runs on: the tier it names, or `None` when it carries
+/// one inline and the caller builds an anonymous tier from the role's own
+/// fields.
+///
+/// A name that matches nothing is refused rather than defaulted. What that
+/// prevents is a typo running every call of one role against a different model
+/// than the operator wrote down — a divergence no later stage could notice,
+/// let alone report.
+fn resolve_endpoint(
+    role: &str,
+    tier_name: Option<&str>,
+    tiers: &HashMap<String, TierConfig>,
+    inline_base_url: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<TierConfig>, String> {
+    if let Some(name) = tier_name {
+        return tiers.get(name).cloned().map(Some).ok_or_else(|| {
+            let mut known: Vec<&str> = tiers.keys().map(String::as_str).collect();
+            known.sort_unstable();
+            format!(
+                "[infer.{role}] points at tier `{name}`, which is not defined. \
+                 Known tiers: {}. Define it under [infer.tiers.{name}].",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )
+        });
+    }
+    if inline_base_url.is_some() {
+        warnings.push(format!(
+            "[infer.{role}] carries its endpoint inline. Move base_url, model, api_key, \
+             context_tokens and max_output_tokens into an [infer.tiers.<name>] block and \
+             write `tier = \"<name>\"` here. The inline form still works and will be removed."
+        ));
+        return Ok(None);
+    }
+    Err(format!(
+        "[infer.{role}] has neither `tier` nor `base_url`. Point it at an \
+         [infer.tiers.<name>] block."
+    ))
+}
+
+/// A field the inline shape has always required. Named here rather than left
+/// to serde's `missing field`, because the same key is legal to omit in the
+/// tiered shape and the message has to say which of the two is short.
+fn required<T>(v: Option<T>, role: &str, field: &str) -> Result<T, String> {
+    v.ok_or_else(|| {
+        format!(
+            "[infer.{role}] carries its endpoint inline but is missing `{field}`. \
+             Add it, or point the role at an [infer.tiers.<name>] block that has it."
+        )
+    })
+}
+
+impl TryFrom<RawInferConfig> for InferConfig {
+    type Error = String;
+
+    fn try_from(raw: RawInferConfig) -> Result<Self, Self::Error> {
+        let mut legacy_warnings = Vec::new();
+        let tiers = &raw.tiers;
+
+        let s = raw.synthesize;
+        let st = match resolve_endpoint(
+            "synthesize",
+            s.tier.as_deref(),
+            tiers,
+            s.base_url.as_deref(),
+            &mut legacy_warnings,
+        )? {
+            Some(t) => t,
+            None => TierConfig {
+                base_url: required(s.base_url.clone(), "synthesize", "base_url")?,
+                model: required(s.model.clone(), "synthesize", "model")?,
+                api_key: s.api_key.clone(),
+                context_tokens: required(s.context_tokens, "synthesize", "context_tokens")?,
+                max_output_tokens: required(
+                    s.max_output_tokens,
+                    "synthesize",
+                    "max_output_tokens",
+                )?,
+                timeout_secs: default_timeout_secs(),
+                reasoning_effort: None,
+                ceiling_param: None,
+                structured_output: default_true(),
+            },
+        };
+        let synthesize = SynthesizeRole {
+            base_url: s.base_url.unwrap_or(st.base_url),
+            model: s.model.unwrap_or(st.model),
+            api_key: s.api_key.or(st.api_key),
+            context_tokens: s.context_tokens.unwrap_or(st.context_tokens),
+            max_output_tokens: s.max_output_tokens.unwrap_or(st.max_output_tokens),
+            output_ratio: s.output_ratio,
+            tokenizer_path: s.tokenizer_path,
+            reasoning_effort: s.reasoning_effort.or(st.reasoning_effort),
+            ceiling_param: s.ceiling_param.or(st.ceiling_param),
+            timeout_secs: s.timeout_secs.unwrap_or(st.timeout_secs),
+            structured_output: s.structured_output.unwrap_or(st.structured_output),
+            cooldown_secs: s.cooldown_secs,
+            context_opening_tokens: s.context_opening_tokens,
+            context_overlap_tokens: s.context_overlap_tokens,
+        };
+
+        let a = raw.ask;
+        let at = match resolve_endpoint(
+            "ask",
+            a.tier.as_deref(),
+            tiers,
+            a.base_url.as_deref(),
+            &mut legacy_warnings,
+        )? {
+            Some(t) => t,
+            None => TierConfig {
+                base_url: required(a.base_url.clone(), "ask", "base_url")?,
+                model: required(a.model.clone(), "ask", "model")?,
+                api_key: a.api_key.clone(),
+                context_tokens: required(a.context_tokens, "ask", "context_tokens")?,
+                // The inline shape has always defaulted this rather than
+                // requiring it, and a refactor is the wrong place to stop.
+                max_output_tokens: default_ask_max_output_tokens(),
+                timeout_secs: default_timeout_secs(),
+                reasoning_effort: None,
+                ceiling_param: None,
+                structured_output: default_true(),
+            },
+        };
+        // Resolved here rather than where it is used, so a typo in the name is
+        // a startup failure like every other tier name instead of a surprise on
+        // the first question someone asks.
+        let follow_up_endpoint = match a.follow_up_tier.as_deref() {
+            Some(name) => resolve_endpoint(
+                "ask.follow_up_tier",
+                Some(name),
+                tiers,
+                None,
+                &mut legacy_warnings,
+            )?,
+            None => None,
+        };
+        let ask = AskRole {
+            base_url: a.base_url.unwrap_or(at.base_url),
+            model: a.model.unwrap_or(at.model),
+            api_key: a.api_key.or(at.api_key),
+            context_tokens: a.context_tokens.unwrap_or(at.context_tokens),
+            max_output_tokens: a.max_output_tokens.unwrap_or(at.max_output_tokens),
+            timeout_secs: a.timeout_secs.unwrap_or(at.timeout_secs),
+            reasoning_effort: a.reasoning_effort.or(at.reasoning_effort),
+            ceiling_param: a.ceiling_param.or(at.ceiling_param),
+            follow_up: a.follow_up,
+            follow_up_endpoint,
+        };
+
+        // Vision is the one role whose endpoint may legitimately be absent:
+        // `None` there means the synthesize endpoint, which `VisionRole::resolve`
+        // reads later. So it is folded by hand rather than through
+        // `resolve_endpoint`, which would refuse that as underspecified.
+        let vision = match raw.vision {
+            None => None,
+            Some(v) => {
+                let vt = match v.tier.as_deref() {
+                    Some(name) => {
+                        resolve_endpoint("vision", Some(name), tiers, None, &mut legacy_warnings)?
+                    }
+                    None => {
+                        if v.base_url.is_some() {
+                            resolve_endpoint(
+                                "vision",
+                                None,
+                                tiers,
+                                v.base_url.as_deref(),
+                                &mut legacy_warnings,
+                            )?;
+                        }
+                        None
+                    }
+                };
+                Some(VisionRole {
+                    model: v.model,
+                    base_url: v
+                        .base_url
+                        .or_else(|| vt.as_ref().map(|t| t.base_url.clone())),
+                    api_key: v
+                        .api_key
+                        .or_else(|| vt.as_ref().and_then(|t| t.api_key.clone())),
+                    // The tier's timeout only where there is a tier: this
+                    // role's own default is two minutes, which is about one
+                    // image and not about whatever endpoint serves it.
+                    timeout_secs: v
+                        .timeout_secs
+                        .or_else(|| vt.as_ref().map(|t| t.timeout_secs))
+                        .unwrap_or_else(default_vision_timeout_secs),
+                    // Not inherited: a tier's ceiling is sized for the role it
+                    // was written for, and a description is stored as a corpus.
+                    max_output_tokens: v
+                        .max_output_tokens
+                        .unwrap_or_else(default_vision_max_output_tokens),
+                    ceiling_param: v
+                        .ceiling_param
+                        .or_else(|| vt.as_ref().and_then(|t| t.ceiling_param)),
+                })
+            }
+        };
+
+        Ok(InferConfig {
+            synthesize,
+            embed: raw.embed,
+            ask,
+            rerank: raw.rerank,
+            vision,
+            legacy_warnings,
+        })
+    }
 }
 
 /// Seconds an inference request may take before the client gives up.
@@ -494,6 +834,18 @@ pub struct AskRole {
     /// See `SynthesizeRole::ceiling_param`.
     #[serde(default)]
     pub ceiling_param: Option<CeilingParam>,
+    /// One bounded extra retrieval round. Off by default: it costs a call, and
+    /// a default moves only after the harness has run.
+    pub follow_up: bool,
+    /// The resolved endpoint the "what do I still need" call runs on, from
+    /// `follow_up_tier`. `None` falls back to this role's own endpoint.
+    ///
+    /// A `TierConfig` rather than a role, because that is honestly what it is:
+    /// an endpoint and its ceilings, handed straight to a completer. That call
+    /// is a cheap classification and belongs on the efficient model even when
+    /// the answer it feeds belongs on the deep one — which is the capability
+    /// the tier names exist to express.
+    pub follow_up_endpoint: Option<TierConfig>,
 }
 
 fn default_ask_max_output_tokens() -> usize {
@@ -815,6 +1167,9 @@ impl Config {
     /// legal search already costs: `MAX_LIMIT` results over-fetched by the
     /// candidate multiplier.
     fn normalize(&mut self) {
+        for w in &self.infer.legacy_warnings {
+            tracing::warn!("{w}");
+        }
         if self.feedback.candidates == 0 {
             let d = FeedbackConfig::default().candidates;
             self.feedback.candidates = d;
@@ -1025,6 +1380,9 @@ impl Config {
         c.infer.synthesize.api_key = c.infer.synthesize.api_key.map(|_| R.into());
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
         c.infer.ask.api_key = c.infer.ask.api_key.map(|_| R.into());
+        if let Some(f) = c.infer.ask.follow_up_endpoint.as_mut() {
+            f.api_key = f.api_key.as_ref().map(|_| R.into());
+        }
         if let Some(r) = c.infer.rerank.as_mut() {
             r.api_key = r.api_key.as_ref().map(|_| R.into());
         }
@@ -1490,5 +1848,254 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     fn the_example_config_carries_the_association_block() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.associate.spread_max, 3);
+    }
+    /// The tier tests below say nothing about auth, but a `Config` cannot be
+    /// loaded without one; kept out of the fixtures so they read as the shapes
+    /// they are actually about.
+    const AUTH_TAIL: &str = r#"
+        [auth]
+        mode = "local"
+        [auth.local]
+        username = "dev"
+        password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
+    "#;
+
+    fn load_infer(body: &str) -> Result<Config, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        Config::load(Some(&write(&dir, &format!("{body}{AUTH_TAIL}"))))
+    }
+
+    /// The whole point of the rename: a role that names a tier and a role that
+    /// carries the same endpoint inline must produce the same completer settings.
+    /// If these ever diverge, an operator's migration silently changes their model.
+    #[test]
+    fn a_tier_and_an_inline_endpoint_resolve_to_the_same_role() {
+        let _guard = env_guard();
+        let tiered = load_infer(
+            r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        [infer.synthesize]
+        tier = "efficient"
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        tier = "efficient"
+        "#,
+        )
+        .expect("tiered config parses");
+
+        let inline = load_infer(
+            r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.synthesize]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        "#,
+        )
+        .expect("the legacy shape still parses");
+
+        assert_eq!(
+            tiered.infer.synthesize.base_url,
+            inline.infer.synthesize.base_url
+        );
+        assert_eq!(tiered.infer.synthesize.model, inline.infer.synthesize.model);
+        assert_eq!(
+            tiered.infer.synthesize.context_tokens,
+            inline.infer.synthesize.context_tokens
+        );
+        assert_eq!(
+            tiered.infer.synthesize.max_output_tokens,
+            inline.infer.synthesize.max_output_tokens
+        );
+        assert_eq!(tiered.infer.ask.base_url, inline.infer.ask.base_url);
+        assert_eq!(tiered.infer.ask.model, inline.infer.ask.model);
+    }
+
+    /// A role may override any field its tier defines. Without this the two tiers
+    /// would have to multiply by every ceiling an operator wants.
+    #[test]
+    fn a_role_field_overrides_the_tier_it_points_at() {
+        let _guard = env_guard();
+        let cfg = load_infer(
+            r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.deep]
+        base_url = "http://localhost:8000/v1"
+        model = "big"
+        context_tokens = 131072
+        max_output_tokens = 16384
+        [infer.synthesize]
+        tier = "deep"
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        tier = "deep"
+        max_output_tokens = 4096
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.infer.ask.max_output_tokens, 4096,
+            "the role's value wins"
+        );
+        assert_eq!(
+            cfg.infer.ask.context_tokens, 131072,
+            "unset fields come from the tier"
+        );
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+    }
+
+    /// A typo in a tier name must be a startup failure naming the typo, never a
+    /// silent fallback to some other model.
+    #[test]
+    fn a_role_pointing_at_a_tier_that_does_not_exist_is_refused() {
+        let _guard = env_guard();
+        let err = load_infer(
+            r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        [infer.synthesize]
+        tier = "efficent"
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        tier = "efficient"
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("efficent"),
+            "the error must name the typo: {err}"
+        );
+        assert!(err.contains("efficient"), "and what was available: {err}");
+    }
+
+    /// The legacy shape is accepted, but never silently: an operator must be told
+    /// what to write instead. Same reasoning as `SynthesizeRole::cooldown_secs`.
+    #[test]
+    fn the_legacy_shape_records_a_warning_naming_its_replacement() {
+        let _guard = env_guard();
+        let cfg = load_infer(
+            r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.synthesize]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        output_ratio = 8.0
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "bge-m3"
+        dim = 1024
+        max_input_tokens = 1024
+        [infer.ask]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.infer.legacy_warnings.len(), 2, "one per inline role");
+        assert!(
+            cfg.infer
+                .legacy_warnings
+                .iter()
+                .any(|w| w.contains("infer.synthesize"))
+        );
+        assert!(
+            cfg.infer
+                .legacy_warnings
+                .iter()
+                .any(|w| w.contains("infer.tiers"))
+        );
+    }
+
+    /// The example config is the migration's own documentation, so it has to be
+    /// the shape being migrated *to* — and resolve to what it resolved to before.
+    #[test]
+    fn the_example_config_reaches_its_endpoints_through_tiers() {
+        let text = std::fs::read_to_string("config.example.toml").unwrap();
+        assert!(
+            text.contains("[infer.tiers."),
+            "the example must show a tier"
+        );
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.infer.legacy_warnings.is_empty(),
+            "the example config still carries an inline endpoint: {:?}",
+            cfg.infer.legacy_warnings
+        );
+        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(cfg.infer.ask.context_tokens, 32768);
+        assert_eq!(cfg.infer.ask.max_output_tokens, 4096);
+        assert!(!cfg.infer.ask.follow_up);
     }
 }

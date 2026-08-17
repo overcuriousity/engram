@@ -401,9 +401,12 @@ mod startup_tests {
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     ceiling_param: None,
+                    follow_up: false,
+                    follow_up_endpoint: None,
                 },
                 rerank: None,
                 vision: None,
+                legacy_warnings: Vec::new(),
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,

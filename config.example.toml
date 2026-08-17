@@ -43,26 +43,30 @@ pinned_boost = 0.15
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three
 # different ones — swapping any single role does not affect the others.
+#
+# An endpoint is named once, under [infer.tiers.<name>], and the roles point at
+# it. That is what lets "which model is this call worth" be answered per call
+# rather than per role: two roles on one tier share a model by saying so, and a
+# role moves to another model by changing one word.
+#
+# A role may still carry base_url/model/context_tokens inline instead. That
+# shape still works and startup warns, naming the tier block to move it to.
 
 # Defaults here assume the case engram is built for: a small model on one
 # consumer GPU, answering in minutes rather than seconds. Against a hosted API
 # you can raise output_ratio's window and lower timeout_secs considerably.
-[infer.synthesize]
+
+# The working tier: everything that runs unattended, in bulk, and is paid for
+# by the corpus rather than by a person waiting.
+[infer.tiers.efficient]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 # The model's real context window.
 context_tokens = 32768
-# Hard cap on output tokens per synthesis call. Generous on purpose: a
-# reasoning model spends part of this thinking before it writes any JSON, and
-# whatever it spends there is taken from the artifact list.
+# Hard cap on output tokens per call. Generous on purpose: a reasoning model
+# spends part of this thinking before it writes any JSON, and whatever it
+# spends there is taken from the artifact list.
 max_output_tokens = 16384
-# Synthesis rewrites rather than splits, so its output can exceed its input.
-# This is how much larger to assume it gets, and it is what sizes the segment:
-# segment = min(context / (1 + ratio), max_output / ratio). At 8.0 that is
-# ~2000 tokens of input per call. A 9B model that produces JSON which stops
-# parsing partway through wants a higher number, not a lower one: a shorter
-# segment is a shorter reply. Lower it (1.5-2.0) for a large hosted model.
-output_ratio = 8.0
 # Seconds before the client gives up on one call. Defaults to 900. A timeout
 # looks exactly like a dead endpoint to the job runner: the job retries and
 # fails at the same wall, so this must exceed the model's real worst case.
@@ -90,10 +94,8 @@ output_ratio = 8.0
 # refusing it. Startup logs a warning naming the guess whenever this is unset
 # and `reasoning_effort` is not.
 #
-# The name belongs to the server, not to the role: every role pointed at the
-# same base_url and model shares one, and what one role is told beats what
-# another infers. Where two roles are both told, and told different things,
-# startup warns and the first one wins.
+# The name belongs to the server, not to the role — which is why it lives on
+# the tier. A role that overrides it overrides it for itself only.
 # ceiling_param = "max_tokens"
 
 # Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
@@ -105,6 +107,49 @@ output_ratio = 8.0
 # the field. Governs both judges too — duplicates and associative links — which
 # run on this endpoint under a schema each.
 # structured_output = true
+
+# The tier for calls a person is waiting on. The same server as `efficient`
+# here, because the case engram is built for has exactly one; point it at a
+# larger model wherever there is one, and only the answering changes.
+[infer.tiers.deep]
+base_url = "http://localhost:8000/v1"
+model = "qwen"
+context_tokens = 32768
+# Hard cap on output tokens per answer, sent on every call. Raise it if answers
+# are getting clipped; there is no reason to unset it, since an endpoint asked
+# for no ceiling applies its own — which is far larger, and is the only thing
+# bounding a reply the model has stopped being able to end.
+#
+# It comes out of `context_tokens`: the endpoint measures the prompt and this
+# ceiling against one window, so ask reserves this much and packs excerpts into
+# what is left. Raising it buys longer answers by showing the model fewer
+# excerpts, and `dropped` on the answer says how many.
+#
+# Never more than half the window, though, whatever it is set to: a ceiling as
+# wide as its own context would reserve everything, pack nothing, and answer
+# every question with "too large for the configured context window". The call
+# itself then asks for whatever the packed prompt actually left over, up to this
+# number — and if the answer still runs into it, the answer says so.
+max_output_tokens = 4096
+# See [infer.tiers.efficient] for timeout_secs, reasoning_effort,
+# ceiling_param and structured_output. Each is a property of this server, so
+# each is set here again rather than inherited from the other tier.
+# timeout_secs = 900
+# reasoning_effort = "none"
+# ceiling_param = "max_tokens"
+
+[infer.synthesize]
+tier = "efficient"
+# Synthesis rewrites rather than splits, so its output can exceed its input.
+# This is how much larger to assume it gets, and it is what sizes the segment:
+# segment = min(context / (1 + ratio), max_output / ratio). At 8.0 that is
+# ~2000 tokens of input per call. A 9B model that produces JSON which stops
+# parsing partway through wants a higher number, not a lower one: a shorter
+# segment is a shorter reply. Lower it (1.5-2.0) for a large hosted model.
+output_ratio = 8.0
+# Any tier field can be overridden here for this role alone, e.g. a shorter
+# ceiling than the tier's:
+# max_output_tokens = 8192
 # Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
 # is ignored, and engram says so at startup rather than letting the setting
 # quietly stop happening.
@@ -136,31 +181,12 @@ dim = 1024
 max_input_tokens = 1024
 
 [infer.ask]
-base_url = "http://localhost:8000/v1"
-model = "qwen"
-context_tokens = 32768
-# Hard cap on output tokens per answer, sent on every call. Defaults to 4096.
-# Raise it if answers are getting clipped; there is no reason to unset it, since
-# an endpoint asked for no ceiling applies its own — which is far larger, and is
-# the only thing bounding a reply the model has stopped being able to end.
-#
-# It comes out of `context_tokens`: the endpoint measures the prompt and this
-# ceiling against one window, so ask reserves this much and packs excerpts into
-# what is left. Raising it buys longer answers by showing the model fewer
-# excerpts, and `dropped` on the answer says how many.
-#
-# Never more than half the window, though, whatever it is set to: a ceiling as
-# wide as its own context would reserve everything, pack nothing, and answer
-# every question with "too large for the configured context window". The call
-# itself then asks for whatever the packed prompt actually left over, up to this
-# number — and if the answer still runs into it, the answer says so.
-# max_output_tokens = 4096
+tier = "deep"
 # ask is the one interactive inference call, so someone is watching it happen.
+# Overriding any tier field for this role alone works here too:
+# max_output_tokens = 4096
 # timeout_secs = 900
 # reasoning_effort = "none"
-# See [infer.synthesize].ceiling_param. Set it here too if this endpoint is one
-# that ignores an unrecognised ceiling rather than refusing it.
-# ceiling_param = "max_tokens"
 
 # Reranking is optional and disabled by default. There is no OpenAI-standard
 # rerank endpoint, so the wire format is configured explicitly.

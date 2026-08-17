@@ -1084,6 +1084,8 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
+            follow_up: false,
+            follow_up_endpoint: None,
         }
     }
     fn vision_cfg(base: Option<String>) -> crate::config::VisionRole {
@@ -1243,6 +1245,8 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
+            follow_up: false,
+            follow_up_endpoint: None,
         })
         .complete("s", "u")
         .await
@@ -1543,6 +1547,8 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
+            follow_up: false,
+            follow_up_endpoint: None,
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
@@ -1571,6 +1577,8 @@ mod tests {
                     timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     ceiling_param: None,
+                    follow_up: false,
+                    follow_up_endpoint: None,
                 }),
                 _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
             };
