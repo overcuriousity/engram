@@ -316,6 +316,18 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         tracing::warn!(error = %e, "could not flag merged artifacts that lost a source");
     }
 
+    // Pairs the old fan-in cap refused before any call was made. There is no
+    // cap now — the unit judges two artifacts at a time — so each of these is
+    // simply an unanswered question, and every one of them has
+    // `judge_attempts = 0`, so putting them back redoes no work and resets no
+    // backoff. Runs every sweep and matches nothing once drained, which is
+    // cheaper than the machinery a one-shot would need.
+    match core.store.reopen_oversized().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(pairs = n, "reopened pairs the fan-in cap had refused"),
+        Err(e) => tracing::warn!(error = %e, "could not reopen the pairs the cap refused"),
+    }
+
     let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
@@ -2075,6 +2087,42 @@ pub(crate) mod tests {
             core.store.get_artifact(&m2.id).await.unwrap().status,
             ArtifactStatus::Active,
             "a merge whose embed is still in flight was reaped"
+        );
+    }
+
+
+    /// The state was terminal and reached without a call ever being made: the
+    /// component flattened past the cap and every pair in it was settled before
+    /// the model saw anything. Sixteen sit that way in the field.
+    #[tokio::test]
+    async fn the_sweep_puts_the_refused_pairs_back_in_the_queue() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+        let id = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        core.store
+            .set_pair_state(
+                id,
+                crate::store::pairs::PairState::Oversized,
+                Some("12 sources, cap is 8"),
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Oversized, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pair refused before any call was made is still refused"
         );
     }
 }
