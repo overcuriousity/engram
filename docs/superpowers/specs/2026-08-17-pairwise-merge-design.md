@@ -91,7 +91,7 @@ and explicitly not a merge input. Context roots carry no letters and cannot be
 named by a verdict.
 
 `dedupe_prompt` changes shape accordingly. Today it takes a slice of
-`(title, text)` and letters them all (`src/infer/prompt.rs:238`). It should take
+`(title, text)` and letters them all (`src/infer/prompt.rs:239`). It should take
 the two members and, separately, the context blocks, so that lettering cannot
 reach the context by construction.
 
@@ -111,7 +111,7 @@ a different cause — an artifact large enough that no pair containing it can be
 judged — and it is settled `Contradiction` with a detail saying so. That is an
 escalation to a person about a real condition, not a counter firing.
 
-`PairState::Oversized` is removed from `PAIR_STATES` (`src/web/ui.rs:1077`) and
+`PairState::Oversized` is removed from `PAIR_STATES` (`src/web/ui.rs:1379`) and
 from everything that writes it. The enum variant and its `"oversized"` string
 mapping stay for one release so that existing rows still parse.
 
@@ -135,7 +135,8 @@ nothing left to describe once a unit owns a single pair, and is deleted.
 ### 4. The loss check runs against what was merged
 
 `losses(&roots, draft)` currently compares the draft against every captured root
-(`src/jobs/dedupe.rs:289`). Kept as written under repeated pairwise merging, a
+— called at `src/jobs/dedupe.rs:289`, defined at `src/jobs/merge.rs:273`. Kept
+as written under repeated pairwise merging, a
 fact dropped in the first generation would fail every later merge in that
 lineage forever, and the lineage would freeze.
 
@@ -215,8 +216,8 @@ default of eight was doing at a less obvious threshold.
 
 The key is removed from `config.example.toml:260` and from the `consolidate.*`
 row in `README.md:185`. The doc comments that reference it as a bound on prompt
-size (`src/infer/budget.rs:74`, `src/infer/openai.rs:829`,
-`src/infer/openai.rs:1655`, `src/store/pairs.rs:64`) are rewritten to describe
+size (`src/infer/budget.rs:74`, `src/infer/openai.rs:840`,
+`src/infer/openai.rs:1666`, `src/store/pairs.rs:64`) are rewritten to describe
 the budget-trimmed context block, since those comments are the record of why the
 budget code is shaped the way it is and would otherwise point at a key that no
 longer exists.
