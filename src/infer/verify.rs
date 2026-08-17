@@ -268,44 +268,116 @@ const LINE_TOKEN_RECALL: f64 = 0.5;
 /// rewritten. A faithfully rewritten chapter therefore scored near zero, which
 /// read exactly like a chapter that had been dropped.
 pub fn content_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> f64 {
-    let lines: Vec<&str> = raw_text.lines().collect();
-    let total = lines.iter().filter(|l| !l.trim().is_empty()).count();
-    if total == 0 {
+    let lines = line_coverage(raw_text, segments);
+    if lines.is_empty() {
         return 0.0;
     }
+    lines.iter().filter(|(_, ok)| *ok).count() as f64 / lines.len() as f64
+}
+
+/// Which non-empty lines survived, in order, as `(line number, covered)`.
+///
+/// The single pass both the fraction and the ranges are computed from. Two
+/// passes could disagree about a line, and a warning that points at lines the
+/// percentage did not count against the document is worse than no warning.
+fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, bool)> {
     let indexed: Vec<(i64, i64, std::collections::HashSet<String>)> = segments
         .iter()
         .map(|(a, b, text)| (*a, *b, distinctive_tokens(text)))
         .collect();
 
-    let mut hit = 0usize;
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
+    raw_text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(i, line)| {
+            let n = i as i64 + 1;
+            let Some((_, _, made)) = indexed.iter().find(|(a, b, _)| *a <= n && n <= *b) else {
+                return (n, false);
+            };
+            let want = distinctive_tokens(line);
+            // A line with nothing distinctive on it — a page number, a rule of
+            // dashes — cannot be looked for and must not be counted against the
+            // document. PDF exports are full of them.
+            if want.is_empty() {
+                return (n, true);
+            }
+            let found = want.iter().filter(|t| made.contains(*t)).count();
+            (n, found as f64 >= want.len() as f64 * LINE_TOKEN_RECALL)
+        })
+        .collect()
+}
+
+/// The line ranges no artifact carried, inclusive and 1-based.
+///
+/// The fraction says how much was lost; this says where, which is the half an
+/// operator can act on. Adjacent uncovered lines are merged into one range — a
+/// list of forty single-line ranges is a wall, and what was missed is a passage
+/// rather than a line. Blank lines are not in the pass at all, so a blank line
+/// between two lost lines does not split the range: the passage is what is
+/// being named.
+pub fn uncovered_ranges(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for (n, ok) in line_coverage(raw_text, segments) {
+        if ok {
             continue;
         }
-        let n = i as i64 + 1;
-        let Some((_, _, made)) = indexed.iter().find(|(a, b, _)| *a <= n && n <= *b) else {
-            continue;
-        };
-        let want = distinctive_tokens(line);
-        // A line with nothing distinctive on it — a page number, a rule of
-        // dashes — cannot be looked for and must not be counted against the
-        // document. PDF exports are full of them.
-        if want.is_empty() {
-            hit += 1;
-            continue;
-        }
-        let found = want.iter().filter(|t| made.contains(*t)).count();
-        if found as f64 >= want.len() as f64 * LINE_TOKEN_RECALL {
-            hit += 1;
+        match out.last_mut() {
+            Some(last) if last.1 + 1 == n => last.1 = n,
+            _ => out.push((n, n)),
         }
     }
-    hit as f64 / total as f64
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ranges_name_the_lines_no_artifact_carried() {
+        let raw = "alpha beta gamma\ndelta epsilon zeta\neta theta iota";
+        // One segment covering all three lines, whose artifacts reproduce only
+        // the first line's vocabulary.
+        let made = vec![(1, 3, "alpha beta gamma".to_string())];
+        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn adjacent_uncovered_lines_become_one_range() {
+        let raw = "alpha beta\nomega sigma\ntau upsilon\nalpha beta";
+        let made = vec![(1, 4, "alpha beta".to_string())];
+        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn a_line_outside_every_segment_is_uncovered() {
+        // A segment that failed leaves its lines in no range at all, which is
+        // exactly the case the measure exists to make visible.
+        let raw = "alpha beta\nomega sigma";
+        let made = vec![(1, 1, "alpha beta".to_string())];
+        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 2)]);
+    }
+
+    #[test]
+    fn the_ranges_and_the_fraction_agree_on_the_same_input() {
+        let raw = "alpha beta\nomega sigma\ntau upsilon";
+        let made = vec![(1, 3, "alpha beta".to_string())];
+        let missed: i64 = uncovered_ranges(raw, &made)
+            .iter()
+            .map(|(a, b)| b - a + 1)
+            .sum();
+        let total = raw.lines().filter(|l| !l.trim().is_empty()).count() as i64;
+        let from_ranges = (total - missed) as f64 / total as f64;
+        assert!((content_coverage(raw, &made) - from_ranges).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_fully_covered_source_has_no_ranges() {
+        let raw = "alpha beta\nomega sigma";
+        let made = vec![(1, 2, "alpha beta omega sigma".to_string())];
+        assert!(uncovered_ranges(raw, &made).is_empty());
+    }
 
     const WINDOW: &str = "\
 ### Writing the ISO
