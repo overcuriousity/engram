@@ -419,6 +419,123 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// Move every still-open pair that names one of `old` onto `new_id`.
+    ///
+    /// Called when a merge is finished, so that a duplicate of one of its
+    /// sources becomes a duplicate of the merge rather than dying with the
+    /// source. Without this a cluster only converges by waiting for the merge
+    /// to embed and a later similarity sweep to re-file the same question,
+    /// which is a whole tick per generation.
+    ///
+    /// Three rows never move. One whose other side is already `new_id` would
+    /// become a pair of the merge with itself. One that would collide with an
+    /// existing pair between the same two artifacts must leave that row alone,
+    /// whatever state it is in — that is what keeps an operator's dismissal
+    /// binding, the same property `record_pair`'s `INSERT OR IGNORE` provides.
+    /// Both are dismissed instead, because the merge has answered the question
+    /// they carried. And a row that is not `Pending` is an answered question
+    /// already; moving it would re-file someone's verdict against an artifact
+    /// it was never about.
+    ///
+    /// `judge_attempts` and `judge_unreadable` reset, because the moved row
+    /// asks about a different pair of artifacts than the one that earned those
+    /// counts. This cannot loop: every merge takes an artifact out of results,
+    /// so the sequence of merges a cluster can produce is finite.
+    ///
+    /// `score` is deliberately left alone and is now stale — it was measured
+    /// between the old member and the other side. It orders the judge queue and
+    /// gates nothing by this point, so the staleness costs ordering accuracy
+    /// and nothing else.
+    pub async fn repoint_open_pairs(&self, old: &[String], new_id: &str) -> Result<u64> {
+        let mut moved = 0u64;
+        for o in old {
+            if o == new_id {
+                continue;
+            }
+            let rows = sqlx::query(
+                "SELECT * FROM artifact_pairs
+                  WHERE state = 'pending' AND (a_id = ? OR b_id = ?)",
+            )
+            .bind(o)
+            .bind(o)
+            .fetch_all(&self.pool)
+            .await?;
+            for p in rows.iter().map(row_to_pair) {
+                let other = if p.a_id == *o {
+                    p.b_id.clone()
+                } else {
+                    p.a_id.clone()
+                };
+                // Both sides went into this merge, or the other side is the
+                // merge already. Either way the row would name the merge twice.
+                // Tested against `old` and not only against `new_id`, because
+                // the sides are visited one at a time: a pair between two
+                // sources is moved onto the merge while the first is being
+                // handled and only recognised as a self-pair while the second
+                // is, which leaves it counted as moved.
+                if other == new_id || old.iter().any(|x| *x == other) {
+                    self.set_pair_state(
+                        p.id,
+                        PairState::Dismissed,
+                        Some("both of these went into the same merge"),
+                    )
+                    .await?;
+                    continue;
+                }
+                if self.pair_state_between(&other, new_id).await?.is_some() {
+                    self.set_pair_state(
+                        p.id,
+                        PairState::Dismissed,
+                        Some("a pair between these two already exists"),
+                    )
+                    .await?;
+                    continue;
+                }
+                let (a, b) = if other.as_str() <= new_id {
+                    (other.as_str(), new_id)
+                } else {
+                    (new_id, other.as_str())
+                };
+                sqlx::query(
+                    "UPDATE artifact_pairs
+                        SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
+                            detail = NULL
+                      WHERE id = ?",
+                )
+                .bind(a)
+                .bind(b)
+                .bind(p.id)
+                .execute(&self.pool)
+                .await?;
+                moved += 1;
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Put every pair the old fan-in cap refused back into the judge queue.
+    ///
+    /// `Oversized` was terminal and reached without a call ever being made: the
+    /// component flattened to more roots than the cap and every pair in it was
+    /// settled before the model saw anything. Pairwise merging removes the
+    /// condition, so the rows left behind are simply unanswered questions.
+    ///
+    /// Run every sweep rather than once behind a guard. Nothing writes the
+    /// state any more, so the first pass drains it and every later one matches
+    /// no rows — cheaper than the machinery a one-shot would need.
+    ///
+    /// Safe whatever the queue looks like: a refused row never spent a call, so
+    /// `judge_attempts` is zero and no backoff is being reset.
+    pub async fn reopen_oversized(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending', detail = NULL
+              WHERE state = 'oversized'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Pending pairs in the order the judge should spend its budget on them.
     ///
     /// Least-attempted first, then by score. A pair whose reply could not be
@@ -548,6 +665,29 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use crate::store::artifacts::NewArtifact;
+
+    /// `n` artifacts under one corpus, for the cases that need more than a pair.
+    async fn n_artifacts(s: &Store, n: usize) -> Vec<String> {
+        let src = s.insert_corpus("x", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..n)
+            .map(|i| NewArtifact {
+                ordinal: i as i64,
+                text: format!("artifact {i}"),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        s.insert_artifacts(&src.id, &new)
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect()
+    }
 
     async fn two_artifacts(s: &Store) -> (String, String) {
         let src = s.insert_corpus("x", "web", None).await.unwrap();
@@ -1180,5 +1320,152 @@ mod tests {
         let p = s.get_pair(id).await.unwrap();
         assert_eq!(p.state, PairState::Contradiction);
         assert_eq!(p.merged_into, None);
+    }
+
+    /// The whole point of re-pointing: C was a duplicate of B, B is now inside
+    /// M, so C is a duplicate of M and the question survives the merge.
+    #[tokio::test]
+    async fn an_open_pair_follows_its_member_into_the_merge() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 4).await;
+        let (b, c, m) = (&ids[1], &ids[2], &ids[3]);
+        s.record_pair(b, c, 0.91).await.unwrap();
+
+        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+
+        assert_eq!(moved, 1);
+        assert_eq!(
+            s.pair_state_between(c, m).await.unwrap(),
+            Some(PairState::Pending),
+            "the pair did not follow B into M"
+        );
+        assert_eq!(
+            s.pair_state_between(b, c).await.unwrap(),
+            None,
+            "the old pair is still there"
+        );
+    }
+
+    /// A pair between the merge's two own sources becomes a pair of the merge
+    /// with itself. There is no question left in it.
+    #[tokio::test]
+    async fn a_pair_between_two_sources_of_the_same_merge_is_dismissed() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (a, b, m) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(a, b, 0.91).await.unwrap();
+
+        let moved = s
+            .repoint_open_pairs(&[a.clone(), b.clone()], m)
+            .await
+            .unwrap();
+
+        assert_eq!(moved, 0, "a self-pair was written");
+        assert_eq!(
+            s.pair_state_between(a, b).await.unwrap(),
+            Some(PairState::Dismissed)
+        );
+    }
+
+    /// An operator's decision outlives the merge. Re-pointing onto a pair
+    /// someone already dismissed must not put that question back, which is the
+    /// same property `record_pair`'s `INSERT OR IGNORE` provides.
+    #[tokio::test]
+    async fn re_pointing_onto_an_existing_pair_leaves_the_existing_row_alone() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(c, m, 0.80).await.unwrap();
+        let existing = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(existing, PairState::Dismissed, Some("operator"))
+            .await
+            .unwrap();
+        s.record_pair(b, c, 0.91).await.unwrap();
+
+        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+
+        assert_eq!(moved, 0);
+        assert_eq!(
+            s.pair_state_between(c, m).await.unwrap(),
+            Some(PairState::Dismissed),
+            "an operator's dismissal was overwritten"
+        );
+        assert_eq!(
+            s.pair_state_between(b, c).await.unwrap(),
+            Some(PairState::Dismissed)
+        );
+    }
+
+    /// The re-pointed row asks a different question than the one that earned
+    /// the counters, so it must not inherit a backoff from artifacts it no
+    /// longer names.
+    #[tokio::test]
+    async fn a_re_pointed_pair_starts_its_attempts_over() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(b, c, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.record_judge_attempt(id).await.unwrap();
+        s.record_unreadable_judgement(id).await.unwrap();
+
+        s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+
+        let pending = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        let moved = pending
+            .iter()
+            .find(|p| p.a_id == *m || p.b_id == *m)
+            .expect("the row moved");
+        assert_eq!(moved.judge_attempts, 0);
+        assert_eq!(moved.judge_unreadable, 0);
+    }
+
+    /// Only pending rows move. A settled pair is an answered question, and
+    /// moving it would re-file someone's verdict against an artifact it was
+    /// never about.
+    #[tokio::test]
+    async fn a_settled_pair_is_not_re_pointed() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(b, c, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::NoConflict, None)
+            .await
+            .unwrap();
+
+        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+
+        assert_eq!(moved, 0);
+        assert_eq!(
+            s.pair_state_between(b, c).await.unwrap(),
+            Some(PairState::NoConflict)
+        );
+    }
+
+    /// The state was terminal and reached without a call: the component
+    /// flattened past the cap and every pair in it was settled before the model
+    /// saw anything. Sixteen of these exist in the field.
+    #[tokio::test]
+    async fn an_oversized_pair_goes_back_into_the_queue() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
+            .await
+            .unwrap();
+
+        assert_eq!(s.reopen_oversized().await.unwrap(), 1);
+
+        let back = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            back[0].detail, None,
+            "the cap's line is still on a pending row"
+        );
+        assert_eq!(back[0].judge_attempts, 0);
+        // Runs every sweep; once the queue is drained it must do nothing.
+        assert_eq!(s.reopen_oversized().await.unwrap(), 0);
     }
 }
