@@ -3996,6 +3996,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pending_pair_leads_with_the_titles_not_with_the_verdict() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &["Speicherorte der MS Mail App", "MS Mail App File Locations"],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.94)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let title = page
+            .find("Speicherorte der MS Mail App")
+            .expect("a title is on the card");
+        let verdict = page
+            .find("cover the same ground")
+            .expect("the verdict is on the card");
+        assert!(
+            title < verdict,
+            "the titles are the content and lead the sentence: {page}"
+        );
+    }
+
+    #[tokio::test]
     async fn minting_a_token_shows_the_plaintext_exactly_once() {
         let (app, cookie) = app_with_session().await;
         let res = app

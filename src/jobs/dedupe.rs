@@ -251,7 +251,10 @@ fn interpret(
     pairs: Vec<ArtifactPair>,
 ) -> Settlement {
     let mut relation = v.relation;
-    let mut detail = v.detail;
+    // The judge's own line, carried through unchanged. Nothing here writes one
+    // any more: the loss check used to, and what it had to say was a list of
+    // tokens rather than a finding.
+    let detail = v.detail;
     let mut merged = v.merged;
     let mut obsolete = None;
 
@@ -292,9 +295,12 @@ fn interpret(
         let lost = crate::jobs::merge::losses(&roots, d);
         if !lost.is_empty() {
             // Escalated rather than retried: the merge is the thing that was
-            // wrong, and naming what it would have cost is a line an operator
-            // can act on where "verification failed" is not.
-            detail = Some(format!("the merge would have lost {}", lost.join(", ")));
+            // wrong, and refusing it hands the pair to a person, which is the
+            // finding. What is not written any more is a sentence naming the
+            // lost tokens — those are as often a bare "1, 4" as a version
+            // number, which is evidence too thin to put on a card someone has
+            // to act on, in a voice unlike every other line beside it. The
+            // judge's own detail, where it wrote one, still stands.
             relation = Relation::Conflict;
             merged = None;
         }
@@ -819,9 +825,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_would_lose_a_value_is_escalated_with_the_reason() {
-        // The loss check, from the unit's side. "the merge would have lost
-        // 1.21.4" is a line an operator can act on; "verification failed" is not.
+    async fn a_merge_that_would_lose_a_value_is_escalated_without_a_sentence_about_it() {
+        // The loss check, from the unit's side. Refusing the merge and handing
+        // the pair to a person is the whole finding. The sentence this used to
+        // write named the lost tokens, and those are as often a bare "1, 4" as
+        // a version number — evidence too thin to put on a card someone has to
+        // act on, in a voice unlike every other line beside it.
         let mut core = test_core().await;
         core.judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
@@ -840,12 +849,12 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert!(
-            found[0]
+            !found[0]
                 .detail
                 .as_deref()
                 .unwrap_or_default()
-                .contains("1.21.4"),
-            "the escalation did not say what would have been lost: {:?}",
+                .contains("would have lost"),
+            "the loss sentence is no longer written: {:?}",
             found[0].detail
         );
         for id in &ids {
