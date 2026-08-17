@@ -4225,6 +4225,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
+        let (app, cookie) = app_with_session().await;
+
+        let search = get_body(&app, &cookie, "/ui/search").await;
+        assert!(
+            search.contains(r#"class="shell shell-wide""#),
+            "search is a three-pane page and must not be held at the reading measure: {search}"
+        );
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(ops.contains(r#"class="shell shell-wide""#), "{ops}");
+
+        let capture = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(
+            capture.contains(r#"class="shell""#) && !capture.contains("shell-wide"),
+            "capture is prose and keeps the reading measure: {capture}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_ask_page_prefills_a_question_from_the_query_string() {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;

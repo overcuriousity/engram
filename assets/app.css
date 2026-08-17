@@ -109,6 +109,14 @@ h3 { font-size: 0.8125rem; color: var(--color-fg-muted); text-transform: upperca
 ::selection { background: var(--color-accent-dim); }
 
 .shell { max-width: 60rem; margin: 0 auto; padding: 0 1rem 4rem; }
+/* The reading measure is right for prose and wrong for a table or a three-pane
+   workspace. Those pages opt out by name rather than every page growing: a
+   capture textarea 110rem wide is a worse place to paste a chapter, not a
+   better one. */
+.shell-wide { max-width: 110rem; }
+/* The one thing on Search that stays narrow. A full-width search box reads as a
+   form to fill in; a narrow one reads as a question to ask. */
+.shell-wide #filters { max-width: 48rem; margin-inline: auto; }
 nav.top {
   display: flex; gap: 0.25rem; align-items: center;
   border-bottom: 1px solid var(--color-border); padding: 0.75rem 0; margin-bottom: 1.5rem;
@@ -248,7 +256,9 @@ nav.top a.brand img { display: block; }
 
 /* ── Chunk detail: the chunk beside the lines it claims ──────────────────── */
 
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+/* The source column takes the larger share: it holds the source's own lines,
+   while the artifact beside it is prose that reads better narrow. */
+.split { display: grid; grid-template-columns: 1fr 1.2fr; gap: 0.75rem; align-items: start; }
 @media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
 
 /* A grid child defaults to `min-width: auto`, which resolves to min-content:
@@ -303,7 +313,7 @@ body { overflow-x: hidden; }
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
 
-.workspace { display: grid; grid-template-columns: 20rem 1fr; gap: 1rem; align-items: start; }
+.workspace { display: grid; grid-template-columns: 22rem 1fr; gap: 1rem; align-items: start; }
 @media (max-width: 60rem) {
   .workspace { grid-template-columns: 1fr; }
   /* One region at a time on a narrow screen: the rail is the list, and
