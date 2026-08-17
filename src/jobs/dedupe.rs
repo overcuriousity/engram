@@ -187,15 +187,12 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .iter()
         .map(|c| (c.title.as_deref().unwrap_or("untitled"), c.text.as_str()))
         .collect();
-    let texts: Vec<&str> = roots.iter().map(|c| c.text.as_str()).collect();
-    let differing = crate::infer::facts::differing_values(&texts);
-
     let permit = core.gate.background().await;
     let reply = core
         .judge
         .complete(
             crate::infer::prompt::DEDUPE_SYSTEM,
-            &crate::infer::prompt::dedupe_prompt(&shown, &differing, p.judge_attempts),
+            &crate::infer::prompt::dedupe_prompt(&shown, p.judge_attempts),
         )
         .await;
     permit.finished();

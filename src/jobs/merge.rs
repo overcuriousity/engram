@@ -260,15 +260,20 @@ pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
                 out.push(tok);
             }
         }
-        // Literals: commands, paths, flags, error strings. The existing check,
-        // with the merged text as the haystack instead of the segment —
-        // `missing_literals(artifact_text, caveats, haystack)` asks which
-        // literals of the first argument are absent from the third, which is
-        // exactly this question with the arguments in this order.
+        // Literals: commands, paths, flags, error strings. `verify`'s module
+        // header states the stake — a paraphrased command is a command that
+        // later gets pasted into a root shell.
         //
-        // `verify`'s module header states the stake: a paraphrased command is a
-        // command that later gets pasted into a root shell.
-        out.extend(crate::infer::verify::missing_literals(
+        // The machine-shaped ones only. This used to call `missing_literals`,
+        // the check synthesis runs against the source window, and the two
+        // questions are not the same one with different arguments: an artifact
+        // is copied from its window, while merged text is a rewrite by
+        // construction and here routinely a rewrite between German and English.
+        // Under the source-window rules a four-space indent counts as code, so
+        // three nested bullets of ordinary English prose in a OneDrive artifact
+        // were required to survive word for word, and a correct merge was
+        // refused for rewording them — which is the merged text's whole job.
+        out.extend(crate::infer::verify::missing_machine_literals(
             &r.text, &r.caveats, &haystack,
         ));
     }
@@ -358,6 +363,68 @@ mod tests {
         let mut d = draft("The request timeout is 90 seconds.");
         d.caveats = vec!["An earlier capture gave 30 seconds.".into()];
         assert!(losses(&roots, &d).is_empty(), "{:?}", losses(&roots, &d));
+    }
+
+    #[test]
+    fn a_merge_may_reword_an_indented_bullet_list() {
+        // The real veto this removes, verbatim from the base: pair 481, two
+        // OneDrive artifacts, one German and one English. The English side nests
+        // its file list four spaces deep, and the source-window rules read a
+        // four-space indent as a code block — so three ordinary sentences,
+        // descriptions and all, became literals that had to survive word for
+        // word. A merge across two languages cannot reproduce them, so the merge
+        // was thrown away and the pair went to the operator as "these two
+        // disagree" every time. Rewording those lines is what merging is.
+        let roots = [
+            root(
+                "Log Dateien befinden sich im Ordner \
+                 \"\\Users\\<USERNAME>\\AppData\\Local\\Microsoft\\OneDrive\\logs\". \
+                 Der Ordner Personal enthält die Datei SyncEngine.odl, welche logs der \
+                 Synchronisation enthält, und die Datei SyncDiagnostics.txt.",
+            ),
+            root(
+                "Standard OneDrive locations and log files:\n\
+                 * Personal directory contents:\n\
+                 \x20   * SyncEngine.odl: Logs of synchronized files and file hashes.\n\
+                 \x20   * Trace.ETL: TraceCurrent.ETL and TraceArchive.ETL for activity tracking.\n\
+                 \x20   * SyncDiagnostics.txt: Log of current synchronization content.",
+            ),
+        ];
+        let d = draft(
+            "OneDrive log files live in \\Users\\<USERNAME>\\AppData\\Local\\Microsoft\\OneDrive\\logs, \
+             which has the subdirectories Common and Personal. Personal holds SyncEngine.odl \
+             (synchronized files and their hashes), Trace.ETL (TraceCurrent.ETL and \
+             TraceArchive.ETL, for activity tracking) and SyncDiagnostics.txt (current \
+             synchronization content).",
+        );
+        assert!(
+            losses(&roots, &d).is_empty(),
+            "a correct merge was refused for rewording prose: {:?}",
+            losses(&roots, &d)
+        );
+    }
+
+    #[test]
+    fn a_merge_that_drops_a_path_is_still_refused() {
+        // The other half of pair 486, which was a genuine model error and has to
+        // keep being caught. Two xmount invocations: the second exists only for
+        // the cache overlay that leaves a bootable /tmp/image.vdi, and the draft
+        // merged them into the first and dropped it. Narrowing the check to
+        // machine-shaped literals must not cost this — a bare path says what it
+        // is in the text and needs no guess from the indentation.
+        let roots = [
+            root("xmount --in ewf --out dd *.E?? /mnt stellt das Image unter /mnt bereit."),
+            root(
+                "Im Mountpoint /tmp befindet sich jetzt die Datei image.vdi welche direkt \
+                 in VirtualBox über den Mountpoint /tmp/image.vdi eingebunden werden kann.",
+            ),
+        ];
+        let d = draft("xmount --in ewf --out dd *.E?? /mnt stellt das Image unter /mnt bereit.");
+        let lost = losses(&roots, &d);
+        assert!(
+            lost.iter().any(|l| l.contains("/tmp/image.vdi")),
+            "the merge dropped the path the second artifact exists for: {lost:?}"
+        );
     }
 
     #[test]

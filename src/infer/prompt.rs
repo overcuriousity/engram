@@ -204,12 +204,27 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// alone, the model saw two anonymous spec lists with different numbers and
 /// called them a contradiction — correctly, on the evidence it was given.
 ///
-/// `differing_values` is what `facts::fact_tokens` found stated differently
-/// across the artifacts. It is a prior, not a verdict: it cannot tell a real
-/// disagreement from the same subject described at two levels of detail, which
-/// is the whole reason a model is asked. It used to be an admission gate, and
-/// as a gate it was backwards — a pair stating no differing value is the
-/// cleanest thing there is to merge, and gating on difference hid exactly those.
+/// No prior about differing values is named here, and that is the decision.
+/// `facts::differing_values` compared value-shaped tokens between the artifacts
+/// and this prompt passed the difference on as something to look at. Both halves
+/// of that were wrong on real text. The tokenizer splits on whitespace, so
+/// whether a version list yields tokens at all depends on how it is punctuated:
+/// `Win7/8/10` yields nothing (digits glued to a word), `(Windows 7-10)` yields
+/// `7-10`, and `Windows 7, 8 und 10` yields `7`, `8`, `10`. Three artifacts
+/// stating one fact three ways produced three different token sets and a
+/// non-empty difference, and the prompt then named four bare integers — stripped
+/// of any sign that they were Windows versions — as values the artifacts do not
+/// state the same way. The model read that against a table of registry codes and
+/// called the version mapping a contradiction, which is the correct reading of
+/// the evidence it was handed. The second half is the conflation: a value only
+/// one artifact states is reported the same as a value the two give differently,
+/// so a strict superset — one artifact listing more Outlook versions than the
+/// other — arrived as a dispute rather than as one side saying more.
+///
+/// Nothing is lost by leaving it out. The prior decided nothing; the model sees
+/// both artifacts whole and has every verdict available either way. The rule it
+/// also justified — a value in the list must survive into merged text — is
+/// enforced by `merge::losses` calling `fact_tokens` directly, and is untouched.
 ///
 /// `attempt` is how many times this group has already been asked about, and it
 /// is in the prompt for one reason: the endpoint caches by exact prompt text and
@@ -220,11 +235,7 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// Zero adds nothing at all, so a first ask stays byte-identical between runs —
 /// and keeps hitting the cache when it should, on a group re-armed after a
 /// settled verdict was lost.
-pub fn dedupe_prompt(
-    members: &[(&str, &str)],
-    differing_values: &[String],
-    attempt: i64,
-) -> String {
+pub fn dedupe_prompt(members: &[(&str, &str)], attempt: i64) -> String {
     let mut s = String::new();
     if attempt > 0 {
         s.push_str(&format!("(attempt {})\n", attempt + 1));
@@ -237,14 +248,6 @@ pub fn dedupe_prompt(
         ));
     }
     s.push_str("----- END -----");
-    if !differing_values.is_empty() {
-        s.push_str(&format!(
-            "\n\nThese values are not stated the same way by all of them: {}. \
-             That may be a real disagreement, or the same subject described at \
-             different levels of detail. Decide which.",
-            differing_values.join(", ")
-        ));
-    }
     s
 }
 
@@ -1168,7 +1171,6 @@ mod tests {
                 ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
                 ("FAT32 Specifications", "32 Bit Clusternummern."),
             ],
-            &[],
             0,
         );
         assert!(p.contains("Title: FAT16 Specifications"), "{p}");
@@ -1180,23 +1182,49 @@ mod tests {
     fn a_component_is_lettered_so_a_direction_can_name_one() {
         // `supersedes` answers with a letter, so the letters have to be in the
         // prompt and in the same order the caller will read them back in.
-        let p = dedupe_prompt(&[("one", "a"), ("two", "b"), ("three", "c")], &[], 0);
+        let p = dedupe_prompt(&[("one", "a"), ("two", "b"), ("three", "c")], 0);
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
         assert!(p.contains("ARTIFACT C"), "{p}");
     }
 
     #[test]
-    fn differing_values_are_named_as_a_prior_not_a_verdict() {
+    fn no_prior_about_values_is_named_to_the_dedupe_judge() {
+        // Three real artifacts stating one fact three ways. Whitespace
+        // tokenization made the token sets differ on punctuation alone —
+        // `Win7/8/10` yields nothing, `(Windows 7-10)` yields `7-10`,
+        // `Windows 7, 8 und 10` yields `7`, `8`, `10` — and the prompt named the
+        // difference as values the artifacts do not state the same way. The
+        // model read four bare integers against a table of registry codes and
+        // called the version mapping a contradiction, which was the honest
+        // answer to the question it was handed. Nothing about the artifacts is
+        // withheld by leaving the prior out; only the priming is.
         let p = dedupe_prompt(
-            &[("t", "timeout is 30s"), ("t", "timeout is 90s")],
-            &["30s".into(), "90s".into()],
+            &[
+                (
+                    "USB Device Registry Keys",
+                    "0066 = Last Connected (Win8-10)",
+                ),
+                (
+                    "USB-Geräte Registry-Werte",
+                    "Registry-Werte (Windows 7-10):",
+                ),
+                ("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
+            ],
             0,
         );
-        assert!(p.contains("30s, 90s"), "{p}");
-        assert!(p.contains("Decide which."), "{p}");
-        // And nothing is added when there is nothing to say.
-        assert!(!dedupe_prompt(&[("t", "x"), ("t", "y")], &[], 0).contains("Decide which."));
+        assert!(
+            !p.contains("Decide which."),
+            "the differing-values prior is back in the prompt: {p}"
+        );
+        assert!(
+            !p.contains("not stated the same way"),
+            "the differing-values prior is back in the prompt: {p}"
+        );
+        // The artifacts themselves are still there in full, which is what the
+        // model is supposed to decide on.
+        assert!(p.contains("0066 = Last Connected (Win8-10)"), "{p}");
+        assert!(p.contains("0066 für Last Connected (Windows 8-)"), "{p}");
     }
 
     #[test]
@@ -1209,10 +1237,10 @@ mod tests {
             ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             ("FAT32 Specifications", "32 Bit Clusternummern."),
         ];
-        let first = dedupe_prompt(members, &[], 0);
-        let second = dedupe_prompt(members, &[], 1);
+        let first = dedupe_prompt(members, 0);
+        let second = dedupe_prompt(members, 1);
         assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(members, &[], 2));
+        assert_ne!(second, dedupe_prompt(members, 2));
         // A first ask stays exactly what it was, so the cache still earns its
         // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");

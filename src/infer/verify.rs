@@ -32,9 +32,25 @@ fn looks_like_a_path_or_flag(token: &str) -> bool {
 }
 
 /// Every string in a chunk that must have come from the source verbatim:
-/// lines inside fenced code blocks, inline code spans, and bare path- or
-/// flag-shaped tokens in the prose.
+/// lines inside fenced code blocks, indented lines, inline code spans, and bare
+/// path- or flag-shaped tokens in the prose.
 pub fn extract_literals(artifact_text: &str) -> Vec<String> {
+    extract(artifact_text, true)
+}
+
+/// The same, minus the rule that an indented line is code.
+///
+/// For a comparison whose other side is not the text this one was copied from —
+/// see `missing_machine_literals`, the only caller. A four-space indent is the
+/// weakest of these signals by far: markdown nests a bullet list that way, so an
+/// ordinary sentence one level deep is picked up whole and then required to
+/// survive verbatim. What is left all says machine-shaped in the text itself —
+/// a fence, backticks, a leading slash — and needs no guess from the layout.
+pub fn extract_machine_literals(artifact_text: &str) -> Vec<String> {
+    extract(artifact_text, false)
+}
+
+fn extract(artifact_text: &str, indented_is_code: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut fenced = false;
     for line in artifact_text.lines() {
@@ -46,7 +62,7 @@ pub fn extract_literals(artifact_text: &str) -> Vec<String> {
         // Fenced blocks, and the indented kind markdown also treats as code —
         // reference documentation is full of the latter, and a command that
         // arrives indented rather than fenced still has to be verbatim.
-        if fenced || line.starts_with("    ") || line.starts_with('\t') {
+        if fenced || (indented_is_code && (line.starts_with("    ") || line.starts_with('\t'))) {
             if !line.trim().is_empty() {
                 out.push(line.trim().to_string());
             }
@@ -96,10 +112,49 @@ pub fn missing_literals(
     caveats: &[String],
     segment_text: &str,
 ) -> Vec<String> {
-    let haystack = normalize(segment_text);
-    let mut all = extract_literals(artifact_text);
+    absent(extract_literals, artifact_text, caveats, segment_text)
+}
+
+/// Literals present in the artifact and absent from a text that is *not* its
+/// source — merged text written over it, where only the machine-shaped strings
+/// were ever meant to come through unchanged.
+///
+/// `missing_literals` asks whether a freshly written artifact copied its
+/// commands out of the window it was extracted from. That is a fair question:
+/// same text, same language, and the synthesizer was told to copy them. Merged
+/// text is a rewrite by construction, and in this corpus routinely a rewrite
+/// across German and English, so "did this sentence survive verbatim" has no
+/// answer there. Asking it anyway is what vetoed a correct merge of two OneDrive
+/// artifacts: three four-space-indented bullets, ordinary English prose with
+/// their own descriptions, were extracted whole as literals and could not
+/// possibly reappear word for word.
+///
+/// What stays is the part that does carry over: a fenced command, a backticked
+/// registry key, a bare path. A merge that drops `/tmp/image.vdi` — the whole
+/// point of the artifact it came from — is still refused.
+pub fn missing_machine_literals(
+    artifact_text: &str,
+    caveats: &[String],
+    merged_text: &str,
+) -> Vec<String> {
+    absent(
+        extract_machine_literals,
+        artifact_text,
+        caveats,
+        merged_text,
+    )
+}
+
+fn absent(
+    extract: fn(&str) -> Vec<String>,
+    artifact_text: &str,
+    caveats: &[String],
+    haystack_text: &str,
+) -> Vec<String> {
+    let haystack = normalize(haystack_text);
+    let mut all = extract(artifact_text);
     for c in caveats {
-        all.extend(extract_literals(c));
+        all.extend(extract(c));
     }
     all.sort();
     all.dedup();
@@ -437,6 +492,41 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     #[test]
     fn prose_alone_has_no_literals_to_check() {
         assert!(extract_literals("Just some ordinary prose about disks.").is_empty());
+    }
+
+    #[test]
+    fn only_the_merge_side_stops_reading_an_indent_as_code() {
+        // Two questions that look like one. Against the source window an
+        // indented line really is code often enough to be worth the false
+        // positives: the artifact was copied out of that same text, so demanding
+        // it verbatim costs nothing when it is prose. Against merged text — a
+        // rewrite by construction, here across two languages — the same demand
+        // vetoes correct merges, and a nested markdown bullet is prose far more
+        // often than it is a command.
+        let nested = "* Personal directory contents:\n    * SyncEngine.odl: Logs of \
+                      synchronized files and file hashes.";
+
+        assert_eq!(
+            extract_literals(nested),
+            vec!["* SyncEngine.odl: Logs of synchronized files and file hashes.".to_string()],
+            "the source-window check must keep reading an indent as code"
+        );
+        assert!(
+            extract_machine_literals(nested).is_empty(),
+            "an indented sentence is still being required to survive a merge: {:?}",
+            extract_machine_literals(nested)
+        );
+
+        // And what says machine-shaped in the text itself survives the
+        // narrowing, indented or not.
+        let both = "Run it:\n    `xmount --in ewf --out dd`\nleaves /tmp/image.vdi behind.";
+        for lit in ["xmount --in ewf --out dd", "/tmp/image.vdi"] {
+            assert!(
+                extract_machine_literals(both).iter().any(|l| l == lit),
+                "{lit} stopped being checked: {:?}",
+                extract_machine_literals(both)
+            );
+        }
     }
 
     #[test]
