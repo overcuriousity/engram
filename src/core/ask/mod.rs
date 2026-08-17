@@ -627,6 +627,62 @@ mod tests {
         );
     }
 
+    /// A reranker whose scores fall off a cliff after the third document, so
+    /// what `ask` does with a relevance cliff can be asserted rather than
+    /// inferred. The fused scores a search produces on their own are smooth by
+    /// construction — no gap in them stands out — so a cliff has to be put
+    /// there deliberately for this to be about `ask` at all.
+    struct Cliffed;
+
+    #[async_trait::async_trait]
+    impl crate::infer::Reranker for Cliffed {
+        async fn rerank(
+            &self,
+            _query: &str,
+            docs: &[String],
+            top_n: usize,
+        ) -> Result<Vec<(usize, f32)>> {
+            const SCORES: [f32; 5] = [0.9, 0.88, 0.86, 0.20, 0.19];
+            Ok((0..docs.len().min(SCORES.len()).min(top_n))
+                .map(|i| (i, SCORES[i]))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cliff_cuts_the_excerpts_the_window_would_have_kept() {
+        // Five small excerpts and a whole context window to put them in: the
+        // budget can cut nothing here, so anything missing from the citations
+        // was cut by the cliff and by nothing else.
+        let mut core = test_core().await;
+        core.reranker = Some(std::sync::Arc::new(Cliffed));
+        seed(&core, 5, 4).await;
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "chunk".into(),
+                    limit: Some(5),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out.citations.len(),
+            3,
+            "the two excerpts below the cliff were still shown to the model"
+        );
+        assert_eq!(
+            out.citations.len() + out.dropped,
+            5,
+            "an excerpt cut by the cliff must be reported, not lost silently"
+        );
+    }
+
     #[tokio::test]
     async fn citations_match_exactly_what_the_model_was_shown() {
         let core = test_core().await;

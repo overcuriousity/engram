@@ -25,12 +25,6 @@ mod tests {
     use super::*;
     use crate::infer::budget::{TokenCounter, pack_by_budget};
 
-    /// Ten-token blocks and a budget that fits all of them, so only the cliff
-    /// can do any cutting here.
-    fn blocks(n: usize) -> Vec<String> {
-        (0..n).map(|_| "x".repeat(35)).collect()
-    }
-
     /// The whole point: a list whose relevance falls off is cut where it falls
     /// off, not where the context window runs out.
     #[test]
@@ -41,14 +35,14 @@ mod tests {
     /// No cliff means no basis for concluding anything about the tail, so the
     /// behaviour is exactly what it was before this function existed.
     #[test]
-    fn a_list_without_a_cliff_packs_everything_the_budget_allows() {
+    fn a_list_without_a_cliff_is_kept_whole() {
         assert_eq!(above_cliff(&[0.9, 0.88, 0.86, 0.84, 0.82]), 5);
     }
 
-    /// Fewer than three hits: `cliff` returns None by construction and the
-    /// budget is the only bound.
+    /// Fewer than three hits: `cliff` returns None by construction, so there
+    /// is nothing here to cut and the budget is left as the only bound.
     #[test]
-    fn two_hits_are_packed_without_a_cliff() {
+    fn two_hits_are_too_few_for_a_cliff_and_are_kept_whole() {
         assert_eq!(above_cliff(&[0.9, 0.1]), 2);
     }
 
@@ -59,7 +53,8 @@ mod tests {
     #[test]
     fn the_budget_still_wins_when_the_cliff_would_overrun_the_window() {
         let above = above_cliff(&[0.9, 0.88, 0.86, 0.20, 0.19]);
-        let blocks = blocks(above);
+        // Ten-token blocks against a budget that holds two.
+        let blocks: Vec<String> = (0..above).map(|_| "x".repeat(35)).collect();
         let kept = pack_by_budget(&blocks, &TokenCounter, 25);
         assert!(kept < above, "the window must cut below the cliff: {kept}");
     }
