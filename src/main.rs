@@ -213,9 +213,9 @@ async fn main() -> anyhow::Result<()> {
         // already judged, so this costs nothing and needs neither Qdrant nor an
         // inference endpoint to be up.
         let store = engram::store::Store::connect(&cfg.store).await?;
-        let (artifacts, pairs) = engram::eval::export::export(&store, dir).await?;
+        let (artifacts, pairs, questions) = engram::eval::export::export(&store, dir).await?;
         println!(
-            "wrote {artifacts} artifacts and {pairs} pairs to {}",
+            "wrote {artifacts} artifacts, {pairs} pairs and {questions} questions to {}",
             dir.display()
         );
         if pairs == 0 {

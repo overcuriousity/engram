@@ -5,14 +5,16 @@
 //! invalidate the pairs. The queries come from searches actually made, and the
 //! expectations from verdicts actually given.
 
-use crate::eval::{EvalPair, FrozenArtifact, save_artifacts, save_pairs};
+use crate::eval::{
+    EvalPair, EvalQuestion, FrozenArtifact, save_artifacts, save_pairs, save_questions,
+};
 use crate::store::Store;
 use anyhow::Result;
 use sqlx::Row;
 use std::path::Path;
 
-/// Returns how many artifacts and how many pairs were written.
-pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize)> {
+/// Returns how many artifacts, pairs and questions were written.
+pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize, usize)> {
     let artifacts = store.all_active_artifacts().await?;
     let known: std::collections::HashSet<String> = artifacts.iter().map(|c| c.id.clone()).collect();
 
@@ -64,9 +66,46 @@ pub async fn export(store: &Store, dir: &Path) -> Result<(usize, usize)> {
         tracing::warn!(dropped, "pairs skipped: their artifact no longer exists");
     }
 
+    // Judged questions, with the artifacts the operator said carried the
+    // answer. A carrier whose artifact is gone is dropped like a stale pair;
+    // the question stays, because it still says whether the base held it.
+    let asks = sqlx::query(
+        "SELECT id, question, verdict, judged_at FROM ask_events
+         WHERE verdict IS NOT NULL ORDER BY judged_at",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let mut questions = Vec::with_capacity(asks.len());
+    let mut lost_carriers = 0usize;
+    for r in &asks {
+        let id: String = r.get("id");
+        let carriers: Vec<String> = sqlx::query_scalar(
+            "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND carried = 1 ORDER BY n",
+        )
+        .bind(&id)
+        .fetch_all(&store.pool)
+        .await?;
+        let (kept, lost): (Vec<String>, Vec<String>) =
+            carriers.into_iter().partition(|c| known.contains(c));
+        lost_carriers += lost.len();
+        questions.push(EvalQuestion {
+            question: r.get("question"),
+            verdict: r.get("verdict"),
+            expect: kept,
+            note: Some(format!("judged {}", r.get::<i64, _>("judged_at"))),
+        });
+    }
+    if lost_carriers > 0 {
+        tracing::warn!(
+            lost_carriers,
+            "carriers skipped: their artifact no longer exists"
+        );
+    }
+
     save_artifacts(dir, &frozen)?;
     save_pairs(dir, &pairs)?;
-    Ok((frozen.len(), pairs.len()))
+    save_questions(dir, &questions)?;
+    Ok((frozen.len(), pairs.len(), questions.len()))
 }
 
 #[cfg(test)]
@@ -137,7 +176,7 @@ mod tests {
         let event = record_one_search(&store, "how do I read a deleted entry", &artifact_id).await;
         store.judge_hit(&event, &artifact_id).await.unwrap();
 
-        let (artifacts, pairs) = export(&store, dir.path()).await.unwrap();
+        let (artifacts, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!((artifacts, pairs), (1, 1));
 
         let frozen = crate::eval::load_artifacts(dir.path()).unwrap();
@@ -192,7 +231,7 @@ mod tests {
         let event = record_one_search(&store, "gone", "no-such-artifact").await;
         store.judge_hit(&event, "no-such-artifact").await.unwrap();
 
-        let (_, pairs) = export(&store, dir.path()).await.unwrap();
+        let (_, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!(pairs, 0);
     }
 
@@ -206,7 +245,7 @@ mod tests {
         let d = record_one_search(&store, "asdf", "x").await;
         store.judge(&d, Verdict::Discard).await.unwrap();
 
-        let (_, pairs) = export(&store, dir.path()).await.unwrap();
+        let (_, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!(pairs, 0);
     }
 
@@ -223,7 +262,70 @@ mod tests {
             .await
             .unwrap();
 
-        let (artifacts, _) = export(&store, dir.path()).await.unwrap();
+        let (artifacts, _, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!(artifacts, 0);
+    }
+
+    async fn record_ask(store: &Store, q: &str, cited: &[&str]) -> String {
+        store
+            .record_ask(crate::store::asks::NewAsk {
+                question: q.into(),
+                scope: None,
+                filters: "{}".into(),
+                query_vec: vec![0.0; 4],
+                embed_model: "fake".into(),
+                answer: "a".into(),
+                abstained: false,
+                dropped: 0,
+                truncated: false,
+                citations: cited
+                    .iter()
+                    .map(|id| crate::store::asks::NewAskCitation {
+                        artifact_id: id.to_string(),
+                        score: 1.0,
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_judged_question_becomes_an_eval_question_with_its_carriers() {
+        let store = Store::memory().await.unwrap();
+        let art = seed_one_artifact(&store).await;
+        let id = record_ask(&store, "how do I", &[&art]).await;
+        store.toggle_carried(&id, 1).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, questions) = export(&store, dir.path()).await.unwrap();
+        assert_eq!(questions, 1);
+        let qs = crate::eval::load_questions(dir.path()).unwrap();
+        assert_eq!(qs[0].question, "how do I");
+        assert_eq!(qs[0].verdict, "right");
+        assert_eq!(qs[0].expect, vec![art]);
+    }
+
+    #[tokio::test]
+    async fn unjudged_questions_are_not_exported_and_gone_carriers_are_dropped() {
+        let store = Store::memory().await.unwrap();
+        let art = seed_one_artifact(&store).await;
+        record_ask(&store, "unjudged", &[&art]).await;
+        let id = record_ask(&store, "carrier gone", &[&art, "deleted-artifact"]).await;
+        store.toggle_carried(&id, 1).await.unwrap();
+        store.toggle_carried(&id, 2).await.unwrap();
+        let nothing = record_ask(&store, "not here", &[]).await;
+        store
+            .judge_ask(&nothing, crate::store::asks::AskVerdict::NothingHere)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, n) = export(&store, dir.path()).await.unwrap();
+        assert_eq!(n, 2);
+        let qs = crate::eval::load_questions(dir.path()).unwrap();
+        let gone = qs.iter().find(|q| q.question == "carrier gone").unwrap();
+        assert_eq!(gone.expect, vec![art]);
+        let none = qs.iter().find(|q| q.question == "not here").unwrap();
+        assert_eq!(none.verdict, "nothing_here");
+        assert!(none.expect.is_empty());
     }
 }
