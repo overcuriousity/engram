@@ -1,0 +1,38 @@
+{# The holes, where capturing happens. A group is a name over the questions
+   in it; a question not yet grouped is shown under itself until the sweep
+   runs. "covered" is the operator's word, never the system's. #}
+{% if !gaps.is_empty() || !loose.is_empty() %}
+<h3>Knowledge gaps</h3>
+<div class="gaps">
+  {% for g in gaps %}
+  <details class="gap">
+    <summary>{{ g.label }} <span class="muted">({{ g.members.len() }})</span></summary>
+    <ul>
+      {% for m in g.members %}
+      <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
+        <span>{{ m.text }}</span>
+        <a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>
+        <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
+                hx-target="closest li" hx-swap="outerHTML">covered</button>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endfor %}
+  {% if !loose.is_empty() %}
+  <details class="gap">
+    <summary>not yet grouped <span class="muted">({{ loose.len() }})</span></summary>
+    <ul>
+      {% for m in loose %}
+      <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
+        <span>{{ m.text }}</span>
+        <a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>
+        <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
+                hx-target="closest li" hx-swap="outerHTML">covered</button>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}

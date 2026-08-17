@@ -9,6 +9,7 @@
 //! whatever documents the operator actually wants to search. What lives here is
 //! the shape of the files and the arithmetic over ranks.
 
+pub mod claims;
 pub mod export;
 pub mod metrics;
 
@@ -52,6 +53,44 @@ pub struct EvalPair {
     pub expect: String,
     #[serde(default)]
     pub note: Option<String>,
+}
+
+/// A question, its verdict, and the artifacts the operator said carried the
+/// answer. `expect` is empty for `wrong` and `nothing_here`, and for a `right`
+/// answer that was a synthesis with no single carrier — those still measure
+/// abstention, not citation recall.
+///
+/// The first half of that is an invariant `export` enforces rather than one the
+/// store upholds: marking a carrier does not overrule a verdict already given,
+/// so a `wrong` answer can carry marks, and a carrier behind `wrong` is not a
+/// statement that the artifact should have been cited.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EvalQuestion {
+    pub question: String,
+    /// `right` | `wrong` | `nothing_here`.
+    pub verdict: String,
+    #[serde(default)]
+    pub expect: Vec<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+pub fn questions_path(dir: &Path) -> PathBuf {
+    dir.join("questions.json")
+}
+
+pub fn save_questions(dir: &Path, questions: &[EvalQuestion]) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = questions_path(dir);
+    let json = serde_json::to_string_pretty(questions)?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
+pub fn load_questions(dir: &Path) -> Result<Vec<EvalQuestion>> {
+    let path = questions_path(dir);
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
 pub fn artifacts_path(dir: &Path) -> PathBuf {

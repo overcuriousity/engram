@@ -18,8 +18,12 @@ complete pair coverage, merge-loss checks and undo; caveats on artifacts; text
 and image capture; hybrid search inside Qdrant; the evaluation harness fed from
 judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`);
 Hebbian links learned from co-retrieval with bounded priming and one-hop
-association in the results; a single-shot ask endpoint — retrieve, pack by
-score, one completion, cite by number, dropped excerpts and truncation reported.
+association in the results; the cliff — where a ranked list's relevance falls
+off — marked on the rail, over the API and over MCP; a single-shot ask endpoint
+— retrieve, pack by score, one completion, cite by number, dropped excerpts and
+truncation reported; judged questions with a second harness — citation recall,
+abstention, faithfulness by literals and by claim check; knowledge gaps grouped
+and named on the capture page.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -90,31 +94,33 @@ in config. The items below are the mechanisms that come after it, in order.
 
 ## [Ask]
 
-Ask today is the 2023 baseline: one embedding, top eight, greedy pack, one
-completion. Nothing about it is measured, nothing it does feeds back, and the
-page shows a spinner and then a wall of text. The pieces below turn it into the
-part of engram that is allowed to think, without giving up the two things that
-make it engram's: an answer cannot carry a literal the excerpts did not, and a
-default moves only after the harness has run. Order matters — each item is
-built on the one before it — and the split is such that every write-time piece
-lands in [Retrieval] as well.
+Ask is still the 2023 baseline in how it answers: one embedding, top eight,
+greedy pack, one completion, and the page shows a spinner and then a wall of
+text. What has changed is that it is now measured and it now feeds back — every
+answer can be judged where it is read, and the harness turns a change to ask
+into a number. The pieces below turn it into the part of engram that is allowed
+to think, without giving up the two things that make it engram's: an answer
+cannot carry a literal the excerpts did not, and a default moves only after the
+harness has run. Order matters — each item is built on the one before it — and
+the split is such that every write-time piece lands in [Retrieval] as well.
 
 Model tiers: ask already runs on a larger, thinking model than synthesis does.
 The config grows two named tiers, **deep** and **efficient**, and every role
 points at one of them (synthesize, situations and judges → efficient; ask and
 its retrieval loop → deep) instead of each role carrying its own endpoint.
-Plumbing, done by whichever item below needs the second tier first.
+Plumbing, done by whichever item below needs the second tier first. The claim
+check and the gap namer already run on the synthesize endpoint under their own
+response shapes (`HttpCompleter::for_claim_checking`, `for_gap_naming`), so the
+split is a rename waiting for the first item that needs the deep tier elsewhere.
 
-1. **Ask harness and ask feedback.** Judged questions rather than judged
-   searches: an answer gets a verdict on the page (right, wrong, "nothing here"
-   — and which citation carried it), and the export grows a second pairs file.
-   The harness measures citation recall, faithfulness (does every claim trace to
-   a shown excerpt) and abstention accuracy — did it say "not in the base" when
-   that was true, and only then. "Nothing here" is also the sharpest signal
-   engram has about what to capture next, and it is surfaced as such. Nothing
-   after this item is a number until this one exists.
+The ask harness and ask feedback — item 1 of the original list — are built
+(spec `2026-08-17-ask-harness-design.md`): verdicts on the answer page with
+carriers, `questions.json` in the export, `evaluate_ask` measuring citation
+recall, abstention accuracy and faithfulness by literals and by claim check,
+and "nothing here" surfaced as knowledge gaps on the capture page. The numbers
+below now exist.
 
-2. **Situation vectors.** People type situations; artifacts are embedded as
+1. **Situation vectors.** People type situations; artifacts are embedded as
    passages, and a question matches a question far better than it matches a
    passage. At ingest the efficient model writes the three to five situations
    an artifact answers, each embedded as an additional named vector on the same
@@ -122,7 +128,7 @@ Plumbing, done by whichever item below needs the second tier first.
    Write-time inference, zero query cost, and the largest single retrieval gain
    on the list. Text untouched; the harness decides whether it stays on.
 
-3. **Streaming ask.** The completion streams to the page — reasoning tokens
+2. **Streaming ask.** The completion streams to the page — reasoning tokens
    included, when the deep model emits them — so the operator watches the model
    think instead of a spinner. `[n]` in the answer is a link: it opens the
    artifact in the detail pane, hover shows the excerpt, and the excerpt rail
@@ -133,7 +139,7 @@ Plumbing, done by whichever item below needs the second tier first.
    records that the text was model-written and from what, and synthesis then
    treats it like any other paste.
 
-4. **The retrieval loop.** Built on streaming, so each step is visible as it
+3. **The retrieval loop.** Built on streaming, so each step is visible as it
    happens. Pack to the relevance cliff, not to the window — noise excerpts
    make the answer worse and the call dearer. Pull the neighbours of the top
    hits (same corpus, adjacent ordinal; one-hop associations) as candidates,
@@ -157,14 +163,11 @@ Plumbing, done by whichever item below needs the second tier first.
 ## [Retrieval]
 
 What ask learns at write time, search inherits. From the [Ask] list: situation
-vectors (item 2) change what search matches against; ask verdicts join judged
-searches as access cues under **access reconsolidation** above. The items here
-are search's own.
+vectors (item 1) change what search matches against; ask verdicts join judged
+searches as access cues under **access reconsolidation** above. The cliff is
+built (`search::cliff`, spec `2026-08-17-cliff-design.md`) and waits for ask's
+retrieval loop to pack to it. The items here are search's own.
 
-- **The cliff, shown.** Hybrid scores mean nothing across queries, but the gap
-  between one hit and the next does. Where the relevance falls off, the rail
-  says so — a break, or hits past it greyed — so a page of ten results does not
-  claim ten answers. Same computation ask uses to stop packing.
 - **Continues in.** A hit whose neighbour in its corpus (adjacent ordinal) is
   also above the cliff says so, and one click reads on. The answer to a
   situation is often the paragraph after the one that matched.

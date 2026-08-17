@@ -42,11 +42,12 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","tags":["..."],"corpus_lines":[start,end],"caveats":["..."]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
-- category: one lowercase word, e.g. procedure, concept, reference, snippet.
-- tags: 1-5 lowercase keywords for filtering.
+- category: exactly one of: concept, procedure, reference, snippet,
+  configuration, definition, example, other. This is what kind of thing the
+  artifact is, never what subject it is about.
 - corpus_lines: the 1-based line range in the input this artifact came from.
 - caveats: 0-3 short sentences for conditions under which this artifact does
   not hold — a prerequisite, a version or platform it is specific to, a
@@ -188,7 +189,7 @@ When you answer "duplicate", the merged text must contain every number, version,
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "tags": [], "caveats": []}}}
+{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
 
 - relation: one of "duplicate", "replaced", "conflict", "distinct".
 - detail: one short sentence saying why. Always.
@@ -295,11 +296,75 @@ pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i
     s
 }
 
+/// The words an abstaining answer opens with. One definition for the string
+/// the model is told and the string `abstained` looks for, for the reason
+/// `Caveat:` is: splitting the two apart is how the agreement quietly breaks.
+pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
+
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
-say so plainly rather than guessing. Cite excerpts by their number. \
+begin your reply with the exact words `Not in the knowledge base.` and say what is missing rather \
+than guessing. Cite excerpts by their number. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
+
+/// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
+/// emphasis, heading and list marks, and opening quotes are skipped, because
+/// models wrap an opening sentence in them no matter what they were told; the
+/// comparison is case-insensitive for the same reason. Mentioning the phrase
+/// later in a real answer is not an abstention.
+///
+/// Skipping an opening quote is what makes that last rule hard, because the one
+/// thing a quote mark can mean is that the phrase is being *quoted* — `"Not in
+/// the knowledge base" is the wrong read here; excerpt 3 covers it.` is an
+/// answer, not an abstention, and scoring it as one records a gap that is not
+/// there. So a lead-in that included a quote is only accepted when the phrase
+/// runs on: a quote closing immediately after it, with an answer behind that,
+/// is the shape of a quotation and nothing else. An abstention that was itself
+/// quoted closes after its full stop — `„Not in the knowledge base.“ Nothing
+/// covers it.` — and a bare quoted phrase with nothing behind it has no answer
+/// to be the quotation's point, so both still count.
+///
+/// Compared over characters rather than over a byte slice of the prefix's
+/// length: a non-ASCII lead-in — a typographic quote, a bullet — moves the
+/// prefix off a byte boundary, and slicing there yields `None`, which scored a
+/// correct abstention as a wrong answer.
+pub fn abstained(answer: &str) -> bool {
+    let quote = |c: char| matches!(c, '"' | '\'' | '„' | '“' | '”' | '‘' | '’' | '«' | '»');
+    let marks = |c: char| {
+        c.is_whitespace()
+            || quote(c)
+            || matches!(c, '*' | '_' | '#' | '>' | '`' | '-' | '+' | '•' | '·')
+    };
+    let opening = answer.trim_start_matches(marks);
+    // An ordered list marker — `1.` or `1)` — is the one lead-in that is not a
+    // single class of character.
+    let digits = opening.len()
+        - opening
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
+    let opening = match opening[digits..].strip_prefix(['.', ')']) {
+        Some(rest) if digits > 0 => rest.trim_start_matches(marks),
+        _ => opening,
+    };
+    let head: String = opening
+        .chars()
+        .take(ABSTAIN_PREFIX.chars().count())
+        .collect();
+    if !head.eq_ignore_ascii_case(ABSTAIN_PREFIX) {
+        return false;
+    }
+    if !answer[..answer.len() - opening.len()].contains(quote) {
+        return true;
+    }
+    // A quote was opened. Where it closes decides what it was doing: right after
+    // the phrase with an answer behind it, the phrase was being quoted.
+    let rest = &opening[head.len()..];
+    match rest.chars().next() {
+        Some(c) if quote(c) => rest[c.len_utf8()..].trim().is_empty(),
+        _ => true,
+    }
+}
 
 /// One retrieved excerpt, numbered so the answer can cite it.
 ///
@@ -321,6 +386,100 @@ pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
         "Question: {question}\n\nExcerpts:\n\n{}",
         excerpts.join("\n\n---\n\n")
     )
+}
+
+/// The claim check behind the ask harness. It never runs on a request path.
+pub const CLAIMS_SYSTEM: &str = r#"You check an answer against the excerpts it was written from. Split the answer into its atomic factual claims — one statement each, in the answer's own words. For every claim, list the numbers of the excerpts that state or directly entail it. A claim no excerpt supports gets an empty list. Do not judge whether a claim is true, only whether the excerpts say it. Reply with JSON only: {"claims":[{"claim":"…","supported_by":[1,3]}]}"#;
+
+pub fn claims_prompt(answer: &str, excerpts: &[String]) -> String {
+    format!(
+        "Answer:\n{answer}\n\nExcerpts:\n\n{}",
+        excerpts.join("\n\n---\n\n")
+    )
+}
+
+/// The shape `eval::claims::parse_claims` reads. Rooted in an object and
+/// closed, like every judge schema.
+pub fn claims_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string"},
+                        "supported_by": {"type": "array", "items": {"type": "integer"}}
+                    },
+                    "required": ["claim", "supported_by"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["claims"],
+        "additionalProperties": false
+    })
+}
+
+/// Names a knowledge gap from the questions in it. Sees questions only, never
+/// answers: it names the hole, not the guess.
+pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
+
+/// How many questions one naming call is shown, and how much of each.
+///
+/// A cluster can hold every open gap of a kind, and every other prompt in this
+/// module packs to a budget while this one concatenated whatever it was handed.
+/// A prompt over the context window fails the call, the group falls back to a
+/// terms label, and — because a terms label is offered to the model again — it
+/// pays that failed call on every sweep for as long as the group lives. Twelve
+/// questions is far more than naming a subject needs, and a question long enough
+/// to be cut is a pasted paragraph rather than a question.
+pub const GAP_LABEL_MAX_QUESTIONS: usize = 12;
+pub const GAP_LABEL_MAX_CHARS: usize = 200;
+
+/// The caller passes its questions newest first, so the cap keeps the newest.
+pub fn gap_label_prompt(questions: &[&str]) -> String {
+    let mut s = String::from("Questions:\n");
+    for q in questions.iter().take(GAP_LABEL_MAX_QUESTIONS) {
+        s.push_str("- ");
+        match q.char_indices().nth(GAP_LABEL_MAX_CHARS) {
+            Some((cut, _)) => {
+                s.push_str(&q[..cut]);
+                s.push('…');
+            }
+            None => s.push_str(q),
+        }
+        s.push('\n');
+    }
+    s
+}
+
+pub fn gap_label_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "label": {"type": "string"} },
+        "required": ["label"],
+        "additionalProperties": false
+    })
+}
+
+/// The label out of the reply, trimmed of quotes and trailing punctuation;
+/// an empty label is an error, because a cluster must be called something.
+pub fn parse_gap_label(reply: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply))
+        .map_err(|e| Error::MalformedLlmOutput(format!("gap label was not JSON: {e}")))?;
+    let label = v["label"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
+        .trim()
+        .to_string();
+    if label.is_empty() {
+        return Err(Error::MalformedLlmOutput("gap label was empty".into()));
+    }
+    Ok(label)
 }
 
 /// The verdict inside the envelope, or the reply itself if it came without one.
@@ -363,8 +522,6 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         title: Option<String>,
         #[serde(default)]
         category: Option<String>,
-        #[serde(default)]
-        tags: Vec<String>,
         #[serde(default)]
         caveats: Vec<String>,
     }
@@ -445,8 +602,13 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         merged: r.merged.map(|m| MergedDraft {
             title: m.title,
             text: m.text,
-            category: m.category,
-            tags: m.tags,
+            category: m.category.map(|c| normalize_category(&c)),
+            // Same rule as a synthesised artifact: nothing writes tags on a
+            // caller's behalf, and a merge inventing its own would be the
+            // drifting vocabulary arriving by a second door. What the sources
+            // were already filed under is added back by `merge::carried_tags`,
+            // which is a different question from what the model may name.
+            tags: Vec::new(),
             caveats: m.caveats,
         }),
     })
@@ -465,11 +627,46 @@ struct RawArtifact {
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
     corpus_lines: Option<Vec<i64>>,
     #[serde(default)]
     caveats: Vec<String>,
+}
+
+/// What kind of thing an artifact is.
+///
+/// A field about *form*, not about subject. These words are true of a corpus of
+/// recipes, of case law, or of forensics notes alike, which is what makes them
+/// safe to state here: naming forms hard-codes no domain.
+///
+/// Closed, because leaving it open is what let a domain in. Given a free
+/// string the model answered "System Administration" and "Forensic Science /
+/// Criminalistics" — subject words in a form field, which the filter row then
+/// offered beside `concept` and `procedure` as though they were the same kind
+/// of choice, in a second unlabelled taxonomy nothing had asked for. Anything
+/// off this list becomes `other`.
+pub const CATEGORIES: &[&str] = &[
+    "concept",
+    "procedure",
+    "reference",
+    "snippet",
+    "configuration",
+    "definition",
+    "example",
+    "other",
+];
+
+/// The stored form of whatever the model answered.
+///
+/// Never rejects: a good artifact carrying an unrecognised label is still a
+/// good artifact, and refusing it would spend the call again to get the same
+/// text back with a different word beside it.
+pub fn normalize_category(raw: &str) -> String {
+    let t = raw.trim().to_ascii_lowercase();
+    if CATEGORIES.contains(&t.as_str()) {
+        t
+    } else {
+        "other".to_string()
+    }
 }
 
 /// The shape `parse_response` will accept, as a JSON Schema for the endpoint to
@@ -481,7 +678,7 @@ struct RawArtifact {
 ///
 /// Every field is required. The optional ones are optional to *serde*, so an
 /// older reply still parses, but there is no reason to let a model that is
-/// being told the shape anyway omit the line range or the tags.
+/// being told the shape anyway omit the line range or the caveats.
 pub fn artifacts_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -493,8 +690,7 @@ pub fn artifacts_schema() -> serde_json::Value {
                     "properties": {
                         "text": {"type": "string"},
                         "title": {"type": "string"},
-                        "category": {"type": "string"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "category": {"type": "string", "enum": CATEGORIES},
                         "corpus_lines": {
                             "type": "array",
                             "items": {"type": "integer"},
@@ -503,7 +699,7 @@ pub fn artifacts_schema() -> serde_json::Value {
                         },
                         "caveats": {"type": "array", "items": {"type": "string"}}
                     },
-                    "required": ["text", "title", "category", "tags", "corpus_lines", "caveats"],
+                    "required": ["text", "title", "category", "corpus_lines", "caveats"],
                     "additionalProperties": false
                 }
             }
@@ -557,17 +753,16 @@ pub fn dedupe_schema() -> serde_json::Value {
         "properties": {
             "text": {"type": "string"},
             "title": {"type": "string"},
-            "category": {"type": "string"},
-            "tags": {"type": "array", "items": {"type": "string"}},
+            "category": {"type": "string", "enum": CATEGORIES},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
         // Every field, for the reason `artifacts_schema` requires every field:
-        // a model being told the shape anyway has no reason to omit the tags,
+        // a model being told the shape anyway has no reason to omit a field,
         // and `strict` makes the rule structural rather than stylistic — a
         // property a strict schema lists and does not require is a schema the
         // hosted APIs reject outright, which fails the call rather than
         // loosening it.
-        "required": ["text", "title", "category", "tags", "caveats"],
+        "required": ["text", "title", "category", "caveats"],
         "additionalProperties": false
     });
     serde_json::json!({
@@ -762,12 +957,23 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
         .map(|c| ProposedArtifact {
             text: c.text.trim().to_string(),
             title: c.title.filter(|t| !t.trim().is_empty()),
-            category: c.category.filter(|t| !t.trim().is_empty()),
-            tags: c
-                .tags
-                .into_iter()
+            // An absent category stays absent: a model that answered nothing
+            // made no claim, and `other` is a claim. Anything it did answer is
+            // held to the list — the schema asks for one of them, and a model
+            // that ignores an enum would otherwise put its own word straight
+            // into the filter row.
+            category: c
+                .category
                 .filter(|t| !t.trim().is_empty())
-                .collect(),
+                .map(|t| normalize_category(&t)),
+            // Nothing writes tags automatically any more. No domain-agnostic
+            // vocabulary exists for subject words, so a generated one is a
+            // vocabulary that drifts: `forensics` and `forensik`, `security`
+            // and `sicherheit`, two filters over one idea and nothing able to
+            // tell they are the same. The field stays — it is the channel
+            // pinning rides on and a public API filter — written by a caller
+            // who means a particular tag.
+            tags: Vec::new(),
             corpus_lines: match c.corpus_lines.as_deref() {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
@@ -836,6 +1042,58 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_schema_no_longer_asks_for_tags() {
+        // No domain-agnostic vocabulary exists for subject words, so a
+        // generated one is a vocabulary that drifts: `forensics` and `forensik`
+        // became two filters over one idea. The field survives for callers who
+        // mean a particular tag; nothing writes it on their behalf.
+        let items = &artifacts_schema()["properties"]["artifacts"]["items"];
+        assert!(items["properties"]["tags"].is_null());
+        let required: Vec<&str> = items["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(!required.contains(&"tags"), "{required:?}");
+    }
+
+    #[test]
+    fn a_category_off_the_list_becomes_other() {
+        // Subject words are what an unconstrained field collects: a corpus of
+        // forensics notes filled it with "Forensic Science / Criminalistics",
+        // which then appeared in the filter row beside "concept" as though it
+        // were the same kind of choice. The field is about form, and the enum
+        // is what keeps a domain out of the schema.
+        assert_eq!(
+            normalize_category("Forensic Science / Criminalistics"),
+            "other"
+        );
+        assert_eq!(normalize_category("System Administration"), "other");
+        assert_eq!(normalize_category(""), "other");
+    }
+
+    #[test]
+    fn a_category_on_the_list_survives_case_and_padding() {
+        assert_eq!(normalize_category("Procedure"), "procedure");
+        assert_eq!(normalize_category("  snippet "), "snippet");
+        assert_eq!(normalize_category("reference"), "reference");
+    }
+
+    #[test]
+    fn the_schema_constrains_the_category_to_the_list() {
+        let schema = artifacts_schema();
+        let cat = &schema["properties"]["artifacts"]["items"]["properties"]["category"];
+        let listed: Vec<&str> = cat["enum"]
+            .as_array()
+            .expect("the category is an enum, not a free string")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(listed, CATEGORIES);
+    }
 
     #[test]
     fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
@@ -1080,6 +1338,8 @@ mod tests {
         for (name, schema) in [
             ("dedupe", dedupe_schema()),
             ("link", link_schema()),
+            ("claims", claims_schema()),
+            ("gap_label", gap_label_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the
@@ -1315,7 +1575,9 @@ mod tests {
         let m = d.merged.as_ref().unwrap();
         assert_eq!(m.text, "Use mount --bind.");
         assert_eq!(m.title.as_deref(), Some("Bind mounts"));
-        assert_eq!(m.tags, vec!["mount".to_string()]);
+        // Offered by the model and not kept: a merge writes no tags of its own,
+        // for the same reason synthesis does not.
+        assert!(m.tags.is_empty());
     }
 
     #[test]
@@ -1463,10 +1725,10 @@ mod tests {
         let out = parse_response(GOOD).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("Mount an E01 image"));
-        assert_eq!(
-            out[0].tags,
-            vec!["forensics".to_string(), "linux".to_string()]
-        );
+        // The reply still carries tags and they are still dropped: the schema
+        // stopped asking, and what a model volunteers anyway is the same
+        // drifting vocabulary by another route.
+        assert!(out[0].tags.is_empty());
         assert_eq!(out[0].corpus_lines, Some((3, 9)));
     }
 
@@ -1561,5 +1823,96 @@ mod tests {
         assert!(!bare.contains("taken"), "{bare}");
         assert!(!bare.contains("GPS"), "{bare}");
         assert!(bare.contains("Read the image"), "{bare}");
+    }
+
+    #[test]
+    fn an_answer_that_opens_with_the_sentinel_is_an_abstention() {
+        assert!(abstained(
+            "Not in the knowledge base. Nothing covers mounting E01 images."
+        ));
+        assert!(abstained(
+            "  not in the knowledge base — the excerpts are about FAT."
+        ));
+        // Models wrap the opening in emphasis or a heading; that is still the opening.
+        assert!(abstained(
+            "**Not in the knowledge base.** The excerpts describe…"
+        ));
+        assert!(abstained("# Not in the knowledge base\n\nThe excerpts…"));
+        // A non-ASCII lead-in puts the prefix off a byte boundary; a list
+        // marker is a lead-in the emphasis set does not cover.
+        assert!(abstained("„Not in the knowledge base.“ Nothing covers it."));
+        assert!(abstained(
+            "• Not in the knowledge base — the excerpts are about FAT."
+        ));
+        assert!(abstained("- Not in the knowledge base."));
+        assert!(abstained("1. Not in the knowledge base."));
+        // The whole answer, quoted and nothing behind it: there is no answer for
+        // the quotation to have been making a point about.
+        assert!(abstained("\"Not in the knowledge base\""));
+    }
+
+    #[test]
+    fn an_answer_that_quotes_the_phrase_to_argue_with_it_is_not_an_abstention() {
+        // The cost of skipping an opening quote. Scored as an abstention, this
+        // records a gap for a question the base did answer, and the gap sweep
+        // then groups and names it.
+        assert!(!abstained(
+            "\"Not in the knowledge base\" is the wrong read here; excerpt 3 covers it."
+        ));
+        assert!(!abstained(
+            "“Not in the knowledge base” would be wrong — see excerpt 1."
+        ));
+    }
+
+    #[test]
+    fn an_answer_that_merely_mentions_the_phrase_is_not_an_abstention() {
+        assert!(!abstained(
+            "Mount it with `ewfmount`. (Details on E02 are not in the knowledge base.)"
+        ));
+        assert!(!abstained(""));
+        assert!(!abstained(
+            "Not in the manual, but in the excerpts: use -o ro."
+        ));
+    }
+
+    #[test]
+    fn the_system_prompt_tells_the_model_the_exact_sentinel_the_code_reads() {
+        assert!(ASK_SYSTEM.contains(ABSTAIN_PREFIX), "{ASK_SYSTEM}");
+    }
+
+    #[test]
+    fn a_gap_label_is_read_out_of_the_envelope_and_tidied() {
+        assert_eq!(
+            parse_gap_label(r#"{"label": "\"Forensic image mounting.\""}"#).unwrap(),
+            "Forensic image mounting"
+        );
+        assert!(parse_gap_label(r#"{"label": ""}"#).is_err());
+        assert!(parse_gap_label("nope").is_err());
+    }
+
+    #[test]
+    fn naming_a_gap_is_shown_a_bounded_number_of_bounded_questions() {
+        // A cluster can hold every open gap of a kind. Unbounded, the prompt
+        // goes over the context window, the call fails, the group falls back to
+        // a terms label — and a terms label is offered to the model again, so
+        // the failure is paid for on every sweep for as long as the group lives.
+        let long = "x".repeat(GAP_LABEL_MAX_CHARS + 50);
+        let mut qs: Vec<&str> = vec![long.as_str(); GAP_LABEL_MAX_QUESTIONS + 20];
+        qs[0] = "the newest question, which the caller passes first";
+        let p = gap_label_prompt(&qs);
+        assert_eq!(
+            p.lines().count(),
+            GAP_LABEL_MAX_QUESTIONS + 1,
+            "one header and {GAP_LABEL_MAX_QUESTIONS} questions: {p}"
+        );
+        assert!(
+            p.contains("the newest question"),
+            "the cap keeps the newest, which the caller passes first: {p}"
+        );
+        assert!(p.contains('…'), "an overlong question is cut: {p}");
+        assert!(
+            !p.contains(&long),
+            "no question reaches the prompt at full length"
+        );
     }
 }

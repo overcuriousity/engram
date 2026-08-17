@@ -11,14 +11,18 @@
    made you look back at the columns to know what you were about to press. #}
 {% for p in pairs %}
 <div class="decide">
+  {# The titles lead. What the pair is *about* is the content of the card, and
+     whether they disagree and by how much is the qualifier on it — the other
+     order buried both titles mid-sentence behind the same eight words repeated
+     down the page.
+
+     `via_link` pairs were never scored by embedding — the judge found them
+     through repeated co-retrieval, not cosine — so `percent` would read as a
+     measured similarity that was never computed. #}
   <div class="decide-head">
-    {% if p.contradiction %}<b>These two disagree</b>{% else %}<b>These two cover the same ground</b>{% endif %}
-    {# `via_link` pairs were never scored by embedding — the judge found them
-       through repeated co-retrieval, not cosine — so `percent` would read as a
-       measured similarity that was never computed. #}
-    {% if p.via_link %}— no similarity was measured for this pair.{% else %}— {{ p.percent }}% alike.{% endif %}
-    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> and
-    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>.
+    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> vs
+    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a> —
+    <b>{% if p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
   <div class="row">

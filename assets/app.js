@@ -120,6 +120,22 @@
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
       if (ws && e.target.id === 'rail') ws.classList.remove('has-selection');
+      // A clicked result was never marked as the open one. `aria-selected` was
+      // set only by the arrow-key handler below, so the styling for an open
+      // card — the accent border, and dropping the snippet the pane beside it
+      // is already showing in full — applied to keyboard navigation and to
+      // nothing else: clicking left the whole list looking unselected while
+      // its own pane was on screen.
+      //
+      // Matched on the href rather than on the click, because the pane is also
+      // swapped by the Related and Seen-together links inside it, and those
+      // move the selection just as truly as a click in the rail does.
+      if (e.target.id === 'pane') {
+        var open = window.location.pathname;
+        document.querySelectorAll('.rail-item').forEach(function (el) {
+          el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
+        });
+      }
     });
   });
 

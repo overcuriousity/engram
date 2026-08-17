@@ -20,6 +20,12 @@
     {{ stats.hits }} hits · {{ stats.finds }} finds · {{ stats.gaps }} gaps ·
     {{ stats.discards }} discarded
   </p>
+  {% if asks.asked > 0 %}
+  <p class="muted mono">
+    {{ asks.judged }} of {{ asks.asked }} questions judged ·
+    {{ asks.right }} right · {{ asks.wrong }} wrong · {{ asks.nothing_here }} nothing here
+  </p>
+  {% endif %}
 </div>
 
 {% if !misses.is_empty() %}

@@ -155,8 +155,16 @@ async fn pair_submit(
         ));
     }
     let origin = request_origin(&headers).unwrap_or_default();
-    let (_, plaintext) =
-        crate::auth::tokens::mint(&st.core.store, "browser extension", &id.subject).await?;
+    // The browser that asked, recorded with the token: every extension token
+    // carries the same name, so this is the only thing telling one row from
+    // another on the settings page.
+    let (_, plaintext) = crate::auth::tokens::mint(
+        &st.core.store,
+        "browser extension",
+        &id.subject,
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    )
+    .await?;
 
     // The fragment, not the query: a fragment is never sent to a server and
     // does not land in a proxy log or in browsing history the way a query

@@ -362,18 +362,13 @@ impl VectorStore for MemoryVectors {
     async fn facets(&self, limit: usize) -> Result<Facets> {
         let r = self.points.read().unwrap();
         let mut categories: HashMap<&str, u64> = HashMap::new();
-        let mut tags: HashMap<&str, u64> = HashMap::new();
         for p in r.values() {
             if let Some(c) = &p.payload.category {
                 *categories.entry(c.as_str()).or_default() += 1;
             }
-            for t in &p.payload.tags {
-                *tags.entry(t.as_str()).or_default() += 1;
-            }
         }
         Ok(Facets {
             categories: ranked(categories, limit),
-            tags: ranked(tags, limit),
         })
     }
 

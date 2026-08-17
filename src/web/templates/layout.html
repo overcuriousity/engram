@@ -24,7 +24,9 @@
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
-  <div class="shell">
+  {# The reading measure is the default and most pages want it. A page whose
+     content is a table or a three-pane workspace says so by name. #}
+  <div class="{% block shell_class %}shell{% endblock %}">
     {% block nav %}
     <nav class="top">
       <a href="/ui/search" class="brand" aria-label="engram">

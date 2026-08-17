@@ -1575,7 +1575,7 @@ mod tests {
                 text: t.to_string(),
                 corpus_span: None,
                 title: Some(format!("t{i}")),
-                category: Some("note".into()),
+                category: Some("reference".into()),
                 tags: vec!["x".into()],
                 segment_idx: None,
                 caveats: vec![],

@@ -160,7 +160,7 @@ impl Synthesizer for FakeSynthesizer {
             .map(|(i, p)| ProposedArtifact {
                 text: p.to_string(),
                 title: Some(format!("chunk {i}")),
-                category: Some("note".into()),
+                category: Some("reference".into()),
                 tags: vec!["fake".into()],
                 corpus_lines: None,
                 caveats: vec![],
@@ -229,7 +229,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
         Ok(vec![ProposedArtifact {
             text: body,
             title: Some("paraphrased".into()),
-            category: Some("note".into()),
+            category: Some("reference".into()),
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
@@ -258,7 +258,7 @@ impl Synthesizer for GreedySynthesizer {
             out.push(ProposedArtifact {
                 text: line.to_string(),
                 title: Some("greedy".into()),
-                category: Some("note".into()),
+                category: Some("reference".into()),
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
@@ -297,7 +297,7 @@ impl Synthesizer for RecordingSynthesizer {
         Ok(vec![ProposedArtifact {
             text: input.core.lines().next().unwrap_or("empty").to_string(),
             title: Some("recorded".into()),
-            category: Some("note".into()),
+            category: Some("reference".into()),
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],

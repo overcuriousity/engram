@@ -67,6 +67,9 @@ struct JudgeTemplate {
     target: i64,
     progress_pct: i64,
     misses: Vec<crate::store::feedback::Miss>,
+    /// Questions asked and judged, beside the searches. Read from the same
+    /// database and moved by every verdict on the ask page.
+    asks: crate::store::asks::AskStats,
     card: Option<Card>,
     /// Always `None` here — the page is a fresh arrival, not the moment after a
     /// verdict. It exists because the card partial is shared with the fragment
@@ -220,6 +223,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         progress_pct,
         stats,
         misses,
+        asks: st.core.store.ask_stats().await?,
         card: next_pending_card(&st).await?,
         flash: None,
     })
@@ -643,6 +647,32 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    #[tokio::test]
+    async fn the_page_counts_the_questions_judged_beside_the_searches() {
+        let (app, cookie, core, _) = judge_app(2, &[]).await;
+        let ask = |q: &str| crate::store::asks::NewAsk {
+            question: q.into(),
+            scope: None,
+            filters: "{}".into(),
+            query_vec: vec![0.0; 4],
+            embed_model: "fake".into(),
+            answer: "a".into(),
+            abstained: false,
+            dropped: 0,
+            truncated: false,
+            citations: vec![],
+        };
+        let a = core.store.record_ask(ask("one")).await.unwrap();
+        core.store.record_ask(ask("two")).await.unwrap();
+        core.store
+            .judge_ask(&a, crate::store::asks::AskVerdict::Right)
+            .await
+            .unwrap();
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("1 of 2 questions judged"), "{body}");
+        assert!(body.contains("1 right"), "{body}");
     }
 
     #[tokio::test]

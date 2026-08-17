@@ -28,7 +28,15 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
 
 /// Mint a token. The plaintext is returned exactly once; only its argon2id
 /// hash is persisted, so a database read cannot recover working credentials.
-pub async fn mint(store: &Store, name: &str, subject: &str) -> Result<(ApiToken, String)> {
+/// `user_agent` is what asked for the token, as it announced itself. Recorded
+/// because the extension mints every one of its tokens under the same name, so
+/// two rows can otherwise be identical in everything a person can read.
+pub async fn mint(
+    store: &Store,
+    name: &str,
+    subject: &str,
+    user_agent: Option<&str>,
+) -> Result<(ApiToken, String)> {
     // OsRng from the rand_core that argon2 re-exports, avoiding a second rand
     // major version in the tree.
     let mut bytes = [0u8; 32];
@@ -39,7 +47,7 @@ pub async fn mint(store: &Store, name: &str, subject: &str) -> Result<(ApiToken,
     );
     let id = crate::store::new_id();
     let row = store
-        .insert_token(&id, name, &hash_secret(&plaintext)?, subject)
+        .insert_token(&id, name, &hash_secret(&plaintext)?, subject, user_agent)
         .await?;
     tracing::info!(token_id = %id, name, "api token minted");
     Ok((row, plaintext))
@@ -79,7 +87,7 @@ mod tests {
     #[tokio::test]
     async fn a_minted_token_verifies_once_and_is_never_retrievable() {
         let s = Store::memory().await.unwrap();
-        let (row, plaintext) = mint(&s, "laptop", "user-1").await.unwrap();
+        let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
 
         assert!(plaintext.starts_with(TOKEN_PREFIX));
         assert!(
@@ -106,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn a_wrong_token_is_unauthorized() {
         let s = Store::memory().await.unwrap();
-        mint(&s, "laptop", "user-1").await.unwrap();
+        mint(&s, "laptop", "user-1", None).await.unwrap();
         for bad in [
             "engram_wrongwrongwrongwrongwrongwrongwrongwrong",
             "garbage",
@@ -125,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn a_revoked_token_stops_working() {
         let s = Store::memory().await.unwrap();
-        let (row, plaintext) = mint(&s, "laptop", "user-1").await.unwrap();
+        let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
         revoke(&s, &row.id).await.unwrap();
         assert!(matches!(
             verify(&s, &plaintext).await,
@@ -136,8 +144,8 @@ mod tests {
     #[tokio::test]
     async fn two_tokens_are_distinct() {
         let s = Store::memory().await.unwrap();
-        let (_, a) = mint(&s, "one", "user-1").await.unwrap();
-        let (_, b) = mint(&s, "two", "user-1").await.unwrap();
+        let (_, a) = mint(&s, "one", "user-1", None).await.unwrap();
+        let (_, b) = mint(&s, "two", "user-1", None).await.unwrap();
         assert_ne!(a, b);
         assert_eq!(verify(&s, &a).await.unwrap().subject, "user-1");
         assert_eq!(verify(&s, &b).await.unwrap().subject, "user-1");
@@ -146,7 +154,7 @@ mod tests {
     #[tokio::test]
     async fn verification_records_last_use() {
         let s = Store::memory().await.unwrap();
-        let (row, plaintext) = mint(&s, "laptop", "user-1").await.unwrap();
+        let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
         assert!(row.last_used_at.is_none());
         verify(&s, &plaintext).await.unwrap();
         let after = s.list_tokens().await.unwrap();
@@ -157,8 +165,8 @@ mod tests {
     async fn a_token_belonging_to_another_subject_carries_that_subject() {
         // Identity must come from the stored row, never from the request.
         let s = Store::memory().await.unwrap();
-        let (_, a) = mint(&s, "one", "alice").await.unwrap();
-        let (_, b) = mint(&s, "two", "bob").await.unwrap();
+        let (_, a) = mint(&s, "one", "alice", None).await.unwrap();
+        let (_, b) = mint(&s, "two", "bob", None).await.unwrap();
         assert_eq!(verify(&s, &a).await.unwrap().subject, "alice");
         assert_eq!(verify(&s, &b).await.unwrap().subject, "bob");
     }
