@@ -637,6 +637,16 @@ impl Core {
     /// `ask` wants that, since a question is often answered by one document.
     /// The UI shows the timing faintly, so a sluggish box points at the
     /// embedder or the vector store without anyone opening a log.
+    /// The embedding of `q`, if a search just made it. `search_with` caches the
+    /// query vector under the whitespace-normalised query; a caller that ran a
+    /// search a moment ago and wants to store the vector it used reads it here
+    /// rather than paying for the embedding twice. `None` only if the cache
+    /// evicted it in between, which a caller must tolerate.
+    pub fn cached_query_vector(&self, q: &str) -> Option<Vec<f32>> {
+        let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.query_cache.lock().ok().and_then(|c| c.get(&key))
+    }
+
     pub async fn search_with(
         &self,
         query: &SearchQuery,

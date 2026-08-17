@@ -693,7 +693,9 @@ async fn ask(
     _id: Identity,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
-    Ok(Json(st.core.ask(&req).await?))
+    Ok(Json(
+        st.core.ask(&req, crate::store::feedback::Door::Api).await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]

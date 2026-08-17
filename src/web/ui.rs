@@ -552,6 +552,11 @@ struct AnswerTemplate {
     /// same reason: a cut-off answer is otherwise indistinguishable from a
     /// finished one.
     truncated: bool,
+    /// The answer said "not in the base"; badged so the operator sees what
+    /// the harness will count.
+    abstained: bool,
+    /// Set when the question was recorded; the verdict bar exists only then.
+    event_id: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -1568,17 +1573,20 @@ struct AskForm {
 
 async fn ask_submit(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
     let out = st
         .core
-        .ask(&crate::core::ask::AskRequest {
-            q: f.q,
-            limit: None,
-            tags: vec![],
-            category: None,
-        })
+        .ask(
+            &crate::core::ask::AskRequest {
+                q: f.q,
+                limit: None,
+                tags: vec![],
+                category: None,
+            },
+            crate::store::feedback::Door::Ui.by(id.subject),
+        )
         .await?;
     Ok(HtmlTemplate(AnswerTemplate {
         // The answer is model output too, so it goes through the same
@@ -1592,6 +1600,8 @@ async fn ask_submit(
             .collect(),
         dropped: out.dropped,
         truncated: out.truncated,
+        abstained: out.abstained,
+        event_id: out.event_id,
     })
     .into_response())
 }

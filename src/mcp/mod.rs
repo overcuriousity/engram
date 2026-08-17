@@ -152,12 +152,15 @@ impl PkdbTools {
     async fn ask(&self, Parameters(p): Parameters<AskParams>) -> String {
         match self
             .core
-            .ask(&crate::core::ask::AskRequest {
-                q: p.q,
-                limit: None,
-                tags: vec![],
-                category: None,
-            })
+            .ask(
+                &crate::core::ask::AskRequest {
+                    q: p.q,
+                    limit: None,
+                    tags: vec![],
+                    category: None,
+                },
+                crate::store::feedback::Door::Mcp,
+            )
             .await
         {
             Ok(a) => {
