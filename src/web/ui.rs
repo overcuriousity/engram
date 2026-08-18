@@ -1050,47 +1050,6 @@ fn coverage_final(status: &CorpusStatus) -> bool {
     )
 }
 
-/// The line ranges of `source` that no artifact carried.
-///
-/// Measured against exactly the shape `recompute_coverage` measures the
-/// percentage against — each segment's line range beside the text of every
-/// artifact made from it — because the warning that brings someone here and
-/// the ranges they find must be answering the same question.
-///
-/// Empty for a corpus with no segment rows: one predating per-segment windows
-/// has no ranges to attribute a loss to, and naming the whole document would
-/// offer a re-read of everything. Empty as well until the capture's coverage is
-/// final — see `coverage_final`.
-async fn uncovered_for(
-    st: &AppState,
-    source: &crate::store::corpora::Corpus,
-    chunks: &[crate::store::artifacts::Chunk],
-) -> Result<Vec<(i64, i64)>> {
-    if !coverage_final(&source.status) {
-        return Ok(Vec::new());
-    }
-    let segments = st.core.store.segments_for_corpus(&source.id).await?;
-    if segments.is_empty() {
-        return Ok(Vec::new());
-    }
-    let made: Vec<(i64, i64, String)> = segments
-        .iter()
-        .map(|w| {
-            let text = chunks
-                .iter()
-                .filter(|c| c.segment_idx == Some(w.idx))
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            (w.start_line, w.end_line, text)
-        })
-        .collect();
-    Ok(crate::infer::verify::uncovered_ranges(
-        &source.raw_text,
-        &made,
-    ))
-}
-
 #[derive(serde::Deserialize)]
 struct RereadForm {
     /// The band the button sits in. Both ends, because a passage nothing was

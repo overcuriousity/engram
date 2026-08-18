@@ -341,9 +341,10 @@ pub fn content_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> f64 
 
 /// Which non-empty lines survived, in order, as `(line number, covered)`.
 ///
-/// The single pass both the fraction and the ranges are computed from. Two
-/// passes could disagree about a line, and a warning that points at lines the
-/// percentage did not count against the document is worse than no warning.
+/// The pass behind `content_coverage`. It asks whether a line's *wording*
+/// survived the rewrite, which is a different question from whether any
+/// artifact claims the line — the corpus page asks that one, off the spans,
+/// and marks its answer in the source itself rather than as a number.
 fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, bool)> {
     let indexed: Vec<(i64, i64, std::collections::HashSet<String>)> = segments
         .iter()
@@ -372,107 +373,9 @@ fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, b
         .collect()
 }
 
-/// The line ranges no artifact carried, inclusive and 1-based.
-///
-/// The fraction says how much was lost; this says where, which is the half an
-/// operator can act on. Adjacent uncovered lines are merged into one range — a
-/// list of forty single-line ranges is a wall, and what was missed is a passage
-/// rather than a line. Blank lines are not in the pass at all, so a blank line
-/// between two lost lines does not split the range: the passage is what is
-/// being named.
-pub fn uncovered_ranges(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, i64)> {
-    let mut out: Vec<(i64, i64)> = Vec::new();
-    // Whether the line before this one was also lost. Consecutive line numbers
-    // cannot be the test: `line_coverage` has already dropped the blank lines,
-    // so the numbers jump across every paragraph break, and comparing them
-    // splits the range at exactly the places prose puts one.
-    let mut running = false;
-    for (n, ok) in line_coverage(raw_text, segments) {
-        if ok {
-            running = false;
-            continue;
-        }
-        match out.last_mut() {
-            Some(last) if running => last.1 = n,
-            _ => out.push((n, n)),
-        }
-        running = true;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_ranges_name_the_lines_no_artifact_carried() {
-        let raw = "alpha beta gamma\ndelta epsilon zeta\neta theta iota";
-        // One segment covering all three lines, whose artifacts reproduce only
-        // the first line's vocabulary.
-        let made = vec![(1, 3, "alpha beta gamma".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
-    }
-
-    #[test]
-    fn adjacent_uncovered_lines_become_one_range() {
-        let raw = "alpha beta\nomega sigma\ntau upsilon\nalpha beta";
-        let made = vec![(1, 4, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
-    }
-
-    #[test]
-    fn a_blank_line_between_two_lost_lines_does_not_split_the_range() {
-        // What was missed is a passage, and a paragraph break inside it is not
-        // a second loss. Prose is mostly blank-separated, so splitting there
-        // turns one range into the wall of single-line ranges the merge exists
-        // to prevent.
-        let raw = "alpha beta\n\nomega sigma\n\ntau upsilon";
-        let made = vec![(1, 5, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(3, 5)]);
-    }
-
-    #[test]
-    fn a_line_that_was_carried_does_split_the_range() {
-        // The other half of the same rule: a range is broken by something
-        // arriving, never by the shape of the source.
-        let raw = "alpha beta\nomega sigma\ntau upsilon";
-        let made = vec![(1, 3, "omega sigma".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(1, 1), (3, 3)]);
-    }
-
-    #[test]
-    fn a_line_outside_every_segment_is_uncovered() {
-        // Not reachable through the splitter, which tiles the document, nor
-        // through a window that failed, which keeps its row and so keeps its
-        // range. It is what the measure does when it is handed a partial
-        // account of the document — a corpus read before per-segment windows
-        // existed, whose ranges are supplied from somewhere else — and the
-        // answer has to be "lost", never "covered".
-        let raw = "alpha beta\nomega sigma";
-        let made = vec![(1, 1, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 2)]);
-    }
-
-    #[test]
-    fn the_ranges_and_the_fraction_agree_on_the_same_input() {
-        let raw = "alpha beta\nomega sigma\ntau upsilon";
-        let made = vec![(1, 3, "alpha beta".to_string())];
-        let missed: i64 = uncovered_ranges(raw, &made)
-            .iter()
-            .map(|(a, b)| b - a + 1)
-            .sum();
-        let total = raw.lines().filter(|l| !l.trim().is_empty()).count() as i64;
-        let from_ranges = (total - missed) as f64 / total as f64;
-        assert!((content_coverage(raw, &made) - from_ranges).abs() < 1e-9);
-    }
-
-    #[test]
-    fn a_fully_covered_source_has_no_ranges() {
-        let raw = "alpha beta\nomega sigma";
-        let made = vec![(1, 2, "alpha beta omega sigma".to_string())];
-        assert!(uncovered_ranges(raw, &made).is_empty());
-    }
 
     const WINDOW: &str = "\
 ### Writing the ISO
