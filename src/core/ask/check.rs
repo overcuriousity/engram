@@ -117,29 +117,36 @@ pub fn mark_unsupported(html: &str, literals: &[String]) -> String {
 ///
 /// `in_code` says whether the run sits inside a `<code>` or `<pre>` element,
 /// because the two callers want opposite things there and only the walker can
-/// tell them apart. A `bool` rather than a depth: `pulldown_cmark` and
-/// `ammonia` never nest one inside the other.
+/// tell them apart.
+///
+/// Counted rather than flagged, because these do nest: a fenced block is
+/// `<pre><code>…</code></pre>`, and a flag cleared at the inner `</code>` would
+/// call the rest of the block prose. Nothing sits between those two tags today,
+/// so the flag happened to be harmless — but that is a fact about the current
+/// renderer, not about the walker, and it is not one worth depending on.
 pub(crate) fn for_text_between_tags<'a>(
     html: &'a str,
     mut on_text: impl FnMut(&'a str, bool) -> std::borrow::Cow<'a, str>,
 ) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
-    let mut in_code = false;
+    let mut code_depth = 0usize;
     loop {
         let Some(open) = rest.find('<') else {
-            out.push_str(&on_text(rest, in_code));
+            out.push_str(&on_text(rest, code_depth > 0));
             return out;
         };
-        out.push_str(&on_text(&rest[..open], in_code));
+        out.push_str(&on_text(&rest[..open], code_depth > 0));
         match rest[open..].find('>') {
             Some(close) => {
                 let tag = &rest[open..open + close + 1];
                 out.push_str(tag);
                 if opens_code(tag) {
-                    in_code = true;
+                    code_depth += 1;
                 } else if closes_code(tag) {
-                    in_code = false;
+                    // Saturating, so markup with more closes than opens leaves
+                    // the walker outside code rather than underflowing.
+                    code_depth = code_depth.saturating_sub(1);
                 }
                 rest = &rest[open + close + 1..];
             }
@@ -194,6 +201,42 @@ fn mark_text(text: &str, needles: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A fenced block is `<pre><code>`, so the two do nest. A flag cleared at
+    /// the inner `</code>` would call whatever follows it prose, which is what
+    /// a citation linker would then happily link.
+    #[test]
+    fn text_between_a_closing_code_and_its_closing_pre_is_still_inside_code() {
+        let mut runs: Vec<(String, bool)> = Vec::new();
+        super::for_text_between_tags("<pre><code>a</code> b </pre>c", |t, in_code| {
+            if !t.is_empty() {
+                runs.push((t.to_string(), in_code));
+            }
+            std::borrow::Cow::Borrowed(t)
+        });
+        assert_eq!(
+            runs,
+            vec![
+                ("a".to_string(), true),
+                (" b ".to_string(), true),
+                ("c".to_string(), false),
+            ]
+        );
+    }
+
+    /// More closes than opens is markup this never produces, but underflowing
+    /// would panic in debug and wrap in release. Outside code is the safe read.
+    #[test]
+    fn an_unbalanced_close_leaves_the_walker_outside_code() {
+        let mut seen = None;
+        super::for_text_between_tags("</code>x", |t, in_code| {
+            if t == "x" {
+                seen = Some(in_code);
+            }
+            std::borrow::Cow::Borrowed(t)
+        });
+        assert_eq!(seen, Some(false));
+    }
+
     use super::*;
 
     /// The fidelity thesis extended to generation: an answer cannot carry a

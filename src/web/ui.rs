@@ -5507,6 +5507,13 @@ mod tests {
         let seen = read_until(res, "event: token").await;
         assert!(seen.contains("event: retrieved"), "{seen}");
         assert!(seen.contains("event: citations"), "{seen}");
+        // Without this the test passes when the answer *failed*: `read_until`
+        // also stops at end of stream, and an ask that errored after its
+        // excerpts records nothing either — for the wrong reason.
+        assert!(
+            seen.contains("event: token"),
+            "the answer never started: {seen}"
+        );
         assert!(
             !seen.contains("event: done"),
             "the reader has to leave before done for this to be about anything: {seen}"
@@ -5541,13 +5548,19 @@ mod tests {
     /// the map, and no round trip to a stream to find out.
     #[tokio::test]
     async fn an_empty_question_is_refused_without_being_parked() {
-        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let st = ask_state_over(core).await;
+        let (app, cookie) = app_over(&st).await;
         let res = app
-            .clone()
             .oneshot(form("/ui/ask", &cookie, "q=+++"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            st.ask_handoff.lock().unwrap().is_empty(),
+            "a question nobody can answer took a slot in the map"
+        );
     }
 
     /// Parking is the only thing that grows the map, so it is where the sweep
@@ -5602,8 +5615,12 @@ mod tests {
     }
 
     async fn ask_state() -> AppState {
+        ask_state_over(crate::core::test_support::test_core().await).await
+    }
+
+    async fn ask_state_over(core: crate::core::Core) -> AppState {
         AppState {
-            core: crate::core::test_support::test_core().await,
+            core,
             auth: std::sync::Arc::new(crate::web::state::AuthContext {
                 mode: crate::config::AuthMode::Local,
                 local: None,
@@ -5613,6 +5630,22 @@ mod tests {
             }),
             ask_handoff: Default::default(),
         }
+    }
+
+    /// A router and a session over a state the caller still holds, so a test
+    /// can look at the same handoff map the routes write to. `app_with_cookie`
+    /// builds its own state and cannot be asked what is in it.
+    async fn app_over(st: &AppState) -> (axum::Router, String) {
+        let cid = crate::store::new_id();
+        st.core
+            .store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        (
+            crate::web::router(st.clone()),
+            format!("engram_session={cid}"),
+        )
     }
 
     /// The model cites more excerpts than it was shown often enough that a link
