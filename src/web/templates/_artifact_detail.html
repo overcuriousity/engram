@@ -123,7 +123,17 @@
     <div>
       <div class="pane-label">Artifact</div>
       <div class="card">
-        <div class="card-head"><span class="card-title">{{ d.title }}</span></div>
+        <div class="card-head">
+          <span class="card-title">{{ d.title }}</span>
+          <span class="spacer"></span>
+          {# The corpus page could edit an artifact and this one could not, on
+             the screen whose whole subject is one artifact. Same box, same
+             route; what differs is which shape comes back. #}
+          <button class="btn btn-ghost btn-sm" type="button"
+                  onclick="var f=document.getElementById('edit-{{ d.id }}');
+                           f.style.display='block';this.style.display='none';
+                           f.querySelector('textarea').focus()">edit</button>
+        </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
@@ -140,6 +150,25 @@
              one artifact and nothing on the rest. #}
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
         </div>
+        {# `view=detail`: the same PUT answers the corpus page with a card and
+           this pane with a pane. Without it the save would swap this whole
+           screen for a card and lose the source, the lineage and the
+           neighbours. `terms` rides along so the highlight survives the save. #}
+        <form id="edit-{{ d.id }}" style="display:none;margin-top:0.75rem"
+              hx-put="/ui/artifacts/{{ d.id }}"
+              hx-target="closest [data-terms]" hx-swap="outerHTML">
+          <input type="hidden" name="view" value="detail">
+          <input type="hidden" name="terms" value="{{ d.terms }}">
+          <textarea class="textarea" name="text" style="min-height:12rem">{{ d.text }}</textarea>
+          <div class="row" style="margin-top:0.5rem">
+            <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
+            <button class="btn btn-ghost btn-sm" type="button"
+                    onclick="var f=this.closest('form');f.style.display='none';
+                             f.parentElement.querySelector('.card-head button').style.display=''">
+              cancel
+            </button>
+          </div>
+        </form>
       </div>
 
       {% if !d.related.is_empty() %}
@@ -226,36 +255,14 @@
           {% endfor %}
         </table>
       </div>
-      {% else %}
-      <div class="pane-label">
-        {% if d.sources.is_empty() %}
-        Written from artifacts that are gone
-        {% else %}
-        Written from {{ d.sources.len() }} artifacts
-        {% endif %}
-      </div>
-      <div class="raw">
-        {% if d.sources.is_empty() %}
-        <p class="muted">
-          Every artifact this was written from has since been deleted. Its
-          content is still in the text above; what is gone is the record of
-          where that content came from.
-        </p>
-        {% else if d.orphaned_source %}
-        <p class="muted">
-          One of the artifacts this was written from has since been deleted. Its
-          content is still in the text above; only the link to it is gone.
-        </p>
-        {% endif %}
-        {% for src in d.sources %}
-        <p>
-          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
-          {% if !src.corpus_id.is_empty() %}
-          · <a class="muted" href="/ui/corpora/{{ src.corpus_id }}">source document</a>
-          {% endif %}
-        </p>
-        {% endfor %}
-      </div>
+      {% endif %}
+
+      {# A merge always shows its lineage, empty or not — the empty case is the
+         orphan notice, and it matters most exactly there. A captured artifact
+         shows one only when it has replaced something: its own lineage is the
+         document, which is the table above. #}
+      {% if d.merged || !d.lineage.is_empty() %}
+      {% include "_lineage.html" %}
       {% endif %}
     </div>
   </div>

@@ -119,10 +119,15 @@ pub struct ArtifactDetail {
     /// `None` for a merged artifact, which belongs to no corpus. The pane shows
     /// what it was made of instead of corpus lines — see `build_artifact_detail`.
     pub corpus_id: Option<String>,
-    /// What a merged artifact was written from. Empty for a captured one — and
-    /// also for a merged one that has lost every source to a delete, which is
-    /// why `merged` and not this is what the template branches on.
-    pub sources: Vec<SourceRow>,
+    /// The artifact's own text, for the edit box. `html` is what is read;
+    /// this is what is edited, and rendering one back into the other is not
+    /// something markdown round-trips.
+    pub text: String,
+    /// How this artifact came to exist: what it was written from, generation
+    /// by generation, and what it replaced. Empty for a captured artifact that
+    /// has replaced nothing — which is most of them, and which is why the
+    /// template asks `is_empty` rather than `merged` before rendering it.
+    pub lineage: crate::web::lineage_view::Lineage,
     /// Which of the two panes to render. A merged artifact belongs to no corpus
     /// and has no span, so the source pane has no document to link and no lines
     /// to list; it shows what the artifact was written from instead.
@@ -1453,6 +1458,16 @@ fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
 #[derive(serde::Deserialize)]
 struct ArtifactEditForm {
     text: String,
+    /// Which shape to answer with. Two screens edit an artifact and they are
+    /// not the same size: the corpus page swaps one card in a list, the detail
+    /// pane swaps the whole pane. Answering both with a card replaced the pane
+    /// — source, lineage and neighbours included — with a list row.
+    #[serde(default)]
+    view: String,
+    /// The search terms the pane was opened with, so the highlight survives a
+    /// save. Empty everywhere else.
+    #[serde(default)]
+    terms: String,
 }
 
 async fn put_artifact(
@@ -1470,6 +1485,10 @@ async fn put_artifact(
         .store
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
+    if f.view == "detail" {
+        let d = build_artifact_detail(&st.core, &cid, &f.terms).await?;
+        return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
+    }
     let c = st.core.store.get_artifact(&cid).await?;
     Ok(HtmlTemplate(ArtifactFragment {
         c: artifact_view(&c),
@@ -1545,7 +1564,7 @@ async fn reprocess_ui(
 
 /// A title is what makes two near-identical artifacts tellable apart at a
 /// glance; falling back to the opening of the body beats an id.
-fn title_of(c: &crate::store::artifacts::Chunk) -> String {
+pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
     c.title
         .clone()
         .unwrap_or_else(|| c.text.chars().take(60).collect())
@@ -2448,23 +2467,15 @@ pub(crate) async fn build_artifact_detail(
         Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
-    // Only a merged artifact has these. The template branches on `merged`, not
-    // on this list, because a merge can lose every source to a delete and still
-    // be a merge.
-    let mut sources = Vec::new();
-    if c.provenance == crate::store::artifacts::Provenance::Merged {
-        let roots = core
-            .store
-            .roots_of(std::slice::from_ref(&c.id))
-            .await
-            .unwrap_or_default();
-        sources = source_rows(
-            &core.store,
-            &c.id,
-            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
-        )
-        .await;
-    }
+    // A missing lineage is not a missing pane, for the same reason a missing
+    // neighbour list is not: it is a layer over the artifact, and the artifact
+    // beside its source is what the page is for.
+    let lineage = crate::web::lineage_view::build(&core.store, artifact_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(artifact_id, error = %e, "no lineage for this pane");
+            Default::default()
+        });
     // A missing neighbour list is not a missing pane. The vector store may be
     // down, or this artifact may simply not be embedded yet, and neither is a
     // reason to refuse to show the artifact beside its source.
@@ -2567,9 +2578,11 @@ pub(crate) async fn build_artifact_detail(
         seen_together,
         orphaned_source,
         source_at_lines,
+        lineage,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
         html: markdown::render(&c.text),
+        text: c.text,
         category: c.category,
         tags: c.tags,
         flags: c.flags,
@@ -2578,7 +2591,6 @@ pub(crate) async fn build_artifact_detail(
         status: c.status,
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
-        sources,
         merged: c.provenance == crate::store::artifacts::Provenance::Merged,
         corpus_id: c.corpus_id,
         // A merged artifact has no corpus and so cannot have a restored one.
@@ -2800,13 +2812,18 @@ mod tests {
             d.slice_lines.is_empty(),
             "a merged artifact rendered lines from a document it did not come from"
         );
-        assert_eq!(d.sources.len(), 2);
-        let listed: Vec<&str> = d.sources.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(d.lineage.leaves(), 2);
+        let listed: Vec<&str> = d.lineage.roots.iter().map(|s| s.id.as_str()).collect();
         for id in &ids {
             assert!(listed.contains(&id.as_str()), "source {id} is not listed");
         }
         // And each source still points at the document it was captured from.
-        assert!(d.sources.iter().all(|s| !s.corpus_id.is_empty()));
+        assert!(
+            d.lineage
+                .roots
+                .iter()
+                .all(|s| s.source_href.starts_with("/ui/corpora/"))
+        );
         assert!(!d.orphaned_source);
     }
 
@@ -2820,7 +2837,7 @@ mod tests {
 
         let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
 
-        assert!(d.sources.is_empty());
+        assert!(d.lineage.is_empty());
         assert!(!d.merged);
         assert!(d.corpus_id.is_some());
     }
@@ -2857,7 +2874,10 @@ mod tests {
 
         let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
 
-        assert!(d.sources.is_empty(), "the fixture did not lose the sources");
+        assert!(
+            d.lineage.roots.is_empty(),
+            "the fixture did not lose the sources"
+        );
         assert!(d.merged, "a merge was rendered as a captured artifact");
         assert!(
             d.source_at_lines.is_empty() && d.slice_lines.is_empty(),
@@ -2994,6 +3014,17 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
         body_of(res).await
+    }
+
+    /// The same, for the one route that takes a `PUT`: editing an artifact.
+    fn put_form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .method("PUT")
+            .header("cookie", cookie)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(body.to_string()))
+            .unwrap()
     }
 
     fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
@@ -3438,6 +3469,152 @@ mod tests {
             !missing.contains("rail-item"),
             "a category no artifact carries must return no results"
         );
+    }
+
+    /// One merge written from an earlier merge and one fresh capture. A flat
+    /// list of roots reads as three equal siblings; the generation between them
+    /// is the whole reason the tree exists.
+    #[tokio::test]
+    async fn the_pane_draws_the_generations_a_merge_came_through() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = crate::jobs::consolidate::tests::seed_titled(
+            &core,
+            &[
+                ("first capture", "a text", [1.0, 0.0]),
+                ("second capture", "b text", [0.93, 0.37]),
+                ("third capture", "c text", [0.9, 0.4]),
+            ],
+        )
+        .await;
+        let draft = |t: &str| crate::infer::prompt::MergedDraft {
+            title: Some(t.into()),
+            text: format!("{t} text"),
+            category: None,
+            tags: vec![],
+            caveats: vec![],
+        };
+        let m1 = crate::jobs::merge::write(&core, &draft("first pass"), &ids[0..2])
+            .await
+            .unwrap();
+        let m2 = crate::jobs::merge::write(
+            &core,
+            &draft("second pass"),
+            &[m1.id.clone(), ids[2].clone()],
+        )
+        .await
+        .unwrap();
+
+        // What `merge::finish` does once the merge is indexed: the sources it
+        // was written from are hidden behind it. Set here because this test is
+        // about how the pane draws that, not about the write path.
+        for hidden in [&ids[2], &m1.id] {
+            core.store
+                .set_superseded_by(hidden, Some(&m2.id))
+                .await
+                .unwrap();
+        }
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{}", m2.id)).await;
+
+        assert!(page.contains(r#"class="lineage""#), "{page}");
+        assert!(
+            page.contains("first pass"),
+            "the earlier merge is a node: {page}"
+        );
+        for t in ["first capture", "second capture", "third capture"] {
+            assert!(page.contains(t), "{t} is missing from the lineage: {page}");
+        }
+        assert!(
+            page.contains("--d:1"),
+            "the earlier merge's own sources are drawn under it: {page}"
+        );
+        assert!(
+            page.contains("Written from 3 artifacts"),
+            "the count is of captures, not of the route they took: {page}"
+        );
+        // The roots this merge superseded say so where they sit.
+        assert!(page.contains("replaced by this"), "{page}");
+    }
+
+    /// A captured artifact was written from a document, not from artifacts. Its
+    /// column is the document, and a tree there would be an empty claim.
+    #[tokio::test]
+    async fn the_pane_of_a_capture_still_shows_its_lines() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
+
+        assert!(page.contains("Source"), "{page}");
+        assert!(!page.contains(r#"class="lineage""#), "{page}");
+    }
+
+    /// The corpus page could edit an artifact and the pane could not, on the
+    /// screen whose whole subject is one artifact.
+    #[tokio::test]
+    async fn the_pane_edits_the_artifact_and_comes_back_a_pane() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
+        assert!(page.contains(&format!(r#"id="edit-{c}""#)), "{page}");
+
+        let res = app
+            .clone()
+            .oneshot(put_form(
+                &format!("/ui/artifacts/{c}"),
+                &cookie,
+                "view=detail&terms=&text=rewritten+by+hand",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(
+            body.contains("data-terms"),
+            "the pane was replaced by a list card: {body}"
+        );
+        assert!(body.contains("rewritten by hand"), "{body}");
+        assert_eq!(
+            core.store.get_artifact(&c).await.unwrap().embed_state,
+            crate::store::artifacts::EmbedState::Pending,
+            "the stored vector describes wording that no longer exists"
+        );
+    }
+
+    /// And the corpus page, which swaps one card in a list, still gets a card.
+    #[tokio::test]
+    async fn the_corpus_card_edit_still_answers_with_a_card() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+
+        let res = app
+            .clone()
+            .oneshot(put_form(
+                &format!("/ui/artifacts/{c}"),
+                &cookie,
+                "text=edited+from+the+corpus+page",
+            ))
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(body.contains(&format!(r#"id="artifact-{c}""#)), "{body}");
+        assert!(!body.contains("data-terms"), "{body}");
     }
 
     #[tokio::test]

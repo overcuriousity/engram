@@ -4,6 +4,7 @@ pub mod auth_routes;
 pub mod corpus_view;
 pub mod extension;
 pub mod judge;
+pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
 pub mod state;

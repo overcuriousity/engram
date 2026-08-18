@@ -1,0 +1,105 @@
+{# How this artifact came to exist.
+
+   A flat list of the captured artifacts under a merge says what it is made of
+   and cannot say how it got there: a merge written from two earlier merges and
+   one fresh capture read as three equal siblings. The indentation is the
+   generation, and `artifact_sources.via_id` — the column the schema marks
+   "rendering only" — is what records it.
+
+   What it does not show is how the wording developed: nothing keeps artifact
+   revisions, so this is assembly, not authorship. #}
+{% if d.merged %}
+<div class="pane-label">
+  {% if d.lineage.roots.is_empty() %}
+  Written from artifacts that are gone
+  {% else %}
+  Written from {{ d.lineage.leaves() }} artifacts
+  {% endif %}
+</div>
+{% endif %}
+
+{% if d.merged && d.lineage.roots.is_empty() %}
+<p class="muted">
+  Every artifact this was written from has since been deleted. Its content is
+  still in the text above; what is gone is the record of where that content
+  came from.
+</p>
+{% else if d.merged && d.orphaned_source %}
+<p class="muted">
+  One of the artifacts this was written from has since been deleted. Its
+  content is still in the text above; only the link to it is gone.
+</p>
+{% endif %}
+
+{% if !d.lineage.roots.is_empty() %}
+<ul class="lineage">
+  {% for f in d.lineage.flat_roots() %}
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+    {% if f.depth > 0 %}<span class="lin-tick" aria-hidden="true">{% if f.last %}└{% else %}├{% endif %}─</span>{% endif %}
+    <div class="lin-body">
+      <div class="lin-head">
+        {% if f.n.missing %}
+        <span class="lin-title muted">{{ f.n.title }}</span>
+        {% else %}
+        {# Swaps the pane for that artifact's, the same way Related does: the
+           partial is also the whole standalone page, where naming `#pane`
+           would leave the link dead. #}
+        <a class="lin-title" href="/ui/artifacts/{{ f.n.id }}"
+           hx-get="/ui/artifacts/{{ f.n.id }}"
+           hx-target="closest [data-terms]" hx-swap="outerHTML"
+           hx-push-url="true">{{ f.n.title }}</a>
+        {% endif %}
+        <span class="lin-kind">{{ f.n.kind }}</span>
+        {% if f.n.replaced %}<span class="lin-kind">replaced by this</span>{% endif %}
+      </div>
+      <div class="lin-sub">
+        {% if !f.n.when.is_empty() %}{{ f.n.when }}{% endif %}
+        {% if !f.n.source_label.is_empty() %}
+        · <a class="muted" href="{{ f.n.source_href }}">{{ f.n.source_label }}</a>
+        {% endif %}
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if !d.lineage.also_replaced.is_empty() %}
+{# Apart from the tree on purpose. The dedupe sweep can supersede a near
+   duplicate without merging anything, and "this replaced it" is a weaker claim
+   than "this was written from it" — under one heading the page would say the
+   winner's text carries the loser's, which in this case nothing checked. #}
+<div class="pane-label">Replaced without being merged</div>
+<ul class="lineage">
+  {% for f in d.lineage.flat_replaced() %}
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+    <div class="lin-body">
+      <div class="lin-head">
+        {% if f.n.missing %}
+        <span class="lin-title muted">{{ f.n.title }}</span>
+        {% else %}
+        <a class="lin-title" href="/ui/artifacts/{{ f.n.id }}"
+           hx-get="/ui/artifacts/{{ f.n.id }}"
+           hx-target="closest [data-terms]" hx-swap="outerHTML"
+           hx-push-url="true">{{ f.n.title }}</a>
+        {% endif %}
+        <span class="lin-kind">{{ f.n.kind }}</span>
+      </div>
+      <div class="lin-sub">
+        {% if !f.n.when.is_empty() %}{{ f.n.when }}{% endif %}
+        {% if !f.n.source_label.is_empty() %}
+        · <a class="muted" href="{{ f.n.source_href }}">{{ f.n.source_label }}</a>
+        {% endif %}
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if d.lineage.truncated %}
+<p class="muted">
+  This history is deeper or wider than the page will draw; what is shown is the
+  most recent part of it.
+</p>
+{% endif %}
