@@ -14,6 +14,37 @@ pub(super) fn unsupported_literals(answer: &str, excerpts: &[String]) -> Vec<Str
         return Vec::new();
     }
     crate::infer::verify::missing_literals(answer, &[], &excerpts.join("\n\n"))
+        .into_iter()
+        .filter(|lit| !looks_like_a_list_item(lit))
+        .collect()
+}
+
+/// A candidate that is a bullet of prose rather than a literal.
+///
+/// `extract_literals` treats a line indented four spaces as code, which is
+/// right for the reference documentation synthesis reads and wrong for an
+/// answer: a bullet list nested four spaces deep is ordinary markdown, and
+/// every nested bullet then arrives here as an invented literal. One answer
+/// with a nested list produced three, each marking a whole sentence of prose.
+///
+/// The badge's whole value is being believed. A guard that fires on formatting
+/// teaches the reader to dismiss it, and the fabricated command this exists for
+/// gets dismissed with the noise.
+///
+/// The rule lives here rather than in `extract_literals`, which synthesis
+/// shares and where the indented-code rule is load-bearing.
+///
+/// The cost, accepted deliberately: a fabricated diff line — `- removed this` —
+/// is now missed, because a diff and a bullet share a prefix. Diffs in answers
+/// are rare and four-space nested bullets are not. A flag is unaffected, since
+/// `--dry-run` has no space after the dashes.
+fn looks_like_a_list_item(lit: &str) -> bool {
+    let t = lit.trim_start();
+    if let Some(rest) = t.strip_prefix(['-', '*', '+']) {
+        return rest.starts_with(' ');
+    }
+    let digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+    digits.len() < t.len() && digits.starts_with(". ")
 }
 
 /// A literal escaped the way the sanitizer writes text, so it can be looked for
@@ -154,6 +185,55 @@ mod tests {
     #[test]
     fn an_answer_with_no_excerpts_at_all_is_not_checked() {
         assert!(unsupported_literals("Run `rm -rf /`.", &[]).is_empty());
+    }
+
+    /// A bullet list nested four spaces deep is markdown, not code, however
+    /// `extract_literals` reads it. Flagging three sentences of ordinary prose
+    /// on one answer is what teaches a reader to ignore the badge.
+    #[test]
+    fn a_bullet_list_nested_four_spaces_deep_is_formatting_not_invention() {
+        let excerpts =
+            vec!["The cliff drops weak excerpts; the budget drops what does not fit.".to_string()];
+        let answer = "Two knobs:\n\n- retrieval\n    - the cliff drops weak excerpts\n    \
+                      - the budget drops what does not fit\n";
+        assert!(
+            unsupported_literals(answer, &excerpts).is_empty(),
+            "{:?}",
+            unsupported_literals(answer, &excerpts)
+        );
+    }
+
+    /// A numbered list is the same shape with a different marker.
+    #[test]
+    fn a_numbered_list_nested_four_spaces_deep_is_formatting_too() {
+        let excerpts = vec!["Stop the service, then start it again.".to_string()];
+        let answer = "Order:\n\n1. first\n    1. stop the service\n    2. start it again\n";
+        assert!(unsupported_literals(answer, &excerpts).is_empty());
+    }
+
+    /// The case the list rule must not break: a flag has no space after its
+    /// dashes, and an invented one in prose is exactly what is being looked
+    /// for.
+    #[test]
+    fn an_invented_flag_is_still_caught_beside_the_list_rule() {
+        let excerpts = vec!["Run `engram reindex` to rebuild.".to_string()];
+        let answer = "Run it with --dry-run first.";
+        assert_eq!(
+            unsupported_literals(answer, &excerpts),
+            vec!["--dry-run".to_string()]
+        );
+    }
+
+    /// And the other half: an invented command indented as code is still
+    /// caught. The rule drops bullets, not indented lines.
+    #[test]
+    fn an_invented_command_in_an_indented_block_survives_the_list_rule() {
+        let excerpts = vec!["Unmount the device first.".to_string()];
+        let answer = "Do this:\n\n    wipefs --all /dev/sdX\n";
+        assert_eq!(
+            unsupported_literals(answer, &excerpts),
+            vec!["wipefs --all /dev/sdX".to_string()]
+        );
     }
 
     /// Marking happens inside code fences too. A fabricated command is exactly
