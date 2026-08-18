@@ -31,29 +31,59 @@ pub struct AppState {
     /// an `ask_events` row is a mutating GET — the kind browser history and
     /// prefetchers replay. An opaque one-shot id costs no schema and cannot be
     /// replayed. Entries are removed on consumption and swept on insert.
-    pub ask_handoff: Arc<Mutex<HashMap<String, (crate::core::ask::AskRequest, Instant)>>>,
+    ///
+    /// Each entry remembers who parked it. The id is unguessable, but a URL is
+    /// the kind of thing that ends up in a log or another tab, and a question
+    /// belongs to the person who asked it: it is answered — and recorded — for
+    /// that subject alone.
+    pub ask_handoff: Arc<Mutex<HashMap<String, ParkedAsk>>>,
+}
+
+/// One question waiting for its stream: what was asked, by whom, and when.
+pub struct ParkedAsk {
+    pub req: crate::core::ask::AskRequest,
+    pub subject: String,
+    pub at: Instant,
 }
 
 impl AppState {
     /// Swept on every park rather than on a timer, because the map only grows
     /// when someone parks: a page that was never streamed leaves one entry,
     /// and the next ask is what collects it.
-    pub fn ask_handoff_park(&self, req: crate::core::ask::AskRequest) -> String {
+    pub fn ask_handoff_park(&self, req: crate::core::ask::AskRequest, subject: &str) -> String {
         let id = crate::store::new_id();
         if let Ok(mut m) = self.ask_handoff.lock() {
             let now = Instant::now();
-            m.retain(|_, (_, at)| now.duration_since(*at) < ASK_HANDOFF_TTL);
-            m.insert(id.clone(), (req, now));
+            m.retain(|_, p| now.duration_since(p.at) < ASK_HANDOFF_TTL);
+            m.insert(
+                id.clone(),
+                ParkedAsk {
+                    req,
+                    subject: subject.to_string(),
+                    at: now,
+                },
+            );
         }
         id
     }
 
     /// One shot: the entry is removed whether or not the stream succeeds, so a
     /// reload of the streaming URL cannot spend a second model call.
-    pub fn ask_handoff_take(&self, id: &str) -> Option<crate::core::ask::AskRequest> {
+    ///
+    /// Only for the subject that parked it. Anyone else gets the same answer an
+    /// unknown id gets, and the entry stays where it is: the asker's own stream
+    /// may still be on its way, and a stranger's guess must not spend it.
+    pub fn ask_handoff_take(
+        &self,
+        id: &str,
+        subject: &str,
+    ) -> Option<crate::core::ask::AskRequest> {
         let mut m = self.ask_handoff.lock().ok()?;
-        let (req, at) = m.remove(id)?;
-        (Instant::now().duration_since(at) < ASK_HANDOFF_TTL).then_some(req)
+        if m.get(id).is_some_and(|p| p.subject != subject) {
+            return None;
+        }
+        let p = m.remove(id)?;
+        (Instant::now().duration_since(p.at) < ASK_HANDOFF_TTL).then_some(p.req)
     }
 }
 

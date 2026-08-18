@@ -2030,7 +2030,7 @@ struct AskForm {
 /// guard, and it is spent on first use.
 async fn ask_submit(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
     // Refused before anything is parked, so an empty box costs no entry in the
@@ -2038,12 +2038,15 @@ async fn ask_submit(
     if f.q.trim().is_empty() {
         return Err(Error::Validation("question is empty".into()));
     }
-    let handoff = st.ask_handoff_park(crate::core::ask::AskRequest {
-        q: f.q,
-        limit: None,
-        tags: vec![],
-        category: None,
-    });
+    let handoff = st.ask_handoff_park(
+        crate::core::ask::AskRequest {
+            q: f.q,
+            limit: None,
+            tags: vec![],
+            category: None,
+        },
+        &id.subject,
+    );
     Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
 }
 
@@ -2063,9 +2066,13 @@ async fn ask_stream(
 ) -> Result<Response> {
     use tokio_stream::StreamExt as _;
 
-    // Unknown, already spent, or expired — all one answer. Never a fresh ask
-    // against an empty question, which would spend a model call on a replay.
-    let req = st.ask_handoff_take(&handoff).ok_or(Error::NotFound)?;
+    // Unknown, already spent, expired, or somebody else's — all one answer.
+    // Never a fresh ask against an empty question, which would spend a model
+    // call on a replay; never another subject's question, which would be
+    // answered to the wrong person and recorded under their name.
+    let req = st
+        .ask_handoff_take(&handoff, &id.subject)
+        .ok_or(Error::NotFound)?;
     let core = st.core.clone();
     let origin = crate::store::feedback::Door::Ui.by(id.subject);
     let events = async_stream::stream! {
@@ -6070,12 +6077,12 @@ mod tests {
     #[tokio::test]
     async fn parking_a_question_sweeps_out_one_that_expired() {
         let st = ask_state().await;
-        let stale = st.ask_handoff_park(a_question());
+        let stale = st.ask_handoff_park(a_question(), "me");
         age_out(&st, &stale);
         assert_eq!(st.ask_handoff.lock().unwrap().len(), 1);
 
         // The next ask is what collects it.
-        let fresh = st.ask_handoff_park(a_question());
+        let fresh = st.ask_handoff_park(a_question(), "me");
         let held = st.ask_handoff.lock().unwrap();
         assert_eq!(held.len(), 1, "the expired entry survived the sweep");
         assert!(held.contains_key(&fresh), "the sweep took the live entry");
@@ -6086,15 +6093,33 @@ mod tests {
     #[tokio::test]
     async fn an_expired_handoff_id_is_refused_and_taken_out_of_the_map() {
         let st = ask_state().await;
-        let id = st.ask_handoff_park(a_question());
+        let id = st.ask_handoff_park(a_question(), "me");
         age_out(&st, &id);
         assert!(
-            st.ask_handoff_take(&id).is_none(),
+            st.ask_handoff_take(&id, "me").is_none(),
             "an expired id was honoured"
         );
         assert!(
             st.ask_handoff.lock().unwrap().is_empty(),
             "a refused id must not stay in the map"
+        );
+    }
+
+    /// A question is answered to the person who asked it. The id is not
+    /// guessable, but a URL travels — into a log, another tab, a referer — and
+    /// a second subject who arrives with it within the window must get the
+    /// same nothing an unknown id gets, while the asker's own stream still can.
+    #[tokio::test]
+    async fn a_parked_question_is_spent_only_by_the_subject_who_parked_it() {
+        let st = ask_state().await;
+        let id = st.ask_handoff_park(a_question(), "alice");
+        assert!(
+            st.ask_handoff_take(&id, "bob").is_none(),
+            "somebody else's question was handed over"
+        );
+        assert!(
+            st.ask_handoff_take(&id, "alice").is_some(),
+            "a stranger's attempt spent the asker's own stream"
         );
     }
 
@@ -6111,8 +6136,8 @@ mod tests {
     /// sleeping a minute: the clock is the thing under test, not the wait.
     fn age_out(st: &AppState, id: &str) {
         let mut m = st.ask_handoff.lock().unwrap();
-        let (_, at) = m.get_mut(id).expect("parked");
-        *at -= crate::web::state::ASK_HANDOFF_TTL * 2;
+        let p = m.get_mut(id).expect("parked");
+        p.at -= crate::web::state::ASK_HANDOFF_TTL * 2;
     }
 
     async fn ask_state() -> AppState {
