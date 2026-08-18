@@ -287,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
             pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
+        ask_handoff: Default::default(),
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

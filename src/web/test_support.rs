@@ -17,6 +17,7 @@ pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Ro
             pending: crate::auth::oidc::PendingStore::new(),
             secure_cookies: false,
         }),
+        ask_handoff: Default::default(),
     })
 }
 

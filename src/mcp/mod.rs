@@ -236,6 +236,7 @@ mod tests {
                 pending: crate::auth::oidc::PendingStore::new(),
                 secure_cookies: false,
             }),
+            ask_handoff: Default::default(),
         };
         let res = crate::web::router(state)
             .oneshot(
