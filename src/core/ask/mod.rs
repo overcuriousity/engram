@@ -1,5 +1,6 @@
 pub mod check;
 mod retrieve;
+pub mod stream;
 
 use super::Core;
 use super::search::{SearchQuery, SearchResult};
@@ -8,6 +9,8 @@ use crate::infer::budget::pack_by_budget;
 use crate::infer::prompt::{ABSTAIN_PREFIX, ASK_SYSTEM, abstained, ask_excerpt, ask_prompt};
 use crate::store::asks::{NewAsk, NewAskCitation};
 use crate::store::feedback::{Door, Origin};
+use stream::AskEvent;
+use tokio_stream::StreamExt;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AskRequest {
@@ -51,220 +54,306 @@ pub struct AskResponse {
 }
 
 impl Core {
+    /// Ask, and wait for the whole answer.
+    ///
+    /// A collector over `ask_events`, not a second implementation: `/api/v1/ask`
+    /// and the MCP tool cannot stream and are not asked to, and there must be
+    /// exactly one account of what asking means.
     pub async fn ask(&self, req: &AskRequest, origin: impl Into<Origin>) -> Result<AskResponse> {
+        let s = self.ask_events(req, origin);
+        tokio::pin!(s);
+        let mut done = None;
+        while let Some(ev) = s.next().await {
+            if let AskEvent::Done(d) = ev? {
+                done = Some(*d);
+            }
+        }
+        done.ok_or_else(|| Error::Internal("ask produced no answer".into()))
+    }
+
+    /// One ask, as it happens: what was retrieved, what the model will be
+    /// shown, and the answer as it is written.
+    ///
+    /// This is the implementation, and `ask` is a collector over it, so a
+    /// change to what asking means reaches both doors or neither.
+    ///
+    /// `'static` on purpose: an SSE response outlives the handler that built
+    /// it, so the stream owns a clone of `Core` and its own copy of the
+    /// request rather than borrowing either.
+    pub fn ask_events<O: Into<Origin>>(
+        &self,
+        req: &AskRequest,
+        origin: O,
+    ) -> impl tokio_stream::Stream<Item = Result<AskEvent>> + 'static + use<O> {
+        let core = self.clone();
+        let req = req.clone();
         let origin = origin.into();
-        if req.q.trim().is_empty() {
-            return Err(Error::Validation("question is empty".into()));
-        }
 
-        // Held for the whole answer rather than around the completion, because
-        // a search embeds the query and that is a model call too. A gap between
-        // them is a gap the worker would fill with a window, and a window is
-        // twenty to seventy seconds of somebody waiting.
-        //
-        // Taking the lane does not make an in-flight call stop; nothing here
-        // cancels. It keeps the worker from putting anything new in front of
-        // this one.
-        let _lane = self.gate.interactive();
+        async_stream::try_stream! {
+            if req.q.trim().is_empty() {
+                Err(Error::Validation("question is empty".into()))?;
+            }
 
-        // No per-source cap: an answer often lives in one document, and
-        // withholding its paragraphs to keep the citation list varied would
-        // make the answer worse, not fairer.
-        let (mut hits, _) = self
-            .search_with(
-                &SearchQuery {
-                    q: req.q.clone(),
-                    limit: req.limit.unwrap_or(8),
-                    tags: req.tags.clone(),
-                    category: req.category.clone(),
-                    // Asking a question is as deliberate as a search gets.
-                    mark: true,
-                    include_deprecated: false,
-                    include_superseded: false,
-                },
-                None,
-                // Deliberately not captured: the right answer to a question is
-                // a synthesis across several artifacts, so "which one was it"
-                // has no well-defined meaning for someone judging it later.
-                crate::store::feedback::Door::Ask,
-            )
-            .await?;
+            // Held for the whole answer rather than around the completion, because
+            // a search embeds the query and that is a model call too. A gap between
+            // them is a gap the worker would fill with a window, and a window is
+            // twenty to seventy seconds of somebody waiting.
+            //
+            // Taking the lane does not make an in-flight call stop; nothing here
+            // cancels. It keeps the worker from putting anything new in front of
+            // this one. Held to the end of the stream, which for the streaming
+            // door is the last token rather than the return of a call.
+            let _lane = core.gate.interactive();
 
-        if hits.is_empty() {
-            // No retrieval, no completion: spending a model call to say
-            // "nothing found" is pure latency. Opens with the sentinel so the
-            // page and the harness read it as the abstention it is.
-            let response = AskResponse {
-                answer: format!("{ABSTAIN_PREFIX}. Nothing matches that question."),
-                citations: vec![],
-                dropped: 0,
-                truncated: false,
-                abstained: true,
-                // Nothing was shown and nothing was claimed.
-                unsupported: vec![],
-                event_id: None,
+            // No per-source cap: an answer often lives in one document, and
+            // withholding its paragraphs to keep the citation list varied would
+            // make the answer worse, not fairer.
+            let (mut hits, _) = core
+                .search_with(
+                    &SearchQuery {
+                        q: req.q.clone(),
+                        limit: req.limit.unwrap_or(8),
+                        tags: req.tags.clone(),
+                        category: req.category.clone(),
+                        // Asking a question is as deliberate as a search gets.
+                        mark: true,
+                        include_deprecated: false,
+                        include_superseded: false,
+                    },
+                    None,
+                    // Deliberately not captured: the right answer to a question is
+                    // a synthesis across several artifacts, so "which one was it"
+                    // has no well-defined meaning for someone judging it later.
+                    crate::store::feedback::Door::Ask,
+                )
+                .await?;
+
+            if hits.is_empty() {
+                // No retrieval, no completion: spending a model call to say
+                // "nothing found" is pure latency. Opens with the sentinel so the
+                // page and the harness read it as the abstention it is.
+                let response = AskResponse {
+                    answer: format!("{ABSTAIN_PREFIX}. Nothing matches that question."),
+                    citations: vec![],
+                    dropped: 0,
+                    truncated: false,
+                    abstained: true,
+                    // Nothing was shown and nothing was claimed.
+                    unsupported: vec![],
+                    event_id: None,
+                };
+                // Emitted even though it is empty: a reader that waits for the
+                // rail before the answer must not wait forever on the one
+                // question that retrieved nothing.
+                yield AskEvent::Retrieved { round: 1, shown: 0, dropped: 0, cliff_at: None };
+                yield AskEvent::Citations(vec![]);
+                let response = core.record_ask(&req, &origin, response).await?;
+                yield AskEvent::Done(Box::new(response));
+                return;
+            }
+
+            // Cut the ranked list where its relevance falls off, before a single
+            // row is read for it: an excerpt below the cliff makes the answer worse
+            // as well as dearer, and its caveats are a lookup spent on something
+            // that will not be sent. `dropped` is still measured against everything
+            // retrieved, so a citation lost to the cliff is as visible as one lost
+            // to the window.
+            let retrieved = hits.len();
+            let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
+            let cliff_at = crate::core::search::cliff(&scores);
+            hits.truncate(retrieve::above_cliff(&scores));
+
+            // Artifacts reached sideways rather than retrieved are appended here,
+            // after the cliff has been taken — they carry no score comparable to a
+            // ranked hit, and must never enter the scores it is computed from.
+            // `scores` is consumed above and never recomputed, so nothing appended
+            // from here on can reach `cliff` at all.
+            let ranked = hits.len();
+            core.reach_sideways(&mut hits, cliff_at).await;
+
+            // Caveats are the conditions under which an excerpt does not apply, and
+            // an answer that quotes "run `mkfs` on the device" without "destroys
+            // everything already on it" is worse than no answer. They are not in
+            // the vector payload — what gets embedded is a separate decision — so
+            // they are read from the store, which costs one cheap SQLite lookup per
+            // hit and no inference. An excerpt whose row has since been deleted
+            // simply carries none.
+            let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
+            for (i, h) in hits.iter().enumerate() {
+                let caveats = core
+                    .store
+                    .get_artifact(&h.artifact_id)
+                    .await
+                    .map(|c| c.caveats)
+                    .unwrap_or_default();
+                blocks.push(ask_excerpt(
+                    i + 1,
+                    h.title.as_deref().unwrap_or_default(),
+                    &h.text,
+                    &caveats,
+                ));
+            }
+
+            // Reserve what the completer will ask for, not a constant. The endpoint
+            // counts the prompt and the requested ceiling against one window, so
+            // packing excerpts up to `context - 1024` while the call goes out
+            // demanding `max_output_tokens` of reply is a request the server refuses
+            // outright — and it refuses it on precisely the queries that retrieved
+            // enough to be worth answering.
+            //
+            // The margin comes off the top too. `ceiling_for_prompt` holds back
+            // headroom for the estimate being an estimate, and it holds it back out
+            // of the *reply*: packing up to `max_output_tokens` exactly and then
+            // being charged that margin is how a 32k window with a 2k ceiling ends
+            // up asking for one token of answer. Reserving it here is what makes
+            // the two halves agree.
+            //
+            // Never more than half the window, though. The reserve is configuration
+            // and the window is configuration, and nothing makes the two agree: a
+            // role whose ceiling is its whole context (4096 and 4096, which is an
+            // ordinary shape for a local model) reserves everything, packs nothing,
+            // and answers "too large for the context window" to every question ever
+            // asked without once calling the model. Half a window of excerpts and
+            // half a window of answer is a worse answer than the operator asked for;
+            // no answer is not an answer.
+            let context = core.completer.context_tokens();
+            let reserve = core
+                .completer
+                .max_output_tokens()
+                .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
+                .min(context / 2);
+            let budget = context
+                .saturating_sub(core.counter.count(ASK_SYSTEM))
+                .saturating_sub(core.counter.count(&req.q))
+                .saturating_sub(reserve);
+
+            // Highest score first, so what gets cut is what mattered least.
+            let kept = pack_by_budget(&blocks, &core.counter, budget);
+            // Measured over the retrieved hits alone. `dropped` answers "what did I
+            // ask for and not get shown", and nobody asked for a neighbour — one
+            // that does not fit was never owed a place, and counting it would make
+            // `dropped` grow every time the reach worked. Packing keeps a prefix
+            // and the neighbours sit after the ranked hits, so the ranked ones that
+            // survived are exactly `kept.min(ranked)`.
+            let dropped = retrieved - kept.min(ranked);
+            if dropped > 0 {
+                tracing::info!(
+                    dropped,
+                    kept,
+                    "ask: excerpts trimmed to the cliff and to what fits"
+                );
+            }
+
+            if kept == 0 {
+                let response = AskResponse {
+                    answer: "The best matching excerpt is too large for the configured context window."
+                        .into(),
+                    citations: vec![],
+                    dropped,
+                    truncated: false,
+                    // A configuration failure, not a statement about the base.
+                    abstained: false,
+                    unsupported: vec![],
+                    event_id: None,
+                };
+                yield AskEvent::Retrieved { round: 1, shown: 0, dropped, cliff_at };
+                yield AskEvent::Citations(vec![]);
+                let response = core.record_ask(&req, &origin, response).await?;
+                yield AskEvent::Done(Box::new(response));
+                return;
+            }
+
+            let user = ask_prompt(&req.q, &blocks[..kept]);
+
+            // The ceiling comes from what the prompt actually cost, not from what
+            // was reserved for it: packing is an estimate made before the excerpts
+            // were chosen, and whatever the window has left over after them is room
+            // the answer may have. Bounded by the configured ceiling, so this only
+            // ever gives back what the reserve above took away — and it keeps the
+            // one invariant the endpoint enforces, that prompt plus ceiling fits the
+            // window, with the margin `ceiling_for_prompt` leaves for the estimate
+            // being an estimate.
+            let spent = core.counter.count(ASK_SYSTEM) + core.counter.count(&user);
+            let ceiling = crate::infer::budget::ceiling_for_prompt(
+                context,
+                spent,
+                core.completer.max_output_tokens(),
+            );
+
+            // The excerpts go out before the first token, so the rail beside the
+            // answer is readable while the answer is still being written.
+            let citations: Vec<SearchResult> = hits.into_iter().take(kept).collect();
+            yield AskEvent::Retrieved {
+                round: 1,
+                shown: citations.len(),
+                dropped,
+                cliff_at,
             };
-            return self.record_ask(req, &origin, response).await;
-        }
+            yield AskEvent::Citations(citations.clone());
 
-        // Cut the ranked list where its relevance falls off, before a single
-        // row is read for it: an excerpt below the cliff makes the answer worse
-        // as well as dearer, and its caveats are a lookup spent on something
-        // that will not be sent. `dropped` is still measured against everything
-        // retrieved, so a citation lost to the cliff is as visible as one lost
-        // to the window.
-        let retrieved = hits.len();
-        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
-        let cliff_at = crate::core::search::cliff(&scores);
-        hits.truncate(retrieve::above_cliff(&scores));
-
-        // Artifacts reached sideways rather than retrieved are appended here,
-        // after the cliff has been taken — they carry no score comparable to a
-        // ranked hit, and must never enter the scores it is computed from.
-        // `scores` is consumed above and never recomputed, so nothing appended
-        // from here on can reach `cliff` at all.
-        let ranked = hits.len();
-        self.reach_sideways(&mut hits, cliff_at).await;
-
-        // Caveats are the conditions under which an excerpt does not apply, and
-        // an answer that quotes "run `mkfs` on the device" without "destroys
-        // everything already on it" is worse than no answer. They are not in
-        // the vector payload — what gets embedded is a separate decision — so
-        // they are read from the store, which costs one cheap SQLite lookup per
-        // hit and no inference. An excerpt whose row has since been deleted
-        // simply carries none.
-        let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
-        for (i, h) in hits.iter().enumerate() {
-            let caveats = self
-                .store
-                .get_artifact(&h.artifact_id)
+            // The sink is bounded, so the call has to run *beside* this loop and
+            // not before it. A producer that awaited the call and drained
+            // afterwards would block the endpoint's read loop on the first answer
+            // longer than the channel — which is every answer worth reading — and
+            // would still pass any test whose fake reply fits in 64 deltas.
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::infer::Delta>(64);
+            let completer = core.completer.clone();
+            let prompt = user.clone();
+            let call = tokio::spawn(async move {
+                completer
+                    .answer_streaming(ASK_SYSTEM, &prompt, ceiling, tx)
+                    .await
+            });
+            while let Some(delta) = rx.recv().await {
+                match delta {
+                    crate::infer::Delta::Token(t) => yield AskEvent::Token(t),
+                    crate::infer::Delta::Reasoning(r) => yield AskEvent::Reasoning(r),
+                }
+            }
+            // The completion, and not the deltas this loop accumulated, is what
+            // gets checked and recorded: a reader that stopped reading must not
+            // be able to truncate what the base stores.
+            let answer = call
                 .await
-                .map(|c| c.caveats)
-                .unwrap_or_default();
-            blocks.push(ask_excerpt(
-                i + 1,
-                h.title.as_deref().unwrap_or_default(),
-                &h.text,
-                &caveats,
-            ));
-        }
+                .map_err(|e| Error::Internal(format!("the answer never finished: {e}")))??;
+            if answer.truncated {
+                tracing::warn!(
+                    ceiling,
+                    "ask: the answer hit its output ceiling and is cut off"
+                );
+            }
 
-        // Reserve what the completer will ask for, not a constant. The endpoint
-        // counts the prompt and the requested ceiling against one window, so
-        // packing excerpts up to `context - 1024` while the call goes out
-        // demanding `max_output_tokens` of reply is a request the server refuses
-        // outright — and it refuses it on precisely the queries that retrieved
-        // enough to be worth answering.
-        //
-        // The margin comes off the top too. `ceiling_for_prompt` holds back
-        // headroom for the estimate being an estimate, and it holds it back out
-        // of the *reply*: packing up to `max_output_tokens` exactly and then
-        // being charged that margin is how a 32k window with a 2k ceiling ends
-        // up asking for one token of answer. Reserving it here is what makes
-        // the two halves agree.
-        //
-        // Never more than half the window, though. The reserve is configuration
-        // and the window is configuration, and nothing makes the two agree: a
-        // role whose ceiling is its whole context (4096 and 4096, which is an
-        // ordinary shape for a local model) reserves everything, packs nothing,
-        // and answers "too large for the context window" to every question ever
-        // asked without once calling the model. Half a window of excerpts and
-        // half a window of answer is a worse answer than the operator asked for;
-        // no answer is not an answer.
-        let context = self.completer.context_tokens();
-        let reserve = self
-            .completer
-            .max_output_tokens()
-            .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
-            .min(context / 2);
-        let budget = context
-            .saturating_sub(self.counter.count(ASK_SYSTEM))
-            .saturating_sub(self.counter.count(&req.q))
-            .saturating_sub(reserve);
+            // Checked against exactly the blocks that went into the prompt, so what
+            // the page flags is measured against what the model actually saw — not
+            // against the excerpts packing dropped, nor the raw artifact text the
+            // model was never shown. An abstention claims nothing, so there is
+            // nothing in it to check.
+            let abstained = abstained(&answer.text);
+            let unsupported = match abstained {
+                true => vec![],
+                false => check::unsupported_literals(&answer.text, &blocks[..kept]),
+            };
+            if !unsupported.is_empty() {
+                tracing::info!(
+                    n = unsupported.len(),
+                    "ask: the answer carries literals no excerpt does"
+                );
+            }
 
-        // Highest score first, so what gets cut is what mattered least.
-        let kept = pack_by_budget(&blocks, &self.counter, budget);
-        // Measured over the retrieved hits alone. `dropped` answers "what did I
-        // ask for and not get shown", and nobody asked for a neighbour — one
-        // that does not fit was never owed a place, and counting it would make
-        // `dropped` grow every time the reach worked. Packing keeps a prefix
-        // and the neighbours sit after the ranked hits, so the ranked ones that
-        // survived are exactly `kept.min(ranked)`.
-        let dropped = retrieved - kept.min(ranked);
-        if dropped > 0 {
-            tracing::info!(
-                dropped,
-                kept,
-                "ask: excerpts trimmed to the cliff and to what fits"
-            );
-        }
-
-        if kept == 0 {
             let response = AskResponse {
-                answer: "The best matching excerpt is too large for the configured context window."
-                    .into(),
-                citations: vec![],
+                abstained,
+                answer: answer.text,
+                citations,
                 dropped,
-                truncated: false,
-                // A configuration failure, not a statement about the base.
-                abstained: false,
-                unsupported: vec![],
+                truncated: answer.truncated,
+                unsupported,
                 event_id: None,
             };
-            return self.record_ask(req, &origin, response).await;
+            // Recorded here rather than by either door, so one ask is one row
+            // however it was asked. The harness reads these.
+            let response = core.record_ask(&req, &origin, response).await?;
+            yield AskEvent::Done(Box::new(response));
         }
-
-        let user = ask_prompt(&req.q, &blocks[..kept]);
-
-        // The ceiling comes from what the prompt actually cost, not from what
-        // was reserved for it: packing is an estimate made before the excerpts
-        // were chosen, and whatever the window has left over after them is room
-        // the answer may have. Bounded by the configured ceiling, so this only
-        // ever gives back what the reserve above took away — and it keeps the
-        // one invariant the endpoint enforces, that prompt plus ceiling fits the
-        // window, with the margin `ceiling_for_prompt` leaves for the estimate
-        // being an estimate.
-        let spent = self.counter.count(ASK_SYSTEM) + self.counter.count(&user);
-        let ceiling = crate::infer::budget::ceiling_for_prompt(
-            context,
-            spent,
-            self.completer.max_output_tokens(),
-        );
-        let answer = self.completer.answer(ASK_SYSTEM, &user, ceiling).await?;
-        if answer.truncated {
-            tracing::warn!(
-                ceiling,
-                "ask: the answer hit its output ceiling and is cut off"
-            );
-        }
-
-        // Checked against exactly the blocks that went into the prompt, so what
-        // the page flags is measured against what the model actually saw — not
-        // against the excerpts packing dropped, nor the raw artifact text the
-        // model was never shown. An abstention claims nothing, so there is
-        // nothing in it to check.
-        let abstained = abstained(&answer.text);
-        let unsupported = match abstained {
-            true => vec![],
-            false => check::unsupported_literals(&answer.text, &blocks[..kept]),
-        };
-        if !unsupported.is_empty() {
-            tracing::info!(
-                n = unsupported.len(),
-                "ask: the answer carries literals no excerpt does"
-            );
-        }
-
-        let response = AskResponse {
-            abstained,
-            answer: answer.text,
-            citations: hits.into_iter().take(kept).collect(),
-            dropped,
-            truncated: answer.truncated,
-            unsupported,
-            event_id: None,
-        };
-        self.record_ask(req, &origin, response).await
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent
@@ -1278,5 +1367,198 @@ mod tests {
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(out.unsupported.is_empty(), "{:?}", out.unsupported);
+    }
+
+    /// The two doors must never drift. `/api/v1/ask` and MCP collect; the page
+    /// streams; both must describe the same ask. This is the test that keeps
+    /// them honest as the code changes.
+    #[tokio::test]
+    async fn the_collected_answer_equals_the_streamed_one() {
+        let mut core = test_core().await;
+        // A cliff and a reach, so the two doors are compared on an ask that
+        // exercises everything between retrieval and the answer rather than on
+        // the shortest path through it.
+        core.reranker = Some(std::sync::Arc::new(Cliffed));
+        seed(&core, 5, 4).await;
+
+        let blocking = core.ask(&req("chunk"), Door::Api).await.unwrap();
+
+        let mut streamed = None;
+        let s = core.ask_events(&req("chunk"), Door::Api);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            if let AskEvent::Done(d) = ev.unwrap() {
+                streamed = Some(*d);
+            }
+        }
+        let streamed = streamed.expect("the stream must terminate with Done");
+
+        assert_eq!(blocking.answer, streamed.answer);
+        assert_eq!(blocking.abstained, streamed.abstained);
+        assert_eq!(blocking.truncated, streamed.truncated);
+        assert_eq!(blocking.dropped, streamed.dropped);
+        assert_eq!(blocking.unsupported, streamed.unsupported);
+        assert_eq!(
+            blocking
+                .citations
+                .iter()
+                .map(|c| (c.artifact_id.as_str(), c.via.as_deref()))
+                .collect::<Vec<_>>(),
+            streamed
+                .citations
+                .iter()
+                .map(|c| (c.artifact_id.as_str(), c.via.as_deref()))
+                .collect::<Vec<_>>(),
+            "the same excerpts were shown to the model, in the same order"
+        );
+    }
+
+    /// The rail must be readable while the model is still writing, which means
+    /// the excerpts have to arrive before the first token.
+    #[tokio::test]
+    async fn citations_arrive_before_the_first_token_and_done_is_last() {
+        let mut core = test_core().await;
+        // Several deltas rather than one, so "before the first token" is a
+        // claim about ordering and not about there being a single token.
+        core.completer = std::sync::Arc::new(Chatty { parts: 3 });
+        seed(&core, 3, 4).await;
+
+        let mut order: Vec<&'static str> = vec![];
+        let s = core.ask_events(&req("chunk"), Door::Api);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            order.push(match ev.unwrap() {
+                AskEvent::Retrieved { .. } => "retrieved",
+                AskEvent::Needs(_) => "needs",
+                AskEvent::Citations(_) => "citations",
+                AskEvent::Reasoning(_) => "reasoning",
+                AskEvent::Token(_) => "token",
+                AskEvent::Done(_) => "done",
+            });
+        }
+
+        let first_token = order
+            .iter()
+            .position(|e| *e == "token")
+            .expect("nothing was streamed, so the ordering claim is vacuous");
+        let citations = order
+            .iter()
+            .position(|e| *e == "citations")
+            .expect("citations emitted");
+        assert!(
+            citations < first_token,
+            "citations must precede the first token: {order:?}"
+        );
+        assert_eq!(
+            order.last(),
+            Some(&"done"),
+            "Done must be terminal: {order:?}"
+        );
+        assert_eq!(
+            order.iter().filter(|e| **e == "done").count(),
+            1,
+            "one ask, one answer: {order:?}"
+        );
+    }
+
+    /// An ask is recorded once, whichever door it came through — the harness
+    /// reads these rows and would double-count otherwise.
+    #[tokio::test]
+    async fn a_streamed_ask_is_recorded_exactly_once() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        seed(&core, 3, 4).await;
+
+        let before = core.store.ask_stats().await.unwrap().asked;
+        let s = core.ask_events(&req("chunk"), Door::Ui.by("me"));
+        tokio::pin!(s);
+        let mut done = None;
+        while let Some(ev) = s.next().await {
+            if let AskEvent::Done(d) = ev.unwrap() {
+                done = Some(*d);
+            }
+        }
+        let after = core.store.ask_stats().await.unwrap().asked;
+
+        assert_eq!(after, before + 1);
+        assert!(
+            done.unwrap().event_id.is_some(),
+            "the streamed answer must carry the id of the row it recorded"
+        );
+    }
+
+    /// The sink the completer writes into is bounded, and `send` waits when it
+    /// is full. A producer that awaited the call before draining would stall
+    /// the endpoint's read loop on the first answer longer than the channel —
+    /// which is every answer worth reading — while still passing every test
+    /// whose fake reply fits in one delta.
+    #[tokio::test]
+    async fn an_answer_longer_than_the_sink_can_hold_still_finishes() {
+        let mut core = test_core().await;
+        const PARTS: usize = 500;
+        core.completer = std::sync::Arc::new(Chatty { parts: PARTS });
+        seed(&core, 3, 4).await;
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut tokens = 0usize;
+            let mut done = None;
+            let s = core.ask_events(&req("chunk"), Door::Api);
+            tokio::pin!(s);
+            while let Some(ev) = s.next().await {
+                match ev.unwrap() {
+                    AskEvent::Token(_) => tokens += 1,
+                    AskEvent::Done(d) => done = Some(*d),
+                    _ => {}
+                }
+            }
+            (tokens, done.expect("the stream must terminate with Done"))
+        })
+        .await
+        .expect("the deltas were not drained while the call was in flight");
+
+        assert_eq!(out.0, PARTS, "a delta was swallowed on the way to the page");
+        assert_eq!(out.1.answer.split_whitespace().count(), PARTS);
+    }
+
+    /// Streams its answer in more pieces than the sink holds, which is the
+    /// shape every real answer has and the one a one-delta fake never has.
+    struct Chatty {
+        parts: usize,
+    }
+
+    impl Chatty {
+        fn text(&self) -> String {
+            (0..self.parts).map(|i| format!("w{i} ")).collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Completer for Chatty {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Ok(self.text())
+        }
+        async fn answer_streaming(
+            &self,
+            _system: &str,
+            _user: &str,
+            _ceiling: usize,
+            sink: tokio::sync::mpsc::Sender<crate::infer::Delta>,
+        ) -> Result<crate::infer::Completion> {
+            for i in 0..self.parts {
+                let _ = sink
+                    .send(crate::infer::Delta::Token(format!("w{i} ")))
+                    .await;
+            }
+            Ok(crate::infer::Completion {
+                text: self.text(),
+                truncated: false,
+            })
+        }
+        fn context_tokens(&self) -> usize {
+            4096
+        }
+        fn max_output_tokens(&self) -> usize {
+            1024
+        }
     }
 }
