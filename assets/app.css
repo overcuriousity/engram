@@ -570,6 +570,33 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 }
 .band-gap-label { font-size: 0.8125rem; color: var(--color-danger); }
 
+/* ── How an artifact came to exist ───────────────────────────────────────── */
+
+/* Indentation is the generation: a row's parent is the nearest row above it at
+   one less depth. Drawn as a flat list with a depth variable rather than nested
+   lists, because the template that renders it cannot include itself. */
+.lineage { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.lin {
+  display: flex; gap: 0.4rem; padding: 0.4rem 0;
+  padding-left: calc(var(--d) * 1.25rem);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.lin:last-child { border-bottom: 0; }
+.lin-tick { color: var(--color-fg-muted); font-family: var(--font-mono); line-height: 1.4; }
+.lin-body { min-width: 0; }
+.lin-head { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
+.lin-title { font-size: 0.875rem; }
+/* What kind of artifact this is, and whether the one above replaced it. Quiet:
+   the title is what is being read, these are what qualify it. */
+.lin-kind {
+  font-size: 0.6875rem; color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.lin-sub { font-size: 0.75rem; color: var(--color-fg-muted); }
+/* A source deleted since. Struck through rather than dropped: the text above
+   still carries what it said. */
+.lin-gone .lin-title { text-decoration: line-through; }
+
 /* An artifact claiming more than one band has its card in the first of them
    and this line in the rest: the card carries element ids and cannot be
    repeated, but the claim is real and the band would otherwise read as if only

@@ -242,6 +242,30 @@ impl Store {
 
     /// Every pair, in any state, both of whose artifacts are in this set.
     ///
+    /// Each captured root of `child_id`, with the direct parent it entered
+    /// through.
+    ///
+    /// `roots_of` answers what a merge is *made of*, which is what every
+    /// decision needs. This answers how it got there, which is what a picture
+    /// of the lineage needs and nothing else does: `via_id` is the column the
+    /// schema marks "rendering only". Equal to the root for a first-generation
+    /// merge, `None` for a row whose intermediate has since been deleted —
+    /// `ON DELETE SET NULL`, because losing the middle of the path does not
+    /// invalidate its end.
+    pub async fn sources_with_via(&self, child_id: &str) -> Result<Vec<(String, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT root_id, via_id FROM artifact_sources
+              WHERE child_id = ? ORDER BY root_id",
+        )
+        .bind(child_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("root_id"), r.get("via_id")))
+            .collect())
+    }
+
     /// What undoing a merge has to dismiss. Reactivating the roots alone
     /// accomplishes nothing: the sweep re-finds them and reaches the same
     /// verdict, so the operator's decision lasts until the next tick.
@@ -301,6 +325,47 @@ mod tests {
             tags: vec![],
             caveats: vec![],
         }
+    }
+
+    /// The column exists for one reason — drawing the lineage — so the query
+    /// that reads it is the only place the generation between a merge and its
+    /// roots survives.
+    #[tokio::test]
+    async fn a_source_row_names_the_parent_its_root_entered_through() {
+        let s = Store::memory().await.unwrap();
+        let (a, b, c) = three(&s).await;
+        let m1 = s
+            .insert_merged_artifact(&merged("a and b"), &[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        let m2 = s
+            .insert_merged_artifact(&merged("all three"), &[m1.id.clone(), c.clone()])
+            .await
+            .unwrap();
+
+        let first = s.sources_with_via(&m1.id).await.unwrap();
+        assert_eq!(
+            first,
+            vec![
+                (a.clone().min(b.clone()), Some(a.clone().min(b.clone()))),
+                (a.clone().max(b.clone()), Some(a.clone().max(b.clone()))),
+            ],
+            "a first-generation merge is its own via"
+        );
+
+        let second: std::collections::BTreeMap<String, Option<String>> = s
+            .sources_with_via(&m2.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            second[&a],
+            Some(m1.id.clone()),
+            "a entered through the merge"
+        );
+        assert_eq!(second[&b], Some(m1.id.clone()));
+        assert_eq!(second[&c], Some(c.clone()), "c was merged directly");
     }
 
     #[tokio::test]
