@@ -194,8 +194,13 @@
         // happen.
         if (round.round < 2) return;
         progress.hidden = false;
-        progress.textContent = 'Round ' + round.round + ': ' + round.shown +
-          ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
+        // Appended, not assigned: the line already holds what `needs` said the
+        // second round went looking for, and after this event nothing else on
+        // the page does. Round one never writes here, so the join is only ever
+        // to that query.
+        progress.textContent = (progress.textContent ?
+          progress.textContent + ' \u2014 ' : 'Round ' + round.round + ': ') +
+          round.shown + ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
       });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;

@@ -63,6 +63,7 @@ const HARNESS = `
           reasoningText: document.getElementById('ask-reasoning').textContent,
           reasoningHidden: document.getElementById('ask-reasoning').hidden,
           statusText: document.getElementById('ask-status').textContent,
+          progressText: document.getElementById('ask-progress').textContent,
           railIds: Array.prototype.map.call(
             document.querySelectorAll('#ask-rail [id]'), function (e) { return e.id; }),
           activeId: (document.querySelector('.rail-active') || {}).id || null,
@@ -145,6 +146,9 @@ const server = http.createServer((req, res) => {
     const send = (name, data) =>
       res.write('event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n');
     send('retrieved', { round: 1, shown: 2, dropped: 0, cliff_at: null });
+    // A follow-up round, so the page has to show its query and then keep it.
+    send('needs', { text: 'more about bravo' });
+    send('retrieved', { round: 2, shown: 2, dropped: 1, cliff_at: null });
     send('citations', { rail: RAIL });
     setTimeout(() => send('reasoning', { text: 'weighing alpha\nagainst bravo' }), 60);
     setTimeout(() => send('token', { text: 'alpha ' }), 120);
