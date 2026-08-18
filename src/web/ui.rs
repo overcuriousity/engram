@@ -5475,6 +5475,71 @@ mod tests {
         );
     }
 
+    /// Both ways out of a stream close it.
+    ///
+    /// The consequence of losing one of these calls is invisible: the answer
+    /// still renders, and about three seconds later the browser reconnects to
+    /// the stream that ended and asks the question again — a model call nobody
+    /// requested, and a doubled bill on a metered endpoint. Nothing else in
+    /// this suite can see a browser, so this reads the shipped `app.js` and
+    /// insists the calls are there.
+    ///
+    /// A text assertion, and honestly a weak one: it pins that the lines exist,
+    /// not that they run. `tests/browser_ask.rs` is the other half, and it
+    /// counts the requests a real browser makes — but it needs node and a
+    /// headless Chrome, so it cannot be what guards this on every `cargo test`.
+    #[test]
+    fn the_stream_driver_closes_the_event_source_on_every_exit() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        // The one place the close actually happens.
+        let stop = js
+            .split_once("function stop() {")
+            .expect("the driver has no stop()")
+            .1;
+        assert!(
+            stop[..stop.find('}').unwrap()].contains("source.close()"),
+            "stop() no longer closes the EventSource: {stop}"
+        );
+
+        // The answer arrived, so nothing more is coming: close before the
+        // payload is touched, or a malformed one leaves the stream open.
+        let done = js
+            .split_once("addEventListener('done'")
+            .expect("the driver does not handle done")
+            .1;
+        let done = &done[..done.find("addEventListener").unwrap_or(done.len())];
+        assert!(
+            done.contains("stop();"),
+            "the done handler does not close the stream: {done}"
+        );
+        assert!(
+            done.find("stop();") < done.find("JSON.parse"),
+            "the stream must be closed before the payload is parsed: {done}"
+        );
+
+        // The failure path, which is also the path a stream that simply ended
+        // arrives on: the browser is already queuing its reconnect when this
+        // fires.
+        let error = js
+            .split_once("addEventListener('error'")
+            .expect("the driver does not handle error")
+            .1;
+        assert!(
+            error[..error.find("});").unwrap()].contains("fail("),
+            "the error handler does not reach the failure path: {error}"
+        );
+        let fail = js
+            .split_once("function fail(message) {")
+            .expect("the driver has no fail()")
+            .1;
+        assert!(
+            fail[..fail.find("\n    }").unwrap()].contains("stop();"),
+            "fail() no longer closes the stream, so the browser will reconnect: {fail}"
+        );
+    }
+
     /// The page and the driver agree about what is on it.
     ///
     /// The stream driver in `app.js` reaches for its regions by id, and a

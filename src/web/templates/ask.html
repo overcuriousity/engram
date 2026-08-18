@@ -24,5 +24,12 @@
    id that the answer's `[n]` links point at. A listbox of anchors, like the
    search rail, because that is what the arrow keys in app.js move between. #}
 <div id="ask-rail" class="rail" role="listbox" aria-label="Excerpts"></div>
+{# The one announcement of the finished answer. The tokens above stream into a
+   polite live region as they arrive, so a reader who cannot see the page knows
+   an answer is coming; nothing else said it had arrived, and swapping the
+   rendered fragment into a live region instead would read the whole answer
+   aloud a second time. Off-screen, because the answer below it is the signal
+   for everyone who can see it. #}
+<p id="ask-status" class="sr-only" role="status"></p>
 <div id="ask-result"></div>
 {% endblock %}

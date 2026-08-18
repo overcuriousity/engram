@@ -123,7 +123,10 @@
     var reasoning = document.getElementById('ask-reasoning');
     var rail = document.getElementById('ask-rail');
     var result = document.getElementById('ask-result');
+    var status = document.getElementById('ask-status');
     var source = null;
+    // Which ask the page belongs to. See the submit handler.
+    var generation = 0;
 
     // The one line that matters most in this file. An `EventSource` that is
     // left open reconnects by itself when the server closes the stream, and the
@@ -150,24 +153,37 @@
       reasoning.hidden = true;
     }
 
-    function openStream(id) {
+    function openStream(id, mine) {
+      // The id of a superseded ask is simply never spent: the stream is not
+      // opened at all rather than opened and closed, which is one fewer model
+      // call started and abandoned.
+      if (mine !== generation) return;
       source = new EventSource('/ui/ask/' + encodeURIComponent(id) + '/stream');
 
+      // Every handler is gated the same way. `stop()` closes the stream the
+      // page is currently listening to; an event already queued from an older
+      // one must not write into the answer that replaced it.
+      function current() { return mine === generation; }
+
       source.addEventListener('citations', function (e) {
+        if (!current()) return;
         // Server-rendered, ids and all: the `cite-n` anchors in here are the
         // other end of the `[n]` links the answer arrives with.
         rail.innerHTML = JSON.parse(e.data).rail;
         enhance(rail);
       });
       source.addEventListener('reasoning', function (e) {
+        if (!current()) return;
         reasoning.hidden = false;
         reasoning.appendChild(document.createTextNode(JSON.parse(e.data).text));
       });
       source.addEventListener('token', function (e) {
+        if (!current()) return;
         live.hidden = false;
         live.appendChild(document.createTextNode(JSON.parse(e.data).text));
       });
       source.addEventListener('done', function (e) {
+        if (!current()) return;
         stop();
         result.innerHTML = JSON.parse(e.data).html;
         enhance(result);
@@ -176,12 +192,17 @@
         // reuses them.
         live.hidden = true;
         reasoning.hidden = true;
+        // Said once, when there is something to read. The tokens streamed into
+        // a polite live region as they arrived, which tells a reader that an
+        // answer is coming; nothing until now said it had finished.
+        status.textContent = 'The answer is ready.';
       });
       // Both failures arrive as `error`: the server's own event, which carries
       // a message, and the browser's transport error, which carries no data.
       // The second one is the dangerous one — the browser is already queuing a
       // reconnect when it fires, so `stop()` has to run on it too.
       source.addEventListener('error', function (e) {
+        if (!current()) return;
         fail(e.data ? e.data : 'The connection to the answer stream was lost.');
       });
     }
@@ -190,9 +211,17 @@
       e.preventDefault();
       var q = form.querySelector('input[name="q"]').value;
       if (!q.trim()) return;
-      // A second ask replaces the first rather than racing it: two open streams
-      // would interleave their tokens into one live region.
+      // A second ask supersedes the first at every stage, which `stop()` on its
+      // own does not achieve: it closes a stream that is already open, and two
+      // submits made before the first POST resolves open two streams, the
+      // second overwriting the only reference to the first. That first one is
+      // then unclosable, reconnects on its own, and — worse — its eventual
+      // error wipes the answer the second ask is in the middle of writing.
+      // The generation is what the page belongs to; anything an older ask has
+      // to say is dropped, including the stream it was about to open.
+      var mine = ++generation;
       stop();
+      status.textContent = '';
       live.textContent = '';
       reasoning.textContent = '';
       rail.textContent = '';
@@ -210,8 +239,12 @@
         if (!res.ok) throw new Error('The question was refused (' + res.status + ').');
         return res.json();
       }).then(function (out) {
-        openStream(out.id);
+        openStream(out.id, mine);
       }).catch(function (err) {
+        // A stale rejection has the same shape as a stale event and is dropped
+        // for the same reason: it would replace a live answer with the failure
+        // of an ask nobody is waiting for any more.
+        if (mine !== generation) return;
         fail(err.message || 'The question could not be sent.');
       });
     });

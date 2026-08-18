@@ -786,3 +786,12 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
    result carries, because it means the same thing — this is the row the page is
    pointing at. */
 .rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+
+/* Announced, not shown: a line for a screen reader where the page itself is
+   the signal for everyone else. Clipped rather than `display:none`, which is
+   the one way to hide something that assistive technology still reads. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+  border: 0;
+}
