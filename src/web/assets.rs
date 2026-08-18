@@ -9,6 +9,15 @@ use axum::routing::get;
 #[folder = "assets/"]
 pub struct Assets;
 
+/// What `/assets/app.js?v=` carries, so a year-long cache stays safe.
+///
+/// Computed in `build.rs` from the bytes of the files themselves; see
+/// `stamp_assets` there for why the URL has to move at all. Read by
+/// `layout.html`, which is the one place the pages name these two files.
+pub fn stamp() -> &'static str {
+    env!("ASSET_STAMP")
+}
+
 fn content_type(path: &str) -> String {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     // Browsers need the charset on text types or non-ASCII renders as mojibake.

@@ -5475,6 +5475,59 @@ mod tests {
         );
     }
 
+    /// The script the page cannot work without is stamped, and the stamp is
+    /// derived from the script.
+    ///
+    /// `/assets/app.js` is served with a year-long `max-age`, so a browser that
+    /// has been here before keeps its copy across an upgrade — and since this
+    /// page stopped working without JavaScript, an old copy is not a stale
+    /// stylesheet but an ask form that submits nothing, silently and per
+    /// browser. The query stamp is what moves the URL when the bytes move.
+    ///
+    /// Recomputed here from the files on disk rather than compared to a
+    /// constant, because the property is *content-derived*: a build stamp that
+    /// was a version string, a timestamp or a fixed value would satisfy a test
+    /// that only looked for `?v=` and would still ship the bug.
+    #[tokio::test]
+    async fn the_page_stamps_its_script_with_a_hash_of_that_script() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for name in ["assets/app.js", "assets/app.css"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+            for b in std::fs::read(&path).unwrap() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        let want = format!("{h:x}");
+        assert_eq!(
+            crate::web::assets::stamp(),
+            want,
+            "the stamp is not a hash of the assets it stamps"
+        );
+
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask").await;
+        assert!(
+            page.contains(&format!("/assets/app.js?v={want}")),
+            "the page does not stamp its script: {page}"
+        );
+
+        // The stamped URL still serves the file: the query is not part of the
+        // route, and a stamp that 404s would be worse than no stamp at all.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/assets/app.js?v={want}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_of(res).await.contains("askDriver"), "not the driver");
+    }
+
     /// Both ways out of a stream close it.
     ///
     /// The consequence of losing one of these calls is invisible: the answer
