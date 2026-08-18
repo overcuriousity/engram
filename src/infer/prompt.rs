@@ -340,10 +340,58 @@ pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i
 /// `Caveat:` is: splitting the two apart is how the agreement quietly breaks.
 pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
 
+/// The one instruction here that is not advice to the model is the abstention
+/// rule, and it is written to be *decidable*.
+///
+/// "If the excerpts do not contain the answer, abstain" sounds like one test and
+/// is really two, because the excerpts almost never fail a question outright —
+/// they answer a neighbouring one. Retrieval that works returns near misses: the
+/// question asks where mail is *read* and the excerpt says where it is *stored*.
+/// Told only that abstention is for when the answer is absent, a model with a
+/// reasoning budget spends the budget deciding which of those it is, and there
+/// is no fact in the prompt that settles it. Observed on a 9B against two short
+/// excerpts: four and a half thousand tokens of thinking, twenty-five restarts
+/// re-litigating the same choice, and a one-sentence answer at the end of it —
+/// and at a lower ceiling, no answer at all, because the deliberation ate the
+/// whole allowance before any content was written.
+///
+/// So the near miss gets a stated resolution rather than a judgement call:
+/// answer the part that is covered, name the part that is not.
+///
+/// That alone moves the deliberation rather than ending it. Abstention phrased
+/// as "only when nothing bears on the question at all" is the same weighing
+/// wearing a different hat — asked a question the corpus genuinely does not
+/// cover, the model litigates whether excerpts about Outlook *bear on* a
+/// question about BGP, and does it for longer than it ever litigated the near
+/// miss. Measured, on the same two excerpts: 113 restarts and the whole ceiling,
+/// against 25 for the wording it replaced.
+///
+/// What ends it is a test the model can *run* rather than weigh: does any
+/// excerpt mention the subject. Lexical, decidable in one pass, and no more
+/// accurate than the semantic version needs to be — the case it has to catch is
+/// a corpus that has nothing to say, and a corpus that has nothing to say does
+/// not mention the subject. Abstention then costs about a thousand tokens
+/// instead of the whole allowance.
+///
+/// Two nearby wordings were tried and are worse, which is why this one reads
+/// oddly concrete. Telling the model to decide the coverage question once and
+/// not revisit it made it revisit it *more* — 86 restarts on the near miss that
+/// the plain wording answered. Asking for an unconditional coverage report —
+/// what is covered, then what is not — fixed the near miss and left the
+/// no-match case looping at the ceiling. Only the lexical test passes both.
+///
+/// [`ABSTAIN_PREFIX`] still has to reach the reply verbatim: [`abstained`] reads
+/// it, and a gap cluster is recorded on the strength of it. Narrowing when it is
+/// asked for narrows what gets recorded — a question half-covered is now an
+/// answer naming its own gap rather than a gap event — which is the more honest
+/// of the two records, and the one the reader of the answer is better served by.
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
-Quote commands, paths and code exactly as they appear. If the excerpts do not contain the answer, \
-begin your reply with the exact words `Not in the knowledge base.` and say what is missing rather \
-than guessing. Cite excerpts by their number. \
+Quote commands, paths and code exactly as they appear. \
+If the excerpts cover only part of the question, answer that part and say plainly what they do not \
+cover — do not withhold a partial answer, and do not stretch an excerpt to cover what it does not. \
+If no excerpt mentions the subject of the question, begin your reply with the exact words \
+`Not in the knowledge base.` and say what is missing rather than guessing. \
+Cite excerpts by their number. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
 
