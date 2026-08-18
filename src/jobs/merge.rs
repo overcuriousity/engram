@@ -1081,7 +1081,6 @@ mod tests {
         assert_eq!(losses(&roots, &d), vec!["5m".to_string()]);
     }
 
-
     /// C was a duplicate of B; B is now inside M. Without this the question
     /// dies with B and only comes back once M has embedded and a later
     /// similarity sweep re-files it — a whole tick per generation of a cluster.
@@ -1097,7 +1096,10 @@ mod tests {
             ],
         )
         .await;
-        core.store.record_pair(&ids[1], &ids[2], 0.91).await.unwrap();
+        core.store
+            .record_pair(&ids[1], &ids[2], 0.91)
+            .await
+            .unwrap();
         let m = write(
             &core,
             &draft("a text and b text"),
@@ -1129,7 +1131,10 @@ mod tests {
             ],
         )
         .await;
-        core.store.record_pair(&ids[1], &ids[2], 0.91).await.unwrap();
+        core.store
+            .record_pair(&ids[1], &ids[2], 0.91)
+            .await
+            .unwrap();
         let m = write(
             &core,
             &draft("a text and b text"),

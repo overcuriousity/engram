@@ -1175,7 +1175,10 @@ mod tests {
             "the merge of a merge did not inherit both lineages"
         );
         for id in &ids {
-            assert!(roots.contains(&id), "an original is missing from the lineage");
+            assert!(
+                roots.contains(&id),
+                "an original is missing from the lineage"
+            );
         }
     }
 
@@ -1260,7 +1263,11 @@ mod tests {
             .unwrap();
         assert_eq!(stuck.len(), 1);
         assert!(
-            stuck[0].detail.as_deref().unwrap_or("").contains("do not fit"),
+            stuck[0]
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("do not fit"),
             "the reason a person is being asked was not recorded"
         );
         assert!(

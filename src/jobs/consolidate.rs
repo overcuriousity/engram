@@ -2090,7 +2090,6 @@ pub(crate) mod tests {
         );
     }
 
-
     /// The state was terminal and reached without a call ever being made: the
     /// component flattened past the cap and every pair in it was settled before
     /// the model saw anything. Sixteen sit that way in the field.
@@ -2098,7 +2097,10 @@ pub(crate) mod tests {
     async fn the_sweep_puts_the_refused_pairs_back_in_the_queue() {
         let core = crate::core::test_support::test_core().await;
         let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])]).await;
-        core.store.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
         let id = core
             .store
             .pairs_by_state(crate::store::pairs::PairState::Pending, 10)

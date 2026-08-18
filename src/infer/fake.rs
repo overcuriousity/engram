@@ -534,7 +534,8 @@ impl Completer for ScriptedCompleter {
             })
     }
     fn context_tokens(&self) -> usize {
-        self.context_tokens.load(std::sync::atomic::Ordering::SeqCst)
+        self.context_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     fn max_output_tokens(&self) -> usize {
         1024

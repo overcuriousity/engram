@@ -1590,7 +1590,10 @@ mod tests {
         let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(!p.contains("ARTIFACT C"), "a third letter exists to be named: {p}");
+        assert!(
+            !p.contains("ARTIFACT C"),
+            "a third letter exists to be named: {p}"
+        );
     }
 
     /// A merged member's own wording is what is being judged, and its captured
@@ -1611,7 +1614,10 @@ mod tests {
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
         assert!(p.contains("the pool holds sixteen"), "{p}");
-        assert!(p.contains("max_connections is 16"), "a source was not shown: {p}");
+        assert!(
+            p.contains("max_connections is 16"),
+            "a source was not shown: {p}"
+        );
         assert!(p.contains("SOURCES OF A"), "{p}");
         assert!(
             !p.contains("SOURCES OF B"),
@@ -1641,11 +1647,11 @@ mod tests {
         // answer to the question it was handed. Nothing about the artifacts is
         // withheld by leaving the prior out; only the priming is.
         let p = dedupe_prompt(
-            &member("USB Device Registry Keys", "0066 = Last Connected (Win8-10)"),
             &member(
-                "Plug and Play Logs",
-                "0066 für Last Connected (Windows 8-)",
+                "USB Device Registry Keys",
+                "0066 = Last Connected (Win8-10)",
             ),
+            &member("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
             0,
         );
         assert!(
