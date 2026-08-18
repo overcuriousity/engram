@@ -443,18 +443,6 @@ Reply with JSON only, in exactly this shape:
   for. Not a question, not a sentence — a query. Never repeat the original
   question back."#;
 
-/// The question and the excerpts round one retrieved for it.
-///
-/// The same shape `ask_prompt` uses, because the model is being shown the same
-/// material and asked one thing about it rather than a differently framed
-/// task.
-pub fn follow_up_prompt(question: &str, excerpts: &[String]) -> String {
-    format!(
-        "Question: {question}\n\nExcerpts:\n\n{}",
-        excerpts.join("\n\n---\n\n")
-    )
-}
-
 /// `need` is nullable in the schema rather than optional, because "I have
 /// enough" is the common answer and a grammar that can only express a query
 /// would put the model in the position of inventing one.

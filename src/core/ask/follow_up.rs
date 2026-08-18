@@ -2,7 +2,7 @@
 
 use super::Core;
 use crate::infer::budget::pack_by_budget;
-use crate::infer::prompt::{FOLLOW_UP_SYSTEM, follow_up_prompt, parse_follow_up};
+use crate::infer::prompt::{FOLLOW_UP_SYSTEM, ask_prompt, parse_follow_up};
 
 /// What this answer still needs, asked once, or `None` for "it has enough".
 ///
@@ -30,14 +30,7 @@ pub(super) async fn needed_query(
     // hold is a call refused for its size on exactly the questions that
     // retrieved enough to be worth a second round.
     let context = model.context_tokens();
-    let reserve = model
-        .max_output_tokens()
-        .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
-        .min(context / 2);
-    let budget = context
-        .saturating_sub(core.counter.count(FOLLOW_UP_SYSTEM))
-        .saturating_sub(core.counter.count(question))
-        .saturating_sub(reserve);
+    let budget = super::excerpt_budget(&**model, &core.counter, FOLLOW_UP_SYSTEM, question);
     let kept = pack_by_budget(excerpts, &core.counter, budget);
     if kept == 0 {
         // Asking whether excerpts are sufficient without showing any of them
@@ -47,7 +40,9 @@ pub(super) async fn needed_query(
         return None;
     }
 
-    let user = follow_up_prompt(question, &excerpts[..kept]);
+    // The same prompt shape the answer call uses: the model is shown the same
+    // material and asked one thing about it, not a differently framed task.
+    let user = ask_prompt(question, &excerpts[..kept]);
     let spent = core.counter.count(FOLLOW_UP_SYSTEM) + core.counter.count(&user);
     let ceiling =
         crate::infer::budget::ceiling_for_prompt(context, spent, model.max_output_tokens());

@@ -477,41 +477,10 @@ impl Core {
         blocks
     }
 
-    /// How many tokens of excerpt one answer may be built from.
-    ///
-    /// Reserve what the completer will ask for, not a constant. The endpoint
-    /// counts the prompt and the requested ceiling against one window, so
-    /// packing excerpts up to `context - 1024` while the call goes out demanding
-    /// `max_output_tokens` of reply is a request the server refuses outright —
-    /// and it refuses it on precisely the queries that retrieved enough to be
-    /// worth answering.
-    ///
-    /// The margin comes off the top too. `ceiling_for_prompt` holds back
-    /// headroom for the estimate being an estimate, and it holds it back out of
-    /// the *reply*: packing up to `max_output_tokens` exactly and then being
-    /// charged that margin is how a 32k window with a 2k ceiling ends up asking
-    /// for one token of answer. Reserving it here is what makes the two halves
-    /// agree.
-    ///
-    /// Never more than half the window, though. The reserve is configuration and
-    /// the window is configuration, and nothing makes the two agree: a role
-    /// whose ceiling is its whole context (4096 and 4096, which is an ordinary
-    /// shape for a local model) reserves everything, packs nothing, and answers
-    /// "too large for the context window" to every question ever asked without
-    /// once calling the model. Half a window of excerpts and half a window of
-    /// answer is a worse answer than the operator asked for; no answer is not an
-    /// answer.
+    /// How many tokens of excerpt one answer may be built from: the rule
+    /// `excerpt_budget` states, for the answer model under the ask prompt.
     fn excerpt_budget(&self, question: &str) -> usize {
-        let context = self.completer.context_tokens();
-        let reserve = self
-            .completer
-            .max_output_tokens()
-            .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
-            .min(context / 2);
-        context
-            .saturating_sub(self.counter.count(ASK_SYSTEM))
-            .saturating_sub(self.counter.count(question))
-            .saturating_sub(reserve)
+        excerpt_budget(&*self.completer, &self.counter, ASK_SYSTEM, question)
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent
@@ -702,6 +671,53 @@ impl Core {
         }
         Ok(response)
     }
+}
+
+/// How many tokens of excerpt one answer may be built from.
+///
+/// Reserve what the completer will ask for, not a constant. The endpoint
+/// counts the prompt and the requested ceiling against one window, so
+/// packing excerpts up to `context - 1024` while the call goes out demanding
+/// `max_output_tokens` of reply is a request the server refuses outright —
+/// and it refuses it on precisely the queries that retrieved enough to be
+/// worth answering.
+///
+/// The margin comes off the top too. `ceiling_for_prompt` holds back
+/// headroom for the estimate being an estimate, and it holds it back out of
+/// the *reply*: packing up to `max_output_tokens` exactly and then being
+/// charged that margin is how a 32k window with a 2k ceiling ends up asking
+/// for one token of answer. Reserving it here is what makes the two halves
+/// agree.
+///
+/// Never more than half the window, though. The reserve is configuration and
+/// the window is configuration, and nothing makes the two agree: a role
+/// whose ceiling is its whole context (4096 and 4096, which is an ordinary
+/// shape for a local model) reserves everything, packs nothing, and answers
+/// "too large for the context window" to every question ever asked without
+/// once calling the model. Half a window of excerpts and half a window of
+/// answer is a worse answer than the operator asked for; no answer is not an
+/// answer.
+///
+/// One rule for the answer call and the follow-up call, which packs the same
+/// excerpts against a different model under a different system prompt. The
+/// half-window clamp was itself a fix; a rule kept in two places gets tuned in
+/// one and leaves the other refusing the second round for size on exactly the
+/// questions worth it.
+pub(super) fn excerpt_budget(
+    model: &dyn crate::infer::Completer,
+    counter: &crate::infer::budget::TokenCounter,
+    system: &str,
+    question: &str,
+) -> usize {
+    let context = model.context_tokens();
+    let reserve = model
+        .max_output_tokens()
+        .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
+        .min(context / 2);
+    context
+        .saturating_sub(counter.count(system))
+        .saturating_sub(counter.count(question))
+        .saturating_sub(reserve)
 }
 
 #[cfg(test)]
