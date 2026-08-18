@@ -661,6 +661,12 @@ struct AnswerTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "_ask_rail.html")]
+struct AskRailTemplate {
+    citations: Vec<RenderedResult>,
+}
+
+#[derive(Template)]
 #[template(path = "_ask_verdict.html")]
 struct AskVerdictTemplate {
     event_id: String,
@@ -2029,7 +2035,7 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
         Needs(what) => ("needs", serde_json::json!({ "text": what })),
         Citations(hits) => (
             "citations",
-            serde_json::json!({ "citations": rail_items(hits) }),
+            serde_json::json!({ "rail": rail_fragment(hits)? }),
         ),
         Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
         Token(t) => ("token", serde_json::json!({ "text": t })),
@@ -2046,26 +2052,24 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
 
 /// The rail, rendered here rather than in the browser.
 ///
+/// One fragment rather than a list of fields, because the ids in it are the
+/// other end of the links `link_citations` writes into the answer, and both
+/// ends are then numbered by the same server-side pass. Rendering the rail in
+/// the browser would put the two halves of a citation in two languages, where
+/// only a person clicking could tell they still agree.
+///
 /// Each excerpt's markdown has already been through the sanitizing renderer, so
 /// the page inserts HTML it was handed and never renders markdown itself.
-fn rail_items(hits: Vec<crate::core::search::SearchResult>) -> Vec<serde_json::Value> {
-    hits.into_iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let r = render_hit(i, h, &Default::default());
-            serde_json::json!({
-                // What `[n]` in the answer links to.
-                "n": i + 1,
-                "artifact_id": r.artifact_id,
-                "title": r.title,
-                "html": r.html,
-                "snippet": r.snippet,
-                "corpus_id": r.corpus_id,
-                "rank": r.rank,
-                "weak": r.weak,
-            })
-        })
-        .collect()
+fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String> {
+    AskRailTemplate {
+        citations: hits
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| render_hit(i, h, &Default::default()))
+            .collect(),
+    }
+    .render()
+    .map_err(|e| Error::Internal(e.to_string()))
 }
 
 /// The finished answer, as the page swaps it in.
@@ -5468,6 +5472,141 @@ mod tests {
         assert!(
             done_html(&body).contains("<div class=\"md\">"),
             "the done event carries the rendered fragment: {body}"
+        );
+    }
+
+    /// The page and the driver agree about what is on it.
+    ///
+    /// The stream driver in `app.js` reaches for its regions by id, and a
+    /// renamed or dropped element does not fail loudly in a browser — it leaves
+    /// an ask page that posts nothing and answers nothing, which is exactly the
+    /// state this task found the page in. Read out of the shipped `app.js`
+    /// rather than listed here, so the two cannot drift apart; scoped to the
+    /// `ask-` prefix, because only the ask driver's ids are this page's problem.
+    #[tokio::test]
+    async fn the_ask_page_carries_every_region_the_stream_driver_looks_up() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let wanted = pulled(&js, "getElementById('ask-", '\'');
+        assert!(
+            wanted.len() >= 4,
+            "the driver looks up almost nothing, so this test checks almost nothing: {wanted:?}"
+        );
+
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask").await;
+        for id in wanted {
+            assert!(
+                page.contains(&format!(r#"id="ask-{id}""#)),
+                "app.js drives #ask-{id} and the page has no such element: {page}"
+            );
+        }
+        // The old path is gone rather than sitting beside the new one: two
+        // submitters on one form would park the question twice and spend a
+        // model call on the copy nobody reads.
+        assert!(
+            !page.contains("hx-post"),
+            "the ask form still posts through htmx: {page}"
+        );
+    }
+
+    /// The excerpt list, out of the `citations` frame, the way the page reads
+    /// it. Keyed apart from the answer's `html` so `done_html` above cannot pick
+    /// this frame up by mistake.
+    fn rail_html(body: &str) -> String {
+        let data = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+            .find(|v| v.get("rail").is_some())
+            .unwrap_or_else(|| panic!("no citations event in {body}"));
+        data["rail"].as_str().unwrap().to_string()
+    }
+
+    /// Every run that follows `open`, up to the next `end`, in document order.
+    fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
+        html.match_indices(open)
+            .map(|(at, m)| {
+                html[at + m.len()..]
+                    .chars()
+                    .take_while(|c| *c != end)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A citation link and the rail item it lands on are the two halves of one
+    /// claim, and they are numbered by two separate passes over two separate
+    /// templates: `link_citations` writes the hrefs into the answer, and
+    /// `_ask_rail.html` writes the ids into the excerpts. Nothing but this
+    /// assertion makes them agree, and a `[1]` that scrolls nowhere reads to a
+    /// reader as provenance the base cannot actually show.
+    ///
+    /// The reply cites `[01]` as well as `[1]`, because the linker anchors on
+    /// the parsed number rather than the digits it found: an id of `cite-01`
+    /// would satisfy a lazier reading of this and still be a dead link.
+    #[tokio::test]
+    async fn every_citation_link_in_the_answer_points_at_an_excerpt_the_rail_carries() {
+        let mut core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Swapped in after indexing, so the citations in the answer are this
+        // reply's and not something retrieval happened to produce.
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("alpha [1], bravo [2], and alpha again [01].".into()),
+        });
+        let (app, cookie) = app_with_cookie(core).await;
+
+        let body = ask_over_sse(&app, &cookie, "what+is+alpha").await;
+        let rail = rail_html(&body);
+        let answer = done_html(&body);
+
+        let cited = pulled(&answer, r##"href="#cite-"##, '"');
+        // Without this the test passes on an answer that cites nothing, which
+        // is the state the page was in before this task and the state a broken
+        // linker would put it back into.
+        assert!(
+            !cited.is_empty(),
+            "the answer carries no citation links at all, so nothing was checked: {answer}"
+        );
+        for n in &cited {
+            assert!(
+                rail.contains(&format!(r#"id="cite-{n}""#)),
+                "the answer links to #cite-{n} and the rail carries no such id: {rail}"
+            );
+        }
+
+        // Coverage on its own is not enough, and a mutation proved it: numbering
+        // the rail from zero leaves every id the answer links to still present
+        // on the page — one excerpt further down. The links would all resolve
+        // and every one of them would cite the wrong artifact, which is the
+        // fabricated provenance this whole scheme exists to avoid. So the
+        // numbering itself is pinned: 1..n, in the order the rail lists them.
+        let ids = pulled(&rail, r#"id="cite-"#, '"');
+        assert!(
+            ids.len() > 1,
+            "an off-by-one cannot show itself over fewer than two excerpts: {rail}"
+        );
+        let counted: Vec<String> = (1..=ids.len()).map(|i| i.to_string()).collect();
+        assert_eq!(ids, counted, "the rail must number 1..n in order: {rail}");
+
+        // And the n-th rail item has to be the n-th excerpt. The answer fragment
+        // lists the same citations in the same order under "Artifacts used"
+        // (after its own card, which is why the first title is dropped), so the
+        // two renderings of one list are checked against each other rather than
+        // each being trusted separately.
+        let rail_titles = pulled(&rail, r#"<span class="rail-title">"#, '<');
+        let mut card_titles = pulled(&answer, r#"<span class="card-title">"#, '<');
+        card_titles.remove(0);
+        assert_eq!(
+            rail_titles, card_titles,
+            "the rail and the answer disagree about which excerpt is which"
         );
     }
 

@@ -1,0 +1,26 @@
+{# The excerpts, sent before the answer that cites them, so the rail is
+   readable while the model is still writing.
+
+   Each item carries the `cite-n` id that `link_citations` writes into every
+   `[n]` of the finished answer. The link and the anchor are two halves of one
+   claim: a citation that scrolls nowhere reads as provenance the base cannot
+   actually show, which is the one failure this codebase exists to prevent. The
+   id is `loop.index`, the same 1-based number the linker parses out of the
+   bracket — never the raw digits it found, so `[01]` and `[1]` both land here.
+
+   Shaped like the search rail because it is one: an anchor per row, which is
+   what the arrow-key navigation in app.js moves between and focuses. It opens
+   in a new tab rather than in place, because the answer above it is still
+   being written and navigating away would throw the stream out. #}
+{% for r in citations %}
+<div class="rail-row">
+  <a class="rail-item" id="cite-{{ loop.index }}" role="option" aria-selected="false"
+     href="/ui/artifacts/{{ r.artifact_id }}" target="_blank" rel="noopener">
+    <div class="rail-head">
+      <span class="rail-rank mono">[{{ loop.index }}]</span>
+      <span class="rail-title">{{ r.title }}</span>
+    </div>
+    <div class="rail-snippet">{{ r.snippet }}</div>
+  </a>
+</div>
+{% endfor %}
