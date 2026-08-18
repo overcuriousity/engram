@@ -15,7 +15,16 @@ fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const TRIM: [char; 8] = ['(', ')', ',', '.', ';', ':', '"', '\''];
+/// Punctuation that wraps a token without belonging to it.
+///
+/// `*` and `_` are here because they are markdown, not because they are
+/// punctuation: emphasis is the one wrapper that also appears in the set below
+/// that decides whether a slash-carrying token is machine-shaped. `**Win7/8/10:**`
+/// therefore matched — the asterisks supplied the second machine character —
+/// and a merge was told it had dropped a path that was never a path. Trimmed
+/// rather than dropped from that set, so `**/etc/fstab**` is still checked, as
+/// `/etc/fstab`.
+const TRIM: [char; 10] = ['(', ')', ',', '.', ';', ':', '"', '\'', '*', '_'];
 
 fn looks_like_a_path_or_flag(token: &str) -> bool {
     let t = token.trim_matches(|c: char| TRIM.contains(&c));
@@ -630,6 +639,27 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
                 extract_machine_literals(both)
             );
         }
+    }
+
+    #[test]
+    fn markdown_emphasis_does_not_make_a_word_into_a_path() {
+        // A slash alone is not enough to call a token machine-shaped — that is
+        // what keeps "enables/disables" out — so something else in the token has
+        // to look like a path. Bold supplied it: the `*` in `**Win7/8/10:**` is
+        // in that set, and the merge of three USB artifacts was refused for
+        // dropping a "path" that is a Windows version list in bold.
+        assert!(!looks_like_a_path_or_flag("**Win7/8/10:**"));
+        assert!(!looks_like_a_path_or_flag("Win7/8/10"));
+        assert!(!looks_like_a_path_or_flag("__enables/disables__"));
+
+        // Emphasis around a real path is stripped, not disqualifying, and the
+        // literal reported is the path itself so the merge is checked for what
+        // it actually has to keep.
+        assert!(looks_like_a_path_or_flag("**/etc/fstab**"));
+        assert_eq!(
+            extract_machine_literals("It lives in **/etc/fstab** on boot."),
+            vec!["/etc/fstab".to_string()]
+        );
     }
 
     #[test]
