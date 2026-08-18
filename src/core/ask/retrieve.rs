@@ -16,8 +16,12 @@
 /// No cliff — fewer than three hits, or no single step standing out — returns
 /// the whole list. A list with no cliff is a list with nothing to conclude
 /// from, and inventing a cut there would be worse than the greedy pack.
-pub(super) fn above_cliff(scores: &[f32]) -> usize {
-    crate::core::search::cliff(scores).unwrap_or(scores.len())
+///
+/// Takes the `Option` `search::cliff` already produced for the same list — the
+/// caller reports that position on the wire and reaches neighbours from it —
+/// rather than computing the cliff a second time.
+pub(super) fn above_cliff(cliff_at: Option<usize>, hits: usize) -> usize {
+    cliff_at.unwrap_or(hits)
 }
 
 /// How many of the top hits get their neighbours pulled in.
@@ -333,21 +337,26 @@ mod tests {
     /// off, not where the context window runs out.
     #[test]
     fn a_list_with_a_cliff_packs_to_it() {
-        assert_eq!(above_cliff(&[0.9, 0.88, 0.86, 0.20, 0.19]), 3);
+        assert_eq!(cut(&[0.9, 0.88, 0.86, 0.20, 0.19]), 3);
+    }
+
+    /// `above_cliff` as `ask` runs it: the cliff of this list, then the cut.
+    fn cut(scores: &[f32]) -> usize {
+        above_cliff(crate::core::search::cliff(scores), scores.len())
     }
 
     /// No cliff means no basis for concluding anything about the tail, so the
     /// behaviour is exactly what it was before this function existed.
     #[test]
     fn a_list_without_a_cliff_is_kept_whole() {
-        assert_eq!(above_cliff(&[0.9, 0.88, 0.86, 0.84, 0.82]), 5);
+        assert_eq!(cut(&[0.9, 0.88, 0.86, 0.84, 0.82]), 5);
     }
 
     /// Fewer than three hits: `cliff` returns None by construction, so there
     /// is nothing here to cut and the budget is left as the only bound.
     #[test]
     fn two_hits_are_too_few_for_a_cliff_and_are_kept_whole() {
-        assert_eq!(above_cliff(&[0.9, 0.1]), 2);
+        assert_eq!(cut(&[0.9, 0.1]), 2);
     }
 
     /// The cliff decides what is worth showing; the window decides what fits,
@@ -356,7 +365,7 @@ mod tests {
     /// cliff, then pack what is left.
     #[test]
     fn the_budget_still_wins_when_the_cliff_would_overrun_the_window() {
-        let above = above_cliff(&[0.9, 0.88, 0.86, 0.20, 0.19]);
+        let above = cut(&[0.9, 0.88, 0.86, 0.20, 0.19]);
         // Ten-token blocks against a budget that holds two.
         let blocks: Vec<String> = (0..above).map(|_| "x".repeat(35)).collect();
         let kept = pack_by_budget(&blocks, &TokenCounter, 25);

@@ -1,6 +1,7 @@
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -388,6 +389,40 @@ impl Store {
             .await?
             .ok_or(Error::NotFound)?;
         Ok(row_to_artifact(&row))
+    }
+
+    /// The caveats of many artifacts in one query, keyed by id.
+    ///
+    /// For the ask path, which needs the caveats of every hit and nothing else
+    /// from the row: one lookup per hit is cheap, but a follow-up round packs
+    /// the merged list again, and a dozen sequential round trips in front of
+    /// every model call adds up. An id with no row — deleted since it was
+    /// retrieved — is simply absent from the map.
+    pub async fn caveats_for(&self, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id, caveats FROM artifacts WHERE id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<Option<String>, _>("caveats")
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect())
     }
 
     /// Every artifact an ordinary search could return.
@@ -1050,6 +1085,37 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
+    }
+
+    /// One query for every hit's caveats: each id maps to its own list, an id
+    /// with no row is absent rather than an error, and nothing asked for is
+    /// confused with anything else in the table.
+    #[tokio::test]
+    async fn caveats_for_reads_many_artifacts_in_one_query() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let mut a = nc(0, "one");
+        a.caveats = vec!["destroys everything on the device".into()];
+        let b = nc(1, "two");
+        let c = nc(2, "three");
+        let made = s.insert_artifacts(&src.id, &[a, b, c]).await.unwrap();
+
+        let ids = vec![made[0].id.clone(), made[1].id.clone(), "gone".to_string()];
+        let got = s.caveats_for(&ids).await.unwrap();
+        assert_eq!(
+            got.get(&made[0].id).map(Vec::as_slice),
+            Some(&["destroys everything on the device".to_string()][..])
+        );
+        assert_eq!(got.get(&made[1].id).map(Vec::len), Some(0));
+        assert!(
+            !got.contains_key("gone"),
+            "a missing row must be absent, not invented"
+        );
+        assert!(
+            !got.contains_key(&made[2].id),
+            "an id not asked for came back"
+        );
+        assert!(s.caveats_for(&[]).await.unwrap().is_empty());
     }
 
     /// The answer is often in the artifact next to the one that matched, and

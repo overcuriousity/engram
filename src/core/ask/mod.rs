@@ -431,7 +431,7 @@ impl Core {
         // will not be sent.
         let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
         let cliff_at = crate::core::search::cliff(&scores);
-        hits.truncate(retrieve::above_cliff(&scores));
+        hits.truncate(retrieve::above_cliff(cliff_at, hits.len()));
         let ranked = hits.len();
 
         // Artifacts reached sideways rather than retrieved are appended here,
@@ -458,23 +458,36 @@ impl Core {
     /// read from the store, which costs one cheap SQLite lookup per hit and no
     /// inference. An excerpt whose row has since been deleted simply carries
     /// none.
+    ///
+    /// One query for the lot rather than one per hit: this runs once per round,
+    /// over the whole list — round two's call covers round one's hits again —
+    /// so per-hit round trips would sit in front of every model call twice.
     async fn excerpts(&self, hits: &[SearchResult]) -> Vec<String> {
-        let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
-        for (i, h) in hits.iter().enumerate() {
-            let caveats = self
-                .store
-                .get_artifact(&h.artifact_id)
-                .await
-                .map(|c| c.caveats)
-                .unwrap_or_default();
-            blocks.push(ask_excerpt(
-                i + 1,
-                h.title.as_deref().unwrap_or_default(),
-                &h.text,
-                &caveats,
-            ));
-        }
-        blocks
+        let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
+        let caveats = match self.store.caveats_for(&ids).await {
+            Ok(m) => m,
+            Err(e) => {
+                // The caveats are the safety margin on an excerpt, not the
+                // excerpt; an answer without them beats no answer, but the
+                // store failing here is worth a line.
+                tracing::warn!(error = %e, "ask: could not read caveats; excerpts carry none");
+                Default::default()
+            }
+        };
+        hits.iter()
+            .enumerate()
+            .map(|(i, h)| {
+                ask_excerpt(
+                    i + 1,
+                    h.title.as_deref().unwrap_or_default(),
+                    &h.text,
+                    caveats
+                        .get(&h.artifact_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
     }
 
     /// How many tokens of excerpt one answer may be built from: the rule
