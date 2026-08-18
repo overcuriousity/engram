@@ -316,6 +316,18 @@ fn interpret(
             // card renders it directly beneath "these two disagree", so the
             // pair states the opposite of its own finding to the person the
             // escalation exists to hand it to.
+            //
+            // Logged, though. Keeping the tokens off the card is a judgement
+            // about what a person can act on; keeping them out of the process
+            // entirely left a refusal nothing anywhere could explain. Three
+            // pairs sat as unexplained "these two disagree" for a day, and
+            // finding out why meant reconstructing the tokenizer's output by
+            // hand against the two texts. This is the one place that knows.
+            tracing::warn!(
+                pair = pair.id,
+                lost = lost.join(", "),
+                "refused a merge that would have dropped these"
+            );
             relation = Relation::Conflict;
             detail = None;
             merged = None;
