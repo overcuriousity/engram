@@ -588,3 +588,42 @@ impl Describer for FakeDescriber {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default implementation is the compatibility guarantee: an implementor
+    /// that knows nothing about streaming still streams, as one delta. Without
+    /// it every fake in the test suite would need a hand-written override.
+    #[tokio::test]
+    async fn a_completer_without_an_override_streams_its_whole_answer_as_one_delta() {
+        let c = FakeCompleter {
+            reply: Some("the answer".into()),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let done = c.answer_streaming("sys", "usr", 128, tx).await.unwrap();
+        let mut got = String::new();
+        while let Some(d) = rx.recv().await {
+            if let crate::infer::Delta::Token(t) = d {
+                got.push_str(&t);
+            }
+        }
+        assert_eq!(got, "the answer");
+        assert_eq!(done.text, "the answer");
+    }
+
+    /// The returned completion, not the accumulated deltas, is what a caller
+    /// stores: a receiver that went away mid-answer must neither fail the call
+    /// nor shorten what it returns.
+    #[tokio::test]
+    async fn a_dropped_receiver_neither_fails_the_call_nor_truncates_its_answer() {
+        let c = FakeCompleter {
+            reply: Some("the answer".into()),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let done = c.answer_streaming("sys", "usr", 128, tx).await.unwrap();
+        assert_eq!(done.text, "the answer");
+    }
+}
