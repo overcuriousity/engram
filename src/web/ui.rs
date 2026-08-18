@@ -5638,7 +5638,7 @@ mod tests {
     #[tokio::test]
     async fn the_page_stamps_its_script_with_a_hash_of_that_script() {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for name in ["assets/app.js", "assets/app.css"] {
+        for name in ["assets/app.js", "assets/app.css", "assets/htmx.min.js"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
             for b in std::fs::read(&path).unwrap() {
                 h ^= b as u64;
@@ -5657,6 +5657,13 @@ mod tests {
         assert!(
             page.contains(&format!("/assets/app.js?v={want}")),
             "the page does not stamp its script: {page}"
+        );
+        // htmx too. It is vendored and changes only on a deliberate bump — which
+        // is exactly the moment a year-old cached copy would bite, on every page
+        // that still drives its interactions through it.
+        assert!(
+            page.contains(&format!("/assets/htmx.min.js?v={want}")),
+            "the page does not stamp htmx: {page}"
         );
 
         // The stamped URL still serves the file: the query is not part of the

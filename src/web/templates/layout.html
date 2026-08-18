@@ -25,7 +25,7 @@
      across an upgrade would show a form that submits nothing. The stamp moves
      only when the bytes do, so an unchanged deployment keeps its caches. #}
   <link rel="stylesheet" href="/assets/app.css?v={{ crate::web::assets::stamp() }}">
-  <script src="/assets/htmx.min.js" defer></script>
+  <script src="/assets/htmx.min.js?v={{ crate::web::assets::stamp() }}" defer></script>
   <script src="/assets/app.js?v={{ crate::web::assets::stamp() }}" defer></script>
 </head>
 <body>

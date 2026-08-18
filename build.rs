@@ -65,7 +65,14 @@ fn main() {
 /// only has to differ when the file differs, and it costs no dependency.
 fn stamp_assets() {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for name in ["assets/app.js", "assets/app.css"] {
+    // htmx is here for the same reason the other two are, even though it is
+    // vendored and changes only when someone bumps it deliberately: a bump is
+    // exactly when a stale copy would bite, and every page but `ask` still
+    // drives its interactions through it. One stamp over all three, so a change
+    // to any of them moves every URL — cheaper than three stamps, and a
+    // needless re-fetch of two small files costs less than a subtle mismatch
+    // between a new htmx and an old app.js.
+    for name in ["assets/app.js", "assets/app.css", "assets/htmx.min.js"] {
         println!("cargo:rerun-if-changed={name}");
         for b in std::fs::read(name).unwrap_or_else(|e| panic!("{name}: {e}")) {
             h ^= b as u64;
