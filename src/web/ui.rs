@@ -5593,6 +5593,43 @@ mod tests {
         );
     }
 
+    /// The driver listens for every frame the server sends.
+    ///
+    /// A frame nobody handles fails silently and only for whoever turned the
+    /// feature on: `follow_up` ships off, so the second round's frames never
+    /// fire on a default install, and an ask page that drops them would look
+    /// perfect right up until the first operator enabled it. The names are
+    /// pulled from `sse_event`'s own source rather than listed here, so adding
+    /// an event without a handler fails this test instead of shipping.
+    #[tokio::test]
+    async fn the_stream_driver_handles_every_event_the_server_names() {
+        let ui = include_str!("ui.rs");
+        let body = &ui[ui.find("fn sse_event(").expect("sse_event is in this file")..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        // The first string of each arm's `(name, data)` tuple, whether the
+        // arm is one line or many.
+        let names: Vec<String> = body
+            .split('(')
+            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            names.len() >= 6,
+            "the event names could not be read out of sse_event: {names:?}"
+        );
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        for name in names {
+            assert!(
+                js.contains(&format!("addEventListener('{name}'")),
+                "the server sends a `{name}` frame and the driver ignores it"
+            );
+        }
+    }
+
     /// The page and the driver agree about what is on it.
     ///
     /// The stream driver in `app.js` reaches for its regions by id, and a

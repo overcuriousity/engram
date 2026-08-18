@@ -121,6 +121,7 @@
     if (!form) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
+    var progress = document.getElementById('ask-progress');
     var rail = document.getElementById('ask-rail');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
@@ -151,6 +152,7 @@
       result.appendChild(box);
       live.hidden = true;
       reasoning.hidden = true;
+      progress.hidden = true;
     }
 
     function openStream(id, mine) {
@@ -172,6 +174,29 @@
         rail.innerHTML = JSON.parse(e.data).rail;
         enhance(rail);
       });
+      // The extra retrieval round, made visible. `follow_up` ships off, so on a
+      // default install neither of these ever fires and the line stays hidden;
+      // with it on, the second search is a silent pause in front of the answer
+      // and the query it ran is otherwise nowhere on the page.
+      source.addEventListener('needs', function (e) {
+        if (!current()) return;
+        progress.hidden = false;
+        // textContent, not innerHTML: this string is model output that went
+        // through no renderer. Same rule as the error box.
+        progress.textContent = 'Looking further: ' + JSON.parse(e.data).text;
+      });
+      source.addEventListener('retrieved', function (e) {
+        if (!current()) return;
+        var round = JSON.parse(e.data);
+        // Round one happens on every ask, including every ask that will never
+        // have a second round, and a line of retrieval statistics in front of
+        // every answer is noise. Round two is the one nobody can otherwise see
+        // happen.
+        if (round.round < 2) return;
+        progress.hidden = false;
+        progress.textContent = 'Round ' + round.round + ': ' + round.shown +
+          ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
+      });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;
         reasoning.hidden = false;
@@ -192,6 +217,9 @@
         // reuses them.
         live.hidden = true;
         reasoning.hidden = true;
+        // `progress` deliberately stays: what the retrieval went looking for
+        // still describes the rail underneath the answer, and it is the only
+        // place on the page that says a second round happened at all.
         // Said once, when there is something to read. The tokens streamed into
         // a polite live region as they arrived, which tells a reader that an
         // answer is coming; nothing until now said it had finished.
@@ -224,6 +252,8 @@
       status.textContent = '';
       live.textContent = '';
       reasoning.textContent = '';
+      progress.textContent = '';
+      progress.hidden = true;
       rail.textContent = '';
       result.textContent = '';
       live.hidden = true;

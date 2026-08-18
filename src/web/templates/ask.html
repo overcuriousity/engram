@@ -11,6 +11,12 @@
   <button class="btn btn-accent" type="submit">Ask</button>
   <span id="ask-spinner" class="spinner">thinking…</span>
 </form>
+{# What the retrieval did before the model was asked anything, when there was
+   more of it than usual. Silent on an ordinary ask: `[infer.ask] follow_up`
+   ships off, and with it off there is never a second round to report. With it
+   on, the second search is otherwise a silent pause of unknown length in front
+   of the answer, and what it went looking for is nowhere on the page. #}
+<p id="ask-progress" class="muted" hidden></p>
 {# What the model said on the way to the answer, kept dim and out of the way: it
    is not the answer, and nothing in it is cited. #}
 <div id="ask-reasoning" class="reasoning" hidden></div>
