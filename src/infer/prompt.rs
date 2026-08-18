@@ -461,6 +461,55 @@ pub fn claims_schema() -> serde_json::Value {
     })
 }
 
+/// The one question the retrieval loop is allowed to ask itself.
+///
+/// Deliberately narrow: it may name one more thing to look for, or nothing at
+/// all. It is never asked to answer, to plan, or to say how many rounds it
+/// wants — "let the model say once what it still needs" is the bounded version
+/// of a mechanism whose unbounded version is an agent, and an agent is not what
+/// this is.
+pub const FOLLOW_UP_SYSTEM: &str = r#"You are helping a search system decide whether it has enough material.
+
+You are given a question and the excerpts retrieved for it. Decide whether the
+excerpts together contain what is needed to answer.
+
+Reply with JSON only, in exactly this shape:
+
+{"need": "a short search query" }   or   {"need": null}
+
+- null: the excerpts are sufficient. This is the common answer.
+- a query: name the ONE thing that is missing, as the words you would search
+  for. Not a question, not a sentence — a query. Never repeat the original
+  question back."#;
+
+/// `need` is nullable in the schema rather than optional, because "I have
+/// enough" is the common answer and a grammar that can only express a query
+/// would put the model in the position of inventing one.
+pub fn follow_up_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "need": {"type": ["string", "null"]} },
+        "required": ["need"],
+        "additionalProperties": false
+    })
+}
+
+/// The query to run next, or `None` for "the excerpts are enough".
+///
+/// Every failure reads as `None`: unparsable output, a missing field, a reply
+/// that was prose. A follow-up is an optional extra round, so anything that is
+/// not unambiguously a query has to mean "do not spend a second retrieval on
+/// it" — the alternative is searching for a fragment of an error message.
+///
+/// Whitespace-only counts as nothing further for the same reason a model that
+/// answers `{"need": ""}` means it has enough: an empty search finds the whole
+/// base or none of it, and neither is what was asked for.
+pub fn parse_follow_up(reply: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply)).ok()?;
+    let need = v["need"].as_str()?.trim();
+    (!need.is_empty()).then(|| need.to_string())
+}
+
 /// Names a knowledge gap from the questions in it. Sees questions only, never
 /// answers: it names the hole, not the guess.
 pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
@@ -1084,6 +1133,56 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// `null` is the common answer and must be readable as "I have enough",
+    /// never as a query to run.
+    #[test]
+    fn a_null_need_parses_as_nothing_further() {
+        assert_eq!(parse_follow_up(r#"{"need": null}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": ""}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": "   "}"#), None);
+    }
+
+    /// A follow-up is an optional extra round, so anything that is not
+    /// unambiguously a query means "spend no second retrieval on it" rather
+    /// than "search for whatever this was".
+    #[test]
+    fn a_reply_that_is_not_the_shape_asked_for_is_nothing_further() {
+        assert_eq!(parse_follow_up("I think you need more on tickers"), None);
+        assert_eq!(parse_follow_up(r#"{"query": "tickers"}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": {"q": "tickers"}}"#), None);
+        assert_eq!(parse_follow_up(""), None);
+    }
+
+    #[test]
+    fn a_need_parses_as_the_query_to_run() {
+        assert_eq!(
+            parse_follow_up(r#"{"need": "engram retention ticker interval"}"#),
+            Some("engram retention ticker interval".to_string())
+        );
+        // Models fence their JSON and preface it with prose no matter what the
+        // prompt says, which is what `extract_json` is for.
+        assert_eq!(
+            parse_follow_up("Here you go:\n```json\n{\"need\": \"ticker interval\"}\n```"),
+            Some("ticker interval".to_string())
+        );
+    }
+
+    /// The schemas are sent to the endpoint to constrain decoding, so a schema
+    /// that has drifted from its parser constrains the model into output the
+    /// parser then rejects — a failure that looks exactly like a bad model.
+    #[test]
+    fn a_reply_that_satisfies_the_follow_up_schema_parses() {
+        let schema = follow_up_schema();
+        assert!(schema["properties"]["need"].is_object());
+        assert_eq!(
+            schema["properties"]["need"]["type"],
+            serde_json::json!(["string", "null"]),
+            "the grammar must be able to say `null`, which is the common answer"
+        );
+        assert!(parse_follow_up(r#"{"need":"x"}"#).is_some());
+        assert!(parse_follow_up(r#"{"need":null}"#).is_none());
+    }
+
     /// A captured artifact: one with nothing behind it to show as context.
     fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
         DedupeMember {
@@ -1390,6 +1489,7 @@ mod tests {
             ("link", link_schema()),
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
+            ("follow_up", follow_up_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the

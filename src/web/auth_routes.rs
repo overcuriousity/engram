@@ -340,6 +340,7 @@ mod tests {
                 pending: crate::auth::oidc::PendingStore::new(),
                 secure_cookies: true,
             }),
+            ask_handoff: Default::default(),
         };
         let res = crate::web::router(state)
             .oneshot(form("/auth/login", "username=dev&password=hunter2"))

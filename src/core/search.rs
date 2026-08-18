@@ -122,7 +122,9 @@ impl From<SearchHit> for SearchResult {
     }
 }
 
-fn now_secs() -> i64 {
+/// Visible to the rest of `core` so `ask` can decay link weights to the same
+/// clock the results rail does, rather than keeping a second reading of it.
+pub(super) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

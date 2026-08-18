@@ -19,7 +19,18 @@
      moment the app launched, with no URL bar to dismiss it from. app.js
      focuses it where a pointer says there is a hardware keyboard already —
      the same rule the search box follows. #}
-  <textarea class="textarea" name="text" placeholder="Paste anything worth keeping."></textarea>
+  <textarea class="textarea" name="text" placeholder="Paste anything worth keeping.">{{ prefill_text }}</textarea>
+  {# Present only when the box was filled from an answer. It rides the form so
+     that what gets stored records the question and the artifacts the answer was
+     written from — kept even if the operator rewrites every word above, because
+     the claim it makes is about where the text came from, not what it says. #}
+  {% if !prefill_ask.is_empty() %}
+  <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
+  <p class="muted" style="margin:0">
+    From an answer engram wrote. Edit it as you like — saving is yours, and the
+    capture records the question it came from.
+  </p>
+  {% endif %}
   <p id="size-hint" class="muted" hidden></p>
   {# A drop target rather than a second page. The file goes to the API
      endpoint, not through this form, because the form posts a urlencoded body

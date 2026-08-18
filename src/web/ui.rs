@@ -1,4 +1,5 @@
 use crate::auth::Identity;
+use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -8,6 +9,7 @@ use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
@@ -362,6 +364,21 @@ struct CaptureTemplate {
     gaps: Vec<GapGroup>,
     /// Open gaps the sweep has not grouped yet.
     loose: Vec<GapMember>,
+    /// An answer the operator asked to keep, dropped into the box for them to
+    /// edit. Empty on an ordinary visit.
+    ///
+    /// Prefilled and not saved: the save stays the operator's decision. That is
+    /// the line the roadmap draws — this is a person keeping something the
+    /// model wrote, recorded as such, and not the system writing memory to
+    /// itself.
+    prefill_text: String,
+    /// The ask this text came from, carried through the form so the capture
+    /// records where it came from. Empty when the box was not prefilled.
+    ///
+    /// The id rather than the prose: a note is a string someone can edit away,
+    /// while this is the join back to the question and the artifacts the answer
+    /// was built from, and `capture_submit` turns it into stored provenance.
+    prefill_ask: String,
 }
 
 /// One unanswered question or gap search, as the capture page lists it.
@@ -664,10 +681,20 @@ struct AnswerTemplate {
     /// The answer said "not in the base"; badged so the operator sees what
     /// the harness will count.
     abstained: bool,
+    /// Literals the answer carries that no cited excerpt does. Badged, and
+    /// marked in `answer`, so a reader can tell what the base holds from what
+    /// the model wrote.
+    unsupported: Vec<String>,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
     /// The bar, rendered — empty when there is no event.
     verdict_bar: String,
+}
+
+#[derive(Template)]
+#[template(path = "_ask_rail.html")]
+struct AskRailTemplate {
+    citations: Vec<RenderedResult>,
 }
 
 #[derive(Template)]
@@ -694,8 +721,34 @@ struct AskCarriedTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+/// What the capture page accepts in its query string.
+///
+/// `from_ask` rather than the answer itself: an answer runs to thousands of
+/// characters and a URL does not, so passing the text would break on exactly
+/// the long answers worth keeping. The id is short, and the page reads the
+/// stored row.
+#[derive(serde::Deserialize)]
+struct CapturePrefill {
+    #[serde(default)]
+    from_ask: Option<String>,
+}
+
+async fn capture_page(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<CapturePrefill>,
+) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
+    // A prefill that names an ask nobody recorded is not an error worth a page
+    // for: the box is simply empty, which is what an ordinary visit looks like.
+    let prefilled = match &p.from_ask {
+        Some(id) => st.core.store.ask_event(id).await?,
+        None => None,
+    };
+    let (prefill_text, prefill_ask) = match prefilled {
+        Some(ev) => (ev.answer, ev.id),
+        None => (String::new(), String::new()),
+    };
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
@@ -720,6 +773,8 @@ async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Respo
         vision_enabled: st.core.describer.is_some(),
         gaps,
         loose,
+        prefill_text,
+        prefill_ask,
     })
     .into_response())
 }
@@ -741,6 +796,11 @@ async fn gap_dismiss(
 #[derive(serde::Deserialize)]
 struct CaptureForm {
     text: String,
+    /// Set when the box was prefilled from an answer. Carries the ask through
+    /// the edit, so what is stored records that the text was model-written and
+    /// what it was written from — even if the operator rewrote every word of it.
+    #[serde(default)]
+    from_ask: Option<String>,
 }
 
 async fn capture_submit(
@@ -748,7 +808,37 @@ async fn capture_submit(
     _id: Identity,
     Form(f): Form<CaptureForm>,
 ) -> Result<Response> {
-    let out = st.core.ingest(&f.text, "web", None).await?;
+    // An answer the operator chose to keep is still a paste, and is stored as
+    // one — the same pipeline, the same synthesis, no special case downstream.
+    // What differs is only the trace: the origin says a model wrote it, and the
+    // metadata says from which question and which artifacts. That is the whole
+    // of the concession the roadmap makes here, and it is a record rather than
+    // a mechanism.
+    //
+    // The two travel together or not at all. An ask can vanish between the page
+    // load and the save — retention deletes unjudged questions — and storing
+    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
+    // model authorship while carrying none of the provenance that assertion is
+    // supposed to buy. A claim that cannot be checked is worse than no claim, so
+    // a lost row falls back to an ordinary paste, which is what it now is.
+    let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
+        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
+            Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
+                &ev.id,
+                &ev.question,
+                &ev.citations,
+            ),
+            None => {
+                tracing::warn!(
+                    ask_id,
+                    "capture named an ask that is no longer stored; keeping it as an ordinary paste"
+                );
+                crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB)
+            }
+        },
+        None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
+    };
+    let out = st.core.ingest_capture(capture).await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -1944,27 +2034,161 @@ struct AskForm {
     q: String,
 }
 
+/// Parks the question and hands back the id that streams it.
+///
+/// The model call belongs to the GET that follows, not here: `EventSource` is
+/// GET-only, so the alternative is a GET that runs inference and writes a row —
+/// exactly what history, prefetchers and link scanners replay. The id is the
+/// guard, and it is spent on first use.
 async fn ask_submit(
     State(st): State<AppState>,
     id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
-    let out = st
-        .core
-        .ask(
-            &crate::core::ask::AskRequest {
-                q: f.q,
-                limit: None,
-                tags: vec![],
-                category: None,
-            },
-            crate::store::feedback::Door::Ui.by(id.subject),
-        )
-        .await?;
-    Ok(HtmlTemplate(AnswerTemplate {
-        // The answer is model output too, so it goes through the same
-        // sanitizing renderer as chunk text.
-        answer: markdown::render(&out.answer),
+    // Refused before anything is parked, so an empty box costs no entry in the
+    // map and no second round trip to find out.
+    if f.q.trim().is_empty() {
+        return Err(Error::Validation("question is empty".into()));
+    }
+    let handoff = st.ask_handoff_park(
+        crate::core::ask::AskRequest {
+            q: f.q,
+            limit: None,
+            tags: vec![],
+            category: None,
+        },
+        &id.subject,
+    );
+    Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
+}
+
+/// One ask, as it happens.
+///
+/// Takes an `Identity` like every other `/ui` route: this one runs a model
+/// call, and an endpoint that runs inference for whoever guesses a URL is a
+/// free-inference hole rather than a page.
+///
+/// A reader who leaves before `Done` records nothing. That is not an oversight:
+/// the recorded id reaches the page only in `Done`, so an abandoned ask has no
+/// verdict bar, nothing to judge, and retention deletes an unjudged row anyway.
+async fn ask_stream(
+    State(st): State<AppState>,
+    id: Identity,
+    Path(handoff): Path<String>,
+) -> Result<Response> {
+    use tokio_stream::StreamExt as _;
+
+    // Unknown, already spent, expired, or somebody else's — all one answer.
+    // Never a fresh ask against an empty question, which would spend a model
+    // call on a replay; never another subject's question, which would be
+    // answered to the wrong person and recorded under their name.
+    let req = st
+        .ask_handoff_take(&handoff, &id.subject)
+        .ok_or(Error::NotFound)?;
+    let core = st.core.clone();
+    let origin = crate::store::feedback::Door::Ui.by(id.subject);
+    let events = async_stream::stream! {
+        let s = core.ask_events(&req, origin);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            yield match ev {
+                Ok(e) => sse_event(e),
+                // Terminal by construction: the producer is a `try_stream!` and
+                // ends at its first error, so the page sees one `error` event
+                // and nothing after it.
+                Err(e) => Ok(SseEvent::default().event("error").data(e.to_string())),
+            };
+        }
+    };
+    // Kept alive because a slow model thinks for longer than a proxy's idle
+    // timeout, and a connection closed mid-answer looks to the page exactly
+    // like an answer that ended.
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// One `AskEvent` as one named SSE event carrying JSON.
+///
+/// JSON rather than bare text for every payload, because SSE frames data by
+/// line: a token that ends in a newline, or an answer whose markdown carries
+/// blank lines, does not survive the wire as itself.
+fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
+    use crate::core::ask::stream::AskEvent::*;
+    let (name, data) = match ev {
+        Retrieved {
+            round,
+            shown,
+            dropped,
+            cliff_at,
+        } => (
+            "retrieved",
+            serde_json::json!({
+                "round": round,
+                "shown": shown,
+                "dropped": dropped,
+                "cliff_at": cliff_at,
+            }),
+        ),
+        Needs(what) => ("needs", serde_json::json!({ "text": what })),
+        Citations(hits) => (
+            "citations",
+            serde_json::json!({ "rail": rail_fragment(hits)? }),
+        ),
+        Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
+        Token(t) => ("token", serde_json::json!({ "text": t })),
+        Done(d) => (
+            "done",
+            serde_json::json!({
+                "event_id": d.event_id,
+                "html": answer_fragment(*d)?,
+            }),
+        ),
+    };
+    Ok(SseEvent::default().event(name).data(data.to_string()))
+}
+
+/// The rail, rendered here rather than in the browser.
+///
+/// One fragment rather than a list of fields, because the ids in it are the
+/// other end of the links `link_citations` writes into the answer, and both
+/// ends are then numbered by the same server-side pass. Rendering the rail in
+/// the browser would put the two halves of a citation in two languages, where
+/// only a person clicking could tell they still agree.
+///
+/// Each excerpt's markdown has already been through the sanitizing renderer, so
+/// the page inserts HTML it was handed and never renders markdown itself.
+fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String> {
+    AskRailTemplate {
+        citations: hits
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| render_hit(i, h, &Default::default()))
+            .collect(),
+    }
+    .render()
+    .map_err(|e| Error::Internal(e.to_string()))
+}
+
+/// The finished answer, as the page swaps it in.
+///
+/// The same template the blocking render used, for the same reason it existed:
+/// one account of what an answer looks like. Only its delivery moved.
+fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
+    // The answer is model output too, so it goes through the same sanitizing
+    // renderer as chunk text. Marking comes after sanitizing: it works on the
+    // escaped text a reader sees, and nothing it inserts needs cleaning.
+    // Linking comes last, so a `[1]` that marking has just wrapped is still
+    // found and neither pass has to know about the other's markup.
+    let answer = link_citations(
+        &crate::core::ask::check::mark_unsupported(
+            &markdown::render(&out.answer),
+            &out.unsupported,
+        ),
+        out.citations.len(),
+    );
+    AnswerTemplate {
+        answer,
         citations: out
             .citations
             .into_iter()
@@ -1974,6 +2198,7 @@ async fn ask_submit(
         dropped: out.dropped,
         truncated: out.truncated,
         abstained: out.abstained,
+        unsupported: out.unsupported,
         verdict_bar: match &out.event_id {
             Some(id) => AskVerdictTemplate {
                 event_id: id.clone(),
@@ -1985,8 +2210,67 @@ async fn ask_submit(
             None => String::new(),
         },
         event_id: out.event_id,
+    }
+    .render()
+    .map_err(|e| Error::Internal(e.to_string()))
+}
+
+/// Turns each `[n]` the answer cites into a link to that excerpt's rail item.
+///
+/// Bounded by `n`, the number of excerpts actually shown: a model writes `[7]`
+/// over four excerpts often enough, and a link to a rail item that does not
+/// exist scrolls nowhere while reading as a citation that is there. An
+/// out-of-range bracket is left as the plain text it is.
+///
+/// Tag interiors are skipped because an attribute value is not prose, and code
+/// spans are skipped because `argv[1]` is not a citation.
+///
+/// That second exclusion is the opposite of what `mark_unsupported` does over
+/// the same markup, and deliberately so. Marking *subtracts* trust, and inside
+/// code is where a fabricated command hides, so marking there is the feature.
+/// Linking *adds* it: `<a href="#cite-1">[1]</a>` asserts that excerpt 1
+/// supports this token, and a reader cannot tell an authored citation from a
+/// coincidence. `arr[0]`, `argv[1]`, `results[2]` are exactly the shapes that
+/// collide, because excerpt counts are single-digit and so are array indices —
+/// on a base whose answers are full of code. Fabricated provenance is the one
+/// failure this codebase exists to prevent, and a wrong link is worse than no
+/// link.
+fn link_citations(html: &str, n: usize) -> String {
+    if n == 0 {
+        return html.to_string();
+    }
+    crate::core::ask::check::for_text_between_tags(html, |t, in_code| match in_code {
+        true => std::borrow::Cow::Borrowed(t),
+        false => std::borrow::Cow::Owned(link_text(t, n)),
     })
-    .into_response())
+}
+
+/// The bracket scan, over one run of prose between tags.
+fn link_text(text: &str, n: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        // The parsed number, never the digits as written: `[01]` cites excerpt
+        // one, and an anchor of `#cite-01` points at nothing the rail emits.
+        let cited = digits.parse::<usize>().ok().filter(|i| (1..=n).contains(i));
+        match (after[digits.len()..].strip_prefix(']'), cited) {
+            (Some(tail), Some(i)) => {
+                out.push_str(&format!(
+                    r##"<a class="cite" href="#cite-{i}">[{digits}]</a>"##
+                ));
+                rest = tail;
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(serde::Deserialize)]
@@ -2308,6 +2592,7 @@ pub fn ui_router() -> Router<AppState> {
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/ask", get(ask_page).post(ask_submit))
+        .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
@@ -2632,6 +2917,56 @@ mod tests {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// The first half of the two-request ask: park the question, take the id.
+    /// `q` is form-encoded, as it is in the body it goes into.
+    async fn post_ask(app: &axum::Router, cookie: &str, q: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(form("/ui/ask", cookie, &format!("q={q}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "the question was not parked");
+        crate::web::test_support::json_of(res).await["id"]
+            .as_str()
+            .expect("parking hands back an id")
+            .to_string()
+    }
+
+    /// The second half: spend the id and stream.
+    async fn get_stream(app: &axum::Router, cookie: &str, id: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/ask/{id}/stream"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// One whole ask over the wire, as the page performs it.
+    async fn ask_over_sse(app: &axum::Router, cookie: &str, q: &str) -> String {
+        let id = post_ask(app, cookie, q).await;
+        let res = get_stream(app, cookie, &id).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        body_of(res).await
+    }
+
+    /// The HTML the page swaps in, pulled out of the `done` frame the way the
+    /// browser reads it: the payload is JSON, so the fragment survives the
+    /// blank lines its markdown carries.
+    fn done_html(body: &str) -> String {
+        let data = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+            .find(|v| v.get("html").is_some())
+            .unwrap_or_else(|| panic!("no done event in {body}"));
+        data["html"].as_str().unwrap().to_string()
     }
 
     /// A session plus a corpus that has been through synthesis and embedding,
@@ -4846,13 +5181,7 @@ mod tests {
             .unwrap();
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
-        let res = app
-            .clone()
-            .oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let html = body_of(res).await;
+        let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
         assert_eq!(
             handle.store.ask_stats().await.unwrap().asked,
             1,
@@ -4863,6 +5192,120 @@ mod tests {
             .await
             .unwrap();
         (app, cookie, handle, html, id)
+    }
+
+    /// Prefilled, never saved. The save is the operator's decision, and that is
+    /// the line: this is a person keeping something a model wrote, recorded as
+    /// such, and not the system writing memory to itself.
+    #[tokio::test]
+    async fn keeping_an_answer_fills_the_capture_box_and_stores_nothing() {
+        let (app, cookie, core, html, id) = ask_recorded().await;
+        assert!(
+            html.contains(&format!("/ui/capture?from_ask={id}")),
+            "the answer offers no way to keep it: {html}"
+        );
+        let before = core.store.list_corpora(100, 0).await.unwrap().len();
+
+        let page = get_body(&app, &cookie, &format!("/ui/capture?from_ask={id}")).await;
+        let answer = core.store.ask_event(&id).await.unwrap().unwrap().answer;
+        assert!(
+            page.contains(answer.trim()),
+            "the answer is not in the box: {page}"
+        );
+        assert!(
+            page.contains(&format!(r#"name="from_ask" value="{id}""#)),
+            "the ask does not ride the form, so nothing would record where the text came from: {page}"
+        );
+        assert_eq!(
+            core.store.list_corpora(100, 0).await.unwrap().len(),
+            before,
+            "opening the capture page must store nothing"
+        );
+    }
+
+    /// The point of carrying the id through the edit: what is stored says a
+    /// model wrote the text and what it was written from, however much the
+    /// operator changed before saving.
+    #[tokio::test]
+    async fn a_kept_answer_is_stored_as_a_paste_that_records_the_question() {
+        let (app, cookie, core, _html, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                &format!("text=edited+by+hand&from_ask={id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let corpus: (String, String) = sqlx::query_as(
+            "SELECT origin, metadata FROM corpora WHERE raw_text = 'edited by hand'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(corpus.0, "ask", "a kept answer must not read as a paste");
+        let meta: serde_json::Value = serde_json::from_str(&corpus.1).unwrap();
+        assert_eq!(meta["ask"]["event_id"], id.as_str());
+        assert_eq!(meta["ask"]["question"], "what is alpha");
+        assert!(
+            meta["ask"]["artifact_ids"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "the artifacts the answer was written from are the provenance: {meta}"
+        );
+    }
+
+    /// Retention deletes unjudged questions, so an ask can vanish between the
+    /// page load and the save. Storing `origin = "ask"` with no provenance would
+    /// leave a corpus asserting a model wrote it and no way to check the claim,
+    /// which is worse than not making it.
+    #[tokio::test]
+    async fn a_kept_answer_whose_ask_is_gone_is_stored_as_an_ordinary_paste() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=an+answer+whose+question+expired&from_ask=no-such-ask",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let row: (String, String) = sqlx::query_as(
+            "SELECT origin, metadata FROM corpora WHERE raw_text = 'an answer whose question expired'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, "web",
+            "a claim of model authorship must not outlive the evidence for it"
+        );
+        let meta: serde_json::Value = serde_json::from_str(&row.1).unwrap();
+        assert!(meta.get("ask").is_none(), "{meta}");
+    }
+
+    /// An ordinary paste is untouched by any of this.
+    #[tokio::test]
+    async fn an_ordinary_capture_still_records_itself_as_one() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let res = app
+            .clone()
+            .oneshot(form("/ui/capture", &cookie, "text=typed+by+a+person"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let origin: String =
+            sqlx::query_scalar("SELECT origin FROM corpora WHERE raw_text = 'typed by a person'")
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(origin, "web");
     }
 
     #[tokio::test]
@@ -4884,12 +5327,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let html = body_of(
-            app.oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
-                .await
-                .unwrap(),
-        )
-        .await;
+        let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
         assert!(!html.contains("/verdict"), "{html}");
     }
 
@@ -5281,11 +5719,675 @@ mod tests {
             ))
             .await
             .unwrap();
+        let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
+        assert!(html.contains("Answer"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_answer_page_badges_and_marks_a_literal_no_excerpt_carries() {
+        let mut core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Swapped in after indexing, so only the answer comes from it.
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("First run `wipefs --all /dev/sdX`, then read alpha.".into()),
+        });
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
+        assert!(html.contains("unsupported literal(s)"), "no badge: {html}");
+        assert!(
+            html.contains(r#"<mark class="unsupported">wipefs --all /dev/sdX</mark>"#),
+            "the invented command is not marked in the prose: {html}"
+        );
+    }
+
+    /// A corpus that has been through synthesis and embedding, under a
+    /// feedback-enabled core, which is the only state in which an ask both
+    /// retrieves something and records a row.
+    async fn app_session_and_core_with_an_embedded_base()
+    -> (axum::Router, String, crate::core::Core) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, handle)
+    }
+
+    /// `EventSource` is GET-only, and a GET that runs a model call and writes a
+    /// row is the kind history and prefetchers replay. The id is the guard, and
+    /// it is one-shot.
+    #[tokio::test]
+    async fn an_ask_handoff_id_cannot_be_used_twice() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let id = post_ask(&app, &cookie, "what+is+alpha").await;
+        let first = get_stream(&app, &cookie, &id).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = get_stream(&app, &cookie, &id).await;
+        assert_eq!(second.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An unknown id is a 404, never a fresh ask against an empty question.
+    #[tokio::test]
+    async fn an_unknown_handoff_id_is_not_found() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let res = get_stream(&app, &cookie, "nope").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The stream runs a model call, so it takes the same identity as every
+    /// other `/ui` route. Unauthenticated, it would be free inference.
+    #[tokio::test]
+    async fn the_stream_route_refuses_a_visitor_without_a_session() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let id = post_ask(&app, &cookie, "what+is+alpha").await;
+        let res = get_stream(&app, "", &id).await;
+        assert_ne!(
+            res.status(),
+            StatusCode::OK,
+            "an unsigned-in visitor streamed"
+        );
+    }
+
+    /// The stream is SSE and terminates with the done event carrying the
+    /// rendered answer, which is what the page swaps in.
+    #[tokio::test]
+    async fn the_stream_ends_with_a_done_event_carrying_rendered_html() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let id = post_ask(&app, &cookie, "what+is+alpha").await;
+        let res = get_stream(&app, &cookie, &id).await;
+        assert_eq!(
+            res.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        let body = body_of(res).await;
+        assert!(body.contains("event: done"), "{body}");
+        assert!(
+            done_html(&body).contains("<div class=\"md\">"),
+            "the done event carries the rendered fragment: {body}"
+        );
+    }
+
+    /// The script the page cannot work without is stamped, and the stamp is
+    /// derived from the script.
+    ///
+    /// `/assets/app.js` is served with a year-long `max-age`, so a browser that
+    /// has been here before keeps its copy across an upgrade — and since this
+    /// page stopped working without JavaScript, an old copy is not a stale
+    /// stylesheet but an ask form that submits nothing, silently and per
+    /// browser. The query stamp is what moves the URL when the bytes move.
+    ///
+    /// Recomputed here from the files on disk rather than compared to a
+    /// constant, because the property is *content-derived*: a build stamp that
+    /// was a version string, a timestamp or a fixed value would satisfy a test
+    /// that only looked for `?v=` and would still ship the bug.
+    #[tokio::test]
+    async fn the_page_stamps_its_script_with_a_hash_of_that_script() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for name in ["assets/app.js", "assets/app.css", "assets/htmx.min.js"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+            for b in std::fs::read(&path).unwrap() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        let want = format!("{h:x}");
+        assert_eq!(
+            crate::web::assets::stamp(),
+            want,
+            "the stamp is not a hash of the assets it stamps"
+        );
+
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask").await;
+        assert!(
+            page.contains(&format!("/assets/app.js?v={want}")),
+            "the page does not stamp its script: {page}"
+        );
+        // htmx too. It is vendored and changes only on a deliberate bump — which
+        // is exactly the moment a year-old cached copy would bite, on every page
+        // that still drives its interactions through it.
+        assert!(
+            page.contains(&format!("/assets/htmx.min.js?v={want}")),
+            "the page does not stamp htmx: {page}"
+        );
+
+        // The stamped URL still serves the file: the query is not part of the
+        // route, and a stamp that 404s would be worse than no stamp at all.
         let res = app
-            .oneshot(form("/ui/ask", &cookie, "q=what+is+alpha"))
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/assets/app.js?v={want}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_of(res).await.contains("Answer"));
+        assert!(body_of(res).await.contains("askDriver"), "not the driver");
+    }
+
+    /// Both ways out of a stream close it.
+    ///
+    /// The consequence of losing one of these calls is invisible: the answer
+    /// still renders, and about three seconds later the browser reconnects to
+    /// the stream that ended and asks the question again — a model call nobody
+    /// requested, and a doubled bill on a metered endpoint. Nothing else in
+    /// this suite can see a browser, so this reads the shipped `app.js` and
+    /// insists the calls are there.
+    ///
+    /// A text assertion, and honestly a weak one: it pins that the lines exist,
+    /// not that they run. `tests/browser_ask.rs` is the other half, and it
+    /// counts the requests a real browser makes — but it needs node and a
+    /// headless Chrome, so it cannot be what guards this on every `cargo test`.
+    #[test]
+    fn the_stream_driver_closes_the_event_source_on_every_exit() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        // The one place the close actually happens.
+        let stop = js
+            .split_once("function stop() {")
+            .expect("the driver has no stop()")
+            .1;
+        assert!(
+            stop[..stop.find('}').unwrap()].contains("source.close()"),
+            "stop() no longer closes the EventSource: {stop}"
+        );
+
+        // The answer arrived, so nothing more is coming: close before the
+        // payload is touched, or a malformed one leaves the stream open.
+        let done = js
+            .split_once("addEventListener('done'")
+            .expect("the driver does not handle done")
+            .1;
+        let done = &done[..done.find("addEventListener").unwrap_or(done.len())];
+        assert!(
+            done.contains("stop();"),
+            "the done handler does not close the stream: {done}"
+        );
+        assert!(
+            done.find("stop();") < done.find("JSON.parse"),
+            "the stream must be closed before the payload is parsed: {done}"
+        );
+        // The fragment is set through `innerHTML`, which htmx does not watch:
+        // its `hx-post` controls (the verdict bar) are inert until htmx is
+        // told about them.
+        assert!(
+            done.contains("htmx.process(result)"),
+            "the done handler no longer hands the answer to htmx: {done}"
+        );
+
+        // The failure path, which is also the path a stream that simply ended
+        // arrives on: the browser is already queuing its reconnect when this
+        // fires.
+        let error = js
+            .split_once("addEventListener('error'")
+            .expect("the driver does not handle error")
+            .1;
+        assert!(
+            error[..error.find("});").unwrap()].contains("fail("),
+            "the error handler does not reach the failure path: {error}"
+        );
+        let fail = js
+            .split_once("function fail(message) {")
+            .expect("the driver has no fail()")
+            .1;
+        assert!(
+            fail[..fail.find("\n    }").unwrap()].contains("stop();"),
+            "fail() no longer closes the stream, so the browser will reconnect: {fail}"
+        );
+    }
+
+    /// The driver listens for every frame the server sends.
+    ///
+    /// A frame nobody handles fails silently and only for whoever turned the
+    /// feature on: `follow_up` ships off, so the second round's frames never
+    /// fire on a default install, and an ask page that drops them would look
+    /// perfect right up until the first operator enabled it. The names are
+    /// pulled from `sse_event`'s own source rather than listed here, so adding
+    /// an event without a handler fails this test instead of shipping.
+    #[tokio::test]
+    async fn the_stream_driver_handles_every_event_the_server_names() {
+        let ui = include_str!("ui.rs");
+        let body = &ui[ui.find("fn sse_event(").expect("sse_event is in this file")..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        // The first string of each arm's `(name, data)` tuple, whether the
+        // arm is one line or many.
+        let names: Vec<String> = body
+            .split('(')
+            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            names.len() >= 6,
+            "the event names could not be read out of sse_event: {names:?}"
+        );
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        for name in names {
+            assert!(
+                js.contains(&format!("addEventListener('{name}'")),
+                "the server sends a `{name}` frame and the driver ignores it"
+            );
+        }
+    }
+
+    /// The page and the driver agree about what is on it.
+    ///
+    /// The stream driver in `app.js` reaches for its regions by id, and a
+    /// renamed or dropped element does not fail loudly in a browser — it leaves
+    /// an ask page that posts nothing and answers nothing, which is exactly the
+    /// state this task found the page in. Read out of the shipped `app.js`
+    /// rather than listed here, so the two cannot drift apart; scoped to the
+    /// `ask-` prefix, because only the ask driver's ids are this page's problem.
+    #[tokio::test]
+    async fn the_ask_page_carries_every_region_the_stream_driver_looks_up() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let wanted = pulled(&js, "getElementById('ask-", '\'');
+        assert!(
+            wanted.len() >= 4,
+            "the driver looks up almost nothing, so this test checks almost nothing: {wanted:?}"
+        );
+
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/ask").await;
+        for id in wanted {
+            assert!(
+                page.contains(&format!(r#"id="ask-{id}""#)),
+                "app.js drives #ask-{id} and the page has no such element: {page}"
+            );
+        }
+        // The old path is gone rather than sitting beside the new one: two
+        // submitters on one form would park the question twice and spend a
+        // model call on the copy nobody reads.
+        assert!(
+            !page.contains("hx-post"),
+            "the ask form still posts through htmx: {page}"
+        );
+    }
+
+    /// The excerpt list, out of the `citations` frame, the way the page reads
+    /// it. Keyed apart from the answer's `html` so `done_html` above cannot pick
+    /// this frame up by mistake.
+    fn rail_html(body: &str) -> String {
+        let data = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+            .find(|v| v.get("rail").is_some())
+            .unwrap_or_else(|| panic!("no citations event in {body}"));
+        data["rail"].as_str().unwrap().to_string()
+    }
+
+    /// Every run that follows `open`, up to the next `end`, in document order.
+    fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
+        html.match_indices(open)
+            .map(|(at, m)| {
+                html[at + m.len()..]
+                    .chars()
+                    .take_while(|c| *c != end)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A citation link and the rail item it lands on are the two halves of one
+    /// claim, and they are numbered by two separate passes over two separate
+    /// templates: `link_citations` writes the hrefs into the answer, and
+    /// `_ask_rail.html` writes the ids into the excerpts. Nothing but this
+    /// assertion makes them agree, and a `[1]` that scrolls nowhere reads to a
+    /// reader as provenance the base cannot actually show.
+    ///
+    /// The reply cites `[01]` as well as `[1]`, because the linker anchors on
+    /// the parsed number rather than the digits it found: an id of `cite-01`
+    /// would satisfy a lazier reading of this and still be a dead link.
+    #[tokio::test]
+    async fn every_citation_link_in_the_answer_points_at_an_excerpt_the_rail_carries() {
+        let mut core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Swapped in after indexing, so the citations in the answer are this
+        // reply's and not something retrieval happened to produce.
+        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("alpha [1], bravo [2], and alpha again [01].".into()),
+        });
+        let (app, cookie) = app_with_cookie(core).await;
+
+        let body = ask_over_sse(&app, &cookie, "what+is+alpha").await;
+        let rail = rail_html(&body);
+        let answer = done_html(&body);
+
+        let cited = pulled(&answer, r##"href="#cite-"##, '"');
+        // Without this the test passes on an answer that cites nothing, which
+        // is the state the page was in before this task and the state a broken
+        // linker would put it back into.
+        assert!(
+            !cited.is_empty(),
+            "the answer carries no citation links at all, so nothing was checked: {answer}"
+        );
+        for n in &cited {
+            assert!(
+                rail.contains(&format!(r#"id="cite-{n}""#)),
+                "the answer links to #cite-{n} and the rail carries no such id: {rail}"
+            );
+        }
+
+        // Coverage on its own is not enough, and a mutation proved it: numbering
+        // the rail from zero leaves every id the answer links to still present
+        // on the page — one excerpt further down. The links would all resolve
+        // and every one of them would cite the wrong artifact, which is the
+        // fabricated provenance this whole scheme exists to avoid. So the
+        // numbering itself is pinned: 1..n, in the order the rail lists them.
+        let ids = pulled(&rail, r#"id="cite-"#, '"');
+        assert!(
+            ids.len() > 1,
+            "an off-by-one cannot show itself over fewer than two excerpts: {rail}"
+        );
+        let counted: Vec<String> = (1..=ids.len()).map(|i| i.to_string()).collect();
+        assert_eq!(ids, counted, "the rail must number 1..n in order: {rail}");
+
+        // And the n-th rail item has to be the n-th excerpt. The answer fragment
+        // lists the same citations in the same order under "Artifacts used"
+        // (after its own card, which is why the first title is dropped), so the
+        // two renderings of one list are checked against each other rather than
+        // each being trusted separately.
+        let rail_titles = pulled(&rail, r#"<span class="rail-title">"#, '<');
+        let mut card_titles = pulled(&answer, r#"<span class="card-title">"#, '<');
+        card_titles.remove(0);
+        assert_eq!(
+            rail_titles, card_titles,
+            "the rail and the answer disagree about which excerpt is which"
+        );
+    }
+
+    /// The rail has to be readable while the answer is still being written, so
+    /// the excerpts go out as their own event before the first token.
+    #[tokio::test]
+    async fn the_citations_event_precedes_the_first_token() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let body = ask_over_sse(&app, &cookie, "what+is+alpha").await;
+        let cites = body.find("event: citations").expect(&body);
+        let token = body.find("event: token").expect(&body);
+        assert!(
+            cites < token,
+            "citations must precede the first token: {body}"
+        );
+    }
+
+    /// A reader who leaves before `done` records nothing: the recorded id only
+    /// reaches the page in `done`, so an abandoned ask has no verdict bar and
+    /// nothing anyone could judge, and retention deletes an unjudged row anyway.
+    ///
+    /// The ask is genuinely under way when the reader leaves — the stream is
+    /// read past its excerpts and dropped between them and the answer. Dropping
+    /// the response unread would prove nothing: an `async_stream` that is never
+    /// polled never runs, so `ask_events` would not have been called at all.
+    #[tokio::test]
+    async fn an_ask_abandoned_mid_answer_is_not_recorded() {
+        let (app, cookie, core) = app_session_and_core_with_an_embedded_base().await;
+        let id = post_ask(&app, &cookie, "what+is+alpha").await;
+        let res = get_stream(&app, &cookie, &id).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Past the excerpts and into the answer: the generator is suspended
+        // inside the token loop, with the completion still to be awaited and
+        // recorded. Stopping at `citations` would leave it suspended one line
+        // earlier and prove nothing about what happens after.
+        let seen = read_until(res, "event: token").await;
+        assert!(seen.contains("event: retrieved"), "{seen}");
+        assert!(seen.contains("event: citations"), "{seen}");
+        // Without this the test passes when the answer *failed*: `read_until`
+        // also stops at end of stream, and an ask that errored after its
+        // excerpts records nothing either — for the wrong reason.
+        assert!(
+            seen.contains("event: token"),
+            "the answer never started: {seen}"
+        );
+        assert!(
+            !seen.contains("event: done"),
+            "the reader has to leave before done for this to be about anything: {seen}"
+        );
+
+        assert_eq!(
+            core.store.ask_stats().await.unwrap().asked,
+            0,
+            "an unjudgeable row was written for a reader who left"
+        );
+    }
+
+    /// Reads SSE frames until `marker` has arrived, then drops the body — which
+    /// is what a closed tab does. Returns what was read.
+    async fn read_until(res: Response, marker: &str) -> String {
+        use tokio_stream::StreamExt as _;
+        let mut frames = res.into_body().into_data_stream();
+        let mut seen = String::new();
+        while let Some(chunk) = frames.next().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            if seen.contains(marker) {
+                break;
+            }
+        }
+        // Explicit, because this is the whole point of the test: the generator
+        // is suspended at the frame just read and is never polled again.
+        drop(frames);
+        seen
+    }
+
+    /// An empty box is refused before anything is parked: it costs no entry in
+    /// the map, and no round trip to a stream to find out.
+    #[tokio::test]
+    async fn an_empty_question_is_refused_without_being_parked() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        let st = ask_state_over(core).await;
+        let (app, cookie) = app_over(&st).await;
+        let res = app
+            .oneshot(form("/ui/ask", &cookie, "q=+++"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            st.ask_handoff.lock().unwrap().is_empty(),
+            "a question nobody can answer took a slot in the map"
+        );
+    }
+
+    /// Parking is the only thing that grows the map, so it is where the sweep
+    /// has to run: a page opened and never streamed would otherwise leave its
+    /// question behind forever.
+    #[tokio::test]
+    async fn parking_a_question_sweeps_out_one_that_expired() {
+        let st = ask_state().await;
+        let stale = st.ask_handoff_park(a_question(), "me");
+        age_out(&st, &stale);
+        assert_eq!(st.ask_handoff.lock().unwrap().len(), 1);
+
+        // The next ask is what collects it.
+        let fresh = st.ask_handoff_park(a_question(), "me");
+        let held = st.ask_handoff.lock().unwrap();
+        assert_eq!(held.len(), 1, "the expired entry survived the sweep");
+        assert!(held.contains_key(&fresh), "the sweep took the live entry");
+    }
+
+    /// An id that outlived its window is as good as unknown: the tab it belongs
+    /// to is gone, and honouring it would spend a model call on nobody.
+    #[tokio::test]
+    async fn an_expired_handoff_id_is_refused_and_taken_out_of_the_map() {
+        let st = ask_state().await;
+        let id = st.ask_handoff_park(a_question(), "me");
+        age_out(&st, &id);
+        assert!(
+            st.ask_handoff_take(&id, "me").is_none(),
+            "an expired id was honoured"
+        );
+        assert!(
+            st.ask_handoff.lock().unwrap().is_empty(),
+            "a refused id must not stay in the map"
+        );
+    }
+
+    /// A question is answered to the person who asked it. The id is not
+    /// guessable, but a URL travels — into a log, another tab, a referer — and
+    /// a second subject who arrives with it within the window must get the
+    /// same nothing an unknown id gets, while the asker's own stream still can.
+    #[tokio::test]
+    async fn a_parked_question_is_spent_only_by_the_subject_who_parked_it() {
+        let st = ask_state().await;
+        let id = st.ask_handoff_park(a_question(), "alice");
+        assert!(
+            st.ask_handoff_take(&id, "bob").is_none(),
+            "somebody else's question was handed over"
+        );
+        assert!(
+            st.ask_handoff_take(&id, "alice").is_some(),
+            "a stranger's attempt spent the asker's own stream"
+        );
+    }
+
+    fn a_question() -> crate::core::ask::AskRequest {
+        crate::core::ask::AskRequest {
+            q: "what is alpha".into(),
+            limit: None,
+            tags: vec![],
+            category: None,
+        }
+    }
+
+    /// Backdates a parked entry past its TTL. Reaching into the map rather than
+    /// sleeping a minute: the clock is the thing under test, not the wait.
+    fn age_out(st: &AppState, id: &str) {
+        let mut m = st.ask_handoff.lock().unwrap();
+        let p = m.get_mut(id).expect("parked");
+        p.at -= crate::web::state::ASK_HANDOFF_TTL * 2;
+    }
+
+    async fn ask_state() -> AppState {
+        ask_state_over(crate::core::test_support::test_core().await).await
+    }
+
+    async fn ask_state_over(core: crate::core::Core) -> AppState {
+        AppState {
+            core,
+            auth: std::sync::Arc::new(crate::web::state::AuthContext {
+                mode: crate::config::AuthMode::Local,
+                local: None,
+                oidc: None,
+                pending: crate::auth::oidc::PendingStore::new(),
+                secure_cookies: false,
+            }),
+            ask_handoff: Default::default(),
+        }
+    }
+
+    /// A router and a session over a state the caller still holds, so a test
+    /// can look at the same handoff map the routes write to. `app_with_cookie`
+    /// builds its own state and cannot be asked what is in it.
+    async fn app_over(st: &AppState) -> (axum::Router, String) {
+        let cid = crate::store::new_id();
+        st.core
+            .store
+            .insert_session(&cid, "user-1", None, 3600)
+            .await
+            .unwrap();
+        (
+            crate::web::router(st.clone()),
+            format!("engram_session={cid}"),
+        )
+    }
+
+    /// The model cites more excerpts than it was shown often enough that a link
+    /// to a rail item which does not exist is a real outcome; it reads as a
+    /// citation and scrolls nowhere.
+    #[test]
+    fn only_a_bracket_naming_an_excerpt_that_exists_becomes_a_link() {
+        let out = super::link_citations("<p>see [1] and [2] but not [9] or [x]</p>", 2);
+        assert!(
+            out.contains(r##"<a class="cite" href="#cite-1">[1]</a>"##),
+            "{out}"
+        );
+        assert!(
+            out.contains(r##"<a class="cite" href="#cite-2">[2]</a>"##),
+            "{out}"
+        );
+        assert!(out.contains("[9]"), "{out}");
+        assert!(!out.contains("#cite-9"), "{out}");
+        assert!(out.contains("[x]"), "{out}");
+    }
+
+    /// A citation link asserts that an excerpt supports the token it wraps.
+    /// `argv[1]` is an array index on a base whose answers are full of code,
+    /// and the citable range is exactly the range of common indices — so a link
+    /// there is provenance the answer never claimed.
+    #[test]
+    fn an_array_index_inside_a_code_span_is_not_turned_into_a_citation() {
+        let out = super::link_citations("<p>see [1]</p><pre><code>argv[1]</code></pre>", 2);
+        assert!(
+            out.contains(r##"<p>see <a class="cite" href="#cite-1">[1]</a></p>"##),
+            "prose still links: {out}"
+        );
+        assert!(
+            out.contains("<code>argv[1]</code>"),
+            "code was linked: {out}"
+        );
+        assert_eq!(out.matches("cite-1").count(), 1, "{out}");
+    }
+
+    /// The same markup, marked rather than linked: marking subtracts trust, and
+    /// a fabricated command is precisely what hides in a code span.
+    #[test]
+    fn marking_an_unsupported_literal_still_reaches_inside_a_code_span() {
+        let out = crate::core::ask::check::mark_unsupported(
+            "<pre><code>wipefs --all</code></pre>",
+            &["wipefs --all".to_string()],
+        );
+        assert!(
+            out.contains(r#"<mark class="unsupported">wipefs --all</mark>"#),
+            "{out}"
+        );
+    }
+
+    /// `[01]` cites excerpt one; an anchor of `#cite-01` points at nothing the
+    /// rail emits.
+    #[test]
+    fn a_zero_padded_citation_links_to_the_anchor_the_rail_will_carry() {
+        let out = super::link_citations("<p>see [01]</p>", 2);
+        assert!(out.contains(r##"href="#cite-1""##), "{out}");
+        assert!(!out.contains("cite-01"), "{out}");
+    }
+
+    /// It runs over sanitized HTML, where a bracket inside a tag is an
+    /// attribute rather than prose.
+    #[test]
+    fn citation_linking_leaves_the_inside_of_a_tag_alone() {
+        let out = super::link_citations(r#"<a href="/x?q=[1]">[1]</a>"#, 1);
+        assert_eq!(
+            out, r##"<a href="/x?q=[1]"><a class="cite" href="#cite-1">[1]</a></a>"##,
+            "{out}"
+        );
     }
 }

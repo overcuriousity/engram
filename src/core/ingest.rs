@@ -10,6 +10,13 @@ use crate::store::now;
 /// The channel an image arrives through. Its own value, like `upload`, so
 /// the queue and the detail page can tell a photo from a paste.
 pub const ORIGIN_IMAGE: &str = "image";
+/// Text typed or pasted into the capture box.
+pub const ORIGIN_WEB: &str = "web";
+/// An answer the operator chose to keep. Its own value because a corpus whose
+/// text a model wrote must never read as one a person typed — that difference
+/// is the whole of what the keep-this-answer door concedes, and a bare literal
+/// in one handler is not where a distinction that load-bearing should live.
+pub const ORIGIN_ASK: &str = "ask";
 /// Longest note kept. Context, not a document: someone wanting to say more
 /// than this has a paste box.
 pub const MAX_NOTE_CHARS: usize = 2000;
@@ -126,6 +133,32 @@ impl Capture {
 
     pub fn with_source_url(mut self, url: Option<String>) -> Self {
         self.source_url = url;
+        self
+    }
+
+    /// The `ask` facts of an answer the operator chose to keep: which question
+    /// it answered, and which artifacts it was written from.
+    ///
+    /// Provenance, never an instruction — like `source_url`, nothing downstream
+    /// reads these to go and do anything. They exist so that a corpus whose
+    /// text a model wrote says so, and says what it was written from, however
+    /// much the operator edited before saving. Without them a kept answer is
+    /// indistinguishable from something a person typed, which is the one thing
+    /// this door must not become.
+    pub fn with_ask(
+        mut self,
+        ask_id: &str,
+        question: &str,
+        citations: &[crate::store::asks::AskCitation],
+    ) -> Self {
+        self.metadata["ask"] = serde_json::json!({
+            "event_id": ask_id,
+            "question": question,
+            "artifact_ids": citations
+                .iter()
+                .map(|c| c.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+        });
         self
     }
 }

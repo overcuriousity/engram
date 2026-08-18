@@ -152,10 +152,9 @@ async fn evaluate_retrieval() {
 #[ignore]
 async fn evaluate_ask() {
     use engram::eval::claims::{parse_claims, supported};
-    use engram::eval::metrics::{Abstention, fraction_cited, fully_supported};
+    use engram::eval::metrics::{Abstention, fraction_cited, fully_supported, unsupported_rate};
     use engram::infer::Completer;
     use engram::infer::prompt::{CLAIMS_SYSTEM, ask_excerpt, claims_prompt};
-    use engram::infer::verify::missing_literals;
 
     let dir = eval_dir();
     let (artifacts, questions) = match (load_artifacts(&dir), engram::eval::load_questions(&dir)) {
@@ -258,10 +257,13 @@ async fn evaluate_ask() {
                     ask_excerpt(i + 1, c.title.as_deref().unwrap_or_default(), &c.text, &[])
                 })
                 .collect();
-            let missing = missing_literals(&out.answer, &[], &excerpts.join("\n"));
-            unsupported_literals.push(missing.len());
-            if !missing.is_empty() {
-                literal_misses.push((short.clone(), missing));
+            // Read off the response rather than recomputed here. `ask` now runs
+            // the check itself against the blocks it actually sent, so counting
+            // it a second time from a reconstruction of those blocks would let
+            // the harness and the page disagree about the same answer.
+            unsupported_literals.push(out.unsupported.len());
+            if !out.unsupported.is_empty() {
+                literal_misses.push((short.clone(), out.unsupported.clone()));
             }
             if check_claims {
                 let reply = claim_checker
@@ -307,7 +309,10 @@ async fn evaluate_ask() {
         t.should_not_did_not + t.should_not_did
     );
     let (clean, answered) = fully_supported(&unsupported_literals);
-    println!("answers with no unsupported literal   {clean}/{answered}");
+    println!(
+        "answers with no unsupported literal   {clean}/{answered}\nunsupported rate   {:.2}",
+        unsupported_rate(&unsupported_literals)
+    );
     if check_claims {
         let (fc, fa) = fully_supported(&answers_fully);
         println!(
@@ -514,6 +519,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
         link_judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
         gap_namer: Arc::new(engram::infer::fake::FakeCompleter::default()),
+        // The harness measures the shipped default, which is one round.
+        follow_up: None,
         describer: None,
         counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),

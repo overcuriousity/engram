@@ -156,7 +156,7 @@ pub struct StatusResponse {
 
 /// Capture channels. `origin` is derived from which field arrived, not
 /// hardcoded: it is the only record of how a document got here.
-const ORIGIN_WEB: &str = "web";
+use crate::core::ingest::ORIGIN_WEB;
 const ORIGIN_EXTENSION: &str = "extension";
 const ORIGIN_FETCH: &str = "fetch";
 

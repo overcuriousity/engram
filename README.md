@@ -111,7 +111,17 @@ Questions get the same treatment. With `feedback.enabled`, every question asked
 on the ask page is recorded with the excerpts the model saw, and the answer
 carries a verdict bar — right, wrong, nothing here — plus a "carried the
 answer" toggle on each excerpt. An answer that opens with *Not in the knowledge
-base* is an abstention and is badged as one. `--export-eval` writes the judged
+base* is an abstention and is badged as one. A literal in the answer — a
+command, a path, a flag, anything in a code span or an indented block — that
+appears in no cited excerpt is marked, and badged: the model wrote it, and the
+base does not hold it. Prose is left alone, deliberately: a bare number in a
+sentence of explanation is not the kind of claim this is looking for, and a
+guard that fires on ordinary writing is one you learn to ignore.
+
+The answer arrives over SSE as the model writes it, so **`/ui/ask` needs
+JavaScript**. `POST /api/v1/ask` and the MCP `ask` tool do not, and are the
+JS-free ways in; they answer with the whole thing at once, from the same code
+path the page streams. `--export-eval` writes the judged
 questions to `questions.json`, and
 
 ```bash
@@ -202,9 +212,10 @@ the file — the loader warns if it finds one.
 | `vector.recency_half_life_days` | Age at which half that boost is gone. Default 180. |
 | `vector.pinned_boost` | Extra score for an artifact tagged `pinned`. Default 0.15. |
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
-| `infer.synthesize.*` | Synthesis model: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `output_ratio`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `cooldown_secs`. |
-| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. |
-| `infer.ask.*` | Completion model, used only by `ask`: `base_url`, `model`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`. |
+| `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
+| `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`, `cooldown_secs`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
+| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
+| `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`. |
@@ -213,8 +224,17 @@ the file — the loader warns if it finds one.
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
 
-Six worth knowing:
+Eight worth knowing:
 
+- **`infer.ask.follow_up`** lets the model say once what it still needs and
+  retrieve a second time before answering. It costs one extra call per question
+  and ships **off**: a default here moves after the harness has run, not before.
+  `follow_up_tier` puts that call on a cheaper tier than the answer it feeds,
+  which is the whole reason tiers are named.
+- **A role may still carry its endpoint inline** instead of naming a tier.
+  That shape parses and warns, naming the block to write instead; it is not an
+  error, because making `tier` required would turn five keys you chose on
+  purpose into unknown keys and ignore them silently.
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
   a way you would not notice for weeks.

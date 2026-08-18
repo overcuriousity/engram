@@ -1,6 +1,7 @@
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -390,6 +391,40 @@ impl Store {
         Ok(row_to_artifact(&row))
     }
 
+    /// The caveats of many artifacts in one query, keyed by id.
+    ///
+    /// For the ask path, which needs the caveats of every hit and nothing else
+    /// from the row: one lookup per hit is cheap, but a follow-up round packs
+    /// the merged list again, and a dozen sequential round trips in front of
+    /// every model call adds up. An id with no row — deleted since it was
+    /// retrieved — is simply absent from the map.
+    pub async fn caveats_for(&self, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id, caveats FROM artifacts WHERE id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<Option<String>, _>("caveats")
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
     /// Every artifact an ordinary search could return.
     ///
     /// Superseded and deprecated stay out, so a benchmark built from this sees
@@ -403,6 +438,27 @@ impl Store {
              WHERE status = 'active' AND superseded_by IS NULL
              ORDER BY corpus_id, ordinal",
         )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// The artifacts either side of `ordinal` in the same corpus.
+    ///
+    /// The answer to a question is often the paragraph after the one that
+    /// matched. `ordinal` is already a continuous per-corpus sequence, which is
+    /// what makes this a lookup instead of a search. An edge returns the one
+    /// side that exists; `status = 'active'` keeps deprecated and superseded
+    /// artifacts out, exactly as an ordinary search would.
+    pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+             WHERE corpus_id = ? AND ordinal IN (?, ?) AND status = 'active'
+             ORDER BY ordinal",
+        )
+        .bind(corpus_id)
+        .bind(ordinal - 1)
+        .bind(ordinal + 1)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_artifact).collect())
@@ -1029,6 +1085,83 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
+    }
+
+    /// One query for every hit's caveats: each id maps to its own list, an id
+    /// with no row is absent rather than an error, and nothing asked for is
+    /// confused with anything else in the table.
+    #[tokio::test]
+    async fn caveats_for_reads_many_artifacts_in_one_query() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let mut a = nc(0, "one");
+        a.caveats = vec!["destroys everything on the device".into()];
+        let b = nc(1, "two");
+        let c = nc(2, "three");
+        let made = s.insert_artifacts(&src.id, &[a, b, c]).await.unwrap();
+
+        let ids = vec![made[0].id.clone(), made[1].id.clone(), "gone".to_string()];
+        let got = s.caveats_for(&ids).await.unwrap();
+        assert_eq!(
+            got.get(&made[0].id).map(Vec::as_slice),
+            Some(&["destroys everything on the device".to_string()][..])
+        );
+        assert_eq!(got.get(&made[1].id).map(Vec::len), Some(0));
+        assert!(
+            !got.contains_key("gone"),
+            "a missing row must be absent, not invented"
+        );
+        assert!(
+            !got.contains_key(&made[2].id),
+            "an id not asked for came back"
+        );
+        assert!(s.caveats_for(&[]).await.unwrap().is_empty());
+    }
+
+    /// The answer is often in the artifact next to the one that matched, and
+    /// `ordinal` is already a continuous per-corpus sequence, so this is a
+    /// lookup rather than a search.
+    #[tokio::test]
+    async fn adjacent_artifacts_returns_the_ordinals_either_side() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..5).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        s.insert_artifacts(&src.id, &new).await.unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 2).await.unwrap();
+        let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
+        assert_eq!(ordinals, vec![1, 3]);
+    }
+
+    /// The first artifact has no left neighbour, and asking for ordinal -1 must
+    /// return the one row that exists rather than an error or nothing.
+    #[tokio::test]
+    async fn adjacent_artifacts_at_the_edge_returns_only_the_side_that_exists() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..5).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        s.insert_artifacts(&src.id, &new).await.unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 0).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].ordinal, 1);
+    }
+
+    /// Reaching sideways must not resurrect what the lifecycle took out of
+    /// results: a deprecated neighbour is not an answer.
+    #[tokio::test]
+    async fn adjacent_artifacts_skips_a_neighbour_that_is_not_active() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..3).map(|i| nc(i, &format!("chunk {i}"))).collect();
+        let made = s.insert_artifacts(&src.id, &new).await.unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let got = s.adjacent_artifacts(&src.id, 1).await.unwrap();
+        let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
+        assert_eq!(ordinals, vec![2]);
     }
 
     #[tokio::test]

@@ -239,6 +239,38 @@ within code spans and fences, and to say so in the spec's own follow-up rather
 than quietly loosening the extractor — because loosening it would weaken the
 synthesis check that shares it.
 
+> **Corrected after implementation.** Both halves of that paragraph were wrong
+> on the facts, and a twelve-answer probe found it.
+>
+> The version-number worry does not arise: `extract_literals` never picks up
+> bare numbers from prose at all — only fenced and indented lines, inline code
+> spans, and path- or flag-shaped tokens. A version number in a sentence of
+> explanation is invisible to it.
+>
+> The fallback would not have worked either. `extract_literals` treats a
+> four-space-indented line as code, so an indented line is *already* "within
+> code spans and fences" by its own definition; narrowing to that changes
+> nothing. Narrowing further, to backticked and fenced spans only, would stop
+> catching a bare invented `--flag` in prose — a real loss for no gain.
+>
+> The actual over-fire is a markdown shape, not a prose shape: a bullet list
+> nested four spaces deep parses as an indented code block, so every nested
+> bullet arrives as an invented literal — three on one answer, each marking a
+> whole sentence of ordinary prose. Four-space nesting is common in model
+> output; two-space is not affected.
+>
+> What shipped instead: `unsupported_literals` drops candidates that, after
+> stripping leading whitespace, begin with a markdown list marker. Local to
+> `ask`; `extract_literals` is untouched. The accepted cost is that a
+> fabricated diff line — `- removed this` — is now missed, because a diff and a
+> bullet share a prefix. Diffs in answers are rare and nested bullets are not.
+> A flag is unaffected: `--dry-run` has no space after the dashes.
+>
+> The reasoning behind taking the fix rather than living with the noise: this
+> badge's only value is being believed. A fidelity guard that fires on ordinary
+> formatting teaches the reader to dismiss it, and the fabricated command it
+> exists for gets dismissed with the noise.
+
 ---
 
 ## 3. Streaming

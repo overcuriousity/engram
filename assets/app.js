@@ -109,8 +109,208 @@
     copyButtons(root);
   }
 
+  // ── Ask, as it happens ────────────────────────────────────────────────────
+  //
+  // Two requests, because `EventSource` is GET-only and a GET that runs a model
+  // call is a free-inference hole: the POST parks the question and hands back an
+  // id, and the stream spends that id once. Everything the page inserts was
+  // rendered and sanitized by the server — this driver moves HTML it was handed
+  // and text it puts in text nodes, and never builds markup out of an answer.
+  function askDriver() {
+    var form = document.getElementById('ask-form');
+    if (!form) return;
+    var live = document.getElementById('ask-live');
+    var reasoning = document.getElementById('ask-reasoning');
+    var progress = document.getElementById('ask-progress');
+    var rail = document.getElementById('ask-rail');
+    var result = document.getElementById('ask-result');
+    var status = document.getElementById('ask-status');
+    var source = null;
+    // Which ask the page belongs to. See the submit handler.
+    var generation = 0;
+
+    // The one line that matters most in this file. An `EventSource` that is
+    // left open reconnects by itself when the server closes the stream, and the
+    // reconnect is a fresh GET — which, on a spent id, is a 404, but on any
+    // future shape of this endpoint is a second model call nobody asked for and
+    // a second bill on a paid endpoint. Every exit from a stream comes through
+    // here.
+    function stop() {
+      if (source) { source.close(); source = null; }
+      form.classList.remove('asking');
+    }
+
+    function fail(message) {
+      stop();
+      result.textContent = '';
+      var box = document.createElement('div');
+      box.className = 'flag';
+      box.setAttribute('role', 'status');
+      // textContent, not innerHTML: an error string is the one payload here
+      // that never went through the sanitizing renderer.
+      box.textContent = message;
+      result.appendChild(box);
+      live.hidden = true;
+      reasoning.hidden = true;
+      progress.hidden = true;
+    }
+
+    function openStream(id, mine) {
+      // The id of a superseded ask is simply never spent: the stream is not
+      // opened at all rather than opened and closed, which is one fewer model
+      // call started and abandoned.
+      if (mine !== generation) return;
+      source = new EventSource('/ui/ask/' + encodeURIComponent(id) + '/stream');
+
+      // Every handler is gated the same way. `stop()` closes the stream the
+      // page is currently listening to; an event already queued from an older
+      // one must not write into the answer that replaced it.
+      function current() { return mine === generation; }
+
+      source.addEventListener('citations', function (e) {
+        if (!current()) return;
+        // Server-rendered, ids and all: the `cite-n` anchors in here are the
+        // other end of the `[n]` links the answer arrives with.
+        rail.innerHTML = JSON.parse(e.data).rail;
+        enhance(rail);
+      });
+      // The extra retrieval round, made visible. `follow_up` ships off, so on a
+      // default install neither of these ever fires and the line stays hidden;
+      // with it on, the second search is a silent pause in front of the answer
+      // and the query it ran is otherwise nowhere on the page.
+      source.addEventListener('needs', function (e) {
+        if (!current()) return;
+        progress.hidden = false;
+        // textContent, not innerHTML: this string is model output that went
+        // through no renderer. Same rule as the error box.
+        progress.textContent = 'Looking further: ' + JSON.parse(e.data).text;
+      });
+      source.addEventListener('retrieved', function (e) {
+        if (!current()) return;
+        var round = JSON.parse(e.data);
+        // Round one happens on every ask, including every ask that will never
+        // have a second round, and a line of retrieval statistics in front of
+        // every answer is noise. Round two is the one nobody can otherwise see
+        // happen.
+        if (round.round < 2) return;
+        progress.hidden = false;
+        // Appended, not assigned: the line already holds what `needs` said the
+        // second round went looking for, and after this event nothing else on
+        // the page does. Round one never writes here, so the join is only ever
+        // to that query.
+        progress.textContent = (progress.textContent ?
+          progress.textContent + ' \u2014 ' : 'Round ' + round.round + ': ') +
+          round.shown + ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
+      });
+      source.addEventListener('reasoning', function (e) {
+        if (!current()) return;
+        reasoning.hidden = false;
+        reasoning.appendChild(document.createTextNode(JSON.parse(e.data).text));
+      });
+      source.addEventListener('token', function (e) {
+        if (!current()) return;
+        live.hidden = false;
+        live.appendChild(document.createTextNode(JSON.parse(e.data).text));
+      });
+      source.addEventListener('done', function (e) {
+        if (!current()) return;
+        stop();
+        result.innerHTML = JSON.parse(e.data).html;
+        enhance(result);
+        // The fragment carries `hx-post` controls — the verdict bar, "carried
+        // the answer" — and htmx binds those only to markup it swapped in
+        // itself or was told about. Set through `innerHTML` they are inert
+        // buttons until this call; before it, a click on Right did nothing.
+        if (window.htmx) window.htmx.process(result);
+        // The plain stream and the model's aside have both been superseded by
+        // the rendered answer. Hidden rather than emptied, so the next ask
+        // reuses them.
+        live.hidden = true;
+        reasoning.hidden = true;
+        // `progress` deliberately stays: what the retrieval went looking for
+        // still describes the rail underneath the answer, and it is the only
+        // place on the page that says a second round happened at all.
+        // Said once, when there is something to read. The tokens streamed into
+        // a polite live region as they arrived, which tells a reader that an
+        // answer is coming; nothing until now said it had finished.
+        status.textContent = 'The answer is ready.';
+      });
+      // Both failures arrive as `error`: the server's own event, which carries
+      // a message, and the browser's transport error, which carries no data.
+      // The second one is the dangerous one — the browser is already queuing a
+      // reconnect when it fires, so `stop()` has to run on it too.
+      source.addEventListener('error', function (e) {
+        if (!current()) return;
+        fail(e.data ? e.data : 'The connection to the answer stream was lost.');
+      });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var q = form.querySelector('input[name="q"]').value;
+      if (!q.trim()) return;
+      // A second ask supersedes the first at every stage, which `stop()` on its
+      // own does not achieve: it closes a stream that is already open, and two
+      // submits made before the first POST resolves open two streams, the
+      // second overwriting the only reference to the first. That first one is
+      // then unclosable, reconnects on its own, and — worse — its eventual
+      // error wipes the answer the second ask is in the middle of writing.
+      // The generation is what the page belongs to; anything an older ask has
+      // to say is dropped, including the stream it was about to open.
+      var mine = ++generation;
+      stop();
+      status.textContent = '';
+      live.textContent = '';
+      reasoning.textContent = '';
+      progress.textContent = '';
+      progress.hidden = true;
+      rail.textContent = '';
+      result.textContent = '';
+      live.hidden = true;
+      reasoning.hidden = true;
+      form.classList.add('asking');
+
+      fetch('/ui/ask', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ q: q }).toString()
+      }).then(function (res) {
+        if (!res.ok) throw new Error('The question was refused (' + res.status + ').');
+        return res.json();
+      }).then(function (out) {
+        openStream(out.id, mine);
+      }).catch(function (err) {
+        // A stale rejection has the same shape as a stale event and is dropped
+        // for the same reason: it would replace a live answer with the failure
+        // of an ask nobody is waiting for any more.
+        if (mine !== generation) return;
+        fail(err.message || 'The question could not be sent.');
+      });
+    });
+
+    // A citation is a link to an excerpt on this page. Delegated, because the
+    // links arrive with the answer long after this runs.
+    document.addEventListener('click', function (e) {
+      var link = e.target.closest ? e.target.closest('a.cite') : null;
+      if (!link) return;
+      var target = document.getElementById(link.getAttribute('href').slice(1));
+      // Left alone when the anchor is missing: the default jump does nothing
+      // visible, which is honest, where scrolling somewhere arbitrary would
+      // look like provenance.
+      if (!target) return;
+      e.preventDefault();
+      rail.querySelectorAll('.rail-active').forEach(function (el) {
+        el.classList.remove('rail-active');
+      });
+      target.classList.add('rail-active');
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    askDriver();
     document.body.addEventListener('htmx:afterSwap', function (e) {
       enhance(e.target);
       // The pane now holds something, so a narrow screen can hide the rail.
