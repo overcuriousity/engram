@@ -570,6 +570,12 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 }
 .band-gap-label { font-size: 0.8125rem; color: var(--color-danger); }
 
+/* An artifact claiming more than one band has its card in the first of them
+   and this line in the rest: the card carries element ids and cannot be
+   repeated, but the claim is real and the band would otherwise read as if only
+   the other artifact came out of it. */
+.band-echo { font-size: 0.8125rem; margin: 0 0 0.5rem; }
+
 /* The fallback for a source there is nothing to band. */
 .raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
             overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8125rem; }

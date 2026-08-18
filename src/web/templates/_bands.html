@@ -37,6 +37,14 @@
         {% endif %}
       </div>
       {% endif %}
+      {# An artifact whose span overlaps another's claims more than one band.
+         Its card is in the first of them and cannot be repeated here — two
+         copies would share their element ids, and edit and delete would reach
+         the copy at the top rather than the one that was pressed. The line
+         points up at it instead. #}
+      {% for e in b.echoes %}
+      <p class="band-echo"><a class="quiet-link" href="#artifact-{{ e.0 }}">↑ {{ e.1 }}</a></p>
+      {% endfor %}
       {% for c in b.artifacts %}{% include "_artifact.html" %}{% endfor %}
     </div>
   </div>

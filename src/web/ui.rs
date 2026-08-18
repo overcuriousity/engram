@@ -329,13 +329,17 @@ pub fn fmt_time(ts: i64) -> String {
     )
 }
 
+/// What to call an artifact that has no title of its own.
+fn artifact_title(c: &crate::store::artifacts::Chunk) -> String {
+    c.title
+        .clone()
+        .unwrap_or_else(|| format!("Chunk {}", c.ordinal))
+}
+
 fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
     ArtifactView {
         id: c.id.clone(),
-        title: c
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+        title: artifact_title(c),
         html: markdown::render(&c.text),
         text: c.text.clone(),
         tags: c.tags.clone(),
@@ -488,6 +492,11 @@ struct CorpusTemplate {
     /// a restored placeholder, or a photo not read yet — which falls back to
     /// the flat rendering.
     bands: Vec<BandView>,
+    /// The artifacts of this capture that name no lines of it, in a section of
+    /// their own below the source. Every artifact of a restored placeholder is
+    /// here, as is anything written before spans were recorded — and the page
+    /// showed none of them once it rendered bands alone.
+    unplaced: Vec<ArtifactView>,
     /// Nothing was captured here at all, so the flat fallback has nothing to
     /// show either.
     lines_empty: bool,
@@ -507,6 +516,11 @@ pub struct BandView {
     pub to: i64,
     pub lines: Vec<crate::web::corpus_view::CorpusLine>,
     pub artifacts: Vec<ArtifactView>,
+    /// `(id, title)` for the artifacts claiming this band whose card is in an
+    /// earlier one — the overlaps. A line pointing up at the card, because the
+    /// card itself can only exist once: two copies of it share their element
+    /// ids, and edit and delete then reach the wrong one.
+    pub echoes: Vec<(String, String)>,
     /// Nothing was written from these lines.
     pub gap: bool,
     /// For a gap band, the lines a re-read would actually cover: the whole
@@ -1159,6 +1173,14 @@ struct RereadForm {
 /// Nothing already written from this capture is replaced. What comes back is
 /// added, and anything it repeats is folded by the dedupe sweep like any other
 /// near duplicate.
+///
+/// The range is what the band said, not what it is: the form carries no token,
+/// and taking `from`/`to` at their word let one POST of `from=1&to=999999` —
+/// hand-edited, replayed, or arriving from another page in the operator's
+/// session — reset and re-enqueue every window of the capture, one paid model
+/// call each. So the bands are cut again here, and only a window holding a
+/// passage that really is a loss, and really is inside the band pressed, is
+/// queued.
 async fn reread_uncovered_ui(
     State(st): State<AppState>,
     _id: Identity,
@@ -1177,11 +1199,32 @@ async fn reread_uncovered_ui(
         return Ok(back);
     }
 
-    let segments = st.core.store.segments_for_corpus(&cid).await?;
-    for w in segments
+    // The same cut the page renders, from the same inputs — and the same two
+    // reasons it renders nothing red: a restored placeholder's text is its own
+    // artifacts, and an artifact naming no lines may have come from exactly the
+    // lines about to be re-read.
+    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
+        return Ok(back);
+    }
+    let spans: Vec<(String, crate::store::artifacts::CorpusSpan)> = chunks
         .iter()
-        .filter(|w| w.start_line <= f.to && f.from <= w.end_line)
-    {
+        .filter_map(|c| c.corpus_span.clone().map(|sp| (c.id.clone(), sp)))
+        .collect();
+    let lost: Vec<(i64, i64)> = crate::web::corpus_view::bands(&s.raw_text, &spans, None)
+        .into_iter()
+        .filter(|b| b.gap() && b.from <= f.to && f.from <= b.to)
+        .map(|b| (b.from, b.to))
+        .collect();
+    if lost.is_empty() {
+        return Ok(back);
+    }
+
+    let segments = st.core.store.segments_for_corpus(&cid).await?;
+    for w in segments.iter().filter(|w| {
+        lost.iter()
+            .any(|(a, z)| w.start_line <= *z && *a <= w.end_line)
+    }) {
         // A window something is already going to read is left alone. `enqueue`
         // re-arms a conflicting row whatever state it is in, running included,
         // so pressing this twice handed the same window to a second worker: two
@@ -1239,16 +1282,42 @@ async fn corpus_detail(
     };
     let by_id: std::collections::HashMap<&str, &crate::store::artifacts::Chunk> =
         chunks.iter().map(|c| (c.id.as_str(), c)).collect();
+
+    // An artifact that names no lines was written from somewhere in this
+    // capture without saying where: a row from before spans were recorded,
+    // anything created outside `window::run`, and every artifact of a restored
+    // placeholder. Banding cannot place it, and rendering only bands dropped it
+    // off the page altogether — off the only page that can edit or delete it.
+    // It gets a section of its own below the source instead.
+    let unplaced: Vec<ArtifactView> = chunks
+        .iter()
+        .filter(|c| restored || c.corpus_span.is_none())
+        .map(artifact_view)
+        .collect();
+
     let segments = st.core.store.segments_for_corpus(&cid).await?;
     // Until the capture has finished being read, a passage nothing claims is
     // a passage nothing has got to yet. Banded, still — the arrangement is how
     // the page reads — but not red, and not offering to re-read what is
     // already on its way.
-    let losses_are_final = coverage_final(&s.status) && !segments.is_empty();
+    //
+    // And nothing is a loss while an artifact of this capture names no lines:
+    // it may well have been written from exactly the lines about to be painted
+    // red, and the page would be offering to pay to read them again on the
+    // strength of a claim it cannot make. `unplaced` says so in words instead.
+    let losses_are_final = coverage_final(&s.status) && !segments.is_empty() && unplaced.is_empty();
 
     // Every row still carries its `L<n>` anchor, inside its band: an artifact's
     // "open at these lines" and the `?from=&to=` highlight both address lines
     // by that id, and banding must not cost the page either of them.
+    //
+    // An artifact whose span overlaps another's claims every band the overlap
+    // cuts, and its card belongs to the first of them. Rendered in each, the
+    // page carried the same artifact three times under one set of element ids:
+    // "edit" on the second copy opened the editor attached to the first, and
+    // delete swapped the first away and left the others behind pointing at a
+    // row that no longer exists.
+    let mut carded: std::collections::HashSet<String> = std::collections::HashSet::new();
     let bands: Vec<BandView> = if restored {
         Vec::new()
     } else {
@@ -1258,34 +1327,51 @@ async fn corpus_detail(
             range.from.map(|f| (f, range.to.unwrap_or(f))),
         )
         .into_iter()
-        .map(|b| BandView {
-            // What pressing the button would actually read: the window holding
-            // this passage, which is wider than it. Saying only "lines 51–53"
-            // over a button that reads 1–120 is a promise it does not keep —
-            // and a second red band inside the same window really is read too.
-            reread: (b.gap() && losses_are_final)
-                .then(|| {
-                    segments
-                        .iter()
-                        .filter(|w| w.start_line <= b.to && b.from <= w.end_line)
-                        .fold(None::<(i64, i64)>, |acc, w| {
-                            Some(match acc {
-                                Some((a, z)) => (a.min(w.start_line), z.max(w.end_line)),
-                                None => (w.start_line, w.end_line),
-                            })
-                        })
-                        .map(|(a, z)| format!("reads lines {a}–{z}"))
-                })
-                .flatten(),
-            gap: b.gap() && losses_are_final,
-            from: b.from,
-            to: b.to,
-            artifacts: b
+        .map(|b| {
+            // Split before the band is built: an artifact gets its card in the
+            // first band that claims it, and a line pointing up at that card in
+            // every later one.
+            let (mut artifacts, mut echoes) = (Vec::new(), Vec::new());
+            for c in b
                 .artifact_ids
                 .iter()
-                .filter_map(|id| by_id.get(id.as_str()).map(|c| artifact_view(c)))
-                .collect(),
-            lines: b.lines,
+                .filter_map(|id| by_id.get(id.as_str()))
+            {
+                if carded.insert(c.id.clone()) {
+                    artifacts.push(artifact_view(c));
+                } else {
+                    echoes.push((c.id.clone(), artifact_title(c)));
+                }
+            }
+            BandView {
+                // What pressing the button would actually read: the window holding
+                // this passage, which is wider than it. Saying only "lines 51–53"
+                // over a button that reads 1–120 is a promise it does not keep —
+                // and a second red band inside the same window really is read too.
+                reread: (b.gap() && losses_are_final)
+                    .then(|| {
+                        segments
+                            .iter()
+                            .filter(|w| w.start_line <= b.to && b.from <= w.end_line)
+                            .fold(None::<(i64, i64)>, |acc, w| {
+                                Some(match acc {
+                                    Some((a, z)) => (a.min(w.start_line), z.max(w.end_line)),
+                                    None => (w.start_line, w.end_line),
+                                })
+                            })
+                            .map(|(a, z)| format!("reads lines {a}–{z}"))
+                    })
+                    .flatten(),
+                gap: b.gap() && losses_are_final,
+                from: b.from,
+                to: b.to,
+                artifacts,
+                // The overlap is still on the page: both artifacts do claim these
+                // lines, and a band that silently dropped one of them would read as
+                // if only the other did.
+                echoes,
+                lines: b.lines,
+            }
         })
         .collect()
     };
@@ -1313,6 +1399,7 @@ async fn corpus_detail(
         exif_rows,
         note,
         bands,
+        unplaced,
         lines_empty: s.raw_text.trim().is_empty(),
         raw_text: s.raw_text.clone(),
         coverage,
@@ -5527,6 +5614,43 @@ mod tests {
         let segments = core.store.segments_for_corpus(&out.id).await.unwrap();
         assert!(segments.len() > 1, "the fixture must span several windows");
         let target = segments[0].clone();
+        assert!(target.end_line > 3, "the loss below must fit inside it");
+
+        // One loss, lines 2–3, and it has to be a real one: the endpoint cuts
+        // the bands again rather than believing the range in the form, so a
+        // fixture where nothing was missed queues nothing however it is aimed.
+        // Two artifacts around the gap, written directly, because what this
+        // test is about is where the button points.
+        let total = core
+            .store
+            .get_corpus(&out.id)
+            .await
+            .unwrap()
+            .raw_text
+            .lines()
+            .count() as i64;
+        sqlx::query("DELETE FROM artifacts WHERE corpus_id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let claim = |ord: i64, a: i64, z: i64| crate::store::artifacts::NewArtifact {
+            ordinal: ord,
+            text: format!("what lines {a} to {z} said"),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: a,
+                end_line: z,
+            }),
+            title: Some(format!("artifact {ord}")),
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        core.store
+            .insert_artifacts(&out.id, &[claim(0, 1, 1), claim(1, 4, total)])
+            .await
+            .unwrap();
 
         let res = app
             .clone()
@@ -5643,6 +5767,237 @@ mod tests {
         let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
         assert!(page.contains("Placeholder source"), "{page}");
         assert!(!page.contains("band-gap"), "{page}");
+    }
+
+    /// Only a photo waits on the vision model. Any other capture with no text
+    /// is a fetch that came back empty or a paste that was, and the fallback
+    /// told the operator a job was queued that nobody had started.
+    #[tokio::test]
+    async fn an_empty_capture_that_is_not_a_photo_names_no_vision_job() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let s = core.store.insert_corpus("", "web", None).await.unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", s.id)).await;
+        assert!(!page.contains("vision model"), "{page}");
+        assert!(page.contains("has no text"), "{page}");
+    }
+
+    /// Not banded is not the same as not shown. A placeholder's artifacts are
+    /// the only thing it holds, and banding alone left them off their own page.
+    #[tokio::test]
+    async fn a_restored_corpus_still_shows_its_artifacts() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        let restored = core
+            .store
+            .insert_artifacts(
+                &out.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "what the vector store still had".into(),
+                    corpus_span: None,
+                    title: Some("recovered".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        sqlx::query("UPDATE corpora SET restored_at = 1 WHERE id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains(&format!(r#"id="artifact-{restored}""#)),
+            "the placeholder's only content has no card on its own page: {page}"
+        );
+    }
+
+    /// Rendering bands alone dropped it: banding places an artifact by its
+    /// span, and an artifact without one was placed nowhere and shown nowhere
+    /// — off the only page that can edit or delete it.
+    #[tokio::test]
+    async fn an_artifact_naming_no_lines_still_has_its_card() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // One artifact from before spans were recorded. Written straight to the
+        // column for the same reason `an_unclaimed_passage_...` does: synthesis
+        // is the only writer of a span, which is right everywhere except here.
+        sqlx::query(
+            "UPDATE artifacts SET corpus_span = NULL
+              WHERE id = (SELECT id FROM artifacts WHERE corpus_id = ? LIMIT 1)",
+        )
+        .bind(&out.id)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        let orphan = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM artifacts WHERE corpus_id = ? AND corpus_span IS NULL",
+        )
+        .bind(&out.id)
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains("Not placed in the source"),
+            "an artifact of this capture is on no page at all: {page}"
+        );
+        assert!(
+            page.contains(&format!(r#"id="artifact-{orphan}""#)),
+            "the card is what carries edit and delete: {page}"
+        );
+    }
+
+    /// It may well have been written from exactly the lines about to be painted
+    /// red, and the page would be offering a paid re-read on the strength of a
+    /// claim it cannot make.
+    #[tokio::test]
+    async fn nothing_is_a_loss_while_an_artifact_names_no_lines() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        // Every span gone: under the old rule the whole document is one red
+        // band with a button on it, though every artifact of it still exists.
+        sqlx::query("UPDATE artifacts SET corpus_span = NULL WHERE corpus_id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(!page.contains("band-gap"), "{page}");
+        assert!(!page.contains(r#"name="from""#), "{page}");
+
+        // And the endpoint behind the button agrees, whatever range reaches it.
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=1&to=999999",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            core.store
+                .pending_segments(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a capture nothing is known to have missed was queued to be re-read"
+        );
+    }
+
+    /// The form carries no token and the range is a claim, not a fact. Taking
+    /// it at its word, one POST reset and re-enqueued every window of the
+    /// capture — a paid model call each, for lines nothing was missing from.
+    #[tokio::test]
+    async fn a_re_read_of_a_range_that_lost_nothing_queues_nothing() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let body = (1..=400)
+            .map(|i| format!("line {i} of the document"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Ready)
+            .await
+            .unwrap();
+        let windows = core.store.segments_for_corpus(&out.id).await.unwrap().len();
+        assert!(windows > 1, "the fixture must span several windows");
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=1&to=999999",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            core.store
+                .pending_segments(&out.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "every window of a fully claimed capture was queued to be read again"
+        );
+    }
+
+    /// Rendered in each band it touches, one artifact appeared three times
+    /// under one set of element ids: "edit" on the second copy opened the
+    /// editor of the first, and delete swapped the first away and left the
+    /// others pointing at a row that no longer exists.
+    #[tokio::test]
+    async fn an_overlapping_artifact_has_exactly_one_card() {
+        use crate::store::artifacts::{CorpusSpan, NewArtifact};
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("one\ntwo\nthree\nfour\nfive\nsix", "web", None)
+            .await
+            .unwrap();
+        let art = |ord: i64, a: i64, z: i64| NewArtifact {
+            ordinal: ord,
+            text: format!("what lines {a} to {z} said"),
+            corpus_span: Some(CorpusSpan {
+                start_line: a,
+                end_line: z,
+            }),
+            title: Some(format!("artifact {ord}")),
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        // Wide, and one inside it: three bands, and the wide one claims all
+        // three.
+        let wide = core
+            .store
+            .insert_artifacts(&out.id, &[art(0, 1, 6), art(1, 3, 4)])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert_eq!(
+            page.matches(&format!(r#"id="artifact-{wide}""#)).count(),
+            1,
+            "one artifact, one card, one set of element ids: {page}"
+        );
+        assert!(
+            page.contains(&format!(r##"href="#artifact-{wide}""##)),
+            "the later bands it claims still point at it: {page}"
+        );
     }
 
     #[tokio::test]

@@ -103,7 +103,14 @@
     <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw corpus{% endif %}</span>
   </div>
   {% if lines_empty %}
+  {# Only a photo is waiting on the vision model. Any other capture with no
+     text is a fetch that came back empty or a paste that was, and saying a
+     photo is queued for it invents a job nobody started. #}
+  {% if image %}
   <p class="muted">Not read yet — the photo is queued for the vision model.</p>
+  {% else %}
+  <p class="muted">Nothing was captured here — this source has no text.</p>
+  {% endif %}
   {% else %}
   <div class="raw" style="max-height:none"><pre class="raw-flat">{{ raw_text }}</pre></div>
   {% endif %}
@@ -117,5 +124,26 @@
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
 {% include "_bands.html" %}
+{% endif %}
+
+{% if !unplaced.is_empty() %}
+{# Artifacts that name no lines of this capture. Banding has nowhere to put
+   them, and rendering bands alone dropped them off the page entirely — off the
+   only page that can edit or delete them. #}
+<h3>Not placed in the source</h3>
+<p class="muted">
+  {% if restored %}
+  Restored from the vector store, so they name no lines of the text above —
+  the text above is these artifacts joined back together.
+  {% else %}
+  These artifacts name no lines of this capture, so they sit beside none of it:
+  written before spans were recorded, or by something other than a window read.
+  While one of them is here the source above cannot be marked for what nothing
+  was written from — any of these may have come from exactly those lines.
+  {% endif %}
+</p>
+<div class="unplaced">
+  {% for c in unplaced %}{% include "_artifact.html" %}{% endfor %}
+</div>
 {% endif %}
 {% endblock %}

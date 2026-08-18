@@ -477,7 +477,7 @@ impl Store {
                 // sources is moved onto the merge while the first is being
                 // handled and only recognised as a self-pair while the second
                 // is, which leaves it counted as moved.
-                if other == new_id || old.iter().any(|x| *x == other) {
+                if other == new_id || old.contains(&other) {
                     self.set_pair_state(
                         p.id,
                         PairState::Dismissed,
@@ -528,11 +528,20 @@ impl Store {
     /// state any more, so the first pass drains it and every later one matches
     /// no rows — cheaper than the machinery a one-shot would need.
     ///
-    /// Safe whatever the queue looks like: a refused row never spent a call, so
-    /// `judge_attempts` is zero and no backoff is being reset.
+    /// `judge_attempts` and `judge_unreadable` reset with the state, for the
+    /// same reason `repoint_open_pairs` resets them. "A refused row never spent
+    /// a call" holds for most of these and not for all: the sweep recorded an
+    /// attempt against every pair of a component, so a pair could take an
+    /// unreadable reply, stay `Pending`, and only be settled `Oversized` later
+    /// when its component grew past the cap. Reopened with its counts intact,
+    /// such a row can come back already at or past `MAX_UNREADABLE_JUDGEMENTS`
+    /// — and `pairs_to_judge` holds those back, so it would sit pending for
+    /// good, never judged and never surfaced.
     pub async fn reopen_oversized(&self) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE artifact_pairs SET state = 'pending', detail = NULL
+            "UPDATE artifact_pairs
+                SET state = 'pending', detail = NULL,
+                    judge_attempts = 0, judge_unreadable = 0
               WHERE state = 'oversized'",
         )
         .execute(&self.pool)
@@ -1335,7 +1344,10 @@ mod tests {
         let (b, c, m) = (&ids[1], &ids[2], &ids[3]);
         s.record_pair(b, c, 0.91).await.unwrap();
 
-        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+        let moved = s
+            .repoint_open_pairs(std::slice::from_ref(b), m)
+            .await
+            .unwrap();
 
         assert_eq!(moved, 1);
         assert_eq!(
@@ -1386,7 +1398,10 @@ mod tests {
             .unwrap();
         s.record_pair(b, c, 0.91).await.unwrap();
 
-        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+        let moved = s
+            .repoint_open_pairs(std::slice::from_ref(b), m)
+            .await
+            .unwrap();
 
         assert_eq!(moved, 0);
         assert_eq!(
@@ -1413,7 +1428,9 @@ mod tests {
         s.record_judge_attempt(id).await.unwrap();
         s.record_unreadable_judgement(id).await.unwrap();
 
-        s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+        s.repoint_open_pairs(std::slice::from_ref(b), m)
+            .await
+            .unwrap();
 
         let pending = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
         let moved = pending
@@ -1438,7 +1455,10 @@ mod tests {
             .await
             .unwrap();
 
-        let moved = s.repoint_open_pairs(&[b.clone()], m).await.unwrap();
+        let moved = s
+            .repoint_open_pairs(std::slice::from_ref(b), m)
+            .await
+            .unwrap();
 
         assert_eq!(moved, 0);
         assert_eq!(
@@ -1471,5 +1491,37 @@ mod tests {
         assert_eq!(back[0].judge_attempts, 0);
         // Runs every sweep; once the queue is drained it must do nothing.
         assert_eq!(s.reopen_oversized().await.unwrap(), 0);
+    }
+
+    /// "A refused row never spent a call" holds for most of them and not for
+    /// all: the sweep recorded an attempt against every pair of a component, so
+    /// a pair could take an unreadable reply, stay pending, and be settled
+    /// `Oversized` only later when its component grew past the cap. Reopened
+    /// with that count intact it comes back at the ceiling — pending, held back
+    /// by `pairs_to_judge`, and so never judged and never surfaced again.
+    #[tokio::test]
+    async fn an_oversized_pair_that_spent_calls_is_judgeable_again() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        for _ in 0..MAX_UNREADABLE_JUDGEMENTS {
+            s.record_judge_attempt(id).await.unwrap();
+            s.record_unreadable_judgement(id).await.unwrap();
+        }
+        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
+            .await
+            .unwrap();
+
+        assert_eq!(s.reopen_oversized().await.unwrap(), 1);
+
+        let back = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        assert_eq!(back[0].judge_unreadable, 0);
+        assert_eq!(back[0].judge_attempts, 0);
+        assert_eq!(
+            s.pairs_to_judge(10).await.unwrap().len(),
+            1,
+            "a reopened pair the judge will never be handed is not reopened"
+        );
     }
 }
