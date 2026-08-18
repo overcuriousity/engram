@@ -192,6 +192,23 @@ tier = "deep"
 # timeout_secs = 900
 # reasoning_effort = "none"
 
+# One bounded extra retrieval round. After the excerpts are packed, the model
+# may say once what it still needs; that becomes a second search whose results
+# are merged in, and then it answers. Exactly one extra round — never two, and
+# never a loop.
+#
+# Off by default because it costs one model call on every question asked,
+# whether or not the second round finds anything. Turn it on when the answers
+# you get establish that a thing exists without the detail you asked about.
+# follow_up = true
+#
+# Which endpoint that call runs on. Deciding whether a set of excerpts covers a
+# question is a cheap classification, not the answer, so it belongs on the
+# efficient model even when the answer it feeds belongs on the deep one — which
+# is what naming tiers per role is for. Unset, it runs on this role's own
+# endpoint, which means paying deep-model latency for a yes-or-no.
+# follow_up_tier = "efficient"
+
 # Reranking is optional and disabled by default. There is no OpenAI-standard
 # rerank endpoint, so the wire format is configured explicitly.
 # style = "tei" | "cohere" | "vllm"

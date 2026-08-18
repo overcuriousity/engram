@@ -85,6 +85,14 @@ pub struct Core {
     /// The model that names a knowledge gap from the questions in it. Same
     /// endpoint as the judges, its own response shape, background only.
     pub gap_namer: Arc<dyn Completer>,
+    /// The model that says, once, what one answer still needs — and with it,
+    /// whether an ask gets a second retrieval round at all.
+    ///
+    /// `None` is the shipped default and the whole of the off switch: there is
+    /// no completer to call, so the disabled path cannot cost a call however
+    /// the ask path is later edited. It is `Some` only when
+    /// `infer.ask.follow_up` is on.
+    pub follow_up: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
     pub counter: Arc<TokenCounter>,
@@ -157,6 +165,10 @@ impl Core {
             judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
             link_judge: Arc::new(HttpCompleter::for_link_judging(&cfg.infer.synthesize)),
             gap_namer: Arc::new(HttpCompleter::for_gap_naming(&cfg.infer.synthesize)),
+            follow_up: cfg.infer.ask.follow_up.then(|| {
+                Arc::new(HttpCompleter::for_follow_up(&cfg.infer.ask.follow_up_on()))
+                    as Arc<dyn Completer>
+            }),
             describer: cfg.infer.vision.as_ref().map(|v| {
                 Arc::new(HttpDescriber::new(v, &cfg.infer.synthesize)) as Arc<dyn Describer>
             }),
@@ -289,6 +301,9 @@ pub mod test_support {
             gap_namer: Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             }),
+            // Off, like the shipped default. The follow-up tests switch it on
+            // by putting a completer here, which is the only thing that does.
+            follow_up: None,
             describer: Some(Arc::new(FakeDescriber::default())),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
@@ -411,6 +426,31 @@ mod tests {
             "released locks were kept"
         );
         drop(held);
+    }
+
+    /// The whole of the off switch. `follow_up` costs one model call on every
+    /// question, so the default must not merely skip the call — there must be
+    /// nothing to call, which is what `None` here means. The example config is
+    /// the shipped default, and this asserts the default it ships.
+    #[tokio::test]
+    async fn the_follow_up_model_is_wired_only_when_the_operator_asked_for_it() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+
+        assert!(
+            !cfg.infer.ask.follow_up,
+            "the shipped config asks for a second retrieval round"
+        );
+        let core = Core::from_config(&cfg, vectors.clone(), store.clone());
+        assert!(
+            core.follow_up.is_none(),
+            "there is a completer to call with the feature off"
+        );
+
+        cfg.infer.ask.follow_up = true;
+        let core = Core::from_config(&cfg, vectors, store);
+        assert!(core.follow_up.is_some());
     }
 
     #[tokio::test]

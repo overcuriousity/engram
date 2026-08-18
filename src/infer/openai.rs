@@ -2,7 +2,9 @@ use super::{
     Completer, Completion, Delta, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput,
     SynthesisBudget, Synthesizer, prompt,
 };
-use crate::config::{AskRole, CeilingParam, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
+use crate::config::{
+    AskRole, CeilingParam, EmbedRole, RerankRole, RerankStyle, SynthesizeRole, TierConfig,
+};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -950,6 +952,33 @@ impl HttpCompleter {
     /// The model that names a knowledge gap, on the judges' endpoint.
     pub fn for_gap_naming(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
+    }
+
+    /// The model that says, once, what one answer still needs.
+    ///
+    /// Takes a `TierConfig` rather than a role because that is honestly what it
+    /// is handed: this call has no role of its own, it runs on whichever
+    /// endpoint the operator pointed `ask.follow_up_tier` at — the efficient
+    /// one, typically, while the answer it feeds runs on the deep one. Falling
+    /// back to the ask role's own endpoint is the config layer's job, so by the
+    /// time this is called there is exactly one endpoint to build.
+    pub fn for_follow_up(cfg: &TierConfig) -> Self {
+        Self {
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "follow_up",
+            )
+            .with_ceiling_param(cfg.ceiling_param, cfg.reasoning_effort.as_deref()),
+            context_tokens: cfg.context_tokens,
+            max_output_tokens: cfg.max_output_tokens,
+            reasoning_effort: cfg.reasoning_effort.clone(),
+            response_schema: cfg
+                .structured_output
+                .then_some(("need", prompt::follow_up_schema())),
+        }
     }
 
     fn judging(cfg: &SynthesizeRole, schema: (&'static str, serde_json::Value)) -> Self {

@@ -876,6 +876,36 @@ pub struct AskRole {
     pub follow_up_endpoint: Option<TierConfig>,
 }
 
+impl AskRole {
+    /// The endpoint the follow-up call runs on.
+    ///
+    /// The fallback lives here, at config time, and not at call time. A caller
+    /// that reached for `Core::completer` when no follow-up tier was named
+    /// would spend an ask-endpoint call on a question the operator may have
+    /// turned off — the gate is `follow_up`, and nothing downstream of it may
+    /// invent an endpoint.
+    ///
+    /// `structured_output` is assumed for the fallback because the ask role
+    /// does not carry the flag: it answers in prose and has never needed one.
+    /// An endpoint that refuses a `response_format` fails the follow-up call,
+    /// which degrades to the single-round answer rather than to a wrong one.
+    pub fn follow_up_on(&self) -> TierConfig {
+        self.follow_up_endpoint
+            .clone()
+            .unwrap_or_else(|| TierConfig {
+                base_url: self.base_url.clone(),
+                model: self.model.clone(),
+                api_key: self.api_key.clone(),
+                context_tokens: self.context_tokens,
+                max_output_tokens: self.max_output_tokens,
+                timeout_secs: self.timeout_secs,
+                reasoning_effort: self.reasoning_effort.clone(),
+                ceiling_param: self.ceiling_param,
+                structured_output: default_true(),
+            })
+    }
+}
+
 fn default_ask_max_output_tokens() -> usize {
     4096
 }
