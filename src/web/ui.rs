@@ -441,11 +441,8 @@ struct CorpusTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     id: String,
-    /// The whole source, one row per line, each anchored so a link can name it.
-    lines: Vec<crate::web::corpus_view::CorpusLine>,
     status: String,
     badge: &'static str,
-    artifacts: Vec<ArtifactView>,
     /// This row is a placeholder for a source that was never captured here, so
     /// `raw_text` is its restored artifacts joined rather than a document. The
     /// page has to say so: it otherwise presents reconstructed fragments under
@@ -469,18 +466,36 @@ struct CorpusTemplate {
     /// — but the original is not stored, so this is the only place they exist.
     exif_rows: Vec<(String, String)>,
     note: Option<String>,
-    /// Stretches of this capture that no artifact carried. Where the coverage
-    /// warning on Recent lands: the percentage says how much was lost, and this
-    /// says which parts, which is the half that can be acted on.
-    uncovered: Vec<UncoveredRange>,
+    /// The source cut where the artifacts claiming it change, each stretch
+    /// beside what came of it. Empty for a source there is nothing to band —
+    /// a restored placeholder, or a photo not read yet — which falls back to
+    /// the flat rendering.
+    bands: Vec<BandView>,
+    /// Nothing was captured here at all, so the flat fallback has nothing to
+    /// show either.
+    lines_empty: bool,
+    /// The source as one block, for the fallback. Unnumbered on purpose: the
+    /// only thing that reaches it is a restored placeholder, where a line
+    /// number is a claim about a document that was never captured here.
+    raw_text: String,
+    /// How much of the wording survived, as the Recent list measures it.
+    /// Stated whether or not a band is red, because the two measures answer
+    /// different questions and can disagree.
+    coverage: Option<String>,
 }
 
-/// A stretch of a capture that no artifact carried, for the corpus page.
-pub struct UncoveredRange {
+/// One stretch of the source on the corpus page, beside what came of it.
+pub struct BandView {
     pub from: i64,
-    /// `line 42` or `lines 42–96` — the same singular rule the source pane
-    /// label follows.
-    pub label: String,
+    pub to: i64,
+    pub lines: Vec<crate::web::corpus_view::CorpusLine>,
+    pub artifacts: Vec<ArtifactView>,
+    /// Nothing was written from these lines.
+    pub gap: bool,
+    /// For a gap band, the lines a re-read would actually cover: the whole
+    /// window holding this passage, which is wider than the passage. `None`
+    /// when no window holds it and there is nothing to offer.
+    pub reread: Option<String>,
 }
 
 #[derive(Template)]
@@ -1158,38 +1173,68 @@ async fn corpus_detail(
 ) -> Result<Response> {
     let s = st.core.store.get_corpus(&cid).await?;
     let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
-    let artifacts = chunks.iter().map(artifact_view).collect();
-    let uncovered = uncovered_for(&st, &s, &chunks)
-        .await?
+    let restored = s.restored_at.is_some();
+
+    // A restored placeholder's text is its own artifacts joined back together,
+    // so a span into it points at an artifact rather than at a source. Banding
+    // it would be a claim that arrangement cannot support; it keeps the flat
+    // rendering, and the warning above it already says why.
+    let spans: Vec<(String, crate::store::artifacts::CorpusSpan)> = if restored {
+        Vec::new()
+    } else {
+        chunks
+            .iter()
+            .filter_map(|c| c.corpus_span.clone().map(|sp| (c.id.clone(), sp)))
+            .collect()
+    };
+    let by_id: std::collections::HashMap<&str, &crate::store::artifacts::Chunk> =
+        chunks.iter().map(|c| (c.id.as_str(), c)).collect();
+    let segments = st.core.store.segments_for_corpus(&cid).await?;
+
+    // Every row still carries its `L<n>` anchor, inside its band: an artifact's
+    // "open at these lines" and the `?from=&to=` highlight both address lines
+    // by that id, and banding must not cost the page either of them.
+    let bands: Vec<BandView> = if restored {
+        Vec::new()
+    } else {
+        crate::web::corpus_view::bands(
+            &s.raw_text,
+            &spans,
+            range.from.map(|f| (f, range.to.unwrap_or(f))),
+        )
         .into_iter()
-        .map(|(from, to)| UncoveredRange {
-            from,
-            label: if from == to {
-                format!("line {from}")
-            } else {
-                format!("lines {from}–{to}")
-            },
+        .map(|b| BandView {
+            // What pressing the button would actually read: the window holding
+            // this passage, which is wider than it. Saying only "lines 51–53"
+            // over a button that reads 1–120 is a promise it does not keep —
+            // and a second red band inside the same window really is read too.
+            reread: b
+                .gap()
+                .then(|| {
+                    segments
+                        .iter()
+                        .find(|w| w.start_line <= b.from && b.from <= w.end_line)
+                        .map(|w| format!("reads lines {}–{}", w.start_line, w.end_line))
+                })
+                .flatten(),
+            gap: b.gap(),
+            from: b.from,
+            to: b.to,
+            artifacts: b
+                .artifact_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()).map(|c| artifact_view(c)))
+                .collect(),
+            lines: b.lines,
         })
-        .collect();
-    // Numbered rather than one blob of text, so an artifact can link to the
-    // exact lines it was drawn from and the browser can scroll to them. Every
-    // row carries an `L<n>` anchor for that; the range, when given, is
-    // highlighted the same way the pane highlights a span.
-    let lines = s
-        .raw_text
-        .lines()
-        .enumerate()
-        .map(|(i, text)| {
-            let number = i as i64 + 1;
-            crate::web::corpus_view::CorpusLine {
-                number,
-                text: text.to_string(),
-                in_span: range
-                    .from
-                    .is_some_and(|f| number >= f && number <= range.to.unwrap_or(f)),
-            }
-        })
-        .collect();
+        .collect()
+    };
+
+    // Stated whether or not anything is red, because the warning on Recent is
+    // computed the other way round: a corpus can be 55% covered with every
+    // line claimed, and following that warning has to land somewhere that
+    // explains itself rather than on a page with nothing marked.
+    let coverage = s.coverage.map(|c| format!("{:.0}%", c * 100.0));
     let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
     let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
     let note = s.metadata["note"].as_str().map(str::to_string);
@@ -1198,18 +1243,19 @@ async fn corpus_detail(
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         id: s.id,
-        lines,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
-        restored: s.restored_at.is_some(),
+        restored,
         source_url: s.source_url.clone(),
         image,
         unread,
         meta_rows,
         exif_rows,
         note,
-        artifacts,
-        uncovered,
+        bands,
+        lines_empty: s.raw_text.trim().is_empty(),
+        raw_text: s.raw_text.clone(),
+        coverage,
     })
     .into_response())
 }
@@ -4442,59 +4488,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_corpus_shows_which_lines_were_missed_and_offers_to_read_them_again() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let out = core
-            .ingest(
-                "alpha beta gamma\n\nomega sigma tau\n\ndelta epsilon zeta",
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        crate::jobs::synthesize::segment_all(&core, &out.id).await;
-        crate::jobs::embed::run_corpus(&core, &out.id)
-            .await
-            .unwrap();
-        // Force a hole: artifacts carrying only the first line's vocabulary.
-        for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
-            core.store
-                .update_artifact_text(&c.id, "alpha beta gamma")
-                .await
-                .unwrap();
-        }
-        crate::jobs::synthesize::recompute_coverage(&core, &out.id)
-            .await
-            .unwrap();
-
-        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
-        assert!(
-            page.contains(r#"id="uncovered""#),
-            "the anchor the warning links to: {page}"
-        );
-        assert!(page.contains("Read these again"), "{page}");
-        assert!(
-            page.contains("#L3"),
-            "a range links to the lines it names: {page}"
-        );
-
-        let res = app
-            .clone()
-            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::SEE_OTHER);
-        // The window holding the missed lines is back in the queue's path.
-        let pending = core.store.pending_segments(&out.id).await.unwrap();
-        assert!(!pending.is_empty(), "nothing was queued to be read again");
-    }
-
-    /// `synthesize::plan` writes every window up front as `pending`, so a
-    /// capture still being read has windows and no artifacts for the ones nobody
-    /// has reached. Measured then, the whole unread remainder is a loss — the
-    /// page named lines that were on their way as never reached, and offered to
-    /// pay for reading them again.
-    #[tokio::test]
     async fn a_capture_still_being_read_names_no_loss_and_offers_no_re_read() {
         use crate::store::segments::NewSegment;
         let (app, cookie, core) = app_session_and_core().await;
@@ -4691,7 +4684,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fully_covered_corpus_shows_no_uncovered_section() {
+    async fn a_fully_covered_corpus_marks_nothing_red() {
+        // The anchor still exists — the Recent warning follows it, and it has
+        // to land on the sentence that explains why nothing is marked. What a
+        // fully claimed corpus has is no red band.
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("alpha beta gamma", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -4700,10 +4696,7 @@ mod tests {
             .unwrap();
 
         let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
-        assert!(
-            !page.contains(r#"id="uncovered""#),
-            "nothing to say: {page}"
-        );
+        assert!(!page.contains("band-gap"), "nothing was missed: {page}");
     }
 
     #[tokio::test]
@@ -5091,6 +5084,98 @@ mod tests {
             page.contains("the file you drop next"),
             "the note must say it is for a file that has not arrived yet: {page}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_corpus_page_puts_each_passage_beside_what_came_of_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(page.contains("band"), "the page is banded: {page}");
+        // The old two-lists arrangement is gone.
+        assert!(!page.contains("Raw corpus"), "{page}");
+        assert!(!page.contains("<h3>Artifacts</h3>"), "{page}");
+        // Every line keeps the anchor an artifact's "open at these lines" uses.
+        assert!(page.contains(r#"id="L1""#), "{page}");
+    }
+
+    #[tokio::test]
+    async fn an_unclaimed_passage_is_a_gap_band_with_its_own_button() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        // Pull every span back onto line 1, leaving the rest of the document
+        // claimed by nobody. Written straight to the column because nothing in
+        // the store edits a span — synthesis computes it and is the only
+        // writer, which is right everywhere except here.
+        sqlx::query(
+            r#"UPDATE artifacts SET corpus_span = '{"start_line":1,"end_line":1}' WHERE corpus_id = ?"#,
+        )
+        .bind(&out.id)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains("band-gap"),
+            "the unclaimed run is red: {page}"
+        );
+        assert!(
+            page.contains(r#"name="from""#),
+            "a gap band carries a re-read button naming its first line: {page}"
+        );
+        assert!(
+            page.contains("reads lines"),
+            "the button says what it will actually read, which is the whole \
+             window and so wider than the band: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restored_corpus_is_not_banded() {
+        // Its "source" is its own artifacts joined back together, so a span
+        // into it is a claim the arrangement cannot support.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        sqlx::query("UPDATE corpora SET restored_at = 1 WHERE id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(page.contains("Placeholder source"), "{page}");
+        assert!(!page.contains("band-gap"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_page_states_the_coverage_the_recent_list_warned_about() {
+        // The two measures answer different questions and can disagree: every
+        // line claimed, and still only half the wording carried. Following the
+        // warning must not land on a page with nothing to see.
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        core.store
+            .set_corpus_coverage(&out.id, Some(0.55))
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
+        assert!(
+            page.contains(r#"id="uncovered""#),
+            "the anchor still lands: {page}"
+        );
+        assert!(page.contains("55%"), "{page}");
     }
 
     #[tokio::test]

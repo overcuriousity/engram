@@ -1,0 +1,40 @@
+{# The corpus, band by band: each stretch of source beside what was written
+   from it, and where nothing was, a red stretch saying so.
+
+   Two lists said these same things before — the whole source, then every
+   artifact, then a hundred line numbers between them naming what had been
+   missed — in three places that could not be read against each other. #}
+<div class="bands">
+  {% for b in bands %}
+  <div class="band{% if b.gap %} band-gap{% endif %}">
+    <div class="band-src">
+      <table>
+        {% for l in b.lines %}
+        <tr id="L{{ l.number }}" class="{% if l.in_span %}in{% endif %}">
+          <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div class="band-out">
+      {% if b.gap %}
+      <div class="band-gap-head">
+        <span class="band-gap-label">lines {{ b.from }}–{{ b.to }} · nothing was written from these</span>
+        {% if let Some(w) = b.reread %}
+        {# The button names the window rather than the band: the window is
+           wider, which is what lets the model read the passage in context, and
+           it is what actually happens — including to any other red band inside
+           the same window. #}
+        <form method="post" action="/ui/corpora/{{ id }}/reread"
+              onsubmit="return confirm('Read this passage again? One model call. Nothing already written from this capture is replaced — what comes back is added to it, and anything it repeats is folded by the dedupe sweep.')">
+          <input type="hidden" name="from" value="{{ b.from }}">
+          <button class="btn btn-sm" type="submit">Read this again — {{ w }}</button>
+        </form>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% for c in b.artifacts %}{% include "_artifact.html" %}{% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
