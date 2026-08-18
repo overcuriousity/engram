@@ -5,12 +5,16 @@
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `keyup` only
    for the box: a radio does not need a debounce and the box does. `change` is
-   scoped to the radios because it bubbles, and the box fires its own on blur,
-   which would repeat the search a second time for nothing. `submit` is listed
-   so htmx cancels it: a single-field form submits implicitly on Enter, and a
-   full page load would throw away the open pane. #}
+   scoped to the chip row because it bubbles, and the box fires its own on blur
+   — which is fired by the very click that opens a result, so an unscoped
+   `change` replaced the list out from under the pointer and the first click on
+   a result did nothing at all. The selector has to be one word: htmx reads
+   `from:` up to the first space, so `from:#filters input[type=radio]` bound to
+   `#filters` and dropped the rest as a syntax error nobody sees. `submit` is
+   listed so htmx cancels it: a single-field form submits implicitly on Enter,
+   and a full page load would throw away the open pane. #}
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
-      hx-trigger="change from:#filters input[type=radio],
+      hx-trigger="change from:#kind-chips,
                   keyup changed delay:250ms from:input[name=q],
                   search from:input[name=q],
                   submit{% if !q.is_empty() %},
@@ -46,7 +50,9 @@
   <div class="facets">
     <div class="facet-row">
     <span class="facet-label">Kind</span>
-    <div class="chips" role="group" aria-label="Kind">
+    {# Named because the form's `change` trigger listens here: the event
+       bubbles out of the radios to this row and no further than the box. #}
+    <div class="chips" id="kind-chips" role="group" aria-label="Kind">
       <label class="chip">
         <input type="radio" name="category" value="" {% if category.is_empty() %}checked{% endif %}>
         <span>All</span>

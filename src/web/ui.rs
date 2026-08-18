@@ -6522,6 +6522,55 @@ mod tests {
         }
     }
 
+    /// Every `from:` in a template names one element, in one word.
+    ///
+    /// htmx reads a `from:` selector up to the first space or comma. A
+    /// descendant selector therefore binds to its first word and the remainder
+    /// is thrown away as an `htmx:syntax:error` that nothing on the page
+    /// listens for — so the trigger silently listens to far more than it says.
+    /// Search is where that cost showed: `change from:#filters input[type=radio]`
+    /// bound to the whole form, the search box fires `change` on blur, and the
+    /// blur is caused by the very click that opens a result — so the first
+    /// click on a result re-ran the search, swapped the list out between the
+    /// press and the release, and opened nothing.
+    #[test]
+    fn no_trigger_scopes_itself_to_a_selector_htmx_will_cut_in_half() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/web/templates");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).expect("the template directory is there") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("html") {
+                continue;
+            }
+            let html = std::fs::read_to_string(&path).unwrap();
+            // Only inside an attribute: the comments above these triggers
+            // quote the broken form on purpose.
+            for attr in html.split("hx-trigger=\"").skip(1) {
+                let attr = &attr[..attr.find('"').unwrap_or(attr.len())];
+                for spec in attr.split(',') {
+                    let Some(rest) = spec.split_once("from:") else {
+                        continue;
+                    };
+                    checked += 1;
+                    let selector = rest.1.trim();
+                    // `closest`, `find`, `next` and `previous` are the one
+                    // shape htmx does read a second word for.
+                    let two_word = ["closest ", "find ", "next ", "previous "]
+                        .iter()
+                        .any(|p| selector.starts_with(p));
+                    assert!(
+                        two_word || !selector.contains(char::is_whitespace),
+                        "{}: `from:{selector}` binds to `{}` and htmx drops the rest — \
+                         give the element an id and name it in one word",
+                        path.display(),
+                        selector.split_whitespace().next().unwrap_or("")
+                    );
+                }
+            }
+        }
+        assert!(checked >= 3, "no `from:` triggers were found to check");
+    }
+
     /// The page and the driver agree about what is on it.
     ///
     /// The stream driver in `app.js` reaches for its regions by id, and a
