@@ -664,6 +664,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
             timeout_secs: a.timeout_secs.unwrap_or(at.timeout_secs),
             reasoning_effort: a.reasoning_effort.or(at.reasoning_effort),
             ceiling_param: a.ceiling_param.or(at.ceiling_param),
+            structured_output: at.structured_output,
             follow_up: a.follow_up,
             follow_up_endpoint,
         };
@@ -862,6 +863,11 @@ pub struct AskRole {
     /// See `SynthesizeRole::ceiling_param`.
     #[serde(default)]
     pub ceiling_param: Option<CeilingParam>,
+    /// See `TierConfig::structured_output`. The ask call itself never sends a
+    /// response format — it answers in prose — but the follow-up call does,
+    /// and when no `follow_up_tier` is named it runs on this endpoint, whose
+    /// flag it has to honour rather than assume.
+    pub structured_output: bool,
     /// One bounded extra retrieval round. Off by default: it costs a call, and
     /// a default moves only after the harness has run.
     pub follow_up: bool,
@@ -885,10 +891,10 @@ impl AskRole {
     /// turned off — the gate is `follow_up`, and nothing downstream of it may
     /// invent an endpoint.
     ///
-    /// `structured_output` is assumed for the fallback because the ask role
-    /// does not carry the flag: it answers in prose and has never needed one.
-    /// An endpoint that refuses a `response_format` fails the follow-up call,
-    /// which degrades to the single-round answer rather than to a wrong one.
+    /// The fallback is this endpoint as its tier described it, `structured_output`
+    /// included: a tier that says it takes no response format must not be
+    /// sent one by the follow-up call, which would 400 on every ask and degrade
+    /// to the single-round answer — quietly, and one wasted call each time.
     pub fn follow_up_on(&self) -> TierConfig {
         self.follow_up_endpoint
             .clone()
@@ -901,7 +907,7 @@ impl AskRole {
                 timeout_secs: self.timeout_secs,
                 reasoning_effort: self.reasoning_effort.clone(),
                 ceiling_param: self.ceiling_param,
-                structured_output: default_true(),
+                structured_output: self.structured_output,
             })
     }
 }
@@ -1373,6 +1379,22 @@ impl Config {
     /// against the server they know they are running. The 400 that corrects the
     /// other direction needs no warning — it corrects itself.
     fn warn_on_inferred_ceiling_param(&self) {
+        for (role, effort) in self.inferred_ceiling_params() {
+            tracing::warn!(
+                role,
+                reasoning_effort = effort,
+                guessing = CeilingParam::inferred_from(Some(effort)).as_str(),
+                "{role}.ceiling_param is unset, so the output ceiling's name is inferred from \
+                 reasoning_effort. If this endpoint takes the other name and ignores unknown \
+                 fields — llama.cpp and older vLLM builds do — replies run with no ceiling at \
+                 all and nothing reports it. Set {role}.ceiling_param to say."
+            );
+        }
+    }
+
+    /// The roles whose output-ceiling name is a guess: `reasoning_effort` set,
+    /// `ceiling_param` not. Each with the effort the guess is made from.
+    fn inferred_ceiling_params(&self) -> Vec<(&'static str, &str)> {
         let synth = &self.infer.synthesize;
         let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = vec![
             (
@@ -1396,20 +1418,24 @@ impl Config {
                 v.ceiling_param(synth),
             ));
         }
-        for (role, effort, configured) in roles {
-            let (Some(effort), None) = (effort, configured) else {
-                continue;
-            };
-            tracing::warn!(
-                role,
-                reasoning_effort = effort,
-                guessing = CeilingParam::inferred_from(Some(effort)).as_str(),
-                "{role}.ceiling_param is unset, so the output ceiling's name is inferred from \
-                 reasoning_effort. If this endpoint takes the other name and ignores unknown \
-                 fields — llama.cpp and older vLLM builds do — replies run with no ceiling at \
-                 all and nothing reports it. Set {role}.ceiling_param to say."
-            );
+        // The follow-up call infers its name the same way (`for_follow_up`),
+        // off a tier of its own — so a guess there is not covered by the ask
+        // line above. Without a named tier it runs on ask's endpoint under
+        // ask's values, and the ask line is the one that speaks for it.
+        if let Some(f) = &self.infer.ask.follow_up_endpoint {
+            roles.push((
+                "infer.ask.follow_up_tier",
+                f.reasoning_effort.as_deref(),
+                f.ceiling_param,
+            ));
         }
+        roles
+            .into_iter()
+            .filter_map(|(role, effort, configured)| match (effort, configured) {
+                (Some(effort), None) => Some((role, effort)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file
@@ -2307,6 +2333,52 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert!(
             !cfg.redacted().contains("tier-key"),
             "the follow-up endpoint's key leaked"
+        );
+    }
+
+    /// With no follow-up tier named, the call runs on the ask endpoint — the
+    /// whole of it, including whether that endpoint takes a response format.
+    /// Assuming it does sends a schema to a server configured not to want one,
+    /// which 400s every ask's follow-up call and wastes it, silently.
+    #[test]
+    fn the_follow_up_fallback_carries_the_ask_tiers_structured_output_flag() {
+        let _guard = env_guard();
+        let toml = TIERED.replace(
+            "ceiling_param = \"max_completion_tokens\"",
+            "ceiling_param = \"max_completion_tokens\"\nstructured_output = false",
+        );
+        let cfg = load_infer(&toml).unwrap();
+        assert!(cfg.infer.ask.follow_up_endpoint.is_none());
+        assert!(
+            !cfg.infer.ask.follow_up_on().structured_output,
+            "the tier said no response format; the fallback endpoint said yes"
+        );
+        // And the default remains on, as it is for every tier.
+        let cfg = load_infer(TIERED).unwrap();
+        assert!(cfg.infer.ask.follow_up_on().structured_output);
+    }
+
+    /// A named follow-up tier infers its ceiling name the same way every role
+    /// does, and the warning that says so at startup has to cover it — that
+    /// endpoint is exactly the cheap local one that ignores an unknown name.
+    #[test]
+    fn a_follow_up_tier_guessing_its_ceiling_name_is_warned_about() {
+        let _guard = env_guard();
+        let toml = format!(
+            "{TIERED}\nfollow_up_tier = \"quick\"\n\
+             [infer.tiers.quick]\nbase_url = \"http://localhost:8001/v1\"\nmodel = \"small\"\n\
+             context_tokens = 8192\nmax_output_tokens = 512\nreasoning_effort = \"none\"\n"
+        );
+        let cfg = load_infer(&toml).unwrap();
+        let guessed = cfg.inferred_ceiling_params();
+        assert!(
+            guessed.contains(&("infer.ask.follow_up_tier", "none")),
+            "the follow-up endpoint's guess went unreported: {guessed:?}"
+        );
+        // Ask itself is on a tier that names the parameter, so it is not listed.
+        assert!(
+            !guessed.iter().any(|(r, _)| *r == "infer.ask"),
+            "{guessed:?}"
         );
     }
 

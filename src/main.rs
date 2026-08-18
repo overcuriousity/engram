@@ -403,6 +403,7 @@ mod startup_tests {
                     reasoning_effort: None,
                     ceiling_param: None,
                     follow_up: false,
+                    structured_output: true,
                     follow_up_endpoint: None,
                 },
                 rerank: None,

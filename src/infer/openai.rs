@@ -1403,6 +1403,7 @@ mod tests {
             reasoning_effort: None,
             ceiling_param: None,
             follow_up: false,
+            structured_output: true,
             follow_up_endpoint: None,
         }
     }
@@ -1564,6 +1565,7 @@ mod tests {
             reasoning_effort: None,
             ceiling_param: None,
             follow_up: false,
+            structured_output: true,
             follow_up_endpoint: None,
         })
         .complete("s", "u")
@@ -1866,6 +1868,7 @@ mod tests {
             reasoning_effort: None,
             ceiling_param: None,
             follow_up: false,
+            structured_output: true,
             follow_up_endpoint: None,
         };
         assert_eq!(
@@ -1896,6 +1899,7 @@ mod tests {
                     reasoning_effort: None,
                     ceiling_param: None,
                     follow_up: false,
+                    structured_output: true,
                     follow_up_endpoint: None,
                 }),
                 _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
