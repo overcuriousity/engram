@@ -2120,47 +2120,44 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
 /// exist scrolls nowhere while reading as a citation that is there. An
 /// out-of-range bracket is left as the plain text it is.
 ///
-/// Tag interiors are skipped for the same reason `mark_unsupported` skips
-/// them: this runs over sanitized HTML, and an attribute value is not prose.
+/// Tag interiors are skipped because an attribute value is not prose, and code
+/// spans are skipped because `argv[1]` is not a citation.
+///
+/// That second exclusion is the opposite of what `mark_unsupported` does over
+/// the same markup, and deliberately so. Marking *subtracts* trust, and inside
+/// code is where a fabricated command hides, so marking there is the feature.
+/// Linking *adds* it: `<a href="#cite-1">[1]</a>` asserts that excerpt 1
+/// supports this token, and a reader cannot tell an authored citation from a
+/// coincidence. `arr[0]`, `argv[1]`, `results[2]` are exactly the shapes that
+/// collide, because excerpt counts are single-digit and so are array indices —
+/// on a base whose answers are full of code. Fabricated provenance is the one
+/// failure this codebase exists to prevent, and a wrong link is worse than no
+/// link.
 fn link_citations(html: &str, n: usize) -> String {
     if n == 0 {
         return html.to_string();
     }
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    loop {
-        let Some(open) = rest.find('<') else {
-            link_text(rest, n, &mut out);
-            return out;
-        };
-        link_text(&rest[..open], n, &mut out);
-        match rest[open..].find('>') {
-            Some(close) => {
-                out.push_str(&rest[open..open + close + 1]);
-                rest = &rest[open + close + 1..];
-            }
-            // An unterminated `<` is not a tag — the sanitizer would have
-            // escaped it — but it is emitted as it stands rather than dropped.
-            None => {
-                out.push_str(&rest[open..]);
-                return out;
-            }
-        }
-    }
+    crate::core::ask::check::for_text_between_tags(html, |t, in_code| match in_code {
+        true => std::borrow::Cow::Borrowed(t),
+        false => std::borrow::Cow::Owned(link_text(t, n)),
+    })
 }
 
-/// The bracket scan, over one run of text between tags.
-fn link_text(text: &str, n: usize, out: &mut String) {
+/// The bracket scan, over one run of prose between tags.
+fn link_text(text: &str, n: usize) -> String {
+    let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find('[') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
         let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-        let cites = digits.parse::<usize>().is_ok_and(|i| (1..=n).contains(&i));
-        match after[digits.len()..].strip_prefix(']') {
-            Some(tail) if cites => {
+        // The parsed number, never the digits as written: `[01]` cites excerpt
+        // one, and an anchor of `#cite-01` points at nothing the rail emits.
+        let cited = digits.parse::<usize>().ok().filter(|i| (1..=n).contains(i));
+        match (after[digits.len()..].strip_prefix(']'), cited) {
+            (Some(tail), Some(i)) => {
                 out.push_str(&format!(
-                    r##"<a class="cite" href="#cite-{digits}">[{digits}]</a>"##
+                    r##"<a class="cite" href="#cite-{i}">[{digits}]</a>"##
                 ));
                 rest = tail;
             }
@@ -2171,6 +2168,7 @@ fn link_text(text: &str, n: usize, out: &mut String) {
         }
     }
     out.push_str(rest);
+    out
 }
 
 #[derive(serde::Deserialize)]
@@ -5489,17 +5487,67 @@ mod tests {
 
     /// A reader who leaves before `done` records nothing: the recorded id only
     /// reaches the page in `done`, so an abandoned ask has no verdict bar and
-    /// nothing anyone could judge.
+    /// nothing anyone could judge, and retention deletes an unjudged row anyway.
+    ///
+    /// The ask is genuinely under way when the reader leaves — the stream is
+    /// read past its excerpts and dropped between them and the answer. Dropping
+    /// the response unread would prove nothing: an `async_stream` that is never
+    /// polled never runs, so `ask_events` would not have been called at all.
     #[tokio::test]
-    async fn an_ask_nobody_stayed_for_is_not_recorded() {
+    async fn an_ask_abandoned_mid_answer_is_not_recorded() {
         let (app, cookie, core) = app_session_and_core_with_an_embedded_base().await;
         let id = post_ask(&app, &cookie, "what+is+alpha").await;
-        drop(get_stream(&app, &cookie, &id).await);
+        let res = get_stream(&app, &cookie, &id).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Past the excerpts and into the answer: the generator is suspended
+        // inside the token loop, with the completion still to be awaited and
+        // recorded. Stopping at `citations` would leave it suspended one line
+        // earlier and prove nothing about what happens after.
+        let seen = read_until(res, "event: token").await;
+        assert!(seen.contains("event: retrieved"), "{seen}");
+        assert!(seen.contains("event: citations"), "{seen}");
+        assert!(
+            !seen.contains("event: done"),
+            "the reader has to leave before done for this to be about anything: {seen}"
+        );
+
         assert_eq!(
             core.store.ask_stats().await.unwrap().asked,
             0,
             "an unjudgeable row was written for a reader who left"
         );
+    }
+
+    /// Reads SSE frames until `marker` has arrived, then drops the body — which
+    /// is what a closed tab does. Returns what was read.
+    async fn read_until(res: Response, marker: &str) -> String {
+        use tokio_stream::StreamExt as _;
+        let mut frames = res.into_body().into_data_stream();
+        let mut seen = String::new();
+        while let Some(chunk) = frames.next().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            if seen.contains(marker) {
+                break;
+            }
+        }
+        // Explicit, because this is the whole point of the test: the generator
+        // is suspended at the frame just read and is never polled again.
+        drop(frames);
+        seen
+    }
+
+    /// An empty box is refused before anything is parked: it costs no entry in
+    /// the map, and no round trip to a stream to find out.
+    #[tokio::test]
+    async fn an_empty_question_is_refused_without_being_parked() {
+        let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
+        let res = app
+            .clone()
+            .oneshot(form("/ui/ask", &cookie, "q=+++"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Parking is the only thing that grows the map, so it is where the sweep
@@ -5584,6 +5632,47 @@ mod tests {
         assert!(out.contains("[9]"), "{out}");
         assert!(!out.contains("#cite-9"), "{out}");
         assert!(out.contains("[x]"), "{out}");
+    }
+
+    /// A citation link asserts that an excerpt supports the token it wraps.
+    /// `argv[1]` is an array index on a base whose answers are full of code,
+    /// and the citable range is exactly the range of common indices — so a link
+    /// there is provenance the answer never claimed.
+    #[test]
+    fn an_array_index_inside_a_code_span_is_not_turned_into_a_citation() {
+        let out = super::link_citations("<p>see [1]</p><pre><code>argv[1]</code></pre>", 2);
+        assert!(
+            out.contains(r##"<p>see <a class="cite" href="#cite-1">[1]</a></p>"##),
+            "prose still links: {out}"
+        );
+        assert!(
+            out.contains("<code>argv[1]</code>"),
+            "code was linked: {out}"
+        );
+        assert_eq!(out.matches("cite-1").count(), 1, "{out}");
+    }
+
+    /// The same markup, marked rather than linked: marking subtracts trust, and
+    /// a fabricated command is precisely what hides in a code span.
+    #[test]
+    fn marking_an_unsupported_literal_still_reaches_inside_a_code_span() {
+        let out = crate::core::ask::check::mark_unsupported(
+            "<pre><code>wipefs --all</code></pre>",
+            &["wipefs --all".to_string()],
+        );
+        assert!(
+            out.contains(r#"<mark class="unsupported">wipefs --all</mark>"#),
+            "{out}"
+        );
+    }
+
+    /// `[01]` cites excerpt one; an anchor of `#cite-01` points at nothing the
+    /// rail emits.
+    #[test]
+    fn a_zero_padded_citation_links_to_the_anchor_the_rail_will_carry() {
+        let out = super::link_citations("<p>see [01]</p>", 2);
+        assert!(out.contains(r##"href="#cite-1""##), "{out}");
+        assert!(!out.contains("cite-01"), "{out}");
     }
 
     /// It runs over sanitized HTML, where a bracket inside a tag is an

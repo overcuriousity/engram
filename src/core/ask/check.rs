@@ -99,17 +99,48 @@ pub fn mark_unsupported(html: &str, literals: &[String]) -> String {
         return html.to_string();
     }
 
+    // Marking inside code is the point rather than an accident: a fabricated
+    // command is exactly what hides in a code span, and a `<mark>` there is at
+    // worst noise. `in_code` is ignored here for that reason.
+    for_text_between_tags(html, |t, _in_code| {
+        std::borrow::Cow::Owned(mark_text(t, &needles))
+    })
+}
+
+/// Walks serialized HTML, handing every run of text between tags to `on_text`
+/// and copying every tag through byte for byte.
+///
+/// Shared rather than written twice. Two passes now walk this markup — one
+/// marking unsupported literals, one linking `[n]` citations — and two copies
+/// of a walker whose whole job is knowing what is markup and what is prose
+/// drift, quietly, in whichever copy is edited less.
+///
+/// `in_code` says whether the run sits inside a `<code>` or `<pre>` element,
+/// because the two callers want opposite things there and only the walker can
+/// tell them apart. A `bool` rather than a depth: `pulldown_cmark` and
+/// `ammonia` never nest one inside the other.
+pub(crate) fn for_text_between_tags<'a>(
+    html: &'a str,
+    mut on_text: impl FnMut(&'a str, bool) -> std::borrow::Cow<'a, str>,
+) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
+    let mut in_code = false;
     loop {
         let Some(open) = rest.find('<') else {
-            out.push_str(&mark_text(rest, &needles));
+            out.push_str(&on_text(rest, in_code));
             return out;
         };
-        out.push_str(&mark_text(&rest[..open], &needles));
+        out.push_str(&on_text(&rest[..open], in_code));
         match rest[open..].find('>') {
             Some(close) => {
-                out.push_str(&rest[open..open + close + 1]);
+                let tag = &rest[open..open + close + 1];
+                out.push_str(tag);
+                if opens_code(tag) {
+                    in_code = true;
+                } else if closes_code(tag) {
+                    in_code = false;
+                }
                 rest = &rest[open + close + 1..];
             }
             // Unterminated `<`. Cannot happen in serialized output, and copying
@@ -121,6 +152,18 @@ pub fn mark_unsupported(html: &str, literals: &[String]) -> String {
             }
         }
     }
+}
+
+/// Matched on the whole delimiter rather than a prefix, so a future `<codepen>`
+/// element cannot be read as a code span.
+fn opens_code(tag: &str) -> bool {
+    ["<code>", "<code ", "<pre>", "<pre "]
+        .iter()
+        .any(|d| tag.starts_with(d))
+}
+
+fn closes_code(tag: &str) -> bool {
+    matches!(tag, "</code>" | "</pre>")
 }
 
 /// One left-to-right pass over a run of text between tags.
