@@ -101,9 +101,16 @@ impl Core {
             //
             // Taking the lane does not make an in-flight call stop; nothing here
             // cancels. It keeps the worker from putting anything new in front of
-            // this one. Held to the end of the stream, which for the streaming
-            // door is the last token rather than the return of a call.
-            let _lane = core.gate.interactive();
+            // this one.
+            //
+            // Shared with the completion's task rather than held here alone,
+            // because the two do not end together. A reader that closes the tab
+            // drops this stream while the model call keeps running on the GPU,
+            // and a lease that ended with the stream would hand the worker a
+            // window against hardware an interactive call still occupies — the
+            // exact interleaving this exists to prevent, inverted. Whichever
+            // side finishes last drops the last handle.
+            let lane = std::sync::Arc::new(core.gate.interactive());
 
             // No per-source cap: an answer often lives in one document, and
             // withholding its paragraphs to keep the citation list varied would
@@ -299,7 +306,12 @@ impl Core {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::infer::Delta>(64);
             let completer = core.completer.clone();
             let prompt = user.clone();
+            let held = std::sync::Arc::clone(&lane);
             let call = tokio::spawn(async move {
+                // Dropped when this task ends, whether or not anyone is still
+                // reading: the GPU is busy until the call returns, and the lane
+                // says so for exactly that long.
+                let _lane = held;
                 completer
                     .answer_streaming(ASK_SYSTEM, &prompt, ceiling, tx)
                     .await
@@ -1518,6 +1530,97 @@ mod tests {
 
         assert_eq!(out.0, PARTS, "a delta was swallowed on the way to the page");
         assert_eq!(out.1.answer.split_whitespace().count(), PARTS);
+    }
+
+    /// A completer that stops mid-answer and waits to be let go, so a test can
+    /// observe the world at the one instant that matters: the reader has gone
+    /// and the model call has not.
+    struct Stalling {
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Completer for Stalling {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Ok("a stalled answer".into())
+        }
+        async fn answer_streaming(
+            &self,
+            _system: &str,
+            _user: &str,
+            _ceiling: usize,
+            sink: tokio::sync::mpsc::Sender<crate::infer::Delta>,
+        ) -> Result<crate::infer::Completion> {
+            let _ = sink
+                .send(crate::infer::Delta::Token("a stalled ".into()))
+                .await;
+            self.release.notified().await;
+            let _ = sink.send(crate::infer::Delta::Token("answer".into())).await;
+            Ok(crate::infer::Completion {
+                text: "a stalled answer".into(),
+                truncated: false,
+            })
+        }
+        fn context_tokens(&self) -> usize {
+            4096
+        }
+        fn max_output_tokens(&self) -> usize {
+            1024
+        }
+    }
+
+    /// Closing the tab is the streaming door's ordinary ending, not an edge
+    /// case, and dropping the stream does not stop the call: it is detached and
+    /// the GPU stays busy until it returns. A lane that ended with the reader
+    /// would let the worker start a seventy-second window against hardware an
+    /// interactive call still occupies — the interleaving the lane exists to
+    /// prevent, inverted rather than merely leaked.
+    #[tokio::test]
+    async fn a_reader_who_leaves_mid_answer_does_not_hand_the_gpu_to_the_worker() {
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.completer = std::sync::Arc::new(Stalling {
+            release: release.clone(),
+        });
+        seed(&core, 3, 4).await;
+
+        // Read as far as the first token, so the call is provably in flight
+        // rather than merely spawned, and then leave.
+        {
+            let s = core.ask_events(&req("chunk"), Door::Ui.by("me"));
+            tokio::pin!(s);
+            loop {
+                match s.next().await.expect("the stream ended before it answered") {
+                    Ok(AskEvent::Token(_)) => break,
+                    Ok(_) => continue,
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        }
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                core.gate.background()
+            )
+            .await
+            .is_err(),
+            "the reader left and the lane went with them, while the model call \
+             it was taken for is still running"
+        );
+
+        // And it is a lease, not a block: once the call it was taken for really
+        // has ended, the worker gets its turn.
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.gate.background())
+            .await
+            .expect("the lane was never released after the call ended");
+
+        // Nothing recorded it, and nothing recorded it twice. Whether an answer
+        // nobody read should be stored at all is a decision for the door that
+        // streams, not a side effect of this one.
+        assert_eq!(core.store.ask_stats().await.unwrap().asked, 0);
     }
 
     /// Streams its answer in more pieces than the sink holds, which is the

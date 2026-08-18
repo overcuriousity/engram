@@ -138,7 +138,10 @@ pub trait Completer: Send + Sync {
     ) -> Result<Completion> {
         let c = self.answer(system, user, ceiling).await?;
         // Unchecked on purpose: a receiver that went away is a reader that
-        // stopped reading, and the call is still worth finishing and recording.
+        // stopped reading, and the call is finished rather than abandoned so the
+        // endpoint is left clean and whatever paces the GPU sees the call end
+        // when it actually ends. The result then goes nowhere — the only thing
+        // that records an answer is the caller that dropped the receiver.
         let _ = sink.send(Delta::Token(c.text.clone())).await;
         Ok(c)
     }

@@ -1058,8 +1058,12 @@ impl Completer for HttpCompleter {
             for c in chunks {
                 if let Some(r) = c.reasoning {
                     // Send errors are ignored throughout: the receiver is a
-                    // reader that may stop reading, and the call is still worth
-                    // finishing for whoever records its result.
+                    // reader that may stop reading, and the response is still
+                    // read to its end rather than abandoned mid-body, so the
+                    // connection is reusable and the call ends when the GPU is
+                    // actually free. Nothing records what comes back once the
+                    // receiver is gone: the caller that dropped it was the only
+                    // recorder.
                     let _ = sink.send(Delta::Reasoning(r)).await;
                 }
                 if let Some(t) = c.content {
