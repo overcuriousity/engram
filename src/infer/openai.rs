@@ -273,28 +273,54 @@ impl Endpoint {
 
     async fn chat(&self, body: serde_json::Value, ceiling: Option<usize>) -> Result<ChatReply> {
         let started = std::time::Instant::now();
-        let role = self.role;
-        let v: serde_json::Value = self
-            .send_with_ceiling(body, ceiling)
-            .await?
-            .json()
-            .await
-            .map_err(|e| Error::Inference {
-                role,
-                detail: e.to_string(),
-            })?;
+        let res = self.send_with_ceiling(body, ceiling).await?;
+        self.buffered_reply(res, ceiling, started).await
+    }
 
+    /// The whole-response half of `chat`: one JSON object, read to its end.
+    ///
+    /// Its own method because the streaming path needs it too — for the
+    /// endpoint that was asked to stream and answered with a plain completion
+    /// instead, which is a valid reply and not a broken stream.
+    async fn buffered_reply(
+        &self,
+        res: reqwest::Response,
+        ceiling: Option<usize>,
+        started: std::time::Instant,
+    ) -> Result<ChatReply> {
+        let role = self.role;
+        let v: serde_json::Value = res.json().await.map_err(|e| Error::Inference {
+            role,
+            detail: e.to_string(),
+        })?;
         let finish_reason = v["choices"][0]["finish_reason"].as_str();
         tracing::info!(
-            role = self.role,
+            role,
             ms = started.elapsed().as_millis(),
             tokens = v["usage"]["completion_tokens"].as_u64(),
             finish_reason,
             "completion finished"
         );
-        // `length` means the ceiling stopped the model rather than the model
-        // stopping itself, and a reply nothing marks as cut off is read as a
-        // complete one — by the parser, and by whoever asked.
+        let text = v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string);
+        self.reply(text, finish_reason, ceiling, "no message content")
+    }
+
+    /// How a completion ended, whichever way it arrived.
+    ///
+    /// `length` means the ceiling stopped the model rather than the model
+    /// stopping itself, and a reply nothing marks as cut off is read as a
+    /// complete one — by the parser, and by whoever asked. `empty` is the
+    /// detail for a reply with no content at all that was *not* cut off; the
+    /// buffered and streamed paths describe that differently.
+    fn reply(
+        &self,
+        text: Option<String>,
+        finish_reason: Option<&str>,
+        ceiling: Option<usize>,
+        empty: &str,
+    ) -> Result<ChatReply> {
         let truncated = finish_reason == Some("length");
         if truncated {
             tracing::warn!(
@@ -303,24 +329,20 @@ impl Endpoint {
                 "the reply hit its output ceiling and is cut off"
             );
         }
-
-        let text = v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Inference {
-                role: self.role,
-                // An empty reply at `length` is the one failure that reads as a
-                // transport fault and is not one: a reasoning model bills its
-                // thinking against this ceiling, and can spend all of it before
-                // the message content starts.
-                detail: if truncated {
-                    "the output ceiling was spent before any message content was written; \
-                     raise max_output_tokens or lower reasoning_effort"
-                        .into()
-                } else {
-                    "no message content".into()
-                },
-            })?;
+        let text = text.ok_or_else(|| Error::Inference {
+            role: self.role,
+            // An empty reply at `length` is the one failure that reads as a
+            // transport fault and is not one: a reasoning model bills its
+            // thinking against this ceiling, and can spend all of it before
+            // the message content starts.
+            detail: if truncated {
+                "the output ceiling was spent before any message content was written; \
+                 raise max_output_tokens or lower reasoning_effort"
+                    .into()
+            } else {
+                empty.into()
+            },
+        })?;
         Ok(ChatReply { text, truncated })
     }
 }
@@ -775,12 +797,39 @@ fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
 
 // ── Server-sent events ───────────────────────────────────────────────────────
 
+/// The response's `content-type`, or `""` when it sent none.
+fn content_type(res: &reqwest::Response) -> &str {
+    res.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
+/// Whether a reply is one JSON document rather than a stream of frames.
+///
+/// Asked the narrow way round on purpose: a server that streams under a sloppy
+/// content-type must go on being read as a stream, so only a reply that calls
+/// itself JSON is taken for the whole completion object. Compared on the media
+/// type alone, so a `; charset=utf-8` suffix or a stray capital changes nothing.
+fn is_json_document(res: &reqwest::Response) -> bool {
+    content_type(res)
+        .split(';')
+        .next()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
+}
+
 /// One `data:` frame of an OpenAI-shaped stream.
 #[derive(Debug, Default)]
 pub(crate) struct SseChunk {
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub finish_reason: Option<String>,
+    /// The server's own account of a failure, sent as a frame because the
+    /// headers — and the 200 — had already gone out when it happened. llama.cpp
+    /// does this for a prompt that outgrows the context; vLLM and most proxies
+    /// do it too. A frame like that has no `choices`, and a parser that only
+    /// reads `choices` drops the one line that says why the stream ended.
+    pub error: Option<String>,
 }
 
 /// Parse one line. `None` for anything that is not a chunk: blank lines,
@@ -791,6 +840,21 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
         return None;
     }
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if let Some(err) = v.get("error") {
+        // `{"error":{"message":..}}` is the OpenAI shape; `{"error":"..."}`
+        // is what some servers send. Either way the message is what matters,
+        // and the whole object is a fair fallback for a shape neither of these.
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .or_else(|| err.as_str().map(str::to_string))
+            .unwrap_or_else(|| err.to_string());
+        return Some(SseChunk {
+            error: Some(message),
+            ..SseChunk::default()
+        });
+    }
     let choice = v.get("choices")?.get(0)?;
     let delta = choice.get("delta");
     let s = |o: Option<&serde_json::Value>, k: &str| {
@@ -809,6 +873,7 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
             .get("finish_reason")
             .and_then(|x| x.as_str())
             .map(str::to_string),
+        error: None,
     })
 }
 
@@ -1072,6 +1137,24 @@ impl Completer for HttpCompleter {
         body["stream"] = json!(true);
 
         let mut res = self.ep.send_with_ceiling(body, Some(ceiling)).await?;
+        // An endpoint or proxy that ignores `stream` answers with the plain
+        // completion object. That is not a broken stream, it is the reply —
+        // and every door reaches the model through here now, including the
+        // two that never asked for a stream. So the buffered parse takes it,
+        // and the sink sees the whole answer as one token rather than none.
+        if is_json_document(&res) {
+            tracing::debug!(
+                role,
+                content_type = content_type(&res),
+                "asked to stream, answered whole; reading it as a completion"
+            );
+            let reply = self.ep.buffered_reply(res, Some(ceiling), started).await?;
+            let _ = sink.send(Delta::Token(reply.text.clone())).await;
+            return Ok(Completion {
+                text: reply.text,
+                truncated: reply.truncated,
+            });
+        }
         let mut frames = SseBuffer::default();
         let mut text = String::new();
         let mut finish_reason: Option<String> = None;
@@ -1085,6 +1168,15 @@ impl Completer for HttpCompleter {
                 None => frames.finish(),
             };
             for c in chunks {
+                if let Some(message) = c.error {
+                    // Surfaced as-is: this is the server's reason, and without
+                    // it the failure below reads as a transport fault with an
+                    // empty body — which is what it looked like before.
+                    return Err(Error::Inference {
+                        role,
+                        detail: format!("the stream carried an error: {message}"),
+                    });
+                }
                 if let Some(r) = c.reasoning {
                     // Send errors are ignored throughout: the receiver is a
                     // reader that may stop reading, and the response is still
@@ -1111,37 +1203,22 @@ impl Completer for HttpCompleter {
         // Truncation is read from the last frame that carried a reason, because
         // a stream has no whole-response object to read it from — and an answer
         // cut off mid-sentence that nothing marks is read as a finished one.
-        let truncated = finish_reason.as_deref() == Some("length");
         tracing::info!(
             role,
             ms = started.elapsed().as_millis(),
             finish_reason,
             "streamed completion finished"
         );
-        if truncated {
-            tracing::warn!(
-                role,
-                ceiling,
-                "the reply hit its output ceiling and is cut off"
-            );
-        }
-        if text.is_empty() {
-            return Err(Error::Inference {
-                role,
-                // The same distinction the buffered path draws: a reasoning
-                // model bills its thinking against this ceiling and can spend
-                // all of it before the answer starts, which is not a transport
-                // fault however much it reads like one.
-                detail: if truncated {
-                    "the output ceiling was spent before any message content was written; \
-                     raise max_output_tokens or lower reasoning_effort"
-                        .into()
-                } else {
-                    "the stream carried no message content".to_string()
-                },
-            });
-        }
-        Ok(Completion { text, truncated })
+        let reply = self.ep.reply(
+            Some(text).filter(|t| !t.is_empty()),
+            finish_reason.as_deref(),
+            Some(ceiling),
+            "the stream carried no message content",
+        )?;
+        Ok(Completion {
+            text: reply.text,
+            truncated: reply.truncated,
+        })
     }
 
     fn context_tokens(&self) -> usize {
@@ -2529,6 +2606,62 @@ mod tests {
             panic!("a stream with no content answered nothing and reported success");
         };
         assert!(format!("{e}").contains("output ceiling was spent"), "{e}");
+    }
+
+    /// An endpoint or proxy that ignores `stream: true` answers with the plain
+    /// completion object. Every door goes through the streaming call now, so
+    /// treating that as a broken stream would break the API and MCP doors on
+    /// exactly the servers they used to work against.
+    #[tokio::test]
+    async fn a_whole_completion_sent_back_to_a_streaming_call_is_still_the_answer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "whole"}, "finish_reason": "stop"}]
+            })))
+            .mount(&server)
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let done = completer_against(&server.uri())
+            .answer_streaming("s", "u", 64, tx)
+            .await
+            .unwrap();
+        assert_eq!(done.text, "whole");
+        assert!(!done.truncated);
+        // The reader still gets the answer, all at once.
+        assert!(matches!(rx.recv().await, Some(Delta::Token(t)) if t == "whole"));
+    }
+
+    /// A server that fails after the headers went out says so in a frame of
+    /// its own — llama.cpp on a prompt past the context, most proxies on an
+    /// upstream fault. That frame has no `choices`; dropping it leaves the
+    /// operator with "no message content" and the log with no reason.
+    #[tokio::test]
+    async fn an_error_frame_mid_stream_is_the_reason_the_call_reports() {
+        let server = streaming_server(
+            "data: {\"error\":{\"message\":\"context size exceeded\",\"code\":400}}\n\n",
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let Err(e) = completer_against(&server.uri())
+            .answer_streaming("s", "u", 64, tx)
+            .await
+        else {
+            panic!("a stream that carried only an error reported success");
+        };
+        assert!(format!("{e}").contains("context size exceeded"), "{e}");
+    }
+
+    /// The two shapes an error frame comes in.
+    #[test]
+    fn an_error_frame_parses_under_either_shape() {
+        let a = parse_sse_line(r#"data: {"error":{"message":"boom"}}"#).unwrap();
+        assert_eq!(a.error.as_deref(), Some("boom"));
+        let b = parse_sse_line(r#"data: {"error":"boom"}"#).unwrap();
+        assert_eq!(b.error.as_deref(), Some("boom"));
+        let c = parse_sse_line(r#"data: {"choices":[{"delta":{"content":"x"}}]}"#).unwrap();
+        assert!(c.error.is_none());
     }
 
     /// The streamed body is the buffered one plus `stream`: the ceiling under
