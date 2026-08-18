@@ -28,6 +28,14 @@
 //! whether a token is *present* rather than whether two spellings match, and
 //! because numbers are the one thing in this corpus that read the same in German
 //! and in English. See `jobs::merge::losses`, its only caller.
+//!
+//! What it extracts narrowed on 2026-08-18, and for the same reason the list
+//! went: presence is only a fair question about a token that is a value in the
+//! first place. A bare run of digits is not one. Three merges the judge had
+//! already written were refused for "losing" `1, 2, 3, 4` — the markers of a
+//! numbered list — and the PID and port columns of a pasted tool dump, which no
+//! merge of two worked examples can carry over whole. A separator or a unit now
+//! has to say the number is a measurement of something: see `is_fact`.
 
 use std::collections::BTreeSet;
 
@@ -67,8 +75,22 @@ fn is_fact(token: &str) -> bool {
         s.chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | ':' | '/' | '_'))
     };
+    // A separator is what makes a run of digits a value: `1.21.4`, `2024-03-01`,
+    // `172.16.112.128`, `7-10`. Digits on their own are not. Nothing tells `8080`
+    // the port apart from `2` the second item of a numbered list or `1220` the
+    // PID column of a pasted `volatility sockets` dump, and in this base the
+    // ordinals and the table cells outnumber the ports by an order of magnitude.
+    // Demanding all of them survive a merge is how three correct merges were
+    // refused: renumber a list, or keep one side's worked example instead of
+    // both, and the guard called it data loss. One of those artifacts wrote
+    // "RFC 32272" for RFC 3227, so correcting the typo would have failed too.
+    //
+    // The cost is real and is the point of the trade: a merge that changes a
+    // bare `8080` to `9090` is no longer caught. A version, a date, an address,
+    // a size and a timeout written `30s` still are, and those are what the
+    // model actually picks a side on.
     if separated(t) {
-        return true;
+        return t.contains(['.', '-', ':', '/', '_']);
     }
     // Otherwise the letters have to earn their place. A number carrying a unit
     // is a value — `30s`, `512mb` — and so is anything a separator has already
@@ -102,12 +124,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_numbers_and_dates_are_facts() {
-        let f = fact_tokens("Requires 1.21.4 or later, 30 seconds, on 2024-03-01, at 8080.");
+    fn versions_and_dates_are_facts() {
+        let f = fact_tokens("Requires 1.21.4 or later, on 2024-03-01, from 172.16.112.128.");
         assert!(f.contains("1.21.4"), "{f:?}");
         assert!(f.contains("2024-03-01"), "{f:?}");
-        assert!(f.contains("30"), "{f:?}");
-        assert!(f.contains("8080"), "{f:?}");
+        assert!(f.contains("172.16.112.128"), "{f:?}");
+    }
+
+    #[test]
+    fn a_bare_run_of_digits_is_not_a_value() {
+        // The rule that lets a numbered list and a pasted output table through
+        // a merge. `2.` is an item marker, `1220` and `139` are the PID and
+        // port columns of a `volatility sockets` dump, and `32272` is a typo
+        // for RFC 3227 that a merge should be free to correct. None of them is
+        // a value the judge could pick a side on, and requiring all of them to
+        // survive refused three merges the judge had already written.
+        assert!(
+            fact_tokens("2. Atomarität: die Sicherung erfolgt ununterbrochen.").is_empty(),
+            "a list marker is not a value"
+        );
+        assert!(
+            fact_tokens("0x82276878 4 139 6 TCP 172.16.112.128")
+                .iter()
+                .all(|t| t == "172.16.112.128"),
+            "only the address survives: {:?}",
+            fact_tokens("0x82276878 4 139 6 TCP 172.16.112.128")
+        );
+        assert!(fact_tokens("Gemäß RFC 32272 gilt die Reihenfolge").is_empty());
+    }
+
+    #[test]
+    fn a_port_written_bare_is_the_cost_of_that_rule() {
+        // Pinned rather than defended. `8080` alone carries nothing that says
+        // it is a port and not the third row of a table, so a merge that
+        // changes it goes uncaught. Written with its protocol it is a value
+        // again, and so is any duration or size that names its unit.
+        assert!(fact_tokens("Listens on 8080.").is_empty());
+        assert!(fact_tokens("Listens on 8080/tcp.").contains("8080/tcp"));
+        assert!(fact_tokens("The timeout is 30s.").contains("30s"));
     }
 
     #[test]
@@ -147,11 +201,15 @@ mod tests {
     fn how_a_version_list_is_punctuated_decides_what_is_extracted() {
         // Why comparing two texts' token sets is not a question about facts.
         // These three lines say one thing, and the tokenizer splits on
-        // whitespace, so they yield three unrelated sets. A difference between
-        // them was named to the dedupe judge as values the artifacts state
+        // whitespace, so they yield unrelated sets. A difference between them
+        // was named to the dedupe judge as values the artifacts state
         // differently, and it reported the contradiction that implies. Pinned
         // rather than fixed: presence is all `merge::losses` asks of these, and
         // it is the comparison that was unsound.
+        //
+        // Two of the three are empty now that a bare number is not a value, so
+        // the asymmetry is narrower than it was — but `7-10` against nothing is
+        // still an asymmetry, and it is still not a fact about the text.
         assert!(
             fact_tokens("First Install (Win7/8/10)").is_empty(),
             "digits glued to a word are not values, which is the whole asymmetry"
@@ -160,12 +218,7 @@ mod tests {
             fact_tokens("Registry-Werte für USB-Geräte (Windows 7-10):"),
             ["7-10".to_string()].into_iter().collect()
         );
-        assert_eq!(
-            fact_tokens("gespeichert unter Windows 7, 8 und 10"),
-            ["10".to_string(), "7".to_string(), "8".to_string()]
-                .into_iter()
-                .collect()
-        );
+        assert!(fact_tokens("gespeichert unter Windows 7, 8 und 10").is_empty());
     }
 
     #[test]

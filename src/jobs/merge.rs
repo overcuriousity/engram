@@ -415,12 +415,12 @@ mod tests {
     #[test]
     fn a_merge_that_keeps_both_values_is_allowed() {
         let roots = [
-            root("The request timeout is 30 seconds."),
-            root("The request timeout is 90 seconds."),
+            root("The request timeout is 30s."),
+            root("The request timeout is 90s."),
         ];
         let d = draft(
-            "Sources differ on the request timeout: an earlier capture gives 30 seconds, \
-             a later one 90 seconds.",
+            "Sources differ on the request timeout: an earlier capture gives 30s, \
+             a later one 90s.",
         );
         assert!(losses(&roots, &d).is_empty(), "{:?}", losses(&roots, &d));
     }
@@ -432,11 +432,21 @@ mod tests {
         // writing. The result reads well, ranks well, and the missing number is
         // gone from the base — a conflict resolved by deletion.
         let roots = [
+            root("The request timeout is 30s."),
+            root("The request timeout is 90s."),
+        ];
+        let d = draft("The request timeout is 90s.");
+        assert_eq!(losses(&roots, &d), vec!["30s".to_string()]);
+
+        // Written without its unit, the same drop goes uncaught. `30` alone is
+        // not distinguishable from the third item of a numbered list, and
+        // demanding every bare number survive refused three correct merges —
+        // see `infer::facts::a_port_written_bare_is_the_cost_of_that_rule`.
+        let bare = [
             root("The request timeout is 30 seconds."),
             root("The request timeout is 90 seconds."),
         ];
-        let d = draft("The request timeout is 90 seconds.");
-        assert_eq!(losses(&roots, &d), vec!["30".to_string()]);
+        assert!(losses(&bare, &draft("The request timeout is 90 seconds.")).is_empty());
     }
 
     #[test]
@@ -1059,15 +1069,16 @@ mod tests {
 
     #[test]
     fn a_merge_of_three_roots_is_checked_against_all_of_them() {
-        // The fan-in cap allows up to eight. A check that only read the first
-        // two would pass a merge that dropped everything the third said.
+        // A pair whose members are themselves merges reaches this with more
+        // than two roots behind it. A check that only read the first two would
+        // pass a merge that dropped everything the third said.
         let roots = [
-            root("Port 8080 is the default."),
+            root("Port 8080/tcp is the default."),
             root("The timeout is 30s."),
-            root("Retries are capped at 5."),
+            root("Retries back off for 5m."),
         ];
-        let d = draft("Port 8080 is the default and the timeout is 30s.");
-        assert_eq!(losses(&roots, &d), vec!["5".to_string()]);
+        let d = draft("Port 8080/tcp is the default and the timeout is 30s.");
+        assert_eq!(losses(&roots, &d), vec!["5m".to_string()]);
     }
 
 
