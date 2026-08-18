@@ -67,6 +67,37 @@ pub(super) fn append_neighbours(
     out
 }
 
+/// How many of the artifacts a round actually retrieved never reached the
+/// model.
+///
+/// Counted by identity rather than by arithmetic over list lengths, because
+/// there are now two rounds and one merged list: the ranked hits of the second
+/// round sit behind the first round's neighbours, so "the ranked ones that
+/// survived are the first `kept`" stopped being true the moment a second round
+/// existed. Identity is true either way.
+///
+/// Only ranked citations count as showing a retrieved artifact. `dropped`
+/// answers "what did I ask for and not get shown", where the asking is the
+/// ranking: an artifact the cliff cut and adjacency then reached back is still
+/// a hit the ranking lost, and reading it as retained would hide the cliff on
+/// exactly the lists where it did the most work. `via` is what tells the two
+/// apart, and nobody asked for a neighbour in the first place — counting one
+/// would make `dropped` grow every time the reach worked.
+pub(super) fn dropped_count(
+    retrieved: &[String],
+    shown: &[crate::core::search::SearchResult],
+) -> usize {
+    let shown: std::collections::HashSet<&str> = shown
+        .iter()
+        .filter(|h| h.via.is_none())
+        .map(|h| h.artifact_id.as_str())
+        .collect();
+    retrieved
+        .iter()
+        .filter(|id| !shown.contains(id.as_str()))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

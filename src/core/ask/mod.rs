@@ -1,4 +1,5 @@
 pub mod check;
+mod follow_up;
 mod retrieve;
 pub mod stream;
 
@@ -21,6 +22,17 @@ pub struct AskRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub category: Option<String>,
+}
+
+/// What one retrieval round produced.
+struct Round {
+    /// Above the cliff, with whatever was reached sideways appended.
+    hits: Vec<SearchResult>,
+    /// Every artifact the ranking returned, cliff and all. What `dropped` is
+    /// measured against, so a citation lost to the cliff is as visible as one
+    /// lost to the window.
+    retrieved: Vec<String>,
+    cliff_at: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -112,28 +124,10 @@ impl Core {
             // side finishes last drops the last handle.
             let lane = std::sync::Arc::new(core.gate.interactive());
 
-            // No per-source cap: an answer often lives in one document, and
-            // withholding its paragraphs to keep the citation list varied would
-            // make the answer worse, not fairer.
-            let (mut hits, _) = core
-                .search_with(
-                    &SearchQuery {
-                        q: req.q.clone(),
-                        limit: req.limit.unwrap_or(8),
-                        tags: req.tags.clone(),
-                        category: req.category.clone(),
-                        // Asking a question is as deliberate as a search gets.
-                        mark: true,
-                        include_deprecated: false,
-                        include_superseded: false,
-                    },
-                    None,
-                    // Deliberately not captured: the right answer to a question is
-                    // a synthesis across several artifacts, so "which one was it"
-                    // has no well-defined meaning for someone judging it later.
-                    crate::store::feedback::Door::Ask,
-                )
-                .await?;
+            // Asking a question is as deliberate as a search gets.
+            let first = core.retrieve_round(&req, &req.q, true).await?;
+            let mut hits = first.hits;
+            let mut retrieved = first.retrieved;
 
             if hits.is_empty() {
                 // No retrieval, no completion: spending a model call to say
@@ -159,90 +153,13 @@ impl Core {
                 return;
             }
 
-            // Cut the ranked list where its relevance falls off, before a single
-            // row is read for it: an excerpt below the cliff makes the answer worse
-            // as well as dearer, and its caveats are a lookup spent on something
-            // that will not be sent. `dropped` is still measured against everything
-            // retrieved, so a citation lost to the cliff is as visible as one lost
-            // to the window.
-            let retrieved = hits.len();
-            let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
-            let cliff_at = crate::core::search::cliff(&scores);
-            hits.truncate(retrieve::above_cliff(&scores));
+            let mut blocks = core.excerpts(&hits).await;
 
-            // Artifacts reached sideways rather than retrieved are appended here,
-            // after the cliff has been taken — they carry no score comparable to a
-            // ranked hit, and must never enter the scores it is computed from.
-            // `scores` is consumed above and never recomputed, so nothing appended
-            // from here on can reach `cliff` at all.
-            let ranked = hits.len();
-            core.reach_sideways(&mut hits, cliff_at).await;
-
-            // Caveats are the conditions under which an excerpt does not apply, and
-            // an answer that quotes "run `mkfs` on the device" without "destroys
-            // everything already on it" is worse than no answer. They are not in
-            // the vector payload — what gets embedded is a separate decision — so
-            // they are read from the store, which costs one cheap SQLite lookup per
-            // hit and no inference. An excerpt whose row has since been deleted
-            // simply carries none.
-            let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
-            for (i, h) in hits.iter().enumerate() {
-                let caveats = core
-                    .store
-                    .get_artifact(&h.artifact_id)
-                    .await
-                    .map(|c| c.caveats)
-                    .unwrap_or_default();
-                blocks.push(ask_excerpt(
-                    i + 1,
-                    h.title.as_deref().unwrap_or_default(),
-                    &h.text,
-                    &caveats,
-                ));
-            }
-
-            // Reserve what the completer will ask for, not a constant. The endpoint
-            // counts the prompt and the requested ceiling against one window, so
-            // packing excerpts up to `context - 1024` while the call goes out
-            // demanding `max_output_tokens` of reply is a request the server refuses
-            // outright — and it refuses it on precisely the queries that retrieved
-            // enough to be worth answering.
-            //
-            // The margin comes off the top too. `ceiling_for_prompt` holds back
-            // headroom for the estimate being an estimate, and it holds it back out
-            // of the *reply*: packing up to `max_output_tokens` exactly and then
-            // being charged that margin is how a 32k window with a 2k ceiling ends
-            // up asking for one token of answer. Reserving it here is what makes
-            // the two halves agree.
-            //
-            // Never more than half the window, though. The reserve is configuration
-            // and the window is configuration, and nothing makes the two agree: a
-            // role whose ceiling is its whole context (4096 and 4096, which is an
-            // ordinary shape for a local model) reserves everything, packs nothing,
-            // and answers "too large for the context window" to every question ever
-            // asked without once calling the model. Half a window of excerpts and
-            // half a window of answer is a worse answer than the operator asked for;
-            // no answer is not an answer.
-            let context = core.completer.context_tokens();
-            let reserve = core
-                .completer
-                .max_output_tokens()
-                .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
-                .min(context / 2);
-            let budget = context
-                .saturating_sub(core.counter.count(ASK_SYSTEM))
-                .saturating_sub(core.counter.count(&req.q))
-                .saturating_sub(reserve);
+            let budget = core.excerpt_budget(&req.q);
 
             // Highest score first, so what gets cut is what mattered least.
-            let kept = pack_by_budget(&blocks, &core.counter, budget);
-            // Measured over the retrieved hits alone. `dropped` answers "what did I
-            // ask for and not get shown", and nobody asked for a neighbour — one
-            // that does not fit was never owed a place, and counting it would make
-            // `dropped` grow every time the reach worked. Packing keeps a prefix
-            // and the neighbours sit after the ranked hits, so the ranked ones that
-            // survived are exactly `kept.min(ranked)`.
-            let dropped = retrieved - kept.min(ranked);
+            let mut kept = pack_by_budget(&blocks, &core.counter, budget);
+            let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept]);
             if dropped > 0 {
                 tracing::info!(
                     dropped,
@@ -263,11 +180,89 @@ impl Core {
                     unsupported: vec![],
                     event_id: None,
                 };
-                yield AskEvent::Retrieved { round: 1, shown: 0, dropped, cliff_at };
+                yield AskEvent::Retrieved { round: 1, shown: 0, dropped, cliff_at: first.cliff_at };
                 yield AskEvent::Citations(vec![]);
                 let response = core.record_ask(&req, &origin, response).await?;
                 yield AskEvent::Done(Box::new(response));
                 return;
+            }
+
+            // Round one is over as far as anyone watching is concerned: what it
+            // retrieved is reported before the follow-up is asked anything, so a
+            // reader sees the first round land rather than a pause of unknown
+            // cause.
+            yield AskEvent::Retrieved {
+                round: 1,
+                shown: kept,
+                dropped,
+                cliff_at: first.cliff_at,
+            };
+
+            // Exactly one extra round, and structurally so: one call site, no
+            // loop, and nothing downstream of here asks again. A second `Some`
+            // has nowhere to go — which is the point. "Let the model say once
+            // what it still needs" is the bounded version of a mechanism whose
+            // unbounded version is an agent, and an agent is not what this is.
+            //
+            // `needed_query` returns `None` the moment no follow-up model is
+            // wired, so with the feature off this costs one `Option` check and
+            // no call at all.
+            if let Some(need) = follow_up::needed_query(&core, &req.q, &blocks[..kept]).await {
+                yield AskEvent::Needs(need.clone());
+                match core.retrieve_round(&req, &need, false).await {
+                    Ok(second) => {
+                        // Deduped against everything round one holds, ranked and
+                        // reached alike: an artifact already in front of the model
+                        // twice is a wasted excerpt, not a stronger one.
+                        let seen: std::collections::HashSet<&str> =
+                            hits.iter().map(|h| h.artifact_id.as_str()).collect();
+                        let fresh: Vec<SearchResult> = second
+                            .hits
+                            .iter()
+                            .filter(|h| !seen.contains(h.artifact_id.as_str()))
+                            .cloned()
+                            .collect();
+
+                        // Packed again over the whole merged list rather than
+                        // appended to what round one packed: the second round's
+                        // excerpts have to fit the same window as the first, and
+                        // the only honest way to know what fits is to pack it.
+                        let mut merged = hits.clone();
+                        merged.extend(fresh);
+                        let merged_blocks = core.excerpts(&merged).await;
+                        let merged_kept =
+                            pack_by_budget(&merged_blocks, &core.counter, budget);
+
+                        // A re-pack that fits nothing leaves round one standing.
+                        // The prompt cannot be empty because the follow-up found
+                        // nothing extra to say.
+                        if merged_kept > 0 {
+                            for id in second.retrieved {
+                                if !retrieved.contains(&id) {
+                                    retrieved.push(id);
+                                }
+                            }
+                            hits = merged;
+                            blocks = merged_blocks;
+                            kept = merged_kept;
+                            dropped = retrieve::dropped_count(&retrieved, &hits[..kept]);
+                            yield AskEvent::Retrieved {
+                                round: 2,
+                                shown: kept,
+                                dropped,
+                                cliff_at: second.cliff_at,
+                            };
+                        } else {
+                            tracing::info!("ask: the second round fit nothing the first had not");
+                        }
+                    }
+                    // A follow-up that fails must never fail the ask: the
+                    // operator asked a question, not for a retrieval strategy.
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "ask: the second retrieval failed; answering from the first"
+                    ),
+                }
             }
 
             let user = ask_prompt(&req.q, &blocks[..kept]);
@@ -282,20 +277,16 @@ impl Core {
             // being an estimate.
             let spent = core.counter.count(ASK_SYSTEM) + core.counter.count(&user);
             let ceiling = crate::infer::budget::ceiling_for_prompt(
-                context,
+                core.completer.context_tokens(),
                 spent,
                 core.completer.max_output_tokens(),
             );
 
             // The excerpts go out before the first token, so the rail beside the
-            // answer is readable while the answer is still being written.
+            // answer is readable while the answer is still being written. Once,
+            // after the last retrieval: the rail names what the model was shown,
+            // and there is one such list however many rounds found it.
             let citations: Vec<SearchResult> = hits.into_iter().take(kept).collect();
-            yield AskEvent::Retrieved {
-                round: 1,
-                shown: citations.len(),
-                dropped,
-                cliff_at,
-            };
             yield AskEvent::Citations(citations.clone());
 
             // The sink is bounded, so the call has to run *beside* this loop and
@@ -366,6 +357,133 @@ impl Core {
             let response = core.record_ask(&req, &origin, response).await?;
             yield AskEvent::Done(Box::new(response));
         }
+    }
+
+    /// One retrieval round: search, cut at the cliff, reach sideways.
+    ///
+    /// Both rounds come through here, so the second one is retrieved on exactly
+    /// the terms the first was. A second copy of this path would be a second
+    /// definition of what an excerpt is allowed to be, and the round that used
+    /// the stale copy would be the one nobody was watching.
+    ///
+    /// `deliberate` is false for the follow-up: marking a search is a claim
+    /// that a person meant it, and the follow-up query is one the model wrote.
+    /// Letting it mark would have the base's activation shaped by its own
+    /// guesses about what it needs.
+    async fn retrieve_round(&self, req: &AskRequest, q: &str, deliberate: bool) -> Result<Round> {
+        // No per-source cap: an answer often lives in one document, and
+        // withholding its paragraphs to keep the citation list varied would
+        // make the answer worse, not fairer.
+        let (mut hits, _) = self
+            .search_with(
+                &SearchQuery {
+                    q: q.to_string(),
+                    limit: req.limit.unwrap_or(8),
+                    tags: req.tags.clone(),
+                    category: req.category.clone(),
+                    mark: deliberate,
+                    include_deprecated: false,
+                    include_superseded: false,
+                },
+                None,
+                // Deliberately not captured: the right answer to a question is
+                // a synthesis across several artifacts, so "which one was it"
+                // has no well-defined meaning for someone judging it later.
+                Door::Ask,
+            )
+            .await?;
+
+        // Everything the ranking actually returned, kept before the cliff takes
+        // its share: `dropped` answers "what did I ask for and not get shown",
+        // and an excerpt cut here is as absent from the answer as one cut by the
+        // window.
+        let retrieved: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
+
+        // Cut the ranked list where its relevance falls off, before a single row
+        // is read for it: an excerpt below the cliff makes the answer worse as
+        // well as dearer, and its caveats are a lookup spent on something that
+        // will not be sent.
+        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
+        let cliff_at = crate::core::search::cliff(&scores);
+        hits.truncate(retrieve::above_cliff(&scores));
+
+        // Artifacts reached sideways rather than retrieved are appended here,
+        // after the cliff has been taken — they carry no score comparable to a
+        // ranked hit, and must never enter the scores it is computed from.
+        // `scores` is consumed above and never recomputed, so nothing appended
+        // from here on can reach `cliff` at all.
+        self.reach_sideways(&mut hits, cliff_at).await;
+
+        Ok(Round {
+            hits,
+            retrieved,
+            cliff_at,
+        })
+    }
+
+    /// The numbered excerpts a set of hits becomes, caveats and all.
+    ///
+    /// Caveats are the conditions under which an excerpt does not apply, and an
+    /// answer that quotes "run `mkfs` on the device" without "destroys
+    /// everything already on it" is worse than no answer. They are not in the
+    /// vector payload — what gets embedded is a separate decision — so they are
+    /// read from the store, which costs one cheap SQLite lookup per hit and no
+    /// inference. An excerpt whose row has since been deleted simply carries
+    /// none.
+    async fn excerpts(&self, hits: &[SearchResult]) -> Vec<String> {
+        let mut blocks: Vec<String> = Vec::with_capacity(hits.len());
+        for (i, h) in hits.iter().enumerate() {
+            let caveats = self
+                .store
+                .get_artifact(&h.artifact_id)
+                .await
+                .map(|c| c.caveats)
+                .unwrap_or_default();
+            blocks.push(ask_excerpt(
+                i + 1,
+                h.title.as_deref().unwrap_or_default(),
+                &h.text,
+                &caveats,
+            ));
+        }
+        blocks
+    }
+
+    /// How many tokens of excerpt one answer may be built from.
+    ///
+    /// Reserve what the completer will ask for, not a constant. The endpoint
+    /// counts the prompt and the requested ceiling against one window, so
+    /// packing excerpts up to `context - 1024` while the call goes out demanding
+    /// `max_output_tokens` of reply is a request the server refuses outright —
+    /// and it refuses it on precisely the queries that retrieved enough to be
+    /// worth answering.
+    ///
+    /// The margin comes off the top too. `ceiling_for_prompt` holds back
+    /// headroom for the estimate being an estimate, and it holds it back out of
+    /// the *reply*: packing up to `max_output_tokens` exactly and then being
+    /// charged that margin is how a 32k window with a 2k ceiling ends up asking
+    /// for one token of answer. Reserving it here is what makes the two halves
+    /// agree.
+    ///
+    /// Never more than half the window, though. The reserve is configuration and
+    /// the window is configuration, and nothing makes the two agree: a role
+    /// whose ceiling is its whole context (4096 and 4096, which is an ordinary
+    /// shape for a local model) reserves everything, packs nothing, and answers
+    /// "too large for the context window" to every question ever asked without
+    /// once calling the model. Half a window of excerpts and half a window of
+    /// answer is a worse answer than the operator asked for; no answer is not an
+    /// answer.
+    fn excerpt_budget(&self, question: &str) -> usize {
+        let context = self.completer.context_tokens();
+        let reserve = self
+            .completer
+            .max_output_tokens()
+            .saturating_add(crate::infer::budget::MAX_HEADROOM_TOKENS)
+            .min(context / 2);
+        context
+            .saturating_sub(self.counter.count(ASK_SYSTEM))
+            .saturating_sub(self.counter.count(question))
+            .saturating_sub(reserve)
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent
@@ -648,6 +766,185 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), core.gate.background())
             .await
             .expect("the interactive lane was never released");
+    }
+
+    /// Answers with one reply however often it is asked, and counts the
+    /// asking. `ScriptedCompleter` runs out of replies, which would turn a
+    /// second call into an error the ask swallows; this one would happily
+    /// answer a third round, so a test that sees only one saw a bound in the
+    /// code rather than a fake refusing to play along.
+    struct Counting {
+        reply: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Counting {
+        fn saying(reply: &str) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                reply: reply.into(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::Completer for Counting {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.reply.clone())
+        }
+        fn context_tokens(&self) -> usize {
+            4096
+        }
+        fn max_output_tokens(&self) -> usize {
+            1024
+        }
+    }
+
+    /// A seeded core whose follow-up model answers `reply`, plus the handle to
+    /// count what it was asked. `None` is the shipped default: no follow-up
+    /// model at all.
+    async fn core_with_follow_up(reply: Option<&str>) -> (Core, std::sync::Arc<Counting>) {
+        let mut core = test_core().await;
+        let model = Counting::saying(reply.unwrap_or_default());
+        core.follow_up =
+            reply.map(|_| model.clone() as std::sync::Arc<dyn crate::infer::Completer>);
+        seed(&core, 3, 4).await;
+        (core, model)
+    }
+
+    /// Every `Retrieved` round and every `Needs`, in the order they were
+    /// emitted.
+    async fn rounds_and_needs(core: &Core) -> (Vec<u8>, Vec<String>) {
+        let (mut rounds, mut needs) = (vec![], vec![]);
+        let s = core.ask_events(&req("chunk"), Door::Api);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            match ev.unwrap() {
+                AskEvent::Retrieved { round, .. } => rounds.push(round),
+                AskEvent::Needs(q) => needs.push(q),
+                _ => {}
+            }
+        }
+        (rounds, needs)
+    }
+
+    /// Off by default, and "off" must mean no call at all — asserted on a
+    /// counting fake rather than inferred from the answer looking the same.
+    ///
+    /// The counting model is the *answer* model here, which is the tempting
+    /// wrong implementation: `follow_up_tier` falls back to the ask role's own
+    /// endpoint, and a fallback read at call time rather than at config time
+    /// would spend an ask-endpoint call on every question with the feature
+    /// switched off.
+    #[tokio::test]
+    async fn follow_up_off_makes_no_extra_call() {
+        let mut core = test_core().await;
+        let model = Counting::saying("fake answer");
+        core.completer = model.clone();
+        seed(&core, 3, 4).await;
+        assert!(core.follow_up.is_none(), "the default wired a follow-up");
+
+        core.ask(&req("chunk"), Door::Api).await.unwrap();
+
+        assert_eq!(
+            model.calls(),
+            1,
+            "with the follow-up off, the only model call is the answer"
+        );
+    }
+
+    /// On, and the model says it has enough: still exactly one retrieval.
+    #[tokio::test]
+    async fn a_null_need_skips_the_second_retrieval() {
+        let (core, model) = core_with_follow_up(Some(r#"{"need": null}"#)).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1]);
+        assert!(needs.is_empty(), "nothing was needed, so nothing was said");
+        assert_eq!(model.calls(), 1, "asked once, and once is the whole budget");
+    }
+
+    /// On, and the model names something: exactly two retrievals and never
+    /// three. Bounded means bounded — and this fake answers with a need every
+    /// time it is asked, so a loop would run until the base ran out of
+    /// patience rather than stopping itself.
+    #[tokio::test]
+    async fn a_named_need_retrieves_exactly_once_more_and_never_twice() {
+        let (core, model) = core_with_follow_up(Some(r#"{"need": "ticker interval"}"#)).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1, 2], "exactly one extra round, never a loop");
+        assert_eq!(needs, vec!["ticker interval".to_string()]);
+        assert_eq!(
+            model.calls(),
+            1,
+            "a second round that asks again is a third round waiting to happen"
+        );
+    }
+
+    /// The excerpts the model sees are one list, not two concatenated: an
+    /// artifact already in front of it is a wasted excerpt, not a stronger one.
+    /// Both rounds retrieve the same small base here, so everything the second
+    /// one found is a duplicate of something the first did.
+    #[tokio::test]
+    async fn the_second_round_merges_deduped_by_artifact() {
+        let (core, _) = core_with_follow_up(Some(r#"{"need": "chunk"}"#)).await;
+        let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
+        let mut ids: Vec<&str> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.as_str())
+            .collect();
+        let seen = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), seen, "an artifact was shown to the model twice");
+    }
+
+    /// A follow-up that fails must never fail the ask: the operator asked a
+    /// question, not for a retrieval strategy.
+    #[tokio::test]
+    async fn a_failed_follow_up_leaves_the_ask_a_single_round() {
+        struct Failing;
+        #[async_trait::async_trait]
+        impl crate::infer::Completer for Failing {
+            async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                Err(Error::Inference {
+                    role: "follow_up",
+                    detail: "the endpoint is loading".into(),
+                })
+            }
+            fn context_tokens(&self) -> usize {
+                4096
+            }
+            fn max_output_tokens(&self) -> usize {
+                1024
+            }
+        }
+        let mut core = test_core().await;
+        core.follow_up = Some(std::sync::Arc::new(Failing));
+        seed(&core, 3, 4).await;
+
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1]);
+        assert!(needs.is_empty());
+        assert_eq!(
+            core.ask(&req("chunk"), Door::Api).await.unwrap().answer,
+            "fake answer",
+            "a failed follow-up cost the answer that was already retrievable"
+        );
+    }
+
+    /// Prose where JSON was asked for means "no second round" rather than
+    /// "search for whatever that was".
+    #[tokio::test]
+    async fn an_unparsable_follow_up_leaves_the_ask_a_single_round() {
+        let (core, _) = core_with_follow_up(Some("I would look for the ticker interval")).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1]);
+        assert!(needs.is_empty());
     }
 
     async fn seed(core: &crate::core::Core, n: usize, size: usize) {
