@@ -117,9 +117,16 @@ h3 { font-size: 0.8125rem; color: var(--color-fg-muted); text-transform: upperca
 /* The one thing on Search that stays narrow. A full-width search box reads as a
    form to fill in; a narrow one reads as a question to ask. */
 .shell-wide #filters { max-width: 48rem; margin-inline: auto; }
+/* Full-bleed, so the rule under the header runs the width of the window
+   instead of stopping at whatever measure the page below happens to use. The
+   row inside it takes the wider of the two measures: it lines up with content
+   on the pages that are that wide, and simply runs wider than the reading
+   column on the pages that are not. Always the same width beats sometimes
+   lining up. */
+.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; }
 nav.top {
   display: flex; gap: 0.25rem; align-items: center;
-  border-bottom: 1px solid var(--color-border); padding: 0.75rem 0; margin-bottom: 1.5rem;
+  max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;
 }
 nav.top a {
   color: var(--color-fg-secondary); text-decoration: none;
@@ -614,6 +621,12 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 
   /* The top row keeps identity and the way out; everything else is a thumb
      away at the bottom. */
+  /* The nav used to inherit this from `.shell`; outside it, landscape on a
+     notched phone put the cutout over the sign-out button. */
+  nav.top {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
   nav.top > a:not(.brand), nav.top .spacer { display: none; }
   nav.top form { margin-left: auto; }
 

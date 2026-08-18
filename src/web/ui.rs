@@ -5094,6 +5094,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_nav_is_the_same_width_on_every_page() {
+        let (app, cookie) = app_with_session().await;
+        for uri in ["/ui/capture", "/ui/search", "/ui/ops"] {
+            let page = get_body(&app, &cookie, uri).await;
+            let bar = page.find(r#"class="topbar""#).expect("a top bar");
+            let shell = page.find(r#"class="shell"#).expect("a shell");
+            assert!(
+                bar < shell,
+                "the nav must sit outside the shell, or it inherits that page's \
+                 measure and moves as you navigate: {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
         let (app, cookie) = app_with_session().await;
 
