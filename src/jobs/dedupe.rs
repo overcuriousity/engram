@@ -1,4 +1,4 @@
-//! One component, one call.
+//! One pair, one call.
 //!
 //! The sweep used to make up to `max_judgements` of these in a single job, so a
 //! consolidation run blocked every capture behind it for as long as twenty model
@@ -7,22 +7,29 @@
 //! and arms one unit each. The queue paces them and interleaves them with
 //! everything else.
 //!
-//! The unit expands its pair into the connected component of still-open pairs
-//! around it. Four related artifacts settled pairwise cost three calls and write
-//! two merged artifacts that are superseded almost immediately — and since a
-//! re-merge is always written from captured roots, those intermediates are paid
-//! for and thrown away for nothing.
+//! The unit asks about the two artifacts its pair names and nothing else. It
+//! used to expand into the connected component of still-open pairs around it and
+//! settle all of them with one verdict, which is what made fan-in something a
+//! single call had to survive: past `merge_max_roots` captured roots the
+//! component was refused outright and every pair in it settled `Oversized`,
+//! terminal and reached before the model saw anything. Sixteen pairs sat that
+//! way, twelve roots against a default of eight nobody had typed.
 //!
-//! Before the call, the component is flattened to its captured roots. A merged
-//! member's own text is never shown to the model: rewriting from a rewrite is
-//! how a paraphrase of a paraphrase ends up three generations from the wording
-//! someone actually captured. The lineage closure exists precisely so that
-//! flattening costs one query, and it keeps information loss one generation deep
-//! however many times a group is merged.
+//! A cluster converges by merging two at a time instead. Each merge inherits the
+//! flattened roots of both sides — `insert_merged_artifact` resolves the lineage
+//! closure — and carries its members' open pairs with it, so the next question is
+//! armed as soon as the merge is indexed rather than one sweep later.
+//!
+//! A member that is itself a merge is shown its own text as the thing under
+//! judgement, with its captured roots beneath it as context. The context is what
+//! keeps repeated merging from walking away from the wording someone captured:
+//! the model can put back a detail an earlier merge dropped. It is unlettered, so
+//! no verdict can name it, and it is trimmed oldest-first when the window is
+//! tight — reference material degrades an answer when it goes, where refusing the
+//! call answers nothing at all.
 //!
 //! Four verdicts come back and only two touch an artifact. A value conflict is
-//! escalated to a person and never merged; a group past the fan-in cap is
-//! surfaced rather than rewritten.
+//! escalated to a person and never merged.
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -34,96 +41,48 @@ use crate::store::pairs::{ArtifactPair, PairState};
 pub struct Settlement {
     pub relation: Relation,
     pub detail: Option<String>,
-    /// The root named obsolete, already checked against newest-wins. A root and
-    /// not a member, because roots are what the model was shown and therefore
-    /// the only things its letter can be naming. Only set for `Replaced`.
+    /// The member named obsolete, already checked against newest-wins. A member
+    /// and not a root, because the members are the only artifacts the prompt
+    /// letters and therefore the only things a letter can be naming. Only set
+    /// for `Replaced`.
     pub obsolete: Option<String>,
     /// Only set for `Duplicate`, and only once the loss check has passed.
     pub merged: Option<MergedDraft>,
-    /// The component's members, active as of the call.
+    /// The two artifacts the model was shown, in letter order.
     pub members: Vec<Chunk>,
-    /// Their captured roots, flattened. What the model was actually shown.
-    pub roots: Vec<Chunk>,
-    pub pairs: Vec<ArtifactPair>,
+    pub pair: ArtifactPair,
 }
 
 pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let id: i64 = pair_id.parse().map_err(|_| Error::NotFound)?;
     let p = core.store.get_pair(id).await?;
     if p.state != PairState::Pending {
-        // Settled by an operator, by a later sweep, or by a sibling unit that
-        // already answered this whole component while this one waited.
+        // Settled by an operator, by a later sweep, or by the unit that merged
+        // one of its members while this one waited out a backoff.
         return Ok(());
     }
 
-    let mut pairs = core.store.open_component(id).await?;
-    let mut member_ids: Vec<String> = pairs
-        .iter()
-        .flat_map(|p| [p.a_id.clone(), p.b_id.clone()])
-        .collect();
-    member_ids.sort();
-    member_ids.dedup();
-
-    let mut members = Vec::new();
-    let mut retired: std::collections::HashSet<String> = Default::default();
-    for mid in &member_ids {
-        // Reported, not swallowed. `a_id` and `b_id` are `ON DELETE CASCADE` and
-        // every pool sets `foreign_keys`, so a pair naming an artifact that is
-        // gone is a state the schema does not allow — a failure here is the
-        // store being unwell, not a deletion to absorb.
-        let c = core.store.get_artifact(mid).await?;
-        // Re-checked here and not only when the unit was armed: a member can be
-        // superseded by a later sweep or deprecated by an operator while this
-        // waits out a backoff, and spending the scarcest thing in the system to
-        // rule on an artifact no longer in results buys nothing.
-        if !c.in_results() {
-            retired.insert(c.id);
-            continue;
-        }
-        members.push(c);
-    }
-    if !retired.is_empty() {
-        // Only the pairs naming a retired member are answered by its
-        // retirement. Dismissing the whole component killed sibling pairs
-        // between still-active duplicates — record_pair is INSERT OR IGNORE
-        // and Dismissed appears on no list, so nothing could ever re-file
-        // them and the surviving duplication was invisible forever.
-        let (dead, live): (Vec<_>, Vec<_>) = pairs
-            .into_iter()
-            .partition(|pr| retired.contains(&pr.a_id) || retired.contains(&pr.b_id));
-        settle_all(
+    // Reported, not swallowed. `a_id` and `b_id` are `ON DELETE CASCADE` and
+    // every pool sets `foreign_keys`, so a pair naming an artifact that is gone
+    // is a state the schema does not allow — a failure here is the store being
+    // unwell, not a deletion to absorb.
+    let a = core.store.get_artifact(&p.a_id).await?;
+    let b = core.store.get_artifact(&p.b_id).await?;
+    // Re-checked here and not only when the unit was armed: a member can be
+    // superseded by a later sweep or deprecated by an operator while this waits
+    // out a backoff, and spending the scarcest thing in the system to rule on an
+    // artifact no longer in results buys nothing.
+    if !a.in_results() || !b.in_results() {
+        return settle(
             core,
-            &dead,
+            &p,
             PairState::Dismissed,
             Some("a member is no longer in results"),
         )
-        .await?;
-        pairs = live;
-        // Dropping a member can strand others with no surviving pair; they
-        // are simply not part of this unit's question any more.
-        let named: std::collections::HashSet<&str> = pairs
-            .iter()
-            .flat_map(|pr| [pr.a_id.as_str(), pr.b_id.as_str()])
-            .collect();
-        members.retain(|c| named.contains(c.id.as_str()));
-        // The seed pair itself may be among the dead; the survivors keep
-        // their own units and nothing further is owed here.
-        if !pairs.iter().any(|pr| pr.id == id) {
-            return Ok(());
-        }
-    }
-    if members.len() < 2 {
-        settle_all(core, &pairs, PairState::Dismissed, None).await?;
-        return Ok(());
+        .await;
     }
 
-    // Flatten before anything else, and never show the model a merged member's
-    // own text.
-    //
-    // From `members`, not the list the component arrived with: the partition
-    // above drops retired members and their pairs, and roots resolved from the
-    // stale list would put a retired artifact back into the prompt, the fan-in
-    // cap, and the loss check — the question this unit is no longer asking.
+    let members = vec![a, b];
     let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
     let root_map = core.store.roots_of(&member_ids).await?;
     // A member with no roots at all is a merge whose sources were deleted out
@@ -134,77 +93,109 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .iter()
         .any(|c| root_map.get(&c.id).is_none_or(|r| r.is_empty()))
     {
-        settle_all(
+        return settle(
             core,
-            &pairs,
+            &p,
             PairState::Contradiction,
             Some("a merged member has lost its sources; resolve by hand"),
         )
-        .await?;
-        return Ok(());
+        .await;
     }
-    let mut root_ids: Vec<String> = root_map.values().flatten().cloned().collect();
-    root_ids.sort();
-    root_ids.dedup();
-
-    if root_ids.len() > core.consolidate.merge_max_roots {
-        tracing::info!(
-            pair = id,
-            roots = root_ids.len(),
-            cap = core.consolidate.merge_max_roots,
-            "component draws on more roots than the cap; surfacing instead of merging"
-        );
-        let detail = format!(
-            "{} sources, cap is {}",
-            root_ids.len(),
-            core.consolidate.merge_max_roots
-        );
-        settle_all(core, &pairs, PairState::Oversized, Some(&detail)).await?;
-        return Ok(());
+    // A merge and one of its own sources are not two things to compare. Asking
+    // would spend a call to be told that an artifact matches itself.
+    let one_contains_the_other = root_map[&members[0].id].contains(&members[1].id)
+        || root_map[&members[1].id].contains(&members[0].id);
+    if one_contains_the_other {
+        return settle(
+            core,
+            &p,
+            PairState::Dismissed,
+            Some("one of these is a source of the other"),
+        )
+        .await;
     }
 
-    // Two members can flatten to one root — a merge and one of its own sources
-    // meet this way — and one root is nothing to compare. Asking would spend a
-    // call to be told an artifact matches itself.
-    if root_ids.len() < 2 {
-        settle_all(core, &pairs, PairState::Dismissed, None).await?;
-        return Ok(());
+    // A merged member's captured roots, oldest first — context, never an input.
+    // Read as whole artifacts because the prompt needs their titles: a body that
+    // never names its own subject is the failure `dedupe_prompt` documents.
+    let mut context: Vec<Vec<Chunk>> = Vec::new();
+    for c in &members {
+        let mut v = Vec::new();
+        if c.provenance == crate::store::artifacts::Provenance::Merged {
+            for rid in &root_map[&c.id] {
+                match core.store.get_artifact(rid).await {
+                    Ok(r) => v.push(r),
+                    Err(Error::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            v.sort_by_key(|r| r.created_at);
+        }
+        context.push(v);
     }
 
-    let mut roots = Vec::new();
-    for rid in &root_ids {
-        roots.push(core.store.get_artifact(rid).await?);
-    }
+    // The two artifacts under judgement are bounded by what capture bounds and
+    // always go out. What can grow without limit is the context block behind a
+    // long lineage — and context is reference, not input, so it is trimmed
+    // rather than defended against. Oldest first: the roots furthest from the
+    // present are the ones a later capture is most likely to have restated.
+    //
+    // No count-based cap. `merge_max_roots` was one, left at a default of eight
+    // nobody typed, and it settled whole clusters before any call was made.
+    let counter = crate::infer::budget::TokenCounter;
+    let window = core.judge.context_tokens();
+    let ceiling = core.judge.max_output_tokens();
+    let system = counter.count(crate::infer::prompt::DEDUPE_SYSTEM);
+    let user = loop {
+        let user = build_prompt(&members, &context, p.judge_attempts);
+        let cost = system + counter.count(&user);
+        if crate::infer::budget::checked_ceiling_for_prompt(window, cost, ceiling).is_some() {
+            break user;
+        }
+        // Whichever member still holds the oldest surviving source gives it up.
+        let oldest = context
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_empty())
+            .min_by_key(|(_, v)| v[0].created_at)
+            .map(|(i, _)| i);
+        match oldest {
+            Some(i) => {
+                context[i].remove(0);
+            }
+            // Nothing left to give: the two artifacts alone do not fit one call.
+            // That is a fact about an artifact's size rather than about this
+            // pair, no rule here can settle it, and recording it as answered is
+            // what `Oversized` did wrong. A person decides.
+            None => {
+                return settle(
+                    core,
+                    &p,
+                    PairState::Contradiction,
+                    Some("these two artifacts do not fit one call; resolve by hand"),
+                )
+                .await;
+            }
+        }
+    };
 
-    // Counted before the call and regardless of how it goes, so a group the
-    // model keeps failing on drops behind the rest of the queue rather than
-    // absorbing the budget again on the next sweep.
-    for pr in &pairs {
-        core.store.record_judge_attempt(pr.id).await?;
-    }
-
-    let shown: Vec<(&str, &str)> = roots
-        .iter()
-        .map(|c| (c.title.as_deref().unwrap_or("untitled"), c.text.as_str()))
-        .collect();
-    let texts: Vec<&str> = roots.iter().map(|c| c.text.as_str()).collect();
-    let differing = crate::infer::facts::differing_values(&texts);
+    // Counted before the call and regardless of how it goes, so a pair the model
+    // keeps failing on drops behind the rest of the queue rather than absorbing
+    // the budget again on the next sweep.
+    core.store.record_judge_attempt(p.id).await?;
 
     let permit = core.gate.background().await;
     let reply = core
         .judge
-        .complete(
-            crate::infer::prompt::DEDUPE_SYSTEM,
-            &crate::infer::prompt::dedupe_prompt(&shown, &differing, p.judge_attempts),
-        )
+        .complete(crate::infer::prompt::DEDUPE_SYSTEM, &user)
         .await;
     permit.finished();
     let reply = reply?;
 
     let verdict = match crate::infer::prompt::parse_dedupe(&reply) {
         Ok(v) => v,
-        // A reply that cannot be read is an error, not a verdict: the component
-        // stays pending and the unit retries under the queue's backoff.
+        // A reply that cannot be read is an error, not a verdict: the pair stays
+        // pending and the unit retries under the queue's backoff.
         //
         // Retrying is only worth anything because `dedupe_prompt` carries the
         // attempt number. Against an endpoint that caches by exact prompt, an
@@ -212,30 +203,42 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         // of `MAX_ATTEMPTS`.
         //
         // Counted here and not beside `record_judge_attempt`, because this is
-        // the only failure that says anything about the group. A call the
+        // the only failure that says anything about the pair. A call the
         // endpoint never answered says something about the endpoint, and letting
         // an outage count against every pending pair would take the whole review
         // queue out of reach on its way past.
         Err(e) => {
-            for pr in &pairs {
-                core.store.record_unreadable_judgement(pr.id).await?;
-            }
+            core.store.record_unreadable_judgement(p.id).await?;
             tracing::warn!(
                 pair = id,
                 attempt = p.judge_attempts,
                 // A parse error names the column it gave up at; without the
-                // length there is no way to tell whether that was the end of
-                // the reply — a cut-off answer — or a break in the middle of
-                // one the endpoint finished writing.
+                // length there is no way to tell whether that was the end of the
+                // reply — a cut-off answer — or a break in the middle of one the
+                // endpoint finished writing.
                 reply_len = reply.len(),
                 error = %e,
-                "dedupe reply unreadable; component stays pending"
+                "dedupe reply unreadable; pair stays pending"
             );
             return Err(e);
         }
     };
 
-    apply(core, interpret(verdict, members, roots, pairs)).await
+    apply(core, interpret(verdict, members, p)).await
+}
+
+/// Assemble the user prompt from the two members and whatever context survives
+/// the budget.
+fn build_prompt(members: &[Chunk], context: &[Vec<Chunk>], attempt: i64) -> String {
+    let member = |i: usize| crate::infer::prompt::DedupeMember {
+        title: members[i].title.as_deref().unwrap_or("untitled"),
+        text: members[i].text.as_str(),
+        sources: context[i]
+            .iter()
+            .map(|c| (c.title.as_deref().unwrap_or("untitled"), c.text.as_str()))
+            .collect(),
+    };
+    crate::infer::prompt::dedupe_prompt(&member(0), &member(1), attempt)
 }
 
 /// Turn a parsed reply into what the write path will do.
@@ -247,8 +250,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
 fn interpret(
     v: crate::infer::prompt::Dedupe,
     members: Vec<Chunk>,
-    roots: Vec<Chunk>,
-    pairs: Vec<ArtifactPair>,
+    pair: ArtifactPair,
 ) -> Settlement {
     let mut relation = v.relation;
     // The judge's own line. Nothing here writes one any more: the loss check
@@ -265,19 +267,19 @@ fn interpret(
         // obsolete is exactly the failure mode worth guarding against, since it
         // would hide the side more likely to be current.
         //
-        // The letter indexes `roots`. `run` builds the lettered list from the
-        // flattened roots and never shows a merged member's own text, so a
-        // letter resolved against `members` would name a different artifact
-        // whenever the two lists diverge — which is exactly when the component
-        // contains an earlier merge. That mismatch superseded an artifact the
-        // model had never been shown.
+        // The letter indexes the members, which are the only artifacts the
+        // prompt letters. A merged member's sources go in unlettered, so a
+        // letter can no longer resolve to something shown as reference — the
+        // mismatch that used to supersede an artifact the model had never been
+        // shown at all. A letter past the end names nothing and downgrades here,
+        // which is why `parse_dedupe` does not pin the range itself.
         let named = v
             .supersedes
             .map(|c| (c as u8 - b'a') as usize)
-            .and_then(|i| roots.get(i));
+            .and_then(|i| members.get(i));
         obsolete = match named {
             Some(named)
-                if roots
+                if members
                     .iter()
                     .all(|o| o.id == named.id || named.created_at <= o.created_at) =>
             {
@@ -293,7 +295,15 @@ fn interpret(
     if relation == Relation::Duplicate
         && let Some(d) = &merged
     {
-        let lost = crate::jobs::merge::losses(&roots, d);
+        // Against the members, which are what is actually being merged — not
+        // against every captured root behind them. A merged member's own text is
+        // already a generation away from its sources, so checking the draft
+        // against those sources would fail on a value an earlier merge dropped
+        // and freeze that lineage: no later merge in it could ever be written.
+        // Loss stays one generation deep per step, and the sources are in the
+        // prompt as context precisely so the model can undo the earlier drift
+        // rather than compound it.
+        let lost = crate::jobs::merge::losses(&members, d);
         if !lost.is_empty() {
             // Escalated rather than retried: the merge is the thing that was
             // wrong, and refusing it hands the pair to a person, which is the
@@ -306,6 +316,18 @@ fn interpret(
             // card renders it directly beneath "these two disagree", so the
             // pair states the opposite of its own finding to the person the
             // escalation exists to hand it to.
+            //
+            // Logged, though. Keeping the tokens off the card is a judgement
+            // about what a person can act on; keeping them out of the process
+            // entirely left a refusal nothing anywhere could explain. Three
+            // pairs sat as unexplained "these two disagree" for a day, and
+            // finding out why meant reconstructing the tokenizer's output by
+            // hand against the two texts. This is the one place that knows.
+            tracing::warn!(
+                pair = pair.id,
+                lost = lost.join(", "),
+                "refused a merge that would have dropped these"
+            );
             relation = Relation::Conflict;
             detail = None;
             merged = None;
@@ -318,144 +340,90 @@ fn interpret(
         obsolete,
         merged,
         members,
-        roots,
-        pairs,
+        pair,
     }
 }
 
 async fn apply(core: &Core, s: Settlement) -> Result<()> {
     match s.relation {
         Relation::Distinct => {
-            settle_all(core, &s.pairs, PairState::NoConflict, s.detail.as_deref()).await
+            settle(core, &s.pair, PairState::NoConflict, s.detail.as_deref()).await
         }
         Relation::Conflict => {
-            tracing::info!(
-                members = s.members.len(),
-                "artifacts disagree; escalating rather than merging"
-            );
-            settle_all(
-                core,
-                &s.pairs,
-                PairState::Contradiction,
-                s.detail.as_deref(),
-            )
-            .await
+            tracing::info!("artifacts disagree; escalating rather than merging");
+            settle(core, &s.pair, PairState::Contradiction, s.detail.as_deref()).await
         }
         Relation::Replaced => {
             let obsolete = s
                 .obsolete
                 .clone()
                 .expect("interpret sets this or downgrades to Conflict");
-            // Fresh statuses, not the snapshot `interpret` saw. The roots of a
-            // member that is itself a finished merge are already superseded,
-            // and a component can change while the unit waits out a backoff.
-            let mut fresh = Vec::new();
-            for r in &s.roots {
-                match core.store.get_artifact(&r.id).await {
-                    Ok(c) => fresh.push(c),
-                    Err(Error::NotFound) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            let obsolete_live = fresh.iter().any(|c| c.id == obsolete && c.in_results());
-            // A live root wins if one exists; otherwise the live member that
-            // carries the surviving roots — a finished merge's own sources are
-            // superseded, and the merge is the one thing still in results.
-            let winner = fresh
+            let winner = s
+                .members
                 .iter()
-                .find(|c| c.id != obsolete && c.in_results())
-                .map(|c| c.id.clone())
-                .or_else(|| {
-                    s.members
-                        .iter()
-                        .find(|m| m.id != obsolete)
-                        .map(|m| m.id.clone())
-                });
-            let (Some(winner), true) = (winner, obsolete_live) else {
-                // Nothing to apply: the named side is already out of results,
-                // so the replacement has in effect already happened.
-                return settle_all(
+                .find(|m| m.id != obsolete)
+                .map(|m| m.id.clone())
+                .expect("a pair has two members and only one of them is obsolete");
+            // A fresh status, not the snapshot `interpret` saw: an operator can
+            // retire the named side while the unit waits out a backoff.
+            let still_live = match core.store.get_artifact(&obsolete).await {
+                Ok(c) => c.in_results(),
+                Err(Error::NotFound) => false,
+                Err(e) => return Err(e),
+            };
+            if !still_live {
+                // Nothing to apply: the named side is already out of results, so
+                // the replacement has in effect already happened.
+                return settle(
                     core,
-                    &s.pairs,
+                    &s.pair,
                     PairState::NoConflict,
                     Some("the named replacement is already out of results"),
                 )
                 .await;
-            };
+            }
 
-            let (touching, survivors): (Vec<&ArtifactPair>, Vec<&ArtifactPair>) = s
-                .pairs
-                .iter()
-                .partition(|pr| pr.a_id == obsolete || pr.b_id == obsolete);
-
-            // The side effect FIRST. A failure here leaves every pair
-            // pending, so the unit retries under the queue's backoff — the
-            // reverse order left the verdict recorded on the pairs but never
-            // applied, because run() skips a component whose seed is no
-            // longer Pending.
+            // The side effect FIRST. A failure here leaves the pair pending, so
+            // the unit retries under the queue's backoff — the reverse order
+            // left the verdict recorded on the pair but never applied, because
+            // `run` skips a pair that is no longer Pending.
             core.supersede(&obsolete, &winner).await?;
             tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
-            for pr in &touching {
-                // Done, with the model's reasoning kept as the record of why.
-                // Leaving it Superseded listed the applied replacement as
-                // awaiting confirmation forever.
-                core.store
-                    .set_pair_state(pr.id, PairState::Dismissed, s.detail.as_deref())
-                    .await?;
-            }
-
-            // Both sides of these pairs survived. Writing the direction on
-            // them would name an artifact the pair does not contain. Not left
-            // pending either: the roots are unchanged, so re-arming would
-            // build the identical prompt and receive the identical answer
-            // forever. An unanswered question goes to a person.
-            let survivor_detail =
-                format!("{obsolete} was superseded; these two were not separated");
-            for pr in &survivors {
-                core.store
-                    .set_pair_state(pr.id, PairState::Contradiction, Some(&survivor_detail))
-                    .await?;
-            }
-            Ok(())
+            // Done, with the model's reasoning kept as the record of why.
+            // Leaving it Superseded listed the applied replacement as awaiting
+            // confirmation forever.
+            settle(core, &s.pair, PairState::Dismissed, s.detail.as_deref()).await
         }
         Relation::Duplicate => {
             let draft = s
                 .merged
                 .as_ref()
                 .expect("interpret keeps this or downgrades to Conflict");
-            // Every member, not just the roots. A merged member is not its own
+            // Both members, not their roots. A merged member is not its own
             // root, and `finish` hides what the lineage names — so passing only
             // the roots would leave that earlier merge active and near-identical
-            // to the new one. `insert_merged_artifact` flattens all of them to
-            // captured roots, and `subsumed_merges` catches the merged members.
+            // to the new one. `insert_merged_artifact` flattens both of them to
+            // captured roots, and `subsumed_merges` catches the merged member.
             let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
             let m = crate::jobs::merge::write(core, draft, &sources).await?;
             // `merged_into` rather than a detail string: if the embed never
-            // lands, the sweep's reap has to find exactly these pairs and
-            // reopen them (`reap_stranded`).
-            for pr in &s.pairs {
-                core.store
-                    .set_pair_merged(pr.id, &m.id, s.detail.as_deref())
-                    .await?;
-            }
-            Ok(())
+            // lands, the sweep's reap has to find exactly this pair and reopen
+            // it (`reap_stranded`).
+            core.store
+                .set_pair_merged(s.pair.id, &m.id, s.detail.as_deref())
+                .await
         }
     }
 }
 
-/// One verdict answers every pair in the component. The ones it did not answer
-/// would be armed and asked about all over again, at full price, for a decision
-/// that has already been made.
-async fn settle_all(
+/// One pair, one verdict.
+async fn settle(
     core: &Core,
-    pairs: &[ArtifactPair],
+    pair: &ArtifactPair,
     state: PairState,
     detail: Option<&str>,
 ) -> Result<()> {
-    for p in pairs {
-        core.store.set_pair_state(p.id, state, detail).await?;
-    }
-    Ok(())
+    core.store.set_pair_state(pair.id, state, detail).await
 }
 
 #[cfg(test)]
@@ -471,7 +439,7 @@ mod tests {
     async fn queue_pair(core: &Core, a: &str, b: &str) -> i64 {
         core.store.record_pair(a, b, 0.91).await.unwrap();
         core.store
-            .pairs_by_state(PairState::Pending, 10)
+            .pairs_by_state(PairState::Pending, 100)
             .await
             .unwrap()
             .into_iter()
@@ -500,52 +468,6 @@ mod tests {
 
         assert_eq!(judge.calls(), 1, "the judge endpoint was not the one asked");
         assert_eq!(asker.calls(), 0, "the sweep called the ask model");
-    }
-
-    #[tokio::test]
-    async fn a_retired_members_roots_do_not_count_against_the_cap() {
-        // C is deprecated while the unit waits. Its pair is dismissed and it
-        // is dropped from the component — but its root must also leave the
-        // question, or a two-root component at the cap is settled Oversized
-        // for fan-in it does not have, and C's text is shown to the model as
-        // an original.
-        let mut core = test_core().await;
-        core.consolidate.merge_max_roots = 2;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("a text", [1.0, 0.0]),
-                ("b text", [0.93, 0.37]),
-                ("c text", [0.90, 0.44]),
-            ],
-        )
-        .await;
-        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        queue_pair(&core, &ids[1], &ids[2]).await;
-        core.deprecate(&ids[2]).await.unwrap();
-
-        run(&core, &seed_pair.to_string()).await.unwrap();
-
-        assert!(
-            core.store
-                .pairs_by_state(PairState::Oversized, 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a retired member's root was counted against merge_max_roots"
-        );
-        // The live pair reached the model and took its verdict.
-        assert_eq!(
-            core.store
-                .pairs_by_state(PairState::NoConflict, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     async fn disagreeing(core: &Core) -> Vec<String> {
@@ -677,117 +599,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_of_two_survivors_is_not_closed_with_someone_elses_direction() {
-        // Three artifacts, two pairs, and one of the three named obsolete. The
-        // pair that holds it has a direction; the pair of the other two does
-        // not, and stamping the same `obsolete_id` on it put an artifact it does
-        // not contain behind an "apply supersede" button in Ops.
-        let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"replaced","supersedes":"a","detail":"the first is stale"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 60 seconds", [0.93, 0.37]),
-                ("timeout is 90 seconds", [0.94, 0.34]),
-            ],
-        )
-        .await;
-        let first = queue_pair(&core, &ids[0], &ids[1]).await;
-        let second = queue_pair(&core, &ids[1], &ids[2]).await;
-
-        run(&core, &first.to_string()).await.unwrap();
-
-        // Applied (autonomy is on), so its own pair is done — Dismissed, as
-        // the manual apply settles it, with the direction cleared.
-        let held = core.store.get_pair(first).await.unwrap();
-        assert_eq!(held.state, PairState::Dismissed);
-        assert_eq!(
-            core.store
-                .get_artifact(&ids[0])
-                .await
-                .unwrap()
-                .superseded_by
-                .as_deref(),
-            Some(ids[1].as_str())
-        );
-
-        let survivors = core.store.get_pair(second).await.unwrap();
-        assert_eq!(
-            survivors.obsolete_id, None,
-            "a pair was closed naming an artifact it does not contain"
-        );
-        assert_eq!(
-            survivors.state,
-            PairState::Contradiction,
-            "two artifacts the verdict never separated were quietly settled"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_letter_names_the_root_it_was_shown_beside_not_the_nth_member() {
-        // The component holds an earlier merge and one captured artifact, so the
-        // members are {M, c} and the lettered roots are {a, b, c}. The two lists
-        // diverge, and the model only ever saw the second — answering "b" means
-        // the root b, whose text was on the screen. Resolved against the members
-        // the same letter lands on the merge, which was never shown and never
-        // named. Under autonomy that hides the wrong artifact outright.
-        let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"replaced","supersedes":"b","detail":"b is the stale one"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 30 s", [0.99, 0.02]),
-                ("timeout is thirty seconds", [0.98, 0.04]),
-            ],
-        )
-        .await;
-        // uuid v7 sorts by creation, so the roots letter as a, b, c and the
-        // merge sorts after all three.
-        let merged = crate::jobs::merge::write(
-            &core,
-            &MergedDraft {
-                text: "timeout is 30 seconds".into(),
-                title: None,
-                category: None,
-                tags: vec![],
-                caveats: vec![],
-            },
-            &[ids[0].clone(), ids[1].clone()],
-        )
-        .await
-        .unwrap();
-        let pair = queue_pair(&core, &merged.id, &ids[2]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        assert_eq!(
-            core.store
-                .get_artifact(&ids[1])
-                .await
-                .unwrap()
-                .superseded_by
-                .as_deref(),
-            Some(ids[0].as_str()),
-            "the letter did not resolve to the root it was shown beside"
-        );
-        assert!(
-            core.store
-                .get_artifact(&merged.id)
-                .await
-                .unwrap()
-                .superseded_by
-                .is_none(),
-            "an artifact the model was never shown was superseded"
-        );
-    }
-
-    #[tokio::test]
     async fn a_replacement_naming_the_newer_artifact_is_not_trusted() {
         // A miscalibrated call proposing to hide the *newer* side disagrees with
         // the sweep's own newest-wins bias, so it falls back to a conflict
@@ -873,81 +684,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_call_settles_every_pair_in_the_component() {
-        // A verdict that answered only its own pair would leave the siblings
-        // pending, and the next sweep would arm them and ask the same question
-        // again at full price.
-        let mut core = test_core().await;
-        let completer = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"distinct","detail":"three different things"}"#.into(),
-        ]));
-        core.judge = completer.clone();
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 60 seconds", [0.93, 0.37]),
-                ("timeout is 90 seconds", [0.94, 0.34]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        queue_pair(&core, &ids[1], &ids[2]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        assert_eq!(
-            completer.calls(),
-            1,
-            "the component cost more than one call"
-        );
-        assert!(
-            core.store
-                .pairs_by_state(PairState::Pending, 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a sibling pair was left to be asked about again"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_component_past_the_fan_in_cap_is_surfaced_and_never_called_about() {
-        // A merge of forty sources is no longer one atomic piece of knowledge,
-        // which is what an artifact is defined to be. Past the cap the honest
-        // answer is to stop, not to write something nobody asked for.
-        let mut core = test_core().await;
-        core.consolidate.merge_max_roots = 2;
-        let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 60 seconds", [0.93, 0.37]),
-                ("timeout is 90 seconds", [0.94, 0.34]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        queue_pair(&core, &ids[1], &ids[2]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        assert_eq!(completer.calls(), 0, "an oversized component cost a call");
-        let over = core
-            .store
-            .pairs_by_state(PairState::Oversized, 10)
-            .await
-            .unwrap();
-        assert_eq!(over.len(), 2, "every pair in the component must be settled");
-        assert_eq!(over[0].detail.as_deref(), Some("3 sources, cap is 2"));
-    }
-
-    #[tokio::test]
-    async fn a_sibling_unit_for_a_settled_component_is_a_no_op() {
-        // Two units are armed for one component and both run. The second must
-        // find its work done rather than asking again.
+    async fn a_second_unit_for_a_pair_already_settled_is_a_no_op() {
+        // Two units are armed for one pair — a sweep re-arming what a queued
+        // job already holds — and both run. The second must find its work done
+        // rather than paying for the same verdict twice.
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"unrelated"}"#.into(),
@@ -958,21 +698,19 @@ mod tests {
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
                 ("timeout is 60 seconds", [0.93, 0.37]),
-                ("timeout is 90 seconds", [0.94, 0.34]),
             ],
         )
         .await;
-        let first = queue_pair(&core, &ids[0], &ids[1]).await;
-        let second = queue_pair(&core, &ids[1], &ids[2]).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
-        run(&core, &first.to_string()).await.unwrap();
-        run(&core, &second.to_string()).await.unwrap();
+        run(&core, &pair.to_string()).await.unwrap();
+        run(&core, &pair.to_string()).await.unwrap();
 
-        assert_eq!(completer.calls(), 1, "the sibling unit asked again");
+        assert_eq!(completer.calls(), 1, "the second unit asked again");
     }
 
     #[tokio::test]
-    async fn a_failed_dedupe_leaves_the_component_pending() {
+    async fn a_failed_dedupe_leaves_the_pair_pending() {
         // A dead endpoint must not silently clear a queue of real duplicates.
         let mut core = test_core().await;
         core.judge = Arc::new(ScriptedCompleter::new(vec!["not json".into()]));
@@ -993,7 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_component_whose_member_was_retired_is_dismissed_without_a_call() {
+    async fn a_pair_whose_member_was_retired_is_dismissed_without_a_call() {
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
         core.judge = completer.clone();
@@ -1061,43 +799,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retired_member_dismisses_only_its_own_pairs() {
-        // Dismissing the whole component killed sibling pairs between
-        // still-active duplicates permanently: record_pair is INSERT OR
-        // IGNORE and Dismissed appears on no list, so the surviving
-        // duplication became invisible forever.
-        let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 60 seconds", [0.93, 0.37]),
-                ("timeout is 90 seconds", [0.94, 0.34]),
-            ],
-        )
-        .await;
-        let p_ab = queue_pair(&core, &ids[0], &ids[1]).await;
-        let p_bc = queue_pair(&core, &ids[1], &ids[2]).await;
-        core.deprecate(&ids[2]).await.unwrap();
-
-        run(&core, &p_ab.to_string()).await.unwrap();
-
-        assert_eq!(
-            core.store.get_pair(p_bc).await.unwrap().state,
-            PairState::Dismissed,
-            "the pair naming the retired artifact should be dismissed"
-        );
-        assert_eq!(
-            core.store.get_pair(p_ab).await.unwrap().state,
-            PairState::NoConflict,
-            "the pair between two live artifacts must still be judged, not dismissed"
-        );
-    }
-
-    #[tokio::test]
     async fn an_applied_replacement_does_not_wait_for_an_operator() {
         // The pair used to stay in Superseded — the state every consumer reads
         // as "awaiting confirmation" — with Keep buttons that could only
@@ -1139,53 +840,157 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_replacement_naming_a_root_already_out_of_results_is_applied_to_the_carrier() {
-        // A component holding a finished merge flattens to roots that are
-        // already superseded. Applying blindly errored *after* the pairs were
-        // settled, and run()'s Pending guard made the error permanent: the
-        // verdict was recorded on the pairs yet never applied.
-        let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"replaced","supersedes":"c","detail":"superseded by the merge"}"#.into(),
-        ]));
-        let ids = seed(
-            &core,
-            &[
-                ("timeout is 30 seconds", [1.0, 0.0]),
-                ("timeout is 30 s", [0.99, 0.02]),
-                ("timeout was 30 seconds once", [0.98, 0.04]),
-            ],
-        )
-        .await;
-        // uuid v7 sorts by creation, so the roots letter as a, b, c.
-        // Oldest, so the newest-wins guard accepts it as obsolete.
-        sqlx::query("UPDATE artifacts SET created_at = created_at - 100 WHERE id = ?")
-            .bind(&ids[2])
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        let merged = crate::jobs::merge::write(
-            &core,
+    /// A merged artifact, written straight to the store, for the cases where
+    /// "a member is itself a merge" is the thing under test.
+    async fn merged_from(core: &Core, title: &str, text: &str, sources: &[String]) -> String {
+        let m = crate::jobs::merge::write(
+            core,
             &MergedDraft {
-                text: "timeout is 30 seconds".into(),
-                title: None,
+                title: Some(title.into()),
+                text: text.into(),
                 category: None,
                 tags: vec![],
                 caveats: vec![],
             },
-            &[ids[0].clone(), ids[1].clone()],
+            sources,
         )
         .await
         .unwrap();
-        // The merge finished: its roots are superseded, only it and c remain.
-        crate::jobs::merge::finish(&core, &merged.id).await.unwrap();
-        let pair = queue_pair(&core, &merged.id, &ids[2]).await;
+        m.id
+    }
+
+    #[tokio::test]
+    async fn a_unit_settles_only_its_own_pair() {
+        // The unit used to claim the whole connected component and answer every
+        // pair in it with one verdict. A sibling pair is a separate question
+        // about a different pair of artifacts, and it keeps its own turn.
+        let mut core = test_core().await;
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        let ids = seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.93, 0.37]),
+                ("c text", [0.90, 0.44]),
+            ],
+        )
+        .await;
+        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        queue_pair(&core, &ids[1], &ids[2]).await;
+
+        run(&core, &seed_pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::NoConflict, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the sibling pair was answered by a call that was not about it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cluster_past_the_old_cap_is_asked_about_rather_than_refused() {
+        // Twelve artifacts in one chain is exactly the shape the fan-in cap
+        // refused: it flattened past the default of eight and every pair in it
+        // was settled Oversized, terminal, with no call ever made. Nothing about
+        // it is oversized now — it is a sequence of two-artifact questions.
+        let mut core = test_core().await;
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        let rows: Vec<(&str, [f32; 2])> = vec![
+            ("t0", [1.00, 0.00]),
+            ("t1", [0.99, 0.01]),
+            ("t2", [0.98, 0.02]),
+            ("t3", [0.97, 0.03]),
+            ("t4", [0.96, 0.04]),
+            ("t5", [0.95, 0.05]),
+            ("t6", [0.94, 0.06]),
+            ("t7", [0.93, 0.07]),
+            ("t8", [0.92, 0.08]),
+            ("t9", [0.91, 0.09]),
+            ("t10", [0.90, 0.10]),
+            ("t11", [0.89, 0.11]),
+        ];
+        let ids = seed(&core, &rows).await;
+        let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        for w in ids.windows(2).skip(1) {
+            queue_pair(&core, &w[0], &w[1]).await;
+        }
+
+        run(&core, &seed_pair.to_string()).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Oversized, 20)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a twelve-artifact cluster was refused instead of asked about"
+        );
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::NoConflict, 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_letter_names_a_member_and_never_one_of_its_sources() {
+        // The letter used to be resolved against the flattened roots while the
+        // members were a different list, and whenever a component held an
+        // earlier merge the two diverged — superseding an artifact the model had
+        // never been shown. Here "a" is the merge, whose own sources would be
+        // the ones a stale resolution reached.
+        let mut core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Old", "the pool holds eight", [1.0, 0.0]),
+                ("Aside", "unrelated text", [0.99, 0.05]),
+                ("Stale", "the pool holds four", [0.60, 0.80]),
+            ],
+        )
+        .await;
+        // A is the merge, so its two sources are what a letter resolved against
+        // a flattened root list would reach. B is the artifact beside it.
+        let m = merged_from(
+            &core,
+            "Merged",
+            "the pool holds eight, and unrelated text",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m, &ids[2]).await;
+        // `record_pair` stores the two sides in id order, and `run` letters them
+        // as it finds them — so which letter the merge got is not the caller's
+        // to choose. The stale artifact is the one being named here; naming the
+        // merge would be refused by newest-wins, since a merge is always the
+        // newest artifact in its own lineage.
+        let stored = core.store.get_pair(pair).await.unwrap();
+        let letter = if stored.a_id == ids[2] { "a" } else { "b" };
+        core.judge = Arc::new(ScriptedCompleter::new(vec![format!(
+            r#"{{"relation":"replaced","detail":"stale","supersedes":"{letter}"}}"#
+        )]));
 
         run(&core, &pair.to_string()).await.unwrap();
 
-        // Every root besides c is superseded, so the live carrier — the merge
-        // itself, a member — wins, and the settle happens after the apply.
         assert_eq!(
             core.store
                 .get_artifact(&ids[2])
@@ -1193,16 +998,285 @@ mod tests {
                 .unwrap()
                 .superseded_by
                 .as_deref(),
-            Some(merged.id.as_str()),
-            "the replacement was not applied against the live carrier"
+            Some(m.as_str()),
+            "the letter did not name the member it was shown beside"
+        );
+        for src in &ids[..2] {
+            assert!(
+                core.store.get_artifact(src).await.unwrap().in_results(),
+                "a source the model was shown as context was superseded by the verdict"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merged_member_reaches_the_model_with_its_sources() {
+        // Its own words are the thing under judgement; the captured originals go
+        // beneath them so a detail an earlier merge dropped can come back.
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        core.judge = judge.clone();
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Pool sizing", "max_connections is 16", [1.0, 0.0]),
+                ("Pool notes", "raise it for batch jobs", [0.99, 0.05]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let m = merged_from(
+            &core,
+            "Pool",
+            "the pool holds sixteen",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let sent = judge.prompts();
+        let sent = sent.first().expect("the judge was asked");
+        assert!(
+            sent.contains("the pool holds sixteen"),
+            "the merge's own words were withheld: {sent}"
         );
         assert!(
+            sent.contains("max_connections is 16"),
+            "a source was not shown as context: {sent}"
+        );
+        assert!(sent.contains("SOURCES OF"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_merge_and_one_of_its_own_sources_is_dismissed_without_a_call() {
+        // The pairwise form of the old "flattens to one root" guard: comparing a
+        // merge with an artifact it was written from asks whether something
+        // matches itself, at the price of a call.
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![]));
+        core.judge = judge.clone();
+        let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.99, 0.05])]).await;
+        let m = merged_from(
+            &core,
+            "Merged",
+            "a text and b text",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m, &ids[0]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            judge.calls(),
+            0,
+            "a call was spent asking whether an artifact matches itself"
+        );
+        assert_eq!(
             core.store
-                .pairs_by_state(PairState::Pending, 10)
+                .pairs_by_state(PairState::Dismissed, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_lost_by_an_earlier_merge_does_not_block_the_next_one() {
+        // The loss check runs against what is actually being merged. Against the
+        // whole flattened lineage instead, a value dropped a generation ago
+        // would fail every later merge in that lineage forever and freeze it.
+        let mut core = test_core().await;
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"same thing",
+                "merged":{"title":"Pool","text":"the pool holds sixteen connections","tags":[],"caveats":[]}}"#
+                .into(),
+        ]));
+        let ids = seed_titled(
+            &core,
+            &[
+                (
+                    "Pool sizing",
+                    "max_connections is 16 and the timeout is 30s",
+                    [1.0, 0.0],
+                ),
+                ("Pool notes", "raise it for batch jobs", [0.99, 0.05]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        // This merge already dropped "30s". The next one is not to blame for it.
+        let m = merged_from(
+            &core,
+            "Pool",
+            "the pool holds sixteen",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Contradiction, 10)
                 .await
                 .unwrap()
                 .is_empty(),
-            "the component was left pending"
+            "the merge was blamed for a value an earlier one had dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_of_a_merge_names_every_original_behind_it() {
+        // The whole point of merging two at a time: the result is mergeable
+        // again, and it carries the flattened lineage of both sides rather than
+        // naming the intermediate.
+        let mut core = test_core().await;
+        core.judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"same thing",
+                "merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","tags":[],"caveats":[]}}"#
+                .into(),
+        ]));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Pool sizing", "max_connections is 16", [1.0, 0.0]),
+                ("Pool notes", "raise it for batch jobs", [0.99, 0.05]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let m1 = merged_from(
+            &core,
+            "Pool",
+            "max_connections is 16, raise it for batch jobs",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m1, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let settled = core.store.get_pair(pair).await.unwrap();
+        let m2 = settled
+            .merged_into
+            .expect("the second merge was never written");
+        let roots = core.store.roots_of(&[m2]).await.unwrap();
+        let roots: Vec<&String> = roots.values().flatten().collect();
+        assert_eq!(
+            roots.len(),
+            3,
+            "the merge of a merge did not inherit both lineages"
+        );
+        for id in &ids {
+            assert!(
+                roots.contains(&id),
+                "an original is missing from the lineage"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_context_block_too_big_for_the_window_is_trimmed_not_refused() {
+        // Context is reference material, so a window too small to hold it costs
+        // the answer some quality — never the answer itself.
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
+        ]));
+        judge.set_context_tokens(1200);
+        core.judge = judge.clone();
+        let long = "verylongsourcetoken ".repeat(400);
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Root one", long.as_str(), [1.0, 0.0]),
+                ("Root two", "raise it for batch jobs", [0.99, 0.05]),
+                ("Other", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let m = merged_from(
+            &core,
+            "Pool",
+            "the pool holds sixteen",
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await;
+        let pair = queue_pair(&core, &m, &ids[2]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(judge.calls(), 1, "the call was refused instead of trimmed");
+        let sent = judge.prompts().first().cloned().unwrap();
+        assert!(
+            sent.contains("the pool holds sixteen"),
+            "a member was trimmed away"
+        );
+        assert!(
+            sent.contains("sixteen connections"),
+            "a member was trimmed away"
+        );
+        assert!(
+            !sent.contains(long.as_str()),
+            "the oversized source was not trimmed"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_members_that_alone_do_not_fit_go_to_a_person() {
+        // A different failure with a different cause: an artifact so large that
+        // no pair containing it can be judged. No rule here settles that, and
+        // recording it as answered is what `Oversized` did wrong.
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![]));
+        judge.set_context_tokens(100);
+        core.judge = judge.clone();
+        let long = "verylongartifacttoken ".repeat(500);
+        let ids = seed_titled(
+            &core,
+            &[
+                ("One", long.as_str(), [1.0, 0.0]),
+                ("Two", long.as_str(), [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            judge.calls(),
+            0,
+            "a call that cannot fit the window was sent anyway"
+        );
+        let stuck = core
+            .store
+            .pairs_by_state(PairState::Contradiction, 10)
+            .await
+            .unwrap();
+        assert_eq!(stuck.len(), 1);
+        assert!(
+            stuck[0]
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("do not fit"),
+            "the reason a person is being asked was not recorded"
+        );
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Oversized, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refused state came back under the old name"
         );
     }
 }

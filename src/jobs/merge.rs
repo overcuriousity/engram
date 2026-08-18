@@ -95,8 +95,9 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
     // out of this merge stays in results, and this repair path — re-run by the
     // sweep for as long as the merge stands — must not undo that decision on
     // every tick.
-    for root in core.store.roots_to_hide(&m.id).await? {
-        let Ok(r) = core.store.get_artifact(&root).await else {
+    let hiding = core.store.roots_to_hide(&m.id).await?;
+    for root in &hiding {
+        let Ok(r) = core.store.get_artifact(root).await else {
             continue;
         };
         if !r.in_results() {
@@ -106,14 +107,15 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // active, and an operator deprecating a root between the read and here
         // is an ordinary race rather than a reason to abandon the other roots —
         // the sweep's repair reaches whatever is left.
-        crate::jobs::try_supersede(core, &root, &m.id, "a merged artifact's root").await;
+        crate::jobs::try_supersede(core, root, &m.id, "a merged artifact's root").await;
     }
 
     // And any earlier merge this one subsumes. Superseding only the roots would
     // leave that merge active and near-identical to this one, so the relate unit
     // would file the pair again on the next sweep and the two would churn
     // against each other for as long as they both existed.
-    for older in core.store.subsumed_merges(&m.id).await? {
+    let subsumed = core.store.subsumed_merges(&m.id).await?;
+    for older in &subsumed {
         // Everything the older merge was hiding has to be re-pointed first.
         // Those roots are already superseded — by `older` — so `finish`'s loop
         // above skipped them, and hiding `older` behind this merge without
@@ -121,13 +123,40 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
         // itself out of results. That is the exact failure `Clusters` exists to
         // prevent on the sweep's side, and the reader who opens a root would be
         // sent to a dead end.
-        for hidden in core.store.artifacts_superseded_by(&older).await? {
+        for hidden in core.store.artifacts_superseded_by(older).await? {
             if let Err(e) = core.repoint_supersession(&hidden, &m.id).await {
                 tracing::warn!(artifact = %hidden, to = %m.id, error = %e,
                     "could not re-point a supersession; it still names a hidden winner");
             }
         }
-        crate::jobs::try_supersede(core, &older, &m.id, "a merge this one subsumes").await;
+        crate::jobs::try_supersede(core, older, &m.id, "a merge this one subsumes").await;
+    }
+
+    // The open questions its members carried are now questions about the merge.
+    // C was a duplicate of B; B is inside M; so C is a duplicate of M. Left
+    // alone the pair dies with B — `run` dismisses a pair whose member is out of
+    // results — and the duplication only comes back when M has embedded and a
+    // later similarity sweep re-files the same question, which is a whole tick
+    // per generation of a cluster.
+    //
+    // Here and not in `write`: at this point the merge is indexed and what it
+    // replaced is hidden. Re-pointing at write time would arm a unit that could
+    // merge this artifact into a further one before it had ever superseded its
+    // own sources, leaving them active underneath a chain whose middle is out of
+    // results — the dead end `repoint_supersession` exists to prevent above.
+    //
+    // Warn and carry on, like the loops above. A pair that could not be moved is
+    // a question filed against an artifact that is now hidden, which the sweep
+    // re-files against the merge; losing the whole repair over it would be the
+    // more expensive failure.
+    let mut swallowed = hiding;
+    swallowed.extend(subsumed);
+    match core.store.repoint_open_pairs(&swallowed, &m.id).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(merged = %m.id, pairs = n, "moved open pairs onto a merge"),
+        Err(e) => {
+            tracing::warn!(merged = %m.id, error = %e, "could not move open pairs onto a merge")
+        }
     }
     Ok(())
 }
@@ -289,15 +318,20 @@ pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
                 out.push(tok);
             }
         }
-        // Literals: commands, paths, flags, error strings. The existing check,
-        // with the merged text as the haystack instead of the segment —
-        // `missing_literals(artifact_text, caveats, haystack)` asks which
-        // literals of the first argument are absent from the third, which is
-        // exactly this question with the arguments in this order.
+        // Literals: commands, paths, flags, error strings. `verify`'s module
+        // header states the stake — a paraphrased command is a command that
+        // later gets pasted into a root shell.
         //
-        // `verify`'s module header states the stake: a paraphrased command is a
-        // command that later gets pasted into a root shell.
-        out.extend(crate::infer::verify::missing_literals(
+        // The machine-shaped ones only. This used to call `missing_literals`,
+        // the check synthesis runs against the source window, and the two
+        // questions are not the same one with different arguments: an artifact
+        // is copied from its window, while merged text is a rewrite by
+        // construction and here routinely a rewrite between German and English.
+        // Under the source-window rules a four-space indent counts as code, so
+        // three nested bullets of ordinary English prose in a OneDrive artifact
+        // were required to survive word for word, and a correct merge was
+        // refused for rewording them — which is the merged text's whole job.
+        out.extend(crate::infer::verify::missing_machine_literals(
             &r.text, &r.caveats, &haystack,
         ));
     }
@@ -381,12 +415,12 @@ mod tests {
     #[test]
     fn a_merge_that_keeps_both_values_is_allowed() {
         let roots = [
-            root("The request timeout is 30 seconds."),
-            root("The request timeout is 90 seconds."),
+            root("The request timeout is 30s."),
+            root("The request timeout is 90s."),
         ];
         let d = draft(
-            "Sources differ on the request timeout: an earlier capture gives 30 seconds, \
-             a later one 90 seconds.",
+            "Sources differ on the request timeout: an earlier capture gives 30s, \
+             a later one 90s.",
         );
         assert!(losses(&roots, &d).is_empty(), "{:?}", losses(&roots, &d));
     }
@@ -398,11 +432,21 @@ mod tests {
         // writing. The result reads well, ranks well, and the missing number is
         // gone from the base — a conflict resolved by deletion.
         let roots = [
+            root("The request timeout is 30s."),
+            root("The request timeout is 90s."),
+        ];
+        let d = draft("The request timeout is 90s.");
+        assert_eq!(losses(&roots, &d), vec!["30s".to_string()]);
+
+        // Written without its unit, the same drop goes uncaught. `30` alone is
+        // not distinguishable from the third item of a numbered list, and
+        // demanding every bare number survive refused three correct merges —
+        // see `infer::facts::a_port_written_bare_is_the_cost_of_that_rule`.
+        let bare = [
             root("The request timeout is 30 seconds."),
             root("The request timeout is 90 seconds."),
         ];
-        let d = draft("The request timeout is 90 seconds.");
-        assert_eq!(losses(&roots, &d), vec!["30".to_string()]);
+        assert!(losses(&bare, &draft("The request timeout is 90 seconds.")).is_empty());
     }
 
     #[test]
@@ -417,6 +461,68 @@ mod tests {
         let mut d = draft("The request timeout is 90 seconds.");
         d.caveats = vec!["An earlier capture gave 30 seconds.".into()];
         assert!(losses(&roots, &d).is_empty(), "{:?}", losses(&roots, &d));
+    }
+
+    #[test]
+    fn a_merge_may_reword_an_indented_bullet_list() {
+        // The real veto this removes, verbatim from the base: pair 481, two
+        // OneDrive artifacts, one German and one English. The English side nests
+        // its file list four spaces deep, and the source-window rules read a
+        // four-space indent as a code block — so three ordinary sentences,
+        // descriptions and all, became literals that had to survive word for
+        // word. A merge across two languages cannot reproduce them, so the merge
+        // was thrown away and the pair went to the operator as "these two
+        // disagree" every time. Rewording those lines is what merging is.
+        let roots = [
+            root(
+                "Log Dateien befinden sich im Ordner \
+                 \"\\Users\\<USERNAME>\\AppData\\Local\\Microsoft\\OneDrive\\logs\". \
+                 Der Ordner Personal enthält die Datei SyncEngine.odl, welche logs der \
+                 Synchronisation enthält, und die Datei SyncDiagnostics.txt.",
+            ),
+            root(
+                "Standard OneDrive locations and log files:\n\
+                 * Personal directory contents:\n\
+                 \x20   * SyncEngine.odl: Logs of synchronized files and file hashes.\n\
+                 \x20   * Trace.ETL: TraceCurrent.ETL and TraceArchive.ETL for activity tracking.\n\
+                 \x20   * SyncDiagnostics.txt: Log of current synchronization content.",
+            ),
+        ];
+        let d = draft(
+            "OneDrive log files live in \\Users\\<USERNAME>\\AppData\\Local\\Microsoft\\OneDrive\\logs, \
+             which has the subdirectories Common and Personal. Personal holds SyncEngine.odl \
+             (synchronized files and their hashes), Trace.ETL (TraceCurrent.ETL and \
+             TraceArchive.ETL, for activity tracking) and SyncDiagnostics.txt (current \
+             synchronization content).",
+        );
+        assert!(
+            losses(&roots, &d).is_empty(),
+            "a correct merge was refused for rewording prose: {:?}",
+            losses(&roots, &d)
+        );
+    }
+
+    #[test]
+    fn a_merge_that_drops_a_path_is_still_refused() {
+        // The other half of pair 486, which was a genuine model error and has to
+        // keep being caught. Two xmount invocations: the second exists only for
+        // the cache overlay that leaves a bootable /tmp/image.vdi, and the draft
+        // merged them into the first and dropped it. Narrowing the check to
+        // machine-shaped literals must not cost this — a bare path says what it
+        // is in the text and needs no guess from the indentation.
+        let roots = [
+            root("xmount --in ewf --out dd *.E?? /mnt stellt das Image unter /mnt bereit."),
+            root(
+                "Im Mountpoint /tmp befindet sich jetzt die Datei image.vdi welche direkt \
+                 in VirtualBox über den Mountpoint /tmp/image.vdi eingebunden werden kann.",
+            ),
+        ];
+        let d = draft("xmount --in ewf --out dd *.E?? /mnt stellt das Image unter /mnt bereit.");
+        let lost = losses(&roots, &d);
+        assert!(
+            lost.iter().any(|l| l.contains("/tmp/image.vdi")),
+            "the merge dropped the path the second artifact exists for: {lost:?}"
+        );
     }
 
     #[test]
@@ -963,14 +1069,91 @@ mod tests {
 
     #[test]
     fn a_merge_of_three_roots_is_checked_against_all_of_them() {
-        // The fan-in cap allows up to eight. A check that only read the first
-        // two would pass a merge that dropped everything the third said.
+        // A pair whose members are themselves merges reaches this with more
+        // than two roots behind it. A check that only read the first two would
+        // pass a merge that dropped everything the third said.
         let roots = [
-            root("Port 8080 is the default."),
+            root("Port 8080/tcp is the default."),
             root("The timeout is 30s."),
-            root("Retries are capped at 5."),
+            root("Retries back off for 5m."),
         ];
-        let d = draft("Port 8080 is the default and the timeout is 30s.");
-        assert_eq!(losses(&roots, &d), vec!["5".to_string()]);
+        let d = draft("Port 8080/tcp is the default and the timeout is 30s.");
+        assert_eq!(losses(&roots, &d), vec!["5m".to_string()]);
+    }
+
+    /// C was a duplicate of B; B is now inside M. Without this the question
+    /// dies with B and only comes back once M has embedded and a later
+    /// similarity sweep re-files it — a whole tick per generation of a cluster.
+    #[tokio::test]
+    async fn finishing_a_merge_moves_its_members_open_pairs_onto_it() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.99, 0.05]),
+                ("c text", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[1], &ids[2], 0.91)
+            .await
+            .unwrap();
+        let m = write(
+            &core,
+            &draft("a text and b text"),
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+
+        finish(&core, &m.id).await.unwrap();
+
+        assert_eq!(
+            core.store.pair_state_between(&ids[2], &m.id).await.unwrap(),
+            Some(crate::store::pairs::PairState::Pending),
+            "the surviving duplicate has no question against the merge"
+        );
+    }
+
+    /// `finish` is re-run by the sweep for as long as the merge stands, so a
+    /// second pass must not put back a question the first one already moved.
+    #[tokio::test]
+    async fn re_pointing_is_safe_to_run_twice() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("a text", [1.0, 0.0]),
+                ("b text", [0.99, 0.05]),
+                ("c text", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[1], &ids[2], 0.91)
+            .await
+            .unwrap();
+        let m = write(
+            &core,
+            &draft("a text and b text"),
+            &[ids[0].clone(), ids[1].clone()],
+        )
+        .await
+        .unwrap();
+
+        finish(&core, &m.id).await.unwrap();
+        finish(&core, &m.id).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a second finish duplicated the question"
+        );
     }
 }

@@ -488,6 +488,14 @@ impl Completer for FakeCompleter {
 pub struct ScriptedCompleter {
     replies: std::sync::Mutex<std::collections::VecDeque<String>>,
     calls: std::sync::atomic::AtomicUsize,
+    /// Every user prompt it was handed, in order. What a caller that *packs* a
+    /// prompt has to be able to assert on: whether a call went out at all says
+    /// nothing about what was in it, and the trimming the dedupe unit does is
+    /// visible nowhere else.
+    prompts: std::sync::Mutex<Vec<String>>,
+    /// Overridable so a test can make the window the binding constraint without
+    /// writing a megabyte of artifact text to get there.
+    context_tokens: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedCompleter {
@@ -495,17 +503,27 @@ impl ScriptedCompleter {
         Self {
             replies: std::sync::Mutex::new(replies.into()),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            prompts: std::sync::Mutex::new(Vec::new()),
+            context_tokens: std::sync::atomic::AtomicUsize::new(4096),
         }
     }
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+    pub fn set_context_tokens(&self, n: usize) {
+        self.context_tokens
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
 impl Completer for ScriptedCompleter {
-    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+    async fn complete(&self, _system: &str, user: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.prompts.lock().unwrap().push(user.to_string());
         self.replies
             .lock()
             .unwrap()
@@ -516,7 +534,8 @@ impl Completer for ScriptedCompleter {
             })
     }
     fn context_tokens(&self) -> usize {
-        4096
+        self.context_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     fn max_output_tokens(&self) -> usize {
         1024
@@ -586,5 +605,44 @@ impl Describer for FakeDescriber {
             }),
             None => Ok(self.reply.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default implementation is the compatibility guarantee: an implementor
+    /// that knows nothing about streaming still streams, as one delta. Without
+    /// it every fake in the test suite would need a hand-written override.
+    #[tokio::test]
+    async fn a_completer_without_an_override_streams_its_whole_answer_as_one_delta() {
+        let c = FakeCompleter {
+            reply: Some("the answer".into()),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let done = c.answer_streaming("sys", "usr", 128, tx).await.unwrap();
+        let mut got = String::new();
+        while let Some(d) = rx.recv().await {
+            if let crate::infer::Delta::Token(t) = d {
+                got.push_str(&t);
+            }
+        }
+        assert_eq!(got, "the answer");
+        assert_eq!(done.text, "the answer");
+    }
+
+    /// The returned completion, not the accumulated deltas, is what a caller
+    /// stores: a receiver that went away mid-answer must neither fail the call
+    /// nor shorten what it returns.
+    #[tokio::test]
+    async fn a_dropped_receiver_neither_fails_the_call_nor_truncates_its_answer() {
+        let c = FakeCompleter {
+            reply: Some("the answer".into()),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let done = c.answer_streaming("sys", "usr", 128, tx).await.unwrap();
+        assert_eq!(done.text, "the answer");
     }
 }

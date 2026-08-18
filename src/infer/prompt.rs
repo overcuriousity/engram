@@ -187,6 +187,8 @@ These are NOT conflicts:
 
 When you answer "duplicate", the merged text must contain every number, version, date, path, flag, command and error string that appeared in any input, and must read as one self-contained artifact rather than a list of sources. If you cannot write one that keeps all of them, the answer is "conflict", not "duplicate".
 
+An artifact that was itself written by merging earlier ones is shown with those originals under "SOURCES OF A" or "SOURCES OF B". They are there for one reason: so that a detail an earlier merge dropped can go back into your answer. They are not under judgement. There are exactly two artifacts, A and B — never name a source in `supersedes`, and never treat a source as a third artifact.
+
 Reply with JSON only, no commentary, in exactly this shape:
 
 {"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
@@ -196,7 +198,19 @@ Reply with JSON only, no commentary, in exactly this shape:
 - supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
 - merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
 
-/// The artifacts, each under a letter and its title.
+/// The two artifacts, each under its letter and its title, each followed by its
+/// captured sources when it has any.
+///
+/// Exactly two, because the unit judges one pair. It used to letter as many
+/// artifacts as the connected component held, which is what made fan-in
+/// something one call had to survive and what `merge_max_roots` was capping —
+/// with the cap settling whole clusters before any call was made.
+///
+/// A merged member is shown its own text as the thing under judgement, with the
+/// originals it was written from beneath it as reference. Those are unlettered,
+/// so a verdict cannot name one: the mismatch between a lettered list of roots
+/// and a different list of members is what used to supersede artifacts the model
+/// had never been shown.
 ///
 /// The title is not decoration here, it is the subject. Synthesis writes a body
 /// that stands on its own within its segment, which is not the same as naming
@@ -205,12 +219,27 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// alone, the model saw two anonymous spec lists with different numbers and
 /// called them a contradiction — correctly, on the evidence it was given.
 ///
-/// `differing_values` is what `facts::fact_tokens` found stated differently
-/// across the artifacts. It is a prior, not a verdict: it cannot tell a real
-/// disagreement from the same subject described at two levels of detail, which
-/// is the whole reason a model is asked. It used to be an admission gate, and
-/// as a gate it was backwards — a pair stating no differing value is the
-/// cleanest thing there is to merge, and gating on difference hid exactly those.
+/// No prior about differing values is named here, and that is the decision.
+/// `facts::differing_values` compared value-shaped tokens between the artifacts
+/// and this prompt passed the difference on as something to look at. Both halves
+/// of that were wrong on real text. The tokenizer splits on whitespace, so
+/// whether a version list yields tokens at all depends on how it is punctuated:
+/// `Win7/8/10` yields nothing (digits glued to a word), `(Windows 7-10)` yields
+/// `7-10`, and `Windows 7, 8 und 10` yields `7`, `8`, `10`. Three artifacts
+/// stating one fact three ways produced three different token sets and a
+/// non-empty difference, and the prompt then named four bare integers — stripped
+/// of any sign that they were Windows versions — as values the artifacts do not
+/// state the same way. The model read that against a table of registry codes and
+/// called the version mapping a contradiction, which is the correct reading of
+/// the evidence it was handed. The second half is the conflation: a value only
+/// one artifact states is reported the same as a value the two give differently,
+/// so a strict superset — one artifact listing more Outlook versions than the
+/// other — arrived as a dispute rather than as one side saying more.
+///
+/// Nothing is lost by leaving it out. The prior decided nothing; the model sees
+/// both artifacts whole and has every verdict available either way. The rule it
+/// also justified — a value in the list must survive into merged text — is
+/// enforced by `merge::losses` calling `fact_tokens` directly, and is untouched.
 ///
 /// `attempt` is how many times this group has already been asked about, and it
 /// is in the prompt for one reason: the endpoint caches by exact prompt text and
@@ -221,32 +250,42 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// Zero adds nothing at all, so a first ask stays byte-identical between runs —
 /// and keeps hitting the cache when it should, on a group re-armed after a
 /// settled verdict was lost.
-pub fn dedupe_prompt(
-    members: &[(&str, &str)],
-    differing_values: &[String],
-    attempt: i64,
-) -> String {
+pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -> String {
     let mut s = String::new();
     if attempt > 0 {
         s.push_str(&format!("(attempt {})\n", attempt + 1));
     }
-    for (i, (title, text)) in members.iter().enumerate() {
-        let letter = (b'a' + i as u8) as char;
+    for (letter, m) in [('A', a), ('B', b)] {
         s.push_str(&format!(
-            "----- ARTIFACT {} -----\nTitle: {title}\n\n{text}\n",
-            letter.to_ascii_uppercase()
+            "----- ARTIFACT {letter} -----\nTitle: {}\n\n{}\n",
+            m.title, m.text
         ));
+        if !m.sources.is_empty() {
+            s.push_str(&format!("----- SOURCES OF {letter} -----\n"));
+            for (title, text) in &m.sources {
+                s.push_str(&format!("Title: {title}\n\n{text}\n\n"));
+            }
+        }
     }
     s.push_str("----- END -----");
-    if !differing_values.is_empty() {
-        s.push_str(&format!(
-            "\n\nThese values are not stated the same way by all of them: {}. \
-             That may be a real disagreement, or the same subject described at \
-             different levels of detail. Decide which.",
-            differing_values.join(", ")
-        ));
-    }
     s
+}
+
+/// One of the two artifacts under judgement, and — when it is itself a merge —
+/// the captured originals behind it.
+///
+/// `sources` is context and never an input. It is there so that a detail an
+/// earlier merge dropped can be put back into this one, which is what keeps
+/// repeated pairwise merging from walking away from the wording someone
+/// actually captured. It is unlettered so that no verdict can name it: `a` and
+/// `b` are the two members and nothing else, and a letter that could resolve to
+/// a source would supersede an artifact on the strength of a text the model was
+/// shown as reference.
+pub struct DedupeMember<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+    /// `(title, text)`, oldest first. Empty for a captured artifact.
+    pub sources: Vec<(&'a str, &'a str)>,
 }
 
 /// Two knowledge artifacts keep being retrieved by the same searches, and this
@@ -422,6 +461,55 @@ pub fn claims_schema() -> serde_json::Value {
     })
 }
 
+/// The one question the retrieval loop is allowed to ask itself.
+///
+/// Deliberately narrow: it may name one more thing to look for, or nothing at
+/// all. It is never asked to answer, to plan, or to say how many rounds it
+/// wants — "let the model say once what it still needs" is the bounded version
+/// of a mechanism whose unbounded version is an agent, and an agent is not what
+/// this is.
+pub const FOLLOW_UP_SYSTEM: &str = r#"You are helping a search system decide whether it has enough material.
+
+You are given a question and the excerpts retrieved for it. Decide whether the
+excerpts together contain what is needed to answer.
+
+Reply with JSON only, in exactly this shape:
+
+{"need": "a short search query" }   or   {"need": null}
+
+- null: the excerpts are sufficient. This is the common answer.
+- a query: name the ONE thing that is missing, as the words you would search
+  for. Not a question, not a sentence — a query. Never repeat the original
+  question back."#;
+
+/// `need` is nullable in the schema rather than optional, because "I have
+/// enough" is the common answer and a grammar that can only express a query
+/// would put the model in the position of inventing one.
+pub fn follow_up_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "need": {"type": ["string", "null"]} },
+        "required": ["need"],
+        "additionalProperties": false
+    })
+}
+
+/// The query to run next, or `None` for "the excerpts are enough".
+///
+/// Every failure reads as `None`: unparsable output, a missing field, a reply
+/// that was prose. A follow-up is an optional extra round, so anything that is
+/// not unambiguously a query has to mean "do not spend a second retrieval on
+/// it" — the alternative is searching for a fragment of an error message.
+///
+/// Whitespace-only counts as nothing further for the same reason a model that
+/// answers `{"need": ""}` means it has enough: an empty search finds the whole
+/// base or none of it, and neither is what was asked for.
+pub fn parse_follow_up(reply: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply)).ok()?;
+    let need = v["need"].as_str()?.trim();
+    (!need.is_empty()).then(|| need.to_string())
+}
+
 /// Names a knowledge gap from the questions in it. Sees questions only, never
 /// answers: it names the hole, not the guess.
 pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
@@ -530,12 +618,14 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
 
-    // Any single letter, because `dedupe_prompt` letters as many artifacts as
-    // the component has and the fan-in cap — not this parser — is what bounds
-    // that. Stopping at "d" silently downgraded every direction named in a group
-    // of five or more to a conflict, which turned the cheapest and most faithful
-    // outcome, superseding one stored original by another, into a queue entry
-    // for a person.
+    // Any single letter, and not a range this parser enforces. The prompt now
+    // hands out exactly two, but a parser that pins the count is a parser that
+    // silently downgrades a perfectly good direction the day the prompt changes
+    // — which is what happened when it stopped at "d" against a prompt that
+    // lettered a whole component: every direction named in a group of five or
+    // more became a conflict, turning the cheapest and most faithful outcome,
+    // superseding one stored original by another, into a queue entry for a
+    // person.
     //
     // How far the letters actually run is the caller's to know: it resolves this
     // against the list it showed, and a letter past the end downgrades there.
@@ -1043,6 +1133,65 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// `null` is the common answer and must be readable as "I have enough",
+    /// never as a query to run.
+    #[test]
+    fn a_null_need_parses_as_nothing_further() {
+        assert_eq!(parse_follow_up(r#"{"need": null}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": ""}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": "   "}"#), None);
+    }
+
+    /// A follow-up is an optional extra round, so anything that is not
+    /// unambiguously a query means "spend no second retrieval on it" rather
+    /// than "search for whatever this was".
+    #[test]
+    fn a_reply_that_is_not_the_shape_asked_for_is_nothing_further() {
+        assert_eq!(parse_follow_up("I think you need more on tickers"), None);
+        assert_eq!(parse_follow_up(r#"{"query": "tickers"}"#), None);
+        assert_eq!(parse_follow_up(r#"{"need": {"q": "tickers"}}"#), None);
+        assert_eq!(parse_follow_up(""), None);
+    }
+
+    #[test]
+    fn a_need_parses_as_the_query_to_run() {
+        assert_eq!(
+            parse_follow_up(r#"{"need": "engram retention ticker interval"}"#),
+            Some("engram retention ticker interval".to_string())
+        );
+        // Models fence their JSON and preface it with prose no matter what the
+        // prompt says, which is what `extract_json` is for.
+        assert_eq!(
+            parse_follow_up("Here you go:\n```json\n{\"need\": \"ticker interval\"}\n```"),
+            Some("ticker interval".to_string())
+        );
+    }
+
+    /// The schemas are sent to the endpoint to constrain decoding, so a schema
+    /// that has drifted from its parser constrains the model into output the
+    /// parser then rejects — a failure that looks exactly like a bad model.
+    #[test]
+    fn a_reply_that_satisfies_the_follow_up_schema_parses() {
+        let schema = follow_up_schema();
+        assert!(schema["properties"]["need"].is_object());
+        assert_eq!(
+            schema["properties"]["need"]["type"],
+            serde_json::json!(["string", "null"]),
+            "the grammar must be able to say `null`, which is the common answer"
+        );
+        assert!(parse_follow_up(r#"{"need":"x"}"#).is_some());
+        assert!(parse_follow_up(r#"{"need":null}"#).is_none());
+    }
+
+    /// A captured artifact: one with nothing behind it to show as context.
+    fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
+        DedupeMember {
+            title,
+            text,
+            sources: vec![],
+        }
+    }
+
     #[test]
     fn the_schema_no_longer_asks_for_tags() {
         // No domain-agnostic vocabulary exists for subject words, so a
@@ -1340,6 +1489,7 @@ mod tests {
             ("link", link_schema()),
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
+            ("follow_up", follow_up_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the
@@ -1424,11 +1574,8 @@ mod tests {
         // different numbers and called them a contradiction — which was the
         // only honest answer to the question it was actually asked.
         let p = dedupe_prompt(
-            &[
-                ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-                ("FAT32 Specifications", "32 Bit Clusternummern."),
-            ],
-            &[],
+            &member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
+            &member("FAT32 Specifications", "32 Bit Clusternummern."),
             0,
         );
         assert!(p.contains("Title: FAT16 Specifications"), "{p}");
@@ -1437,26 +1584,88 @@ mod tests {
     }
 
     #[test]
-    fn a_component_is_lettered_so_a_direction_can_name_one() {
+    fn the_pair_is_lettered_so_a_direction_can_name_one() {
         // `supersedes` answers with a letter, so the letters have to be in the
         // prompt and in the same order the caller will read them back in.
-        let p = dedupe_prompt(&[("one", "a"), ("two", "b"), ("three", "c")], &[], 0);
+        let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(p.contains("ARTIFACT C"), "{p}");
+        assert!(
+            !p.contains("ARTIFACT C"),
+            "a third letter exists to be named: {p}"
+        );
+    }
+
+    /// A merged member's own wording is what is being judged, and its captured
+    /// roots are there so the model can put back a detail the earlier merge
+    /// dropped. Both appear; only the member is lettered.
+    #[test]
+    fn a_merged_member_is_shown_with_its_sources_beneath_it() {
+        let a = DedupeMember {
+            title: "Pool sizing",
+            text: "the pool holds sixteen",
+            sources: vec![
+                ("Pool sizing, 2024", "max_connections is 16"),
+                ("Pool notes", "raise it for batch jobs"),
+            ],
+        };
+        let p = dedupe_prompt(&a, &member("Connections", "sixteen connections"), 0);
+
+        assert!(p.contains("ARTIFACT A"), "{p}");
+        assert!(p.contains("ARTIFACT B"), "{p}");
+        assert!(p.contains("the pool holds sixteen"), "{p}");
+        assert!(
+            p.contains("max_connections is 16"),
+            "a source was not shown: {p}"
+        );
+        assert!(p.contains("SOURCES OF A"), "{p}");
+        assert!(
+            !p.contains("SOURCES OF B"),
+            "a captured member was given a sources block: {p}"
+        );
+        assert!(!p.contains("ARTIFACT C"), "a source was lettered: {p}");
+    }
+
+    /// The letters a verdict may name are exactly the two artifacts under
+    /// judgement, and the system prompt has to say so — otherwise a merged
+    /// member's sources are fair game for `supersedes`.
+    #[test]
+    fn the_system_prompt_rules_the_sources_out_of_the_verdict() {
+        assert!(DEDUPE_SYSTEM.contains("SOURCES"));
+        assert!(DEDUPE_SYSTEM.contains("never name a source"));
     }
 
     #[test]
-    fn differing_values_are_named_as_a_prior_not_a_verdict() {
+    fn no_prior_about_values_is_named_to_the_dedupe_judge() {
+        // Three real artifacts stating one fact three ways. Whitespace
+        // tokenization made the token sets differ on punctuation alone —
+        // `Win7/8/10` yields nothing, `(Windows 7-10)` yields `7-10`,
+        // `Windows 7, 8 und 10` yields `7`, `8`, `10` — and the prompt named the
+        // difference as values the artifacts do not state the same way. The
+        // model read four bare integers against a table of registry codes and
+        // called the version mapping a contradiction, which was the honest
+        // answer to the question it was handed. Nothing about the artifacts is
+        // withheld by leaving the prior out; only the priming is.
         let p = dedupe_prompt(
-            &[("t", "timeout is 30s"), ("t", "timeout is 90s")],
-            &["30s".into(), "90s".into()],
+            &member(
+                "USB Device Registry Keys",
+                "0066 = Last Connected (Win8-10)",
+            ),
+            &member("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
             0,
         );
-        assert!(p.contains("30s, 90s"), "{p}");
-        assert!(p.contains("Decide which."), "{p}");
-        // And nothing is added when there is nothing to say.
-        assert!(!dedupe_prompt(&[("t", "x"), ("t", "y")], &[], 0).contains("Decide which."));
+        assert!(
+            !p.contains("Decide which."),
+            "the differing-values prior is back in the prompt: {p}"
+        );
+        assert!(
+            !p.contains("not stated the same way"),
+            "the differing-values prior is back in the prompt: {p}"
+        );
+        // The artifacts themselves are still there in full, which is what the
+        // model is supposed to decide on.
+        assert!(p.contains("0066 = Last Connected (Win8-10)"), "{p}");
+        assert!(p.contains("0066 für Last Connected (Windows 8-)"), "{p}");
     }
 
     #[test]
@@ -1465,14 +1674,12 @@ mod tests {
         // milliseconds. A group whose reply the parser could not read is retried
         // up to `MAX_ATTEMPTS` times, and every one of those would have read the
         // same unreadable bytes back.
-        let members: &[(&str, &str)] = &[
-            ("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-            ("FAT32 Specifications", "32 Bit Clusternummern."),
-        ];
-        let first = dedupe_prompt(members, &[], 0);
-        let second = dedupe_prompt(members, &[], 1);
+        let a = member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB.");
+        let b = member("FAT32 Specifications", "32 Bit Clusternummern.");
+        let first = dedupe_prompt(&a, &b, 0);
+        let second = dedupe_prompt(&a, &b, 1);
         assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(members, &[], 2));
+        assert_ne!(second, dedupe_prompt(&a, &b, 2));
         // A first ask stays exactly what it was, so the cache still earns its
         // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
@@ -1626,11 +1833,12 @@ mod tests {
 
     #[test]
     fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
-        // `dedupe_prompt` letters one artifact per component member, and the
-        // fan-in cap defaults to eight — so H is a letter the model is routinely
-        // invited to answer with. A parser that stopped at D turned every one of
-        // those into a conflict, which spends a person on a group the model had
-        // already resolved the cheap way.
+        // The prompt hands out A and B, and `interpret` is what refuses a letter
+        // past the end — deliberately, so that this parser does not have to be
+        // edited in lockstep with the prompt. It was pinned at D once, against a
+        // prompt that lettered a whole component, and turned every direction
+        // named in a group of five or more into a conflict: a person spent on a
+        // group the model had already resolved the cheap way.
         for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
             let d = parse_dedupe(&format!(
                 r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#

@@ -15,7 +15,16 @@ fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const TRIM: [char; 8] = ['(', ')', ',', '.', ';', ':', '"', '\''];
+/// Punctuation that wraps a token without belonging to it.
+///
+/// `*` and `_` are here because they are markdown, not because they are
+/// punctuation: emphasis is the one wrapper that also appears in the set below
+/// that decides whether a slash-carrying token is machine-shaped. `**Win7/8/10:**`
+/// therefore matched — the asterisks supplied the second machine character —
+/// and a merge was told it had dropped a path that was never a path. Trimmed
+/// rather than dropped from that set, so `**/etc/fstab**` is still checked, as
+/// `/etc/fstab`.
+const TRIM: [char; 10] = ['(', ')', ',', '.', ';', ':', '"', '\'', '*', '_'];
 
 fn looks_like_a_path_or_flag(token: &str) -> bool {
     let t = token.trim_matches(|c: char| TRIM.contains(&c));
@@ -32,9 +41,25 @@ fn looks_like_a_path_or_flag(token: &str) -> bool {
 }
 
 /// Every string in a chunk that must have come from the source verbatim:
-/// lines inside fenced code blocks, inline code spans, and bare path- or
-/// flag-shaped tokens in the prose.
+/// lines inside fenced code blocks, indented lines, inline code spans, and bare
+/// path- or flag-shaped tokens in the prose.
 pub fn extract_literals(artifact_text: &str) -> Vec<String> {
+    extract(artifact_text, true)
+}
+
+/// The same, minus the rule that an indented line is code.
+///
+/// For a comparison whose other side is not the text this one was copied from —
+/// see `missing_machine_literals`, the only caller. A four-space indent is the
+/// weakest of these signals by far: markdown nests a bullet list that way, so an
+/// ordinary sentence one level deep is picked up whole and then required to
+/// survive verbatim. What is left all says machine-shaped in the text itself —
+/// a fence, backticks, a leading slash — and needs no guess from the layout.
+pub fn extract_machine_literals(artifact_text: &str) -> Vec<String> {
+    extract(artifact_text, false)
+}
+
+fn extract(artifact_text: &str, indented_is_code: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut fenced = false;
     for line in artifact_text.lines() {
@@ -46,7 +71,7 @@ pub fn extract_literals(artifact_text: &str) -> Vec<String> {
         // Fenced blocks, and the indented kind markdown also treats as code —
         // reference documentation is full of the latter, and a command that
         // arrives indented rather than fenced still has to be verbatim.
-        if fenced || line.starts_with("    ") || line.starts_with('\t') {
+        if fenced || (indented_is_code && (line.starts_with("    ") || line.starts_with('\t'))) {
             if !line.trim().is_empty() {
                 out.push(line.trim().to_string());
             }
@@ -96,10 +121,49 @@ pub fn missing_literals(
     caveats: &[String],
     segment_text: &str,
 ) -> Vec<String> {
-    let haystack = normalize(segment_text);
-    let mut all = extract_literals(artifact_text);
+    absent(extract_literals, artifact_text, caveats, segment_text)
+}
+
+/// Literals present in the artifact and absent from a text that is *not* its
+/// source — merged text written over it, where only the machine-shaped strings
+/// were ever meant to come through unchanged.
+///
+/// `missing_literals` asks whether a freshly written artifact copied its
+/// commands out of the window it was extracted from. That is a fair question:
+/// same text, same language, and the synthesizer was told to copy them. Merged
+/// text is a rewrite by construction, and in this corpus routinely a rewrite
+/// across German and English, so "did this sentence survive verbatim" has no
+/// answer there. Asking it anyway is what vetoed a correct merge of two OneDrive
+/// artifacts: three four-space-indented bullets, ordinary English prose with
+/// their own descriptions, were extracted whole as literals and could not
+/// possibly reappear word for word.
+///
+/// What stays is the part that does carry over: a fenced command, a backticked
+/// registry key, a bare path. A merge that drops `/tmp/image.vdi` — the whole
+/// point of the artifact it came from — is still refused.
+pub fn missing_machine_literals(
+    artifact_text: &str,
+    caveats: &[String],
+    merged_text: &str,
+) -> Vec<String> {
+    absent(
+        extract_machine_literals,
+        artifact_text,
+        caveats,
+        merged_text,
+    )
+}
+
+fn absent(
+    extract: fn(&str) -> Vec<String>,
+    artifact_text: &str,
+    caveats: &[String],
+    haystack_text: &str,
+) -> Vec<String> {
+    let haystack = normalize(haystack_text);
+    let mut all = extract(artifact_text);
     for c in caveats {
-        all.extend(extract_literals(c));
+        all.extend(extract(c));
     }
     all.sort();
     all.dedup();
@@ -277,9 +341,10 @@ pub fn content_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> f64 
 
 /// Which non-empty lines survived, in order, as `(line number, covered)`.
 ///
-/// The single pass both the fraction and the ranges are computed from. Two
-/// passes could disagree about a line, and a warning that points at lines the
-/// percentage did not count against the document is worse than no warning.
+/// The pass behind `content_coverage`. It asks whether a line's *wording*
+/// survived the rewrite, which is a different question from whether any
+/// artifact claims the line — the corpus page asks that one, off the spans,
+/// and marks its answer in the source itself rather than as a number.
 fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, bool)> {
     let indexed: Vec<(i64, i64, std::collections::HashSet<String>)> = segments
         .iter()
@@ -308,107 +373,9 @@ fn line_coverage(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, b
         .collect()
 }
 
-/// The line ranges no artifact carried, inclusive and 1-based.
-///
-/// The fraction says how much was lost; this says where, which is the half an
-/// operator can act on. Adjacent uncovered lines are merged into one range — a
-/// list of forty single-line ranges is a wall, and what was missed is a passage
-/// rather than a line. Blank lines are not in the pass at all, so a blank line
-/// between two lost lines does not split the range: the passage is what is
-/// being named.
-pub fn uncovered_ranges(raw_text: &str, segments: &[(i64, i64, String)]) -> Vec<(i64, i64)> {
-    let mut out: Vec<(i64, i64)> = Vec::new();
-    // Whether the line before this one was also lost. Consecutive line numbers
-    // cannot be the test: `line_coverage` has already dropped the blank lines,
-    // so the numbers jump across every paragraph break, and comparing them
-    // splits the range at exactly the places prose puts one.
-    let mut running = false;
-    for (n, ok) in line_coverage(raw_text, segments) {
-        if ok {
-            running = false;
-            continue;
-        }
-        match out.last_mut() {
-            Some(last) if running => last.1 = n,
-            _ => out.push((n, n)),
-        }
-        running = true;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_ranges_name_the_lines_no_artifact_carried() {
-        let raw = "alpha beta gamma\ndelta epsilon zeta\neta theta iota";
-        // One segment covering all three lines, whose artifacts reproduce only
-        // the first line's vocabulary.
-        let made = vec![(1, 3, "alpha beta gamma".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
-    }
-
-    #[test]
-    fn adjacent_uncovered_lines_become_one_range() {
-        let raw = "alpha beta\nomega sigma\ntau upsilon\nalpha beta";
-        let made = vec![(1, 4, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 3)]);
-    }
-
-    #[test]
-    fn a_blank_line_between_two_lost_lines_does_not_split_the_range() {
-        // What was missed is a passage, and a paragraph break inside it is not
-        // a second loss. Prose is mostly blank-separated, so splitting there
-        // turns one range into the wall of single-line ranges the merge exists
-        // to prevent.
-        let raw = "alpha beta\n\nomega sigma\n\ntau upsilon";
-        let made = vec![(1, 5, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(3, 5)]);
-    }
-
-    #[test]
-    fn a_line_that_was_carried_does_split_the_range() {
-        // The other half of the same rule: a range is broken by something
-        // arriving, never by the shape of the source.
-        let raw = "alpha beta\nomega sigma\ntau upsilon";
-        let made = vec![(1, 3, "omega sigma".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(1, 1), (3, 3)]);
-    }
-
-    #[test]
-    fn a_line_outside_every_segment_is_uncovered() {
-        // Not reachable through the splitter, which tiles the document, nor
-        // through a window that failed, which keeps its row and so keeps its
-        // range. It is what the measure does when it is handed a partial
-        // account of the document — a corpus read before per-segment windows
-        // existed, whose ranges are supplied from somewhere else — and the
-        // answer has to be "lost", never "covered".
-        let raw = "alpha beta\nomega sigma";
-        let made = vec![(1, 1, "alpha beta".to_string())];
-        assert_eq!(uncovered_ranges(raw, &made), vec![(2, 2)]);
-    }
-
-    #[test]
-    fn the_ranges_and_the_fraction_agree_on_the_same_input() {
-        let raw = "alpha beta\nomega sigma\ntau upsilon";
-        let made = vec![(1, 3, "alpha beta".to_string())];
-        let missed: i64 = uncovered_ranges(raw, &made)
-            .iter()
-            .map(|(a, b)| b - a + 1)
-            .sum();
-        let total = raw.lines().filter(|l| !l.trim().is_empty()).count() as i64;
-        let from_ranges = (total - missed) as f64 / total as f64;
-        assert!((content_coverage(raw, &made) - from_ranges).abs() < 1e-9);
-    }
-
-    #[test]
-    fn a_fully_covered_source_has_no_ranges() {
-        let raw = "alpha beta\nomega sigma";
-        let made = vec![(1, 2, "alpha beta omega sigma".to_string())];
-        assert!(uncovered_ranges(raw, &made).is_empty());
-    }
 
     const WINDOW: &str = "\
 ### Writing the ISO
@@ -540,6 +507,62 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
     #[test]
     fn prose_alone_has_no_literals_to_check() {
         assert!(extract_literals("Just some ordinary prose about disks.").is_empty());
+    }
+
+    #[test]
+    fn only_the_merge_side_stops_reading_an_indent_as_code() {
+        // Two questions that look like one. Against the source window an
+        // indented line really is code often enough to be worth the false
+        // positives: the artifact was copied out of that same text, so demanding
+        // it verbatim costs nothing when it is prose. Against merged text — a
+        // rewrite by construction, here across two languages — the same demand
+        // vetoes correct merges, and a nested markdown bullet is prose far more
+        // often than it is a command.
+        let nested = "* Personal directory contents:\n    * SyncEngine.odl: Logs of \
+                      synchronized files and file hashes.";
+
+        assert_eq!(
+            extract_literals(nested),
+            vec!["* SyncEngine.odl: Logs of synchronized files and file hashes.".to_string()],
+            "the source-window check must keep reading an indent as code"
+        );
+        assert!(
+            extract_machine_literals(nested).is_empty(),
+            "an indented sentence is still being required to survive a merge: {:?}",
+            extract_machine_literals(nested)
+        );
+
+        // And what says machine-shaped in the text itself survives the
+        // narrowing, indented or not.
+        let both = "Run it:\n    `xmount --in ewf --out dd`\nleaves /tmp/image.vdi behind.";
+        for lit in ["xmount --in ewf --out dd", "/tmp/image.vdi"] {
+            assert!(
+                extract_machine_literals(both).iter().any(|l| l == lit),
+                "{lit} stopped being checked: {:?}",
+                extract_machine_literals(both)
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_emphasis_does_not_make_a_word_into_a_path() {
+        // A slash alone is not enough to call a token machine-shaped — that is
+        // what keeps "enables/disables" out — so something else in the token has
+        // to look like a path. Bold supplied it: the `*` in `**Win7/8/10:**` is
+        // in that set, and the merge of three USB artifacts was refused for
+        // dropping a "path" that is a Windows version list in bold.
+        assert!(!looks_like_a_path_or_flag("**Win7/8/10:**"));
+        assert!(!looks_like_a_path_or_flag("Win7/8/10"));
+        assert!(!looks_like_a_path_or_flag("__enables/disables__"));
+
+        // Emphasis around a real path is stripped, not disqualifying, and the
+        // literal reported is the path itself so the merge is checked for what
+        // it actually has to keep.
+        assert!(looks_like_a_path_or_flag("**/etc/fstab**"));
+        assert_eq!(
+            extract_machine_literals("It lives in **/etc/fstab** on boot."),
+            vec!["/etc/fstab".to_string()]
+        );
     }
 
     #[test]

@@ -287,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
             pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
+        ask_handoff: Default::default(),
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -401,9 +402,13 @@ mod startup_tests {
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     ceiling_param: None,
+                    follow_up: false,
+                    structured_output: true,
+                    follow_up_endpoint: None,
                 },
                 rerank: None,
                 vision: None,
+                legacy_warnings: Vec::new(),
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,

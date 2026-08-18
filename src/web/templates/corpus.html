@@ -86,52 +86,64 @@
 </div>
 {% endif %}
 
+{% if let Some(c) = coverage %}
+{# Both measures, plainly. The bands say what nothing was written from; this
+   says how much of the wording survived into what was. They answer different
+   questions and can disagree — every line claimed and half the wording gone is
+   an ordinary outcome — so the anchor the Recent warning follows lands here
+   when there is no red band for it to land on. #}
+<p class="muted" id="uncovered">{{ c }} of this capture's wording survived into an artifact.</p>
+{% endif %}
+
+{% if bands.is_empty() %}
+{# Nothing to band: a restored placeholder, whose text is its own artifacts
+   joined back together, or a photo the vision model has not read yet. #}
 <div class="card">
   <div class="card-head">
     <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw corpus{% endif %}</span>
-    {% if image %}<span class="muted">— the model's reading of the photo, not the source itself</span>{% endif %}
   </div>
-  {% if image && lines.is_empty() %}
+  {% if lines_empty %}
+  {# Only a photo is waiting on the vision model. Any other capture with no
+     text is a fetch that came back empty or a paste that was, and saying a
+     photo is queued for it invents a job nobody started. #}
+  {% if image %}
   <p class="muted">Not read yet — the photo is queued for the vision model.</p>
+  {% else %}
+  <p class="muted">Nothing was captured here — this source has no text.</p>
   {% endif %}
-  {# Every line is anchored, so an artifact's "open at these lines" link lands
-     on the exact lines it was drawn from instead of the top of the document.
-     Same markup and highlighting as the excerpt in the artifact pane. #}
-  <div class="raw" style="max-height:none">
-    <table>
-      {% for l in lines %}
-      <tr id="L{{ l.number }}" class="{% if l.in_span %}in{% endif %}">
-        <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-  </div>
+  {% else %}
+  <div class="raw" style="max-height:none"><pre class="raw-flat">{{ raw_text }}</pre></div>
+  {% endif %}
 </div>
-
-{% if !uncovered.is_empty() %}
-{# Where the coverage warning on Recent lands. The percentage there says how
-   much of this capture never reached an artifact; this says which parts, and
-   offers the one thing that can be done about it. #}
-<h3 id="uncovered">Never reached an artifact</h3>
-<p class="muted">
-  These lines are stored and readable above, but nothing was written from them
-  — so nothing here answers a search about what they say.
-</p>
-<ul class="uncovered">
-  {% for u in uncovered %}
-  <li><a href="#L{{ u.from }}">{{ u.label }}</a></li>
-  {% endfor %}
-</ul>
-{# Says what it costs and what it does not: nothing already written from this
-   capture is replaced. What comes back is added, and anything it repeats is
-   folded by the dedupe sweep like any other near-duplicate. #}
-<form method="post" action="/ui/corpora/{{ id }}/reread"
-      onsubmit="return confirm('Read these lines again? Each window holding them is one model call. Nothing already written from this capture is replaced — what comes back is added to it.')">
-  <button class="btn btn-sm" type="submit">Read these again</button>
-</form>
+{% else %}
+{% if image %}
+{# The lines below are the model's reading of the photo, and the page has to
+   keep saying so: banded beside the artifacts drawn from them they would
+   otherwise read as captured source. #}
+<h3>Transcription</h3>
+<p class="muted">The model's reading of the photo, not the source itself.</p>
+{% endif %}
+{% include "_bands.html" %}
 {% endif %}
 
-<h3>Artifacts</h3>
-{% for c in artifacts %}{% include "_artifact.html" %}{% endfor %}
-{% if artifacts.is_empty() %}<p class="muted">Not synthesised yet.</p>{% endif %}
+{% if !unplaced.is_empty() %}
+{# Artifacts that name no lines of this capture. Banding has nowhere to put
+   them, and rendering bands alone dropped them off the page entirely — off the
+   only page that can edit or delete them. #}
+<h3>Not placed in the source</h3>
+<p class="muted">
+  {% if restored %}
+  Restored from the vector store, so they name no lines of the text above —
+  the text above is these artifacts joined back together.
+  {% else %}
+  These artifacts name no lines of this capture, so they sit beside none of it:
+  written before spans were recorded, or by something other than a window read.
+  While one of them is here the source above cannot be marked for what nothing
+  was written from — any of these may have come from exactly those lines.
+  {% endif %}
+</p>
+<div class="unplaced">
+  {% for c in unplaced %}{% include "_artifact.html" %}{% endfor %}
+</div>
+{% endif %}
 {% endblock %}

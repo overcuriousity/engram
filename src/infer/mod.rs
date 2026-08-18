@@ -76,6 +76,17 @@ pub trait Reranker: Send + Sync {
     -> Result<Vec<(usize, f32)>>;
 }
 
+/// One piece of a streamed completion.
+///
+/// Reasoning is kept apart from the answer rather than concatenated: the page
+/// shows it dimmed and above, and it is never part of what the literal check
+/// or the citation parser reads.
+#[derive(Debug, Clone)]
+pub enum Delta {
+    Token(String),
+    Reasoning(String),
+}
+
 /// A completion, and whether the ceiling is what ended it.
 pub struct Completion {
     pub text: String,
@@ -106,6 +117,33 @@ pub trait Completer: Send + Sync {
             text: self.complete(system, user).await?,
             truncated: false,
         })
+    }
+
+    /// `answer`, delivering the text as it arrives.
+    ///
+    /// Defaults to `answer` followed by one delta, so an implementor that
+    /// cannot stream — every fake in the test suite, and any endpoint without
+    /// SSE — still satisfies the streaming caller without a hand-written
+    /// override. Only `HttpCompleter` overrides this.
+    ///
+    /// The returned `Completion` is authoritative: a caller assembles its
+    /// answer from it, not from the deltas it accumulated, so a dropped
+    /// receiver can never silently truncate a stored answer.
+    async fn answer_streaming(
+        &self,
+        system: &str,
+        user: &str,
+        ceiling: usize,
+        sink: tokio::sync::mpsc::Sender<Delta>,
+    ) -> Result<Completion> {
+        let c = self.answer(system, user, ceiling).await?;
+        // Unchecked on purpose: a receiver that went away is a reader that
+        // stopped reading, and the call is finished rather than abandoned so the
+        // endpoint is left clean and whatever paces the GPU sees the call end
+        // when it actually ends. The result then goes nowhere — the only thing
+        // that records an answer is the caller that dropped the receiver.
+        let _ = sink.send(Delta::Token(c.text.clone())).await;
+        Ok(c)
     }
 
     fn context_tokens(&self) -> usize;

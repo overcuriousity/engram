@@ -30,6 +30,14 @@ sha2 = "0.11"
 hex = "0.4"
 anyhow = "1"
 async-trait = "0.1.92"
+# One ask is a sequence of events, written as straight-line async code. The
+# alternative is a hand-written state machine over the same control flow, which
+# is the same logic in a form nobody can read against the blocking door.
+async-stream = "0.3"
+# The `Stream` trait itself (a re-export of `futures-core`'s) and `next()`.
+# Already in the tree by way of axum and sqlx; named here because this uses it
+# directly.
+tokio-stream = "0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"

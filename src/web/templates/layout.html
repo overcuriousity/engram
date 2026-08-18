@@ -19,15 +19,23 @@
      not frame a light page in a dark bar or the reverse. #}
   <meta name="theme-color" content="#f8f6f1" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0e1015" media="(prefers-color-scheme: dark)">
-  <link rel="stylesheet" href="/assets/app.css">
-  <script src="/assets/htmx.min.js" defer></script>
-  <script src="/assets/app.js" defer></script>
+  {# Stamped with a hash of the files' own bytes. All three are served with a
+     year-long `max-age` under a name that never changes, and the ask page
+     stopped working without its script — so a browser holding an old copy
+     across an upgrade would show a form that submits nothing. The stamp moves
+     only when the bytes do, so an unchanged deployment keeps its caches. #}
+  <link rel="stylesheet" href="/assets/app.css?v={{ crate::web::assets::stamp() }}">
+  <script src="/assets/htmx.min.js?v={{ crate::web::assets::stamp() }}" defer></script>
+  <script src="/assets/app.js?v={{ crate::web::assets::stamp() }}" defer></script>
 </head>
 <body>
-  {# The reading measure is the default and most pages want it. A page whose
-     content is a table or a three-pane workspace says so by name. #}
-  <div class="{% block shell_class %}shell{% endblock %}">
-    {% block nav %}
+  {# Chrome, not content. Inside `.shell` the nav took whichever measure the
+     page had chosen — 60rem on Capture, 110rem on Search — so it changed width
+     as you navigated, and the rule under it stopped at a different place on
+     every page. Out here the border spans the window and the row inside it is
+     one width everywhere. #}
+  {% block nav %}
+  <header class="topbar">
     <nav class="top">
       <a href="/ui/search" class="brand" aria-label="engram">
         <img src="/assets/logo.svg" alt="" width="22" height="22">
@@ -55,7 +63,11 @@
         <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
       </form>
     </nav>
-    {% endblock %}
+  </header>
+  {% endblock %}
+  {# The reading measure is the default and most pages want it. A page whose
+     content is a table or a three-pane workspace says so by name. #}
+  <div class="{% block shell_class %}shell{% endblock %}">
     {% block content %}{% endblock %}
   </div>
   {# On a phone the destinations move under the thumb and the top row keeps

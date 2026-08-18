@@ -8,10 +8,34 @@
 //! the model on it. That gate was removed on 2026-08-14: it admitted a pair only
 //! when values *differed*, which is right for hunting contradictions and exactly
 //! backwards for deduplication, where two artifacts saying the same thing in
-//! different words are the cleanest thing there is to merge. What survives is
-//! the list, which decides nothing: it is a prior for the prompt, and the rule
-//! the merge verification enforces — whatever appears in it must survive into
-//! the merged text, or a value was dropped.
+//! different words are the cleanest thing there is to merge.
+//!
+//! What replaced the gate was a list of the values not shared by every artifact,
+//! handed to the dedupe prompt as a prior. That went too, on 2026-08-17, and only
+//! `fact_tokens` is left. The list compared tokens, and `fact_tokens` splits on
+//! whitespace, so the comparison answered a question about punctuation rather
+//! than about facts: `Win7/8/10` yields no tokens at all, `(Windows 7-10)` yields
+//! `7-10`, `Windows 7, 8 und 10` yields `7`, `8`, `10`. Three artifacts stating
+//! one thing three ways came out as a difference, and the prompt named four bare
+//! integers to the model as values its artifacts disagreed about — which the
+//! model then reported as a contradiction, correctly, on that evidence. It also
+//! could not distinguish "only one side states this" from "the two state it
+//! differently", so a strict superset arrived as a dispute.
+//!
+//! `fact_tokens` itself stays, and the rule it serves is unchanged: whatever it
+//! finds in an artifact must survive into text merged from it, or a value was
+//! dropped. That comparison is sound where the list's was not, because it asks
+//! whether a token is *present* rather than whether two spellings match, and
+//! because numbers are the one thing in this corpus that read the same in German
+//! and in English. See `jobs::merge::losses`, its only caller.
+//!
+//! What it extracts narrowed on 2026-08-18, and for the same reason the list
+//! went: presence is only a fair question about a token that is a value in the
+//! first place. A bare run of digits is not one. Three merges the judge had
+//! already written were refused for "losing" `1, 2, 3, 4` — the markers of a
+//! numbered list — and the PID and port columns of a pasted tool dump, which no
+//! merge of two worked examples can carry over whole. A separator or a unit now
+//! has to say the number is a measurement of something: see `is_fact`.
 
 use std::collections::BTreeSet;
 
@@ -51,8 +75,22 @@ fn is_fact(token: &str) -> bool {
         s.chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | ':' | '/' | '_'))
     };
+    // A separator is what makes a run of digits a value: `1.21.4`, `2024-03-01`,
+    // `172.16.112.128`, `7-10`. Digits on their own are not. Nothing tells `8080`
+    // the port apart from `2` the second item of a numbered list or `1220` the
+    // PID column of a pasted `volatility sockets` dump, and in this base the
+    // ordinals and the table cells outnumber the ports by an order of magnitude.
+    // Demanding all of them survive a merge is how three correct merges were
+    // refused: renumber a list, or keep one side's worked example instead of
+    // both, and the guard called it data loss. One of those artifacts wrote
+    // "RFC 32272" for RFC 3227, so correcting the typo would have failed too.
+    //
+    // The cost is real and is the point of the trade: a merge that changes a
+    // bare `8080` to `9090` is no longer caught. A version, a date, an address,
+    // a size and a timeout written `30s` still are, and those are what the
+    // model actually picks a side on.
     if separated(t) {
-        return true;
+        return t.contains(['.', '-', ':', '/', '_']);
     }
     // Otherwise the letters have to earn their place. A number carrying a unit
     // is a value — `30s`, `512mb` — and so is anything a separator has already
@@ -81,44 +119,49 @@ pub fn fact_tokens(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Values that not all of these texts state.
-///
-/// This is what `may_disagree` became once deduplication replaced contradiction
-/// hunting. As a gate the predicate was backwards: it admitted a pair only when
-/// values *differed*, which discards exactly the pairs that are cleanest to
-/// merge — two artifacts saying the same thing in different words have nothing
-/// to contradict and everything to combine.
-///
-/// As a list it is useful in both directions. Handed to the model it names what
-/// to look at without deciding anything, because it cannot tell a real
-/// disagreement from the same subject described at two levels of detail. Handed
-/// to the merge verification it becomes a hard rule: whatever appears here has
-/// to survive into the merged text, or the merge dropped a value and is refused.
-///
-/// Sorted, because it goes into a prompt: the endpoint caches by exact prompt
-/// text, and a set iterating in a different order would defeat that for no gain.
-pub fn differing_values(texts: &[&str]) -> Vec<String> {
-    let sets: Vec<BTreeSet<String>> = texts.iter().map(|t| fact_tokens(t)).collect();
-    let mut all: BTreeSet<String> = BTreeSet::new();
-    for s in &sets {
-        all.extend(s.iter().cloned());
-    }
-    all.into_iter()
-        .filter(|tok| !sets.iter().all(|s| s.contains(tok)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn versions_numbers_and_dates_are_facts() {
-        let f = fact_tokens("Requires 1.21.4 or later, 30 seconds, on 2024-03-01, at 8080.");
+    fn versions_and_dates_are_facts() {
+        let f = fact_tokens("Requires 1.21.4 or later, on 2024-03-01, from 172.16.112.128.");
         assert!(f.contains("1.21.4"), "{f:?}");
         assert!(f.contains("2024-03-01"), "{f:?}");
-        assert!(f.contains("30"), "{f:?}");
-        assert!(f.contains("8080"), "{f:?}");
+        assert!(f.contains("172.16.112.128"), "{f:?}");
+    }
+
+    #[test]
+    fn a_bare_run_of_digits_is_not_a_value() {
+        // The rule that lets a numbered list and a pasted output table through
+        // a merge. `2.` is an item marker, `1220` and `139` are the PID and
+        // port columns of a `volatility sockets` dump, and `32272` is a typo
+        // for RFC 3227 that a merge should be free to correct. None of them is
+        // a value the judge could pick a side on, and requiring all of them to
+        // survive refused three merges the judge had already written.
+        assert!(
+            fact_tokens("2. Atomarität: die Sicherung erfolgt ununterbrochen.").is_empty(),
+            "a list marker is not a value"
+        );
+        assert!(
+            fact_tokens("0x82276878 4 139 6 TCP 172.16.112.128")
+                .iter()
+                .all(|t| t == "172.16.112.128"),
+            "only the address survives: {:?}",
+            fact_tokens("0x82276878 4 139 6 TCP 172.16.112.128")
+        );
+        assert!(fact_tokens("Gemäß RFC 32272 gilt die Reihenfolge").is_empty());
+    }
+
+    #[test]
+    fn a_port_written_bare_is_the_cost_of_that_rule() {
+        // Pinned rather than defended. `8080` alone carries nothing that says
+        // it is a port and not the third row of a table, so a merge that
+        // changes it goes uncaught. Written with its protocol it is a value
+        // again, and so is any duration or size that names its unit.
+        assert!(fact_tokens("Listens on 8080.").is_empty());
+        assert!(fact_tokens("Listens on 8080/tcp.").contains("8080/tcp"));
+        assert!(fact_tokens("The timeout is 30s.").contains("30s"));
     }
 
     #[test]
@@ -128,22 +171,12 @@ mod tests {
 
     #[test]
     fn versions_carrying_a_v_are_facts_and_equal_the_bare_form() {
-        let f = fact_tokens("Needs v1.21.4 of the toolchain.");
-        assert!(f.contains("1.21.4"), "{f:?}");
-        assert!(
-            differing_values(&[
-                "Needs v1.21.4 of the toolchain.",
-                "Needs 1.21.4 of the toolchain.",
-            ])
-            .is_empty(),
-            "the v prefix made one value look like two"
-        );
+        // A merge of one text into the other must not be told a value went
+        // missing just because the source wrote the `v`.
         assert_eq!(
-            differing_values(&[
-                "Needs v1.21.4 of the toolchain.",
-                "Needs v1.30.0 of the toolchain.",
-            ]),
-            vec!["1.21.4".to_string(), "1.30.0".to_string()]
+            fact_tokens("Needs v1.21.4 of the toolchain."),
+            fact_tokens("Needs 1.21.4 of the toolchain."),
+            "the v prefix made one value look like two"
         );
     }
 
@@ -155,10 +188,6 @@ mod tests {
         let f = fact_tokens("The timeout is 30s and the batch is 512MB.");
         assert!(f.contains("30s"), "{f:?}");
         assert!(f.contains("512mb"), "{f:?}");
-        assert_eq!(
-            differing_values(&["Wait 30s.", "Wait 90s."]),
-            vec!["30s".to_string(), "90s".to_string()]
-        );
     }
 
     #[test]
@@ -169,38 +198,27 @@ mod tests {
     }
 
     #[test]
-    fn differing_values_names_only_what_is_not_shared() {
-        // The prompt prior. A value every artifact states is not something to
-        // ask about; a value only some of them state is.
-        assert_eq!(
-            differing_values(&[
-                "The timeout is 30s on port 8080.",
-                "The timeout is 90s on port 8080."
-            ]),
-            vec!["30s".to_string(), "90s".to_string()],
-            "the shared port should not be named"
-        );
-    }
-
-    #[test]
-    fn texts_agreeing_on_every_value_differ_in_none() {
-        // And this is the case the old gate discarded: nothing to disagree
-        // about, everything to merge.
+    fn how_a_version_list_is_punctuated_decides_what_is_extracted() {
+        // Why comparing two texts' token sets is not a question about facts.
+        // These three lines say one thing, and the tokenizer splits on
+        // whitespace, so they yield unrelated sets. A difference between them
+        // was named to the dedupe judge as values the artifacts state
+        // differently, and it reported the contradiction that implies. Pinned
+        // rather than fixed: presence is all `merge::losses` asks of these, and
+        // it is the comparison that was unsound.
+        //
+        // Two of the three are empty now that a bare number is not a value, so
+        // the asymmetry is narrower than it was — but `7-10` against nothing is
+        // still an asymmetry, and it is still not a fact about the text.
         assert!(
-            differing_values(&["Needs v1.21.4 to build.", "To build it you need 1.21.4."])
-                .is_empty()
+            fact_tokens("First Install (Win7/8/10)").is_empty(),
+            "digits glued to a word are not values, which is the whole asymmetry"
         );
-        assert!(differing_values(&["Prose only.", "Different prose."]).is_empty());
-    }
-
-    #[test]
-    fn a_value_only_one_artifact_states_is_a_differing_value() {
-        // It is exactly what a merge must carry over, so verification has to
-        // see it even though nothing contradicts it.
         assert_eq!(
-            differing_values(&["Mount it first.", "Mount it first. Wait 30s."]),
-            vec!["30s".to_string()]
+            fact_tokens("Registry-Werte für USB-Geräte (Windows 7-10):"),
+            ["7-10".to_string()].into_iter().collect()
         );
+        assert!(fact_tokens("gespeichert unter Windows 7, 8 und 10").is_empty());
     }
 
     #[test]

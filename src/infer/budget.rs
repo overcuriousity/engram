@@ -70,10 +70,12 @@ pub const MIN_REPLY_TOKENS: usize = 64;
 /// The endpoint enforces one invariant the caller cannot see around: prompt
 /// plus ceiling has to fit the window, as the *server* counts both. Asking for
 /// the configured ceiling regardless is how a caller whose prompt is not
-/// budgeted against the window — the dedupe judge, handed up to
-/// `merge_max_roots` whole artifacts — sends a request the endpoint refuses
-/// outright, and a 400 is not retryable, so the group is stuck at that size on
-/// every later sweep.
+/// budgeted against the window — a judge handed whole artifacts to compare —
+/// sends a request the endpoint refuses outright, and a 400 is not retryable,
+/// so the pair is stuck at that size on every later sweep. The dedupe judge
+/// packs two artifacts plus a context block it trims against this window, and
+/// the trimming is only meaningful because the ceiling comes off the prompt's
+/// own cost here.
 ///
 /// `context - prompt` exactly is not enough. [`estimate`] is `chars / 3.5`,
 /// which undercounts CJK and dense markup badly, and a ceiling that fills the

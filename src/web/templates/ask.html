@@ -2,10 +2,40 @@
 {% block title %}Ask — engram{% endblock %}
 {% block content %}
 <p class="muted">Synthesis across several artifacts. Slower than search, and never the default path.</p>
-<form hx-post="/ui/ask" hx-target="#ask-result" hx-swap="innerHTML" class="row" style="margin-bottom:1rem">
+{# No `hx-post`: the answer arrives over SSE, which is two requests — the POST
+   parks the question and hands back an id, and an `EventSource` spends it. The
+   driver is in app.js. The page needs JS from here on; `/api/v1/ask` and the
+   MCP door are the JS-free ways in, and neither needs a browser. #}
+<form id="ask-form" class="row" style="margin-bottom:1rem">
   <input class="input" name="q" value="{{ q }}" placeholder="Ask a question…" autofocus>
   <button class="btn btn-accent" type="submit">Ask</button>
-  <span class="spinner">thinking…</span>
+  <span id="ask-spinner" class="spinner">thinking…</span>
 </form>
+{# What the retrieval did before the model was asked anything, when there was
+   more of it than usual. Silent on an ordinary ask: `[infer.ask] follow_up`
+   ships off, and with it off there is never a second round to report. With it
+   on, the second search is otherwise a silent pause of unknown length in front
+   of the answer, and what it went looking for is nowhere on the page. #}
+<p id="ask-progress" class="muted" hidden></p>
+{# What the model said on the way to the answer, kept dim and out of the way: it
+   is not the answer, and nothing in it is cited. #}
+<div id="ask-reasoning" class="reasoning" hidden></div>
+{# The answer as it is being written, in plain text; the markdown is rendered by
+   the server and swapped in whole at the end. `aria-live="polite"` so a reader
+   who cannot see it knows the answer is arriving — the announcement is the
+   appended text and nothing else, because rewriting the region or moving focus
+   into it on every token would talk over the reader for the whole answer. #}
+<pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
+{# The excerpts, on screen before the first token. Each one carries the `cite-n`
+   id that the answer's `[n]` links point at. A listbox of anchors, like the
+   search rail, because that is what the arrow keys in app.js move between. #}
+<div id="ask-rail" class="rail" role="listbox" aria-label="Excerpts"></div>
+{# The one announcement of the finished answer. The tokens above stream into a
+   polite live region as they arrive, so a reader who cannot see the page knows
+   an answer is coming; nothing else said it had arrived, and swapping the
+   rendered fragment into a live region instead would read the whole answer
+   aloud a second time. Off-screen, because the answer below it is the signal
+   for everyone who can see it. #}
+<p id="ask-status" class="sr-only" role="status"></p>
 <div id="ask-result"></div>
 {% endblock %}
