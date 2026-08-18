@@ -135,6 +135,21 @@
                            f.querySelector('textarea').focus()">edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {% if !d.caveats.is_empty() %}
+        {# Emitted by the same synthesis call that wrote the artifact, from what
+           the source states. Shown but deliberately not embedded. #}
+        <div class="caveats">
+          <b>Before you rely on this</b>
+          <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+        <div class="chips">
+          {# The kind, and nothing else. Tags are still stored and still
+             filterable through the API; they are no longer written by the
+             model, so a chip row here would show whatever a caller set on this
+             one artifact and nothing on the rest. #}
+          {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
+        </div>
         {# `view=detail`: the same PUT answers the corpus page with a card and
            this pane with a pane. Without it the save would swap this whole
            screen for a card and lose the source, the lineage and the
@@ -154,21 +169,6 @@
             </button>
           </div>
         </form>
-        {% if !d.caveats.is_empty() %}
-        {# Emitted by the same synthesis call that wrote the artifact, from what
-           the source states. Shown but deliberately not embedded. #}
-        <div class="caveats">
-          <b>Before you rely on this</b>
-          <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
-        </div>
-        {% endif %}
-        <div class="chips">
-          {# The kind, and nothing else. Tags are still stored and still
-             filterable through the API; they are no longer written by the
-             model, so a chip row here would show whatever a caller set on this
-             one artifact and nothing on the rest. #}
-          {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
-        </div>
       </div>
 
       {% if !d.related.is_empty() %}

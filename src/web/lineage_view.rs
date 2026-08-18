@@ -39,6 +39,9 @@ pub struct LineageNode {
     /// `merge` or `captured` — what kind of artifact this is, in one word.
     pub kind: &'static str,
     pub when: String,
+    /// Not rendered. What the levels are ordered by: a tree read top to bottom
+    /// is a history, and one ordered by id is a history in no order at all.
+    pub created_at: i64,
     /// The document this was drawn from, deep-linked to its exact lines.
     /// Empty for a merge, which belongs to no document.
     pub source_href: String,
@@ -226,7 +229,7 @@ impl Walk<'_> {
             }
         }
 
-        let mut out = Vec::new();
+        let mut out: Vec<LineageNode> = Vec::new();
         for root in sorted(direct) {
             if self.nodes >= MAX_NODES {
                 self.truncated = true;
@@ -260,6 +263,11 @@ impl Walk<'_> {
             }
             out.push(n);
         }
+        // Oldest first, so the level reads as the order things happened. `sorted`
+        // above only makes the walk deterministic; it says nothing about time,
+        // and a merge listed before the capture it was written from reads as a
+        // history running backwards.
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.title.cmp(&b.title)));
         Ok(out)
     }
 
@@ -274,6 +282,9 @@ impl Walk<'_> {
                 title: "deleted since".into(),
                 kind: "gone",
                 when: String::new(),
+                // Nothing is known about when it was written; it sorts to the
+                // front, where a reader looking for what is missing will be.
+                created_at: 0,
                 source_href: String::new(),
                 source_label: String::new(),
                 replaced,
@@ -287,6 +298,7 @@ impl Walk<'_> {
             title: crate::web::ui::title_of(&c),
             kind: if merged { "merge" } else { "captured" },
             when: crate::web::ui::fmt_time(c.created_at),
+            created_at: c.created_at,
             source_href,
             source_label,
             replaced,
@@ -441,6 +453,34 @@ mod tests {
         assert_eq!(l.roots.len(), 2);
         assert!(l.roots.iter().all(|n| n.children.is_empty()));
         assert!(l.roots.iter().all(|n| n.kind == "captured"));
+    }
+
+    /// A level read top to bottom is a history. Ordered by id it is a history
+    /// in no order at all.
+    #[tokio::test]
+    async fn a_level_is_ordered_oldest_first() {
+        let s = Store::memory().await.unwrap();
+        let ids = captured(&s, 3).await;
+        let m1 = s
+            .insert_merged_artifact(&merged("first pass"), &ids[0..2])
+            .await
+            .unwrap();
+        let m2 = s
+            .insert_merged_artifact(&merged("second pass"), &[m1.id.clone(), ids[2].clone()])
+            .await
+            .unwrap();
+
+        let l = build(&s, &m2.id).await.unwrap();
+
+        let times: Vec<i64> = l.roots.iter().map(|n| n.created_at).collect();
+        let mut want = times.clone();
+        want.sort();
+        assert_eq!(times, want, "the top level runs backwards");
+        assert_eq!(
+            l.roots.last().unwrap().id,
+            m1.id,
+            "the merge was written after the capture beside it"
+        );
     }
 
     /// Depth first, with the depth: the template draws indentation from it, so
