@@ -1236,8 +1236,24 @@ impl VectorStore for QdrantVectors {
         status: ArtifactStatus,
         superseded_by: Option<&str>,
     ) -> Result<()> {
-        let _: Value = self
-            .call(
+        // Absent is not a failure here. An artifact can legitimately have no
+        // point — its embedding never ran, or it failed — and a lifecycle change
+        // on one has nothing to write to rather than something to complain
+        // about. `embed::upsert_with_current_lifecycle` reads the row when it
+        // finally writes a point, so the status lands with the vector if one is
+        // ever created, and until then there is nothing to drift from.
+        //
+        // Reading the 404 as an error broke `merge::reap_stranded` completely:
+        // it retires a merge *because that merge could not be indexed*, so the
+        // point never existed, so the deprecation errored on every call. The row
+        // went to `deprecated` and the rest of the reap — reopening the pairs
+        // merged into it, dropping the embed job that could never succeed —
+        // never ran, while the log reported the reap as failed. It also handed
+        // the same 404 to `consolidate::repair_lifecycle_drift`, which writes
+        // its batch in one call and would fail every other artifact's repair
+        // alongside it.
+        let _: Option<Value> = self
+            .call_absent_point_as_none(
                 Method::POST,
                 &format!("/collections/{}/points/payload?wait=true", self.alias),
                 Some(json!({
@@ -2267,6 +2283,101 @@ mod tests {
         assert!(
             dense_of(&json!({ "sparse_only": {} })).is_none(),
             "a point without a dense vector must be reported, not silently skipped"
+        );
+    }
+
+    /// A store pointed at a mock, for the arms that turn an HTTP status into a
+    /// decision rather than a value.
+    async fn against(server: &wiremock::MockServer) -> QdrantVectors {
+        QdrantVectors::connect(&VectorConfig {
+            url: server.uri(),
+            collection: "engram".into(),
+            api_key: None,
+            recency_weight: 0.05,
+            recency_half_life_days: 180,
+            pinned_boost: 0.15,
+            weak_below: 0.35,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_change_on_an_artifact_with_no_point_is_not_a_failure() {
+        // `merge::reap_stranded` retires a merge *because it could not be
+        // indexed*, so the point it would update never existed. Reading that
+        // 404 as an error meant the reap deprecated the row and then died
+        // before reopening the merge's pairs or dropping the embed job that
+        // could never succeed — on every call, for every stranded merge, while
+        // the log said the reap had failed.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points/payload"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "status": { "error": "Not found: No point with id 0192… found" }
+            })))
+            .mount(&server)
+            .await;
+
+        against(&server)
+            .await
+            .set_lifecycle(
+                "0192abcd-0000-7000-8000-000000000000",
+                ArtifactStatus::Deprecated,
+                None,
+            )
+            .await
+            .expect("a missing point is nothing to write to, not an error");
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_change_against_a_missing_collection_is_still_a_failure() {
+        // The other thing Qdrant answers 404 to. An alias pointing at a dropped
+        // generation affects every artifact, and reading it as "this one has no
+        // point" would turn a broken store into a silent success each time.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points/payload"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "status": { "error": "Not found: Collection `engram` doesn't exist!" }
+            })))
+            .mount(&server)
+            .await;
+        // What `call_absent_point_as_none` asks when the message does not name
+        // a point: is the collection there? It resolves the alias first, then
+        // asks. It is not.
+        Mock::given(method("GET"))
+            .and(path("/aliases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "aliases": [] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/collections/engram/exists"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "exists": false }
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(
+            against(&server)
+                .await
+                .set_lifecycle(
+                    "0192abcd-0000-7000-8000-000000000000",
+                    ArtifactStatus::Deprecated,
+                    None
+                )
+                .await
+                .is_err(),
+            "a store with no collection must be reported, not read as an empty one"
         );
     }
 
