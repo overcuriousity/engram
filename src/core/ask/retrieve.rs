@@ -67,14 +67,54 @@ pub(super) fn append_neighbours(
     out
 }
 
+/// Two rounds of hits as one candidate list: every ranked hit, in round order,
+/// then every artifact that was reached sideways.
+///
+/// The ordering is the same safety property `append_neighbours` states, held
+/// across the seam between the rounds. A neighbour is the most speculative
+/// excerpt in the prompt, and appending it last is what makes it the first
+/// thing the budget drops. Merging the two rounds as whole lists — round one's
+/// neighbours ahead of round two's ranked hits — inverts that on precisely the
+/// windows where it matters: a tight one would drop an artifact the model
+/// explicitly asked for and keep a speculative neighbour of something else.
+///
+/// This cannot reach the cliff. Both rounds computed theirs over their own
+/// scores before returning, and nothing downstream of here recomputes one, so
+/// the seam is a packing-priority decision and nothing more.
+///
+/// Deduped by `artifact_id` against everything round one holds, ranked and
+/// reached alike: an artifact in front of the model twice is a wasted excerpt,
+/// not a stronger one. Round one wins the duplicate, keeping the `via` that
+/// says how it was found.
+pub(super) fn merge_rounds(
+    first: Vec<crate::core::search::SearchResult>,
+    second: Vec<crate::core::search::SearchResult>,
+) -> Vec<crate::core::search::SearchResult> {
+    let seen: std::collections::HashSet<&str> =
+        first.iter().map(|h| h.artifact_id.as_str()).collect();
+    let fresh: Vec<crate::core::search::SearchResult> = second
+        .into_iter()
+        .filter(|h| !seen.contains(h.artifact_id.as_str()))
+        .collect();
+
+    let ranked = |h: &crate::core::search::SearchResult| h.via.is_none();
+    let mut out: Vec<crate::core::search::SearchResult> =
+        Vec::with_capacity(first.len() + fresh.len());
+    out.extend(first.iter().filter(|h| ranked(h)).cloned());
+    out.extend(fresh.iter().filter(|h| ranked(h)).cloned());
+    out.extend(first.into_iter().filter(|h| !ranked(h)));
+    out.extend(fresh.into_iter().filter(|h| !ranked(h)));
+    out
+}
+
 /// How many of the artifacts a round actually retrieved never reached the
 /// model.
 ///
 /// Counted by identity rather than by arithmetic over list lengths, because
-/// there are now two rounds and one merged list: the ranked hits of the second
-/// round sit behind the first round's neighbours, so "the ranked ones that
-/// survived are the first `kept`" stopped being true the moment a second round
-/// existed. Identity is true either way.
+/// there are now two rounds and one merged list: `retrieved` spans both rounds
+/// while the prefix that survived packing spans neither cleanly, so "the ranked
+/// ones that survived are exactly `kept.min(ranked)`" stopped being true the
+/// moment a second round existed. Identity is true either way.
 ///
 /// Only ranked citations count as showing a retrieved artifact. `dropped`
 /// answers "what did I ask for and not get shown", where the asking is the
@@ -102,6 +142,72 @@ pub(super) fn dropped_count(
 mod tests {
     use super::*;
     use crate::infer::budget::{TokenCounter, pack_by_budget};
+
+    /// A hit, ranked or reached, with nothing in it but what the merge reads.
+    fn hit(id: &str, via: Option<&str>) -> crate::core::search::SearchResult {
+        crate::core::search::SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score: 0.0,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            past_cliff: false,
+            via: via.map(str::to_string),
+            reason: None,
+        }
+    }
+
+    /// The seam between the rounds obeys the same rule as the seam inside one:
+    /// everything ranked before everything reached. Merging the rounds as whole
+    /// lists would leave round one's neighbours ahead of round two's hits, and
+    /// a tight window would then drop the artifact the model explicitly asked
+    /// for while keeping a neighbour of something else — the priority
+    /// `append_neighbours` exists to set, inverted at the one point nothing was
+    /// checking.
+    #[test]
+    fn every_ranked_hit_of_either_round_packs_ahead_of_every_reached_one() {
+        let first = vec![hit("r1", None), hit("n1", Some("r1"))];
+        let second = vec![hit("r2", None), hit("n2", Some("r2"))];
+
+        let merged = merge_rounds(first, second);
+        let ids: Vec<&str> = merged.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "r2", "n1", "n2"]);
+
+        let last_ranked = merged.iter().rposition(|h| h.via.is_none()).unwrap();
+        let first_reached = merged.iter().position(|h| h.via.is_some()).unwrap();
+        assert!(
+            last_ranked < first_reached,
+            "a neighbour packs ahead of a hit, so the budget drops the wrong one first"
+        );
+    }
+
+    /// Round one wins a duplicate, keeping how it was found. An artifact in
+    /// front of the model twice is a wasted excerpt, not a stronger one — and
+    /// the copy that survives must be the one whose `via` the rail already
+    /// explained.
+    #[test]
+    fn an_artifact_both_rounds_found_appears_once_as_round_one_found_it() {
+        let first = vec![hit("a", None), hit("b", Some("a"))];
+        // The second round ranks what the first only reached, and re-finds
+        // what it already had.
+        let second = vec![hit("b", None), hit("a", None), hit("c", None)];
+
+        let merged = merge_rounds(first, second);
+        let ids: Vec<&str> = merged.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c", "b"]);
+        assert_eq!(
+            merged[2].via.as_deref(),
+            Some("a"),
+            "the surviving copy lost the anchor the rail names"
+        );
+    }
 
     /// The whole point: a list whose relevance falls off is cut where it falls
     /// off, not where the context window runs out.

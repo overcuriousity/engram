@@ -211,24 +211,16 @@ impl Core {
                 yield AskEvent::Needs(need.clone());
                 match core.retrieve_round(&req, &need, false).await {
                     Ok(second) => {
-                        // Deduped against everything round one holds, ranked and
-                        // reached alike: an artifact already in front of the model
-                        // twice is a wasted excerpt, not a stronger one.
-                        let seen: std::collections::HashSet<&str> =
-                            hits.iter().map(|h| h.artifact_id.as_str()).collect();
-                        let fresh: Vec<SearchResult> = second
-                            .hits
-                            .iter()
-                            .filter(|h| !seen.contains(h.artifact_id.as_str()))
-                            .cloned()
-                            .collect();
+                        // Round one's ranked hits, round two's, then every
+                        // neighbour either round reached — deduped by artifact.
+                        // The order is the packing priority, and a neighbour has
+                        // to stay the first thing the budget drops.
+                        let merged = retrieve::merge_rounds(hits.clone(), second.hits);
 
                         // Packed again over the whole merged list rather than
                         // appended to what round one packed: the second round's
                         // excerpts have to fit the same window as the first, and
                         // the only honest way to know what fits is to pack it.
-                        let mut merged = hits.clone();
-                        merged.extend(fresh);
                         let merged_blocks = core.excerpts(&merged).await;
                         let merged_kept =
                             pack_by_budget(&merged_blocks, &core.counter, budget);
