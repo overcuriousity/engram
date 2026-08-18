@@ -363,6 +363,21 @@ struct CaptureTemplate {
     gaps: Vec<GapGroup>,
     /// Open gaps the sweep has not grouped yet.
     loose: Vec<GapMember>,
+    /// An answer the operator asked to keep, dropped into the box for them to
+    /// edit. Empty on an ordinary visit.
+    ///
+    /// Prefilled and not saved: the save stays the operator's decision. That is
+    /// the line the roadmap draws — this is a person keeping something the
+    /// model wrote, recorded as such, and not the system writing memory to
+    /// itself.
+    prefill_text: String,
+    /// The ask this text came from, carried through the form so the capture
+    /// records where it came from. Empty when the box was not prefilled.
+    ///
+    /// The id rather than the prose: a note is a string someone can edit away,
+    /// while this is the join back to the question and the artifacts the answer
+    /// was built from, and `capture_submit` turns it into stored provenance.
+    prefill_ask: String,
 }
 
 /// One unanswered question or gap search, as the capture page lists it.
@@ -690,8 +705,34 @@ struct AskCarriedTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+/// What the capture page accepts in its query string.
+///
+/// `from_ask` rather than the answer itself: an answer runs to thousands of
+/// characters and a URL does not, so passing the text would break on exactly
+/// the long answers worth keeping. The id is short, and the page reads the
+/// stored row.
+#[derive(serde::Deserialize)]
+struct CapturePrefill {
+    #[serde(default)]
+    from_ask: Option<String>,
+}
+
+async fn capture_page(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<CapturePrefill>,
+) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
+    // A prefill that names an ask nobody recorded is not an error worth a page
+    // for: the box is simply empty, which is what an ordinary visit looks like.
+    let prefilled = match &p.from_ask {
+        Some(id) => st.core.store.ask_event(id).await?,
+        None => None,
+    };
+    let (prefill_text, prefill_ask) = match prefilled {
+        Some(ev) => (ev.answer, ev.id),
+        None => (String::new(), String::new()),
+    };
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
@@ -716,6 +757,8 @@ async fn capture_page(State(st): State<AppState>, _id: Identity) -> Result<Respo
         vision_enabled: st.core.describer.is_some(),
         gaps,
         loose,
+        prefill_text,
+        prefill_ask,
     })
     .into_response())
 }
@@ -737,6 +780,11 @@ async fn gap_dismiss(
 #[derive(serde::Deserialize)]
 struct CaptureForm {
     text: String,
+    /// Set when the box was prefilled from an answer. Carries the ask through
+    /// the edit, so what is stored records that the text was model-written and
+    /// what it was written from — even if the operator rewrote every word of it.
+    #[serde(default)]
+    from_ask: Option<String>,
 }
 
 async fn capture_submit(
@@ -744,7 +792,24 @@ async fn capture_submit(
     _id: Identity,
     Form(f): Form<CaptureForm>,
 ) -> Result<Response> {
-    let out = st.core.ingest(&f.text, "web", None).await?;
+    // An answer the operator chose to keep is still a paste, and is stored as
+    // one — the same pipeline, the same synthesis, no special case downstream.
+    // What differs is only the trace: the origin says a model wrote it, and the
+    // metadata says from which question and which artifacts. That is the whole
+    // of the concession the roadmap makes here, and it is a record rather than
+    // a mechanism.
+    let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
+        Some(ask_id) => {
+            let ev = st.core.store.ask_event(ask_id).await?;
+            let mut c = crate::core::ingest::Capture::new(&f.text, "ask");
+            if let Some(ev) = ev {
+                c = c.with_ask(&ev.id, &ev.question, &ev.citations);
+            }
+            c
+        }
+        None => crate::core::ingest::Capture::new(&f.text, "web"),
+    };
+    let out = st.core.ingest_capture(capture).await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -5135,6 +5200,88 @@ mod tests {
             .await
             .unwrap();
         (app, cookie, handle, html, id)
+    }
+
+    /// Prefilled, never saved. The save is the operator's decision, and that is
+    /// the line: this is a person keeping something a model wrote, recorded as
+    /// such, and not the system writing memory to itself.
+    #[tokio::test]
+    async fn keeping_an_answer_fills_the_capture_box_and_stores_nothing() {
+        let (app, cookie, core, html, id) = ask_recorded().await;
+        assert!(
+            html.contains(&format!("/ui/capture?from_ask={id}")),
+            "the answer offers no way to keep it: {html}"
+        );
+        let before = core.store.list_corpora(100, 0).await.unwrap().len();
+
+        let page = get_body(&app, &cookie, &format!("/ui/capture?from_ask={id}")).await;
+        let answer = core.store.ask_event(&id).await.unwrap().unwrap().answer;
+        assert!(
+            page.contains(answer.trim()),
+            "the answer is not in the box: {page}"
+        );
+        assert!(
+            page.contains(&format!(r#"name="from_ask" value="{id}""#)),
+            "the ask does not ride the form, so nothing would record where the text came from: {page}"
+        );
+        assert_eq!(
+            core.store.list_corpora(100, 0).await.unwrap().len(),
+            before,
+            "opening the capture page must store nothing"
+        );
+    }
+
+    /// The point of carrying the id through the edit: what is stored says a
+    /// model wrote the text and what it was written from, however much the
+    /// operator changed before saving.
+    #[tokio::test]
+    async fn a_kept_answer_is_stored_as_a_paste_that_records_the_question() {
+        let (app, cookie, core, _html, id) = ask_recorded().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                &format!("text=edited+by+hand&from_ask={id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let corpus: (String, String) = sqlx::query_as(
+            "SELECT origin, metadata FROM corpora WHERE raw_text = 'edited by hand'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(corpus.0, "ask", "a kept answer must not read as a paste");
+        let meta: serde_json::Value = serde_json::from_str(&corpus.1).unwrap();
+        assert_eq!(meta["ask"]["event_id"], id.as_str());
+        assert_eq!(meta["ask"]["question"], "what is alpha");
+        assert!(
+            meta["ask"]["artifact_ids"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "the artifacts the answer was written from are the provenance: {meta}"
+        );
+    }
+
+    /// An ordinary paste is untouched by any of this.
+    #[tokio::test]
+    async fn an_ordinary_capture_still_records_itself_as_one() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let res = app
+            .clone()
+            .oneshot(form("/ui/capture", &cookie, "text=typed+by+a+person"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let origin: String =
+            sqlx::query_scalar("SELECT origin FROM corpora WHERE raw_text = 'typed by a person'")
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(origin, "web");
     }
 
     #[tokio::test]

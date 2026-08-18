@@ -128,6 +128,32 @@ impl Capture {
         self.source_url = url;
         self
     }
+
+    /// The `ask` facts of an answer the operator chose to keep: which question
+    /// it answered, and which artifacts it was written from.
+    ///
+    /// Provenance, never an instruction — like `source_url`, nothing downstream
+    /// reads these to go and do anything. They exist so that a corpus whose
+    /// text a model wrote says so, and says what it was written from, however
+    /// much the operator edited before saving. Without them a kept answer is
+    /// indistinguishable from something a person typed, which is the one thing
+    /// this door must not become.
+    pub fn with_ask(
+        mut self,
+        ask_id: &str,
+        question: &str,
+        citations: &[crate::store::asks::AskCitation],
+    ) -> Self {
+        self.metadata["ask"] = serde_json::json!({
+            "event_id": ask_id,
+            "question": question,
+            "artifact_ids": citations
+                .iter()
+                .map(|c| c.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+        });
+        self
+    }
 }
 
 impl Core {

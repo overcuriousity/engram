@@ -19,6 +19,18 @@
   <div class="md">{{ answer|safe }}</div>
   {# Judged where it is read. Present only when the question was recorded. #}
   {{ verdict_bar|safe }}
+  {# A link, not a button: it opens the capture page with the answer in the box
+     and saves nothing. That is the line — the operator decides, and the trace
+     records that a model wrote the text and what it was written from. An
+     answer engram stored by itself would be a synthesised digest competing in
+     search with the exact wording it was derived from, which is the fidelity
+     loss this whole design exists to refuse. #}
+  {% if let Some(id) = event_id %}
+  <div class="chips">
+    <a class="btn btn-ghost btn-sm" href="/ui/capture?from_ask={{ id }}"
+       title="Open this answer in the capture box. Nothing is saved until you say so.">keep this answer</a>
+  </div>
+  {% endif %}
 </div>
 <h3>Artifacts used</h3>
 {% for r in citations %}
