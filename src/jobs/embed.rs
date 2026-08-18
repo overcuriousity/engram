@@ -351,6 +351,15 @@ pub async fn split_into_artifact_jobs(core: &Core, corpus_id: &str) -> Result<()
 /// split at a paragraph boundary. Truncating would silently discard knowledge,
 /// and one vector per fragment keeps the data model unchanged.
 async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) -> Result<()> {
+    // A merged artifact has no corpus to write siblings into and no reading
+    // order to put them in, so every route through here that ends in
+    // `replace_with_siblings` ends in the same refusal, on every attempt, for
+    // ever. Four of them sat at the backoff ceiling for a day: unembedded, so
+    // out of search, so never a neighbour of anything, and — because
+    // `mark_indexed` is what finishes a merge — with their roots still active
+    // beside them. Cutting is simply not the move available for one of these,
+    // so the attempts at it are skipped rather than made and refused.
+    let splittable = chunk.corpus_id.is_some();
     // The limit is checked against what actually gets embedded, and that is the
     // title followed by the text. Siblings inherit the title, so only what the
     // title leaves over is available to their text. Giving the text the whole
@@ -364,7 +373,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
 
     // A title that fills the limit on its own cannot be cut out of the way:
     // every sibling would carry it too, so no split of the text can help.
-    if budget > 0 {
+    if splittable && budget > 0 {
         let parts = split_by_paragraphs(&chunk.text, budget, &core.counter);
         if parts.len() > 1 {
             return replace_with_siblings(core, chunk, parts).await;
@@ -387,7 +396,8 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     tracing::warn!(
         artifact_id = %chunk.id,
         title_cost,
-        "oversize chunk has nothing left to cut on; embedding as-is"
+        splittable,
+        "oversize chunk has no split available; embedding as-is"
     );
     let permit = core.gate.background().await;
     let embedded = core.embedder.embed(std::slice::from_ref(&chunk.text)).await;
@@ -397,6 +407,13 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         // Refused, not failed: the endpoint answered. This arm does not test
         // `budget`, because a refusal we cannot act on is still a refusal.
         Err(e) if input_too_large(&e) => {
+            // The endpoint has now settled it for a merge too: it does not fit,
+            // and no split of it can land anywhere. Index what does fit rather
+            // than leaving an artifact that has swallowed several others out of
+            // search entirely.
+            if !splittable {
+                return embed_head(core, chunk, limit).await;
+            }
             // Still nothing to cut with when the title alone fills the limit:
             // `split_by_lines` at a budget of zero puts every line in a part of
             // its own and then falls to the 64-character floor, which shreds the
@@ -429,6 +446,81 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         // coverage this embedding advances and nothing to settle.
         None => Ok(()),
     }
+}
+
+/// Index a merged artifact too long for the embedder using as much of its head
+/// as fits.
+///
+/// Splitting is what the corpus path does and it is the better answer where it
+/// is available: one vector per fragment loses nothing. A merge has no corpus,
+/// and cutting it into siblings would throw away the lineage that says what it
+/// was made of — the objection `replace_with_siblings` raises and is right to.
+/// The choice here is not between a whole vector and a partial one, then, but
+/// between a partial one and none at all, and none at all means an artifact
+/// that has swallowed several others and cannot be found by any of them.
+///
+/// So: the dense vector is placed by the opening of the text, which is where a
+/// merged artifact states its subject, and the sparse vector still encodes the
+/// whole thing, so every term in the tail is searchable exactly as before. The
+/// stored text is untouched. What degrades is semantic ranking against the tail,
+/// and that is worth saying out loud in the log, because a merge this long is
+/// usually a merge that should have stayed two artifacts.
+async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
+    let title_cost = chunk
+        .title
+        .as_deref()
+        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    let budget = limit.saturating_sub(title_cost);
+    let head = if budget > 0 {
+        split_by_lines(&chunk.text, budget, &core.counter)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // A title that fills the embedder's limit by itself leaves no prefix to
+    // take, and that is a broken title rather than an over-long merge. Reported
+    // rather than worked around, which is what the no-corpus refusal was for.
+    if head.trim().is_empty() {
+        return Err(Error::Validation(format!(
+            "cannot embed merged artifact {}: its title alone fills the {limit}-token limit",
+            chunk.id
+        )));
+    }
+
+    tracing::warn!(
+        artifact_id = %chunk.id,
+        kept = head.len(),
+        of = chunk.text.len(),
+        "merged artifact is too long to embed and has no corpus to split into; \
+         indexing its opening"
+    );
+
+    let input = match chunk.title.as_deref() {
+        Some(t) => format!("{t}\n{head}"),
+        None => head,
+    };
+    let permit = core.gate.background().await;
+    let embedded = core.embedder.embed(std::slice::from_ref(&input)).await;
+    permit.finished();
+    let vectors = embedded?;
+
+    upsert_with_current_lifecycle(
+        core,
+        vec![VectorPoint {
+            vector: vectors.into_iter().next().unwrap(),
+            // The whole artifact, unlike the dense side. Lexical retrieval has
+            // no length limit to respect, so there is no reason to lose the
+            // tail on both halves of the query at once.
+            sparse: crate::vector::sparse::encode_document(&chunk.text),
+            payload: payload_of(chunk),
+        }],
+    )
+    .await?;
+    // Which also finishes the merge: its roots stay active and beside it in
+    // search until this lands, and that is the state these four were stuck in.
+    mark_indexed(core, chunk).await
 }
 
 /// Cut text on blank lines, packing as many paragraphs into each part as the
@@ -521,9 +613,14 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     // Splitting means writing siblings into the parent's document, at ordinals
     // around its own. A merged artifact has neither: no corpus to insert into
     // and no reading order to preserve, and its siblings would lose the lineage
-    // that says what it was made of. A merge that will not embed is a bug in
-    // the merge — the draft is too long, or the model ran away — and it belongs
-    // on Ops rather than being quietly chopped into fragments nothing can trace.
+    // that says what it was made of.
+    //
+    // A backstop now rather than the answer. `split_oversize` no longer routes
+    // one of these here at all — it indexes the head instead, because this
+    // refusal is permanent and every attempt at it produced the same error and
+    // another turn of the backoff, which left four merges out of search and
+    // unfinished for a day. Kept so that a future caller cannot reintroduce the
+    // silent chopping this refuses; reaching it is a bug in that caller.
     let Some(corpus_id) = chunk.corpus_id.as_deref() else {
         return Err(Error::Validation(format!(
             "refusing to split merged artifact {}: it belongs to no corpus",
