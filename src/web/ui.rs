@@ -5771,6 +5771,13 @@ mod tests {
             done.find("stop();") < done.find("JSON.parse"),
             "the stream must be closed before the payload is parsed: {done}"
         );
+        // The fragment is set through `innerHTML`, which htmx does not watch:
+        // its `hx-post` controls (the verdict bar) are inert until htmx is
+        // told about them.
+        assert!(
+            done.contains("htmx.process(result)"),
+            "the done handler no longer hands the answer to htmx: {done}"
+        );
 
         // The failure path, which is also the path a stream that simply ended
         // arrives on: the browser is already queuing its reconnect when this

@@ -212,6 +212,11 @@
         stop();
         result.innerHTML = JSON.parse(e.data).html;
         enhance(result);
+        // The fragment carries `hx-post` controls — the verdict bar, "carried
+        // the answer" — and htmx binds those only to markup it swapped in
+        // itself or was told about. Set through `innerHTML` they are inert
+        // buttons until this call; before it, a click on Right did nothing.
+        if (window.htmx) window.htmx.process(result);
         // The plain stream and the model's aside have both been superseded by
         // the rendered answer. Hidden rather than emptied, so the next ask
         // reuses them.

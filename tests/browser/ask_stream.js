@@ -32,6 +32,7 @@ const PARK_DELAY = SCENARIO === 'double' ? 150 : 0;
 
 let parkRequests = 0;
 let streamRequests = 0;
+let verdictRequests = 0;
 let report = null;
 let child = null;
 
@@ -49,6 +50,11 @@ const HARNESS = `
     setTimeout(function () {
       var link = document.querySelector('a.cite[href="#cite-2"]');
       if (link) link.click();
+      // The verdict bar arrived inside the done fragment through innerHTML,
+      // which htmx does not watch. A click here is the proof the driver told
+      // htmx about it: the fake server counts the POST it produces.
+      var right = document.querySelector('#ask-verdict button');
+      if (right) right.click();
       setTimeout(function () {
         fetch('/report', { method: 'POST', body: JSON.stringify({
           result: document.getElementById('ask-result').innerHTML,
@@ -72,11 +78,12 @@ const HARNESS = `
 `;
 
 const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Ask</title>
-<link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js" defer></script></head><body>
+<link rel="stylesheet" href="/assets/app.css"><script src="/assets/htmx.min.js" defer></script><script src="/assets/app.js" defer></script></head><body>
 <form id="ask-form" class="row"><input class="input" name="q" value="" placeholder="Ask a question…">
 <button class="btn btn-accent" type="submit">Ask</button>
 <span id="ask-spinner" class="spinner">thinking…</span></form>
 <div id="ask-reasoning" class="reasoning" hidden></div>
+<p id="ask-progress" class="ask-progress" hidden></p>
 <pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
 <div id="ask-rail" class="rail" role="listbox" aria-label="Excerpts"></div>
 <p id="ask-status" class="sr-only" role="status"></p>
@@ -92,7 +99,9 @@ const RAIL =
   '<div class="rail-row"><a class="rail-item" id="cite-2"><span class="rail-title">bravo</span></a></div>';
 const DONE =
   '<div class="card"><div class="md"><p>alpha <a class="cite" href="#cite-1">[1]</a> and ' +
-  'bravo <a class="cite" href="#cite-2">[2]</a></p></div></div>';
+  'bravo <a class="cite" href="#cite-2">[2]</a></p></div></div>' +
+  '<div id="ask-verdict"><button hx-post="/ui/ask/ev1/verdict" hx-vals=\'{"verdict":"right"}\' ' +
+  'hx-target="#ask-verdict" hx-swap="outerHTML">Right</button></div>';
 
 const server = http.createServer((req, res) => {
   if (req.url === '/ui/ask' && req.method === 'GET') {
@@ -105,6 +114,15 @@ const server = http.createServer((req, res) => {
   if (req.url === '/assets/app.js') {
     res.writeHead(200, { 'content-type': 'text/javascript' });
     return res.end(fs.readFileSync(ROOT + '/assets/app.js'));
+  }
+  if (req.url === '/assets/htmx.min.js') {
+    res.writeHead(200, { 'content-type': 'text/javascript' });
+    return res.end(fs.readFileSync(ROOT + '/assets/htmx.min.js'));
+  }
+  if (req.url === '/ui/ask/ev1/verdict' && req.method === 'POST') {
+    verdictRequests++;
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end('<div id="ask-verdict">judged</div>');
   }
   if (req.url === '/assets/app.css') {
     res.writeHead(200, { 'content-type': 'text/css' });
@@ -154,7 +172,7 @@ const server = http.createServer((req, res) => {
 function finish() {
   if (child) child.kill();
   server.close();
-  console.log(JSON.stringify({ scenario: SCENARIO, parkRequests, streamRequests, report }));
+  console.log(JSON.stringify({ scenario: SCENARIO, parkRequests, streamRequests, verdictRequests, report }));
   process.exit(0);
 }
 

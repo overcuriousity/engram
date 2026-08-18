@@ -134,6 +134,16 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
     assert_eq!(report["railIds"][1], "cite-2", "{report}");
     assert_eq!(report["activeId"], "cite-2", "{report}");
     assert_eq!(report["formAsking"], false, "{report}");
+    // The verdict bar came in through `innerHTML`, which htmx does not watch;
+    // its buttons only work because the driver hands the fragment to htmx.
+    assert_eq!(
+        out["verdictRequests"], 1,
+        "the verdict button in the streamed answer was inert: {out}"
+    );
+    assert!(
+        result.contains("judged"),
+        "htmx did not swap the verdict response: {result}"
+    );
     assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
 }
 
