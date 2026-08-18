@@ -112,8 +112,11 @@ on the ask page is recorded with the excerpts the model saw, and the answer
 carries a verdict bar — right, wrong, nothing here — plus a "carried the
 answer" toggle on each excerpt. An answer that opens with *Not in the knowledge
 base* is an abstention and is badged as one. A literal in the answer — a
-command, a path, a version — that appears in no cited excerpt is marked, and
-badged: the model wrote it, and the base does not hold it.
+command, a path, a flag, anything in a code span or an indented block — that
+appears in no cited excerpt is marked, and badged: the model wrote it, and the
+base does not hold it. Prose is left alone, deliberately: a bare number in a
+sentence of explanation is not the kind of claim this is looking for, and a
+guard that fires on ordinary writing is one you learn to ignore.
 
 The answer arrives over SSE as the model writes it, so **`/ui/ask` needs
 JavaScript**. `POST /api/v1/ask` and the MCP `ask` tool do not, and are the

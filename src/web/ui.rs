@@ -1,4 +1,5 @@
 use crate::auth::Identity;
+use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -798,16 +799,29 @@ async fn capture_submit(
     // metadata says from which question and which artifacts. That is the whole
     // of the concession the roadmap makes here, and it is a record rather than
     // a mechanism.
+    //
+    // The two travel together or not at all. An ask can vanish between the page
+    // load and the save — retention deletes unjudged questions — and storing
+    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
+    // model authorship while carrying none of the provenance that assertion is
+    // supposed to buy. A claim that cannot be checked is worse than no claim, so
+    // a lost row falls back to an ordinary paste, which is what it now is.
     let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
-        Some(ask_id) => {
-            let ev = st.core.store.ask_event(ask_id).await?;
-            let mut c = crate::core::ingest::Capture::new(&f.text, "ask");
-            if let Some(ev) = ev {
-                c = c.with_ask(&ev.id, &ev.question, &ev.citations);
+        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
+            Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
+                &ev.id,
+                &ev.question,
+                &ev.citations,
+            ),
+            None => {
+                tracing::warn!(
+                    ask_id,
+                    "capture named an ask that is no longer stored; keeping it as an ordinary paste"
+                );
+                crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB)
             }
-            c
-        }
-        None => crate::core::ingest::Capture::new(&f.text, "web"),
+        },
+        None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
     let out = st.core.ingest_capture(capture).await?;
     Ok(HtmlTemplate(CapturedTemplate {
@@ -5264,6 +5278,38 @@ mod tests {
                 .is_some_and(|a| !a.is_empty()),
             "the artifacts the answer was written from are the provenance: {meta}"
         );
+    }
+
+    /// Retention deletes unjudged questions, so an ask can vanish between the
+    /// page load and the save. Storing `origin = "ask"` with no provenance would
+    /// leave a corpus asserting a model wrote it and no way to check the claim,
+    /// which is worse than not making it.
+    #[tokio::test]
+    async fn a_kept_answer_whose_ask_is_gone_is_stored_as_an_ordinary_paste() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/capture",
+                &cookie,
+                "text=an+answer+whose+question+expired&from_ask=no-such-ask",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let row: (String, String) = sqlx::query_as(
+            "SELECT origin, metadata FROM corpora WHERE raw_text = 'an answer whose question expired'",
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, "web",
+            "a claim of model authorship must not outlive the evidence for it"
+        );
+        let meta: serde_json::Value = serde_json::from_str(&row.1).unwrap();
+        assert!(meta.get("ask").is_none(), "{meta}");
     }
 
     /// An ordinary paste is untouched by any of this.

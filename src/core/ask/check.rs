@@ -50,12 +50,18 @@ fn looks_like_a_list_item(lit: &str) -> bool {
 /// A literal escaped the way the sanitizer writes text, so it can be looked for
 /// as the text a reader sees.
 ///
-/// Only the three characters that carry structure. `"` and `'` are deliberately
-/// left alone: the rendered answer has been through `ammonia`, whose serializer
-/// escapes them in attribute values and not in text, so escaping them here would
-/// make every literal containing a quote unmatchable. They are harmless in the
-/// position this ever writes into — element content, never an attribute — and
-/// `mark_unsupported` quotes its own attribute itself.
+/// Exactly what `html5ever`'s text serializer emits, which is the whole
+/// requirement: `&`, `<`, `>`, and the non-breaking space. NBSP is not
+/// structural and is easy to leave out — but models emit it, and a literal
+/// containing one would then be badged and never marked, which is the quiet
+/// erosion this check cannot afford.
+///
+/// `"` and `'` are deliberately left alone: the rendered answer has been through
+/// `ammonia`, whose serializer escapes them in attribute values and not in text,
+/// so escaping them here would make every literal containing a quote
+/// unmatchable. They are harmless in the position this ever writes into —
+/// element content, never an attribute — and `mark_unsupported` quotes its own
+/// attribute itself.
 ///
 /// Local rather than a dependency because the requirement is not "escape HTML"
 /// but "escape it exactly as the document already is": a general escaper that
@@ -67,6 +73,7 @@ fn escape_text(s: &str) -> String {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '\u{00A0}' => out.push_str("&nbsp;"),
             _ => out.push(c),
         }
     }
@@ -85,7 +92,7 @@ fn escape_text(s: &str) -> String {
 ///
 /// Longest first, so a literal that contains a shorter one is marked whole
 /// rather than being broken in half by the shorter match landing first.
-pub fn mark_unsupported(html: &str, literals: &[String]) -> String {
+pub(crate) fn mark_unsupported(html: &str, literals: &[String]) -> String {
     let mut needles: Vec<String> = literals
         .iter()
         .map(|l| escape_text(l))
@@ -330,6 +337,21 @@ mod tests {
         let html = "<pre><code>rm -rf /var/lib/engram</code></pre>";
         let marked = mark_unsupported(html, &["rm -rf /var/lib/engram".to_string()]);
         assert!(marked.contains(r#"<mark class="unsupported">"#), "{marked}");
+    }
+
+    /// The needle has to be escaped exactly as the serializer wrote the
+    /// document, and the serializer escapes a non-breaking space. Models emit
+    /// them; without this arm such a literal is badged and never marked, and a
+    /// badge pointing at nothing is how a reader learns to stop believing the
+    /// badge.
+    #[test]
+    fn a_literal_holding_a_non_breaking_space_is_still_marked() {
+        let html = "<p>run engram&nbsp;reindex now</p>";
+        let marked = mark_unsupported(html, &["engram\u{00A0}reindex".to_string()]);
+        assert!(
+            marked.contains(r#"<mark class="unsupported">engram&nbsp;reindex</mark>"#),
+            "{marked}"
+        );
     }
 
     /// The marker must never be able to inject markup: a literal is model

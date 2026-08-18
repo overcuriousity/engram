@@ -13,7 +13,11 @@ pub struct Assets;
 ///
 /// Computed in `build.rs` from the bytes of the files themselves; see
 /// `stamp_assets` there for why the URL has to move at all. Read by
-/// `layout.html`, which is the one place the pages name these two files.
+/// `layout.html`, which is the one place the pages name these three files.
+///
+/// One stamp over all of them rather than one each: a change to any moves every
+/// URL, which costs a needless re-fetch of two small files and buys never
+/// serving a new script beside an old library.
 pub fn stamp() -> &'static str {
     env!("ASSET_STAMP")
 }

@@ -257,14 +257,37 @@ impl Core {
                             };
                         } else {
                             tracing::info!("ask: the second round fit nothing the first had not");
+                            // Still reported, with round one's numbers. `Needs`
+                            // has already told the page a second search is
+                            // happening; ending without a matching `Retrieved`
+                            // would leave "looking further…" on screen for the
+                            // rest of the answer, describing something that
+                            // finished. A round that changed nothing is an
+                            // outcome, not an absence.
+                            yield AskEvent::Retrieved {
+                                round: 2,
+                                shown: kept,
+                                dropped,
+                                cliff_at: second.cliff_at,
+                            };
                         }
                     }
                     // A follow-up that fails must never fail the ask: the
                     // operator asked a question, not for a retrieval strategy.
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "ask: the second retrieval failed; answering from the first"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "ask: the second retrieval failed; answering from the first"
+                        );
+                        // Same reasoning as above: the page was told to expect a
+                        // second round, so it is told how it ended.
+                        yield AskEvent::Retrieved {
+                            round: 2,
+                            shown: kept,
+                            dropped,
+                            cliff_at: None,
+                        };
+                    }
                 }
             }
 

@@ -173,6 +173,26 @@ impl PkdbTools {
                          (ask.max_output_tokens) and is incomplete._",
                     );
                 }
+                // The same reasoning, and the sharper case. The page marks these
+                // inline and badges them; MCP has no page, so without this an
+                // agent gets a fabricated command or path with nothing saying so
+                // — and an agent is the caller most likely to *run* it. Named
+                // rather than counted: "one unsupported literal" is not
+                // actionable, `rm -rf /var/lib/engram` is.
+                if !a.unsupported.is_empty() {
+                    out.push_str(
+                        "\n\n_Not from the knowledge base — these appear in no cited excerpt, \
+                         and the model wrote them: ",
+                    );
+                    out.push_str(
+                        &a.unsupported
+                            .iter()
+                            .map(|l| format!("`{l}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                    out.push_str("._");
+                }
                 if !a.citations.is_empty() {
                     out.push_str("\n\n---\n\n**Sources**\n\n");
                     out.push_str(&format_search_results(&a.citations));
