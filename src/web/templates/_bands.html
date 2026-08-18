@@ -28,6 +28,10 @@
         <form method="post" action="/ui/corpora/{{ id }}/reread"
               onsubmit="return confirm('Read this passage again? One model call. Nothing already written from this capture is replaced — what comes back is added to it, and anything it repeats is folded by the dedupe sweep.')">
           <input type="hidden" name="from" value="{{ b.from }}">
+          {# Both ends: a passage nothing was written from does not stop at a
+             window boundary, and naming only its first line re-read the window
+             the loss opened in and left the rest of it as it was. #}
+          <input type="hidden" name="to" value="{{ b.to }}">
           <button class="btn btn-sm" type="submit">Read this again — {{ w }}</button>
         </form>
         {% endif %}

@@ -1091,78 +1091,79 @@ async fn uncovered_for(
     ))
 }
 
-/// Read the lines no artifact carried, again.
+#[derive(serde::Deserialize)]
+struct RereadForm {
+    /// The band the button sits in. Both ends, because a passage nothing was
+    /// written from does not stop at a window boundary, and matching on the
+    /// first line alone re-read the window the loss opened in and left the
+    /// rest of it exactly as it was.
+    from: i64,
+    to: i64,
+}
+
+/// Read one passage again.
 ///
-/// One `SegmentWindow` job per window holding a loss, rather than a whole
-/// re-segment: the parts that did arrive are fine, and re-reading them would
-/// pay for the same artifacts twice and then hand the duplicates to the dedupe
-/// sweep to clean up after it.
+/// The window holding that line, not the line itself: a window is wider than
+/// the passage, and that is what lets the model read it in its surroundings
+/// rather than stripped of them. One model call.
+///
+/// Nothing already written from this capture is replaced. What comes back is
+/// added, and anything it repeats is folded by the dedupe sweep like any other
+/// near duplicate.
 async fn reread_uncovered_ui(
     State(st): State<AppState>,
     _id: Identity,
     Path(cid): Path<String>,
+    Form(f): Form<RereadForm>,
 ) -> Result<Response> {
-    let s = st.core.store.get_corpus(&cid).await?;
-    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
-    let segments = st.core.store.segments_for_corpus(&cid).await?;
+    // Back to the band the button was in. On a nine-hundred-line document,
+    // returning to the top after pressing something two thirds of the way down
+    // loses the reader's place for no reason.
+    let back = Redirect::to(&format!("/ui/corpora/{cid}#L{}", f.from)).into_response();
 
-    // One window can hold several uncovered ranges, and reading it once reads
-    // all of them, so the windows are collected before anything is queued.
-    //
-    // Every window the range overlaps, not the one its first line falls in: a
-    // range is merged across everything that was lost in a row, which does not
-    // stop at a window boundary, and matching on the first line alone re-read
-    // the opening of the loss and left the rest of it exactly as it was.
-    let mut windows: Vec<i64> = Vec::new();
-    for (from, to) in uncovered_for(&st, &s, &chunks).await? {
-        for w in segments
-            .iter()
-            .filter(|w| w.start_line <= to && from <= w.end_line)
-        {
-            if !windows.contains(&w.idx) {
-                windows.push(w.idx);
-            }
-        }
+    // A page left open while the capture was still being read would otherwise
+    // offer to re-read lines that are merely not written yet.
+    let s = st.core.store.get_corpus(&cid).await?;
+    if !coverage_final(&s.status) {
+        return Ok(back);
     }
 
-    for idx in windows {
+    let segments = st.core.store.segments_for_corpus(&cid).await?;
+    for w in segments
+        .iter()
+        .filter(|w| w.start_line <= f.to && f.from <= w.end_line)
+    {
         // A window something is already going to read is left alone. `enqueue`
         // re-arms a conflicting row whatever state it is in, running included,
-        // so pressing this button while an earlier re-read is still in flight
-        // handed the same window to a second worker: two paid model calls and
-        // two sets of artifacts for one loss, then the dedupe sweep to clean up
-        // after them — the outcome reading only the lost windows exists to
-        // avoid.
+        // so pressing this twice handed the same window to a second worker: two
+        // paid model calls and two sets of artifacts for one passage, then the
+        // dedupe sweep to clean up after them.
         if st
             .core
             .store
             .live_job(
                 crate::store::jobs::Stage::SegmentWindow,
-                &crate::jobs::window::unit_target(&cid, idx),
+                &crate::jobs::window::unit_target(&cid, w.idx),
             )
             .await?
         {
             continue;
         }
-        // `window::run` returns early on a window already marked done, so the
-        // state goes back to pending first — this is the "re-run this window"
-        // case `reset_segment` exists for.
-        //
-        // Keeping what the window already produced: those artifacts are the
-        // parts of it that did arrive, they may have been edited, retagged or
-        // verified since, and none of that is what this button is about. A
-        // duplicate of something already captured goes to the dedupe sweep.
-        st.core.store.reset_segment(&cid, idx, true).await?;
+        // `true`: this window was read correctly and missed lines, so it is
+        // being added to rather than replaced. Deleting what it already wrote
+        // would throw away artifacts that may have been edited, tagged or
+        // verified since, for lines that were never the problem.
+        st.core.store.reset_segment(&cid, w.idx, true).await?;
         st.core
             .store
             .enqueue(
                 crate::store::jobs::Stage::SegmentWindow,
                 "segment",
-                &crate::jobs::window::unit_target(&cid, idx),
+                &crate::jobs::window::unit_target(&cid, w.idx),
             )
             .await?;
     }
-    Ok(Redirect::to(&format!("/ui/corpora/{cid}#uncovered")).into_response())
+    Ok(back)
 }
 
 async fn corpus_detail(
@@ -1190,6 +1191,11 @@ async fn corpus_detail(
     let by_id: std::collections::HashMap<&str, &crate::store::artifacts::Chunk> =
         chunks.iter().map(|c| (c.id.as_str(), c)).collect();
     let segments = st.core.store.segments_for_corpus(&cid).await?;
+    // Until the capture has finished being read, a passage nothing claims is
+    // a passage nothing has got to yet. Banded, still — the arrangement is how
+    // the page reads — but not red, and not offering to re-read what is
+    // already on its way.
+    let losses_are_final = coverage_final(&s.status) && !segments.is_empty();
 
     // Every row still carries its `L<n>` anchor, inside its band: an artifact's
     // "open at these lines" and the `?from=&to=` highlight both address lines
@@ -1208,16 +1214,21 @@ async fn corpus_detail(
             // this passage, which is wider than it. Saying only "lines 51–53"
             // over a button that reads 1–120 is a promise it does not keep —
             // and a second red band inside the same window really is read too.
-            reread: b
-                .gap()
+            reread: (b.gap() && losses_are_final)
                 .then(|| {
                     segments
                         .iter()
-                        .find(|w| w.start_line <= b.from && b.from <= w.end_line)
-                        .map(|w| format!("reads lines {}–{}", w.start_line, w.end_line))
+                        .filter(|w| w.start_line <= b.to && b.from <= w.end_line)
+                        .fold(None::<(i64, i64)>, |acc, w| {
+                            Some(match acc {
+                                Some((a, z)) => (a.min(w.start_line), z.max(w.end_line)),
+                                None => (w.start_line, w.end_line),
+                            })
+                        })
+                        .map(|(a, z)| format!("reads lines {a}–{z}"))
                 })
                 .flatten(),
-            gap: b.gap(),
+            gap: b.gap() && losses_are_final,
             from: b.from,
             to: b.to,
             artifacts: b
@@ -4522,7 +4533,11 @@ mod tests {
         // And the form behind that button, reached directly, arms nothing.
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=1&to=6",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
@@ -4597,7 +4612,11 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=1&to=6",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
@@ -4667,7 +4686,11 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/corpora/{}/reread", out.id), &cookie, ""))
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=1&to=6",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
@@ -5087,6 +5110,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn re_reading_one_passage_leaves_the_other_windows_alone() {
+        let (app, cookie, core) = app_session_and_core().await;
+        // Long enough to be several windows, so "one of them" is meaningful.
+        let body = (1..=400)
+            .map(|i| format!("line {i} of the document"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let out = core.ingest(&body, "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        // Settled, or the endpoint rightly refuses: lines a capture has not
+        // been read to the end of are not lines it lost. Set directly because
+        // this test is about where a re-read is aimed, not about the pipeline
+        // that gets a document to Ready.
+        core.store
+            .set_corpus_status(&out.id, CorpusStatus::Ready)
+            .await
+            .unwrap();
+        let segments = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(segments.len() > 1, "the fixture must span several windows");
+        let target = segments[0].clone();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                &format!("from={}&to={}", target.start_line, target.end_line),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+        let pending = core.store.pending_segments(&out.id).await.unwrap();
+        assert_eq!(
+            pending.iter().map(|w| w.idx).collect::<Vec<_>>(),
+            vec![target.idx],
+            "exactly the window holding that line, and no other"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_reading_a_line_in_no_window_is_not_a_500() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("alpha line", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/corpora/{}/reread", out.id),
+                &cookie,
+                "from=99999&to=99999",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::SEE_OTHER,
+            "nothing to do is not an error"
+        );
+    }
+
+    #[tokio::test]
     async fn the_corpus_page_puts_each_passage_beside_what_came_of_it() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core
@@ -5112,6 +5198,11 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        // Settled, or nothing is a loss yet: a capture still being read has
+        // lines nothing claims because nothing has got to them.
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
         // Pull every span back onto line 1, leaving the rest of the document
         // claimed by nobody. Written straight to the column because nothing in
         // the store edits a span — synthesis computes it and is the only
