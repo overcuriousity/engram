@@ -163,51 +163,56 @@ impl PkdbTools {
             )
             .await
         {
-            Ok(a) => {
-                let mut out = a.answer;
-                // Said before the sources rather than after: an agent reading a
-                // cut-off answer as a complete one is the failure this prevents.
-                if a.truncated {
-                    out.push_str(
-                        "\n\n_This answer was cut off at the configured answer length limit \
-                         (ask.max_output_tokens) and is incomplete._",
-                    );
-                }
-                // The same reasoning, and the sharper case. The page marks these
-                // inline and badges them; MCP has no page, so without this an
-                // agent gets a fabricated command or path with nothing saying so
-                // — and an agent is the caller most likely to *run* it. Named
-                // rather than counted: "one unsupported literal" is not
-                // actionable, `rm -rf /var/lib/engram` is.
-                if !a.unsupported.is_empty() {
-                    out.push_str(
-                        "\n\n_Not from the knowledge base — these appear in no cited excerpt, \
-                         and the model wrote them: ",
-                    );
-                    out.push_str(
-                        &a.unsupported
-                            .iter()
-                            .map(|l| format!("`{l}`"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    );
-                    out.push_str("._");
-                }
-                if !a.citations.is_empty() {
-                    out.push_str("\n\n---\n\n**Sources**\n\n");
-                    out.push_str(&format_search_results(&a.citations));
-                }
-                if a.dropped > 0 {
-                    out.push_str(&format!(
-                        "\n\n_{} further excerpt(s) omitted for context budget._",
-                        a.dropped
-                    ));
-                }
-                out
-            }
+            Ok(a) => format_answer(&a),
             Err(e) => format!("Ask failed: {e}"),
         }
     }
+}
+
+/// An answer, with everything the page would have shown around it.
+///
+/// A function rather than prose inside the tool, because MCP is the door with
+/// no page: an agent gets this string and nothing else, so what it does or does
+/// not say is the whole of what the caller knows — and that is worth being able
+/// to test directly.
+///
+/// Order is by consequence. Truncation first, because an agent reading a
+/// cut-off answer as a complete one acts on half a procedure. Then the literals
+/// the base does not hold, because the page marks those inline and badges them
+/// and an agent sees neither — and an agent is the caller most likely to *run*
+/// a fabricated command. Named rather than counted: "one unsupported literal"
+/// is not actionable, the literal is.
+fn format_answer(a: &crate::core::ask::AskResponse) -> String {
+    let mut out = a.answer.clone();
+    if a.truncated {
+        out.push_str(
+            "\n\n_This answer was cut off at the configured answer length limit \
+             (ask.max_output_tokens) and is incomplete._",
+        );
+    }
+    if !a.unsupported.is_empty() {
+        let named = a
+            .unsupported
+            .iter()
+            .map(|l| format!("`{l}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "\n\n_Not from the knowledge base — these appear in no cited excerpt, \
+             and the model wrote them: {named}._"
+        ));
+    }
+    if !a.citations.is_empty() {
+        out.push_str("\n\n---\n\n**Sources**\n\n");
+        out.push_str(&format_search_results(&a.citations));
+    }
+    if a.dropped > 0 {
+        out.push_str(&format!(
+            "\n\n_{} further excerpt(s) omitted for context budget._",
+            a.dropped
+        ));
+    }
+    out
 }
 
 /// Guard in front of the MCP service. Extracting `Identity` here means an
@@ -243,6 +248,36 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    fn answer(unsupported: &[&str]) -> crate::core::ask::AskResponse {
+        crate::core::ask::AskResponse {
+            answer: "Run `engram reindex`, then `wipefs --all /dev/sdX`.".into(),
+            citations: vec![],
+            dropped: 0,
+            truncated: false,
+            abstained: false,
+            unsupported: unsupported.iter().map(|s| s.to_string()).collect(),
+            event_id: None,
+        }
+    }
+
+    /// MCP is the door with no page. An agent gets this string and nothing
+    /// else, so a literal the base does not hold has to be named in it — and
+    /// named, not counted, because an agent may run what it reads.
+    #[test]
+    fn the_mcp_answer_names_the_literals_the_base_does_not_hold() {
+        let out = format_answer(&answer(&["wipefs --all /dev/sdX"]));
+        assert!(out.contains("wipefs --all /dev/sdX"), "{out}");
+        assert!(out.contains("no cited excerpt"), "{out}");
+    }
+
+    /// And says nothing when there is nothing to say: a caveat on every answer
+    /// is a caveat nobody reads.
+    #[test]
+    fn an_answer_drawn_from_its_excerpts_carries_no_warning() {
+        let out = format_answer(&answer(&[]));
+        assert!(!out.contains("no cited excerpt"), "{out}");
+    }
 
     #[tokio::test]
     async fn mcp_requires_a_bearer_token() {
