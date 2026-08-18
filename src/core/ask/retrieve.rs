@@ -68,7 +68,8 @@ pub(super) fn append_neighbours(
 }
 
 /// Two rounds of hits as one candidate list: every ranked hit, in round order,
-/// then every artifact that was reached sideways.
+/// then every artifact that was only ever reached sideways. `ranked` is where
+/// the second half starts.
 ///
 /// The ordering is the same safety property `append_neighbours` states, held
 /// across the seam between the rounds. A neighbour is the most speculative
@@ -82,29 +83,74 @@ pub(super) fn append_neighbours(
 /// scores before returning, and nothing downstream of here recomputes one, so
 /// the seam is a packing-priority decision and nothing more.
 ///
-/// Deduped by `artifact_id` against everything round one holds, ranked and
-/// reached alike: an artifact in front of the model twice is a wasted excerpt,
-/// not a stronger one. Round one wins the duplicate, keeping the `via` that
-/// says how it was found.
+/// Deduped by `artifact_id`: an artifact in front of the model twice is a
+/// wasted excerpt, not a stronger one. Where the two rounds disagree about what
+/// an artifact *is*, round two's ranking wins the position and round one keeps
+/// the story — an artifact round one only reached and round two then ranked
+/// takes its ranked place, carrying the `via` that says how it was first found.
+/// Leaving it in the tail because that is where it entered would demote a hit
+/// the model explicitly asked for below neighbours of something else, and would
+/// have `dropped` report it missing while it sat in the prompt.
+pub(super) struct Merged {
+    pub hits: Vec<crate::core::search::SearchResult>,
+    /// How many leading hits are ranked. Everything from here on was reached.
+    pub ranked: usize,
+}
+
 pub(super) fn merge_rounds(
     first: Vec<crate::core::search::SearchResult>,
     second: Vec<crate::core::search::SearchResult>,
-) -> Vec<crate::core::search::SearchResult> {
-    let seen: std::collections::HashSet<&str> =
-        first.iter().map(|h| h.artifact_id.as_str()).collect();
-    let fresh: Vec<crate::core::search::SearchResult> = second
-        .into_iter()
-        .filter(|h| !seen.contains(h.artifact_id.as_str()))
+) -> Merged {
+    use crate::core::search::SearchResult;
+    let is_ranked = |h: &SearchResult| h.via.is_none();
+
+    // How round one found each artifact it reached, so a promoted hit can keep
+    // saying so on the rail.
+    let reached: std::collections::HashMap<&str, (&Option<String>, &Option<String>)> = first
+        .iter()
+        .filter(|h| !is_ranked(h))
+        .map(|h| (h.artifact_id.as_str(), (&h.via, &h.reason)))
+        .collect();
+    let ranked_already: std::collections::HashSet<&str> = first
+        .iter()
+        .filter(|h| is_ranked(h))
+        .map(|h| h.artifact_id.as_str())
         .collect();
 
-    let ranked = |h: &crate::core::search::SearchResult| h.via.is_none();
-    let mut out: Vec<crate::core::search::SearchResult> =
-        Vec::with_capacity(first.len() + fresh.len());
-    out.extend(first.iter().filter(|h| ranked(h)).cloned());
-    out.extend(fresh.iter().filter(|h| ranked(h)).cloned());
-    out.extend(first.into_iter().filter(|h| !ranked(h)));
-    out.extend(fresh.into_iter().filter(|h| !ranked(h)));
-    out
+    let mut promoted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut second_ranked: Vec<SearchResult> = Vec::new();
+    let mut second_reached: Vec<SearchResult> = Vec::new();
+    for h in &second {
+        let id = h.artifact_id.as_str();
+        if ranked_already.contains(id) {
+            continue;
+        }
+        match (is_ranked(h), reached.get(id)) {
+            (true, Some((via, reason))) => {
+                promoted.insert(id);
+                let mut h = h.clone();
+                h.via = (*via).clone();
+                h.reason = (*reason).clone();
+                second_ranked.push(h);
+            }
+            (true, None) => second_ranked.push(h.clone()),
+            // Reached in both rounds, or reached now and never ranked: round
+            // one's copy already stands for it.
+            (false, Some(_)) => {}
+            (false, None) => second_reached.push(h.clone()),
+        }
+    }
+
+    let mut out: Vec<SearchResult> = first.iter().filter(|h| is_ranked(h)).cloned().collect();
+    out.extend(second_ranked);
+    let ranked = out.len();
+    out.extend(
+        first
+            .into_iter()
+            .filter(|h| !is_ranked(h) && !promoted.contains(h.artifact_id.as_str())),
+    );
+    out.extend(second_reached);
+    Merged { hits: out, ranked }
 }
 
 /// How many of the artifacts a round actually retrieved never reached the
@@ -116,20 +162,22 @@ pub(super) fn merge_rounds(
 /// ones that survived are exactly `kept.min(ranked)`" stopped being true the
 /// moment a second round existed. Identity is true either way.
 ///
-/// Only ranked citations count as showing a retrieved artifact. `dropped`
-/// answers "what did I ask for and not get shown", where the asking is the
-/// ranking: an artifact the cliff cut and adjacency then reached back is still
-/// a hit the ranking lost, and reading it as retained would hide the cliff on
-/// exactly the lists where it did the most work. `via` is what tells the two
-/// apart, and nobody asked for a neighbour in the first place — counting one
-/// would make `dropped` grow every time the reach worked.
+/// Only the ranked part of the list counts as showing a retrieved artifact.
+/// `dropped` answers "what did I ask for and not get shown", where the asking
+/// is the ranking: an artifact the cliff cut and adjacency then reached back is
+/// still a hit the ranking lost, and reading it as retained would hide the
+/// cliff on exactly the lists where it did the most work. Position rather than
+/// `via` is what tells the two apart, because a promoted hit carries a `via`
+/// and is a ranked hit all the same — round two returned it above its own
+/// cliff, which is the opposite of lost.
 pub(super) fn dropped_count(
     retrieved: &[String],
     shown: &[crate::core::search::SearchResult],
+    ranked: usize,
 ) -> usize {
     let shown: std::collections::HashSet<&str> = shown
         .iter()
-        .filter(|h| h.via.is_none())
+        .take(ranked)
         .map(|h| h.artifact_id.as_str())
         .collect();
     retrieved
@@ -177,35 +225,107 @@ mod tests {
         let second = vec![hit("r2", None), hit("n2", Some("r2"))];
 
         let merged = merge_rounds(first, second);
-        let ids: Vec<&str> = merged.iter().map(|h| h.artifact_id.as_str()).collect();
+        let ids: Vec<&str> = merged.hits.iter().map(|h| h.artifact_id.as_str()).collect();
         assert_eq!(ids, vec!["r1", "r2", "n1", "n2"]);
+        assert_eq!(merged.ranked, 2, "the seam is where the reaching starts");
 
-        let last_ranked = merged.iter().rposition(|h| h.via.is_none()).unwrap();
-        let first_reached = merged.iter().position(|h| h.via.is_some()).unwrap();
+        let last_ranked = merged.hits.iter().rposition(|h| h.via.is_none()).unwrap();
+        let first_reached = merged.hits.iter().position(|h| h.via.is_some()).unwrap();
         assert!(
             last_ranked < first_reached,
             "a neighbour packs ahead of a hit, so the budget drops the wrong one first"
         );
     }
 
-    /// Round one wins a duplicate, keeping how it was found. An artifact in
-    /// front of the model twice is a wasted excerpt, not a stronger one — and
-    /// the copy that survives must be the one whose `via` the rail already
-    /// explained.
+    /// An artifact round one only reached and round two then ranked is a hit,
+    /// and packs like one. Leaving it in the tail because that is where it
+    /// entered demotes it below neighbours of something else — the R32
+    /// inversion, surviving inside the dedup — and has `dropped` report it
+    /// missing while it sits in the prompt.
+    ///
+    /// It keeps its `via` all the same: that string is how the rail explains
+    /// where it came from, and round two ranking it does not unsay it.
     #[test]
-    fn an_artifact_both_rounds_found_appears_once_as_round_one_found_it() {
+    fn an_artifact_round_two_ranked_takes_a_ranked_place_and_keeps_how_it_was_reached() {
         let first = vec![hit("a", None), hit("b", Some("a"))];
-        // The second round ranks what the first only reached, and re-finds
-        // what it already had.
+        // The second round ranks what the first only reached, and re-finds what
+        // it already had.
         let second = vec![hit("b", None), hit("a", None), hit("c", None)];
 
         let merged = merge_rounds(first, second);
-        let ids: Vec<&str> = merged.iter().map(|h| h.artifact_id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "c", "b"]);
+        let ids: Vec<&str> = merged.hits.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
         assert_eq!(
-            merged[2].via.as_deref(),
+            merged.ranked, 3,
+            "the promoted hit is inside the ranked half"
+        );
+        assert_eq!(
+            merged.hits[1].via.as_deref(),
             Some("a"),
-            "the surviving copy lost the anchor the rail names"
+            "the rail lost the anchor this artifact was first reached from"
+        );
+        assert_eq!(
+            dropped_count(
+                &["a".to_string(), "b".to_string(), "c".to_string()],
+                &merged.hits,
+                merged.ranked
+            ),
+            0,
+            "an artifact in the prompt was counted as dropped"
+        );
+    }
+
+    /// `dropped` is measured by position, not by `via`, and the two disagree
+    /// exactly here: an artifact the cliff cut and adjacency reached back is a
+    /// hit the ranking lost, however it reads on the rail.
+    #[test]
+    fn an_artifact_the_cliff_cut_stays_dropped_even_when_the_reach_puts_it_back() {
+        let first = vec![hit("a", None), hit("b", Some("a"))];
+        let merged = merge_rounds(first, vec![]);
+        assert_eq!(
+            dropped_count(
+                &["a".to_string(), "b".to_string()],
+                &merged.hits,
+                merged.ranked
+            ),
+            1,
+            "the cliff stopped being visible in `dropped`"
+        );
+    }
+
+    /// The second round can leave the model with *fewer* excerpts than the
+    /// first, and that is the R32 priority working rather than a regression: a
+    /// hit round two asked for packs ahead of round one's neighbours, so a
+    /// window that held three small speculative excerpts may hold one hit
+    /// instead. `Retrieved { round: 2, shown }` can therefore be lower than
+    /// round one's, which is honest — those neighbours are no longer in the
+    /// prompt.
+    #[test]
+    fn a_second_round_can_show_fewer_excerpts_than_the_first_did() {
+        let first = vec![
+            hit("r1", None),
+            hit("n1", Some("r1")),
+            hit("n2", Some("r1")),
+        ];
+        let second = vec![hit("big", None)];
+
+        let block = |h: &crate::core::search::SearchResult| match h.artifact_id.as_str() {
+            "big" => "x".repeat(60),
+            _ => "x".repeat(20),
+        };
+        let budget = 25;
+
+        let one: Vec<String> = first.iter().map(block).collect();
+        let kept_one = pack_by_budget(&one, &TokenCounter, budget);
+
+        let merged = merge_rounds(first, second);
+        let two: Vec<String> = merged.hits.iter().map(block).collect();
+        let kept_two = pack_by_budget(&two, &TokenCounter, budget);
+
+        assert_eq!(merged.hits[1].artifact_id, "big", "the hit packs second");
+        assert!(
+            kept_two < kept_one,
+            "nothing was displaced: {kept_one} then {kept_two}"
         );
     }
 

@@ -5612,7 +5612,7 @@ mod tests {
             .split('(')
             .filter_map(|rest| rest.trim_start().strip_prefix('"'))
             .filter_map(|rest| rest.split('"').next())
-            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()))
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
             .map(str::to_string)
             .collect();
         assert!(

@@ -53,7 +53,18 @@ pub(super) async fn needed_query(
         crate::infer::budget::ceiling_for_prompt(context, spent, model.max_output_tokens());
 
     match model.answer(FOLLOW_UP_SYSTEM, &user, ceiling).await {
-        Ok(reply) => parse_follow_up(&reply.text),
+        Ok(reply) => match parse_follow_up(&reply.text) {
+            // The prompt forbids repeating the question back and small models
+            // do it anyway. Running it costs a search whose results round one
+            // already holds, and then a re-pack that can evict round one's
+            // neighbours for nothing — the second round would take excerpts
+            // away rather than add any.
+            Some(need) if need.eq_ignore_ascii_case(question.trim()) => {
+                tracing::debug!("ask: the follow-up asked for the question back");
+                None
+            }
+            other => other,
+        },
         Err(e) => {
             tracing::warn!(error = %e, "ask: the follow-up call failed; answering from one round");
             None

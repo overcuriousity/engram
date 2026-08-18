@@ -28,6 +28,8 @@ pub struct AskRequest {
 struct Round {
     /// Above the cliff, with whatever was reached sideways appended.
     hits: Vec<SearchResult>,
+    /// How many of `hits` are ranked. Everything after them was reached.
+    ranked: usize,
     /// Every artifact the ranking returned, cliff and all. What `dropped` is
     /// measured against, so a citation lost to the cliff is as visible as one
     /// lost to the window.
@@ -159,7 +161,8 @@ impl Core {
 
             // Highest score first, so what gets cut is what mattered least.
             let mut kept = pack_by_budget(&blocks, &core.counter, budget);
-            let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept]);
+            let mut ranked = first.ranked;
+            let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
             if dropped > 0 {
                 tracing::info!(
                     dropped,
@@ -221,7 +224,7 @@ impl Core {
                         // appended to what round one packed: the second round's
                         // excerpts have to fit the same window as the first, and
                         // the only honest way to know what fits is to pack it.
-                        let merged_blocks = core.excerpts(&merged).await;
+                        let merged_blocks = core.excerpts(&merged.hits).await;
                         let merged_kept =
                             pack_by_budget(&merged_blocks, &core.counter, budget);
 
@@ -234,10 +237,18 @@ impl Core {
                                     retrieved.push(id);
                                 }
                             }
-                            hits = merged;
+                            hits = merged.hits;
+                            ranked = merged.ranked;
                             blocks = merged_blocks;
                             kept = merged_kept;
-                            dropped = retrieve::dropped_count(&retrieved, &hits[..kept]);
+                            dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
+                            // `shown` here can be *lower* than round one's,
+                            // and that is the priority working rather than a
+                            // regression: a hit round two asked for packs ahead
+                            // of round one's neighbours, so a window that held
+                            // three speculative excerpts may hold one hit
+                            // instead. Reporting the smaller number is honest —
+                            // those neighbours are no longer in the prompt.
                             yield AskEvent::Retrieved {
                                 round: 2,
                                 shown: kept,
@@ -398,6 +409,7 @@ impl Core {
         let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
         let cliff_at = crate::core::search::cliff(&scores);
         hits.truncate(retrieve::above_cliff(&scores));
+        let ranked = hits.len();
 
         // Artifacts reached sideways rather than retrieved are appended here,
         // after the cliff has been taken — they carry no score comparable to a
@@ -408,6 +420,7 @@ impl Core {
 
         Ok(Round {
             hits,
+            ranked,
             retrieved,
             cliff_at,
         })
@@ -882,7 +895,7 @@ mod tests {
     /// one found is a duplicate of something the first did.
     #[tokio::test]
     async fn the_second_round_merges_deduped_by_artifact() {
-        let (core, _) = core_with_follow_up(Some(r#"{"need": "chunk"}"#)).await;
+        let (core, _) = core_with_follow_up(Some(r#"{"need": "filler"}"#)).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         let mut ids: Vec<&str> = out
             .citations
@@ -893,6 +906,137 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), seen, "an artifact was shown to the model twice");
+    }
+
+    /// The prompt forbids repeating the question back; nothing but this
+    /// enforces it. An echo is a search whose results round one already holds,
+    /// followed by a re-pack that can take round-one neighbours out of the
+    /// prompt in exchange for nothing.
+    #[tokio::test]
+    async fn a_need_that_is_the_question_back_is_not_worth_a_second_round() {
+        let (core, model) = core_with_follow_up(Some(r#"{"need": "CHUNK "}"#)).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1], "the question was searched for twice");
+        assert!(needs.is_empty());
+        assert_eq!(
+            model.calls(),
+            1,
+            "the call still happened; only its answer was refused"
+        );
+    }
+
+    /// Embeds on one word each way, so two queries can retrieve two disjoint
+    /// halves of one corpus.
+    ///
+    /// The hashing fake cannot do this: every artifact is some arbitrary
+    /// distance from every query, so both rounds retrieve the same small base
+    /// and the second one is never asked to contribute anything. That is the
+    /// gap that let the merge's ordering be pinned only on hand-built lists.
+    struct Keyed;
+
+    #[async_trait::async_trait]
+    impl crate::infer::Embedder for Keyed {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0f32; crate::core::test_support::TEST_DIM];
+                    v[0] = t.contains("alpha") as u8 as f32;
+                    v[1] = t.contains("beta") as u8 as f32;
+                    // Never the zero vector: a cosine against nothing is not a
+                    // ranking, it is a division the store would have to guess at.
+                    v[2] = (v[0] == 0.0 && v[1] == 0.0) as u8 as f32;
+                    v
+                })
+                .collect())
+        }
+        fn dim(&self) -> usize {
+            crate::core::test_support::TEST_DIM
+        }
+        fn model(&self) -> &str {
+            "fake-keyed"
+        }
+        fn max_input_tokens(&self) -> usize {
+            8192
+        }
+    }
+
+    /// One corpus, three `alpha` artifacts then three `beta` ones, adjacent in
+    /// that order — so a search for one term ranks three, the cliff cuts the
+    /// other three, and the reach sideways from the last hit pulls exactly one
+    /// `beta` neighbour in.
+    async fn seed_two_topics(core: &Core) {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<NewArtifact> = (0..6)
+            .map(|i| NewArtifact {
+                ordinal: i,
+                text: match i < 3 {
+                    true => format!("alpha topic {i} filler filler"),
+                    false => format!("beta topic {i} filler filler"),
+                },
+                corpus_span: None,
+                title: Some(format!("t{i}")),
+                category: Some("reference".into()),
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
+        for c in &made {
+            crate::jobs::embed::run(core, &c.id).await.unwrap();
+        }
+    }
+
+    /// The whole mechanism, end to end: a question the base answers by halves.
+    ///
+    /// Round one ranks the three `alpha` artifacts, the cliff cuts the three
+    /// `beta` ones, and adjacency reaches exactly one of them back as a
+    /// neighbour. The model then asks for `beta`, and round two ranks all
+    /// three — including the one round one had only reached.
+    ///
+    /// `dropped` is the assertion that matters. Every artifact retrieved is in
+    /// front of the model by the end, so nothing was dropped; a merge that let
+    /// round one's `via` keep the promoted artifact in the speculative tail
+    /// would leave it below the seam, counted as a hit the ranking lost while
+    /// it sat in the prompt — and packed as the first thing a tighter window
+    /// would throw away.
+    #[tokio::test]
+    async fn a_second_round_shows_what_the_first_rounds_cliff_cut() {
+        let mut core = test_core().await;
+        core.embedder = std::sync::Arc::new(Keyed);
+        core.follow_up = Some(Counting::saying(r#"{"need": "beta"}"#));
+        seed_two_topics(&core).await;
+
+        let (mut rounds, mut shown) = (vec![], vec![]);
+        let s = core.ask_events(&req("alpha"), Door::Api);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            if let AskEvent::Retrieved {
+                round, shown: n, ..
+            } = ev.unwrap()
+            {
+                rounds.push(round);
+                shown.push(n);
+            }
+        }
+        assert_eq!(rounds, vec![1, 2]);
+        assert!(
+            shown[0] < 6,
+            "round one already had everything, so round two proves nothing: {shown:?}"
+        );
+
+        let out = core.ask(&req("alpha"), Door::Api).await.unwrap();
+        let ids: std::collections::HashSet<&str> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 6, "the second round did not add its half");
+        assert_eq!(
+            out.dropped, 0,
+            "an artifact the model was shown was reported missing"
+        );
     }
 
     /// A follow-up that fails must never fail the ask: the operator asked a
