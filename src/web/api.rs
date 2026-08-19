@@ -804,7 +804,6 @@ async fn patch_artifact(
                 created_at: chunk.created_at,
                 last_seen_at: None,
                 hit_count: None,
-                superseded: None,
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,

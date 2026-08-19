@@ -364,11 +364,6 @@ mod tests {
             cfg.consolidate.max_dedupe_per_tick > 0 && cfg.consolidate.dedupe_interval_mins > 0,
             "the pass must have a rate, or it either never runs or is unbounded"
         );
-        assert_eq!(
-            cfg.consolidate.merge_max_roots, None,
-            "the fan-in cap is deprecated; shipping a value for it turns a key \
-             that changes nothing into one a reader expects to work"
-        );
     }
 
     #[tokio::test]

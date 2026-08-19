@@ -92,9 +92,8 @@ pub fn encode(sig: &[u64]) -> String {
     serde_json::to_string(sig).unwrap_or_else(|_| "[]".into())
 }
 
-/// A column written by an older version, or corrupted, yields no signature
-/// rather than an error: the corpus simply is not compared, which is exactly
-/// the behaviour before this existed.
+/// An absent or corrupted column yields no signature rather than an error: the
+/// corpus simply is not compared.
 pub fn decode(s: &str) -> Vec<u64> {
     serde_json::from_str(s).unwrap_or_default()
 }

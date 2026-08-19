@@ -27,19 +27,10 @@ pub struct VectorPayload {
     /// but rarely-queried artifact never gets the chance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_count: Option<i64>,
-    /// Set when this artifact lost a near-identical pair to a newer one. Kept
-    /// for filter backward-compatibility now that `status` is the source of
-    /// truth for the same thing — see `SearchFilter`. Like `last_seen_at`, it
-    /// is omitted when unset so a writer which does not know the value — the
-    /// embed job rebuilding a payload — leaves the stored one alone rather
-    /// than reviving a hidden artifact.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub superseded: Option<bool>,
     /// Active, deprecated, or superseded. Mirrors the SQLite source of truth
     /// (`store::artifacts::Chunk::status`). Omitted when unset for the same
     /// merge-write reason as `last_seen_at`; absent is treated as active by
-    /// every filter, so a point written before this field existed is not
-    /// hidden until backfilled.
+    /// every filter, which is what a hand-written point carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ArtifactStatus>,
     /// When this artifact was last confirmed accurate. What search ranking's
@@ -184,17 +175,17 @@ impl Touch {
 /// What a point's payload says about its lifecycle, as the drift repair reads
 /// it back. A point missing from a `lifecycle_of` answer is simply absent from
 /// the map; an absent `status` key reads as `Active`, which is how every filter
-/// treats a point written before lifecycle tracking existed.
+/// treats it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredLifecycle {
     pub status: ArtifactStatus,
     pub superseded_by: Option<String>,
 }
 
-/// One artifact's SQLite-side lifecycle state, as the backfill pushes it into
-/// the vector store. `last_verified_at` is never optional here: the backfill's
-/// whole job is to give every point the stamp that ranking decays against, and
-/// an artifact never explicitly verified falls back to its `created_at`.
+/// One artifact's SQLite-side lifecycle state, as the drift repair pushes it
+/// into the vector store. `last_verified_at` is never optional here: ranking
+/// decays against that stamp, and an artifact never explicitly verified falls
+/// back to its `created_at`.
 #[derive(Debug, Clone)]
 pub struct LifecycleRow {
     pub artifact_id: String,
@@ -211,15 +202,9 @@ pub trait VectorStore: Send + Sync {
     /// category changes nothing the embedding model saw, so re-embedding for it
     /// would spend an inference call to arrive at the same vector.
     async fn set_payload(&self, payload: &VectorPayload) -> Result<()>;
-    /// Hide or unhide one artifact. A payload write, not a re-embed: which
-    /// artifact won a near-identical pair changes nothing the embedding model
-    /// saw.
-    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()>;
     /// Set an artifact's lifecycle status (and, for `Superseded`, the winner
-    /// it was replaced by). A payload write, not a re-embed, for the same
-    /// reason as `set_superseded` — also derives and writes the legacy
-    /// `superseded: bool` flag so `build_filter`'s pre-backfill safety net
-    /// keeps working.
+    /// it was replaced by). A payload write, not a re-embed: which artifact won
+    /// a near-identical pair changes nothing the embedding model saw.
     async fn set_lifecycle(
         &self,
         artifact_id: &str,
@@ -231,7 +216,7 @@ pub trait VectorStore: Send + Sync {
     ///
     /// `reset_hits` also zeroes `hit_count`, because `stale_max_hits` counts
     /// retrievals *since* the last verification. An operator verifying an
-    /// artifact passes `true`; the one-shot backfill passes `false`, since it
+    /// artifact passes `true`; a bulk lifecycle write passes `false`, since it
     /// stamps every artifact and would otherwise wipe every counter.
     async fn set_last_verified_at(
         &self,
@@ -246,11 +231,10 @@ pub trait VectorStore: Send + Sync {
     /// higher, so it cannot create a popularity feedback loop.
     ///
     /// A point with no `last_verified_at` at all is *not* a candidate. Missing
-    /// means unknown, not stale: every point predates the backfill until it
-    /// runs, and treating those as maximally stale would fill the review list
-    /// with an arbitrary sample of the whole base and invite an operator to
-    /// deprecate it. A missing `hit_count` is different — never retrieved is a
-    /// fact the absent key states correctly — so it counts as zero.
+    /// means unknown, not stale, and treating those as maximally stale would
+    /// invite an operator to deprecate points nothing knows anything about. A
+    /// missing `hit_count` is different — never retrieved is a fact the absent
+    /// key states correctly — so it counts as zero.
     async fn stale_candidates(
         &self,
         older_than: i64,
@@ -272,22 +256,9 @@ pub trait VectorStore: Send + Sync {
     /// every target; `hit_count` only for the ones marked `counts_as_hit`.
     async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()>;
     /// Push a batch of artifacts' SQLite-side lifecycle state into the store,
-    /// as one request rather than one per artifact per field. What the
-    /// migration backfill runs on; also what the sweep's drift repair uses.
+    /// as one request rather than one per artifact per field. What the sweep's
+    /// drift repair uses.
     async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()>;
-    /// How many points carry no `last_verified_at`, i.e. still need the
-    /// lifecycle backfill. Startup reads this to decide whether to run it,
-    /// rather than making an operator remember a flag.
-    ///
-    /// Points with no `artifact_id` are excluded, and that exclusion is what
-    /// makes "run the backfill once" true. The backfill stamps artifacts, so a
-    /// point naming none can never be stamped by it — counting those meant the
-    /// number never reached zero and every process start kicked off another
-    /// full-base rewrite. Such a point can come from a hand-populated
-    /// collection or a `--reindex` over one, it is invisible to search anyway
-    /// (its payload will not parse as a chunk), and it is left alone rather than
-    /// deleted: nothing here knows what it is.
-    async fn unstamped_count(&self) -> Result<u64>;
     /// What these artifacts' payloads currently say about their lifecycle. Ids
     /// with no point are absent from the answer.
     ///
@@ -303,12 +274,11 @@ pub trait VectorStore: Send + Sync {
     /// the one caller is the heal, which is already a pass over the whole base
     /// and compares this against SQLite in both directions.
     ///
-    /// A point whose payload carries no `artifact_id` at all cannot appear here
-    /// and is not counted by `unstamped_count` either — see that method. It is
-    /// not an engram point and nothing can be said about it.
+    /// A point whose payload carries no `artifact_id` at all cannot appear
+    /// here. It is not an engram point and nothing can be said about it.
     async fn all_artifact_ids(&self) -> Result<Vec<String>>;
-    /// The full stored payloads for these ids. Ids with no point are absent
-    /// from the answer. What the lifecycle backfill stamps an orphan point from.
+    /// The full stored payloads for these ids, as the store holds them. Ids
+    /// with no point are absent from the answer.
     async fn payloads_of(
         &self,
         artifact_ids: &[String],

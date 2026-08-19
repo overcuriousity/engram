@@ -1,21 +1,12 @@
 -- The whole database, in one place.
 --
--- engram had thirteen incremental migrations. They existed to carry a running
--- instance from one shape to the next, and while the project is in testing
--- there is no such instance: every database is created from nothing. A chain
--- of diffs is then thirteen files describing a schema none of them states, so
--- this file states it instead.
+-- One statement of what the schema is, rather than a chain of diffs describing
+-- how it came to be. Every database is created from nothing by this file.
 --
 -- Applied on every connect, which is why every object is IF NOT EXISTS. It
 -- creates what is missing and leaves what is there alone; it does not alter an
 -- existing table. Changing a column means changing it here and recreating the
 -- database.
---
--- Because it cannot alter a table, `migrate` reads the columns back out of this
--- file and checks them against the database afterwards. A table that predates a
--- column added here would otherwise survive startup and panic later, in a
--- request, on a column nothing ever added. One column per line is what that
--- check parses, so keep it that way.
 
 -- ── Corpora ──────────────────────────────────────────────────────────────────
 -- A captured source in full. The raw text is kept verbatim and forever: every
@@ -33,8 +24,7 @@ CREATE TABLE IF NOT EXISTS corpora (
   -- Fraction of the corpus that reached an artifact. A window the synthesizer
   -- never managed leaves a hole, and this is how the hole stays visible.
   coverage        REAL,
-  -- Bottom-k shingle hashes of raw_text, for near-duplicate detection. Empty
-  -- for corpora captured before the column existed.
+  -- Bottom-k shingle hashes of raw_text, for near-duplicate detection.
   shingles        TEXT,
   near_dupe_of    TEXT,
   near_dupe_score REAL,
@@ -117,11 +107,6 @@ CREATE TABLE IF NOT EXISTS artifacts (
   caveats          TEXT NOT NULL DEFAULT '[]',
   status           TEXT NOT NULL DEFAULT 'active',
   last_verified_at INTEGER,
-  -- Stamped once the vector payload has been brought back into step with this
-  -- row after the category fold. SQLite is migrated on connect and Qdrant has
-  -- no such hook, so the repair runs from the housekeeping page and uses this
-  -- to know what it has already done.
-  payload_synced_at INTEGER,
   activation       REAL    NOT NULL DEFAULT 1.0,
   -- Current accessibility above is raised by being captured, retrieved,
   -- opened and confirmed; read through the same lazy decay as a link's
@@ -233,14 +218,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- and then sorts them in a temp B-tree on every poll. This walks `state`,
 -- `attempts`, `id` in claim order, tests `run_after` on each entry, and stops
 -- at the first row that is ready — covering, and no sort.
---
--- Dropped by its old name rather than widened in place. `migrate` applies this
--- file to every database on every start, and `CREATE INDEX IF NOT EXISTS` on a
--- name that already exists is a silent no-op, so a deployment carrying an
--- earlier version of this index would have kept it. The drop is how an existing
--- base actually picks the new one up.
-DROP INDEX IF EXISTS idx_jobs_ready;
-DROP INDEX IF EXISTS idx_jobs_claim;
 CREATE INDEX IF NOT EXISTS idx_jobs_claim2  ON jobs(state, attempts, seq, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 

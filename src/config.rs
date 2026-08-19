@@ -74,10 +74,6 @@ pub struct PacingConfig {
     /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
     /// and the pacer exists to protect the GPU from batch work, not from them.
     pub cooldown_secs: u64,
-    /// Retired. The turn serialises calls and the job queue backs off.
-    pub breaker_after: Option<usize>,
-    /// Retired.
-    pub breaker_probe_secs: Option<u64>,
 }
 
 /// Recording real searches so they can be judged later.
@@ -237,17 +233,6 @@ pub struct ConsolidateConfig {
     /// Zero switches the model off entirely: pairs are still found, recorded and
     /// clustered — all of which is free — and nothing is ever asked about.
     pub max_dedupe_per_tick: usize,
-    /// Deprecated and unread. Kept for one release so that an existing config
-    /// file still loads.
-    ///
-    /// It capped how many captured roots one merged artifact could be written
-    /// from, and a component past it was settled `Oversized` — terminal, and
-    /// reached before any call was made. The default of eight was never typed
-    /// by anyone and switched merging off for every cluster past eight sources;
-    /// sixteen pairs sat refused with no attempt against them. The unit merges
-    /// two artifacts at a time now and lets the results be merged again, so
-    /// fan-in is not something one call has to survive.
-    pub merge_max_roots: Option<usize>,
     /// An active artifact not confirmed accurate (`last_verified_at`) in this
     /// many days becomes a deprecation-review candidate — never anything more
     /// automatic than that. See `stale_max_hits`.
@@ -258,23 +243,6 @@ pub struct ConsolidateConfig {
     /// to the candidate list — it never feeds search scoring, or a frequently
     /// shown result would keep boosting its own visibility.
     pub stale_max_hits: i64,
-
-    /// Retired. Read only so that `judge = false` can be carried across rather
-    /// than ignored, and so an operator is told where the setting went.
-    ///
-    /// It gated whether the model was asked at all, which is now
-    /// `max_dedupe_per_tick = 0`. Left unread it would parse without complaint,
-    /// and the operator who had switched the only inference-costing stage off
-    /// would be given an autonomous one instead — a setting that hides
-    /// artifacts, arriving by upgrade, from a file that says the opposite.
-    pub judge: Option<bool>,
-    /// Retired. A number per 24-hour tick was a budget only while the sweep was
-    /// the only producer of pairs; see `max_dedupe_per_tick`, which is a rate.
-    pub max_judgements: Option<usize>,
-    /// Retired. Detection is per artifact now, not a sampled sweep.
-    pub sample: Option<usize>,
-    /// Retired. Every verdict is acted on; every merge and supersede has undo.
-    pub autonomous: Option<bool>,
 }
 
 impl Default for ConsolidateConfig {
@@ -288,13 +256,8 @@ impl Default for ConsolidateConfig {
             interval_hours: 24,
             dedupe_interval_mins: 15,
             max_dedupe_per_tick: 5,
-            merge_max_roots: None,
             stale_after_days: 365,
             stale_max_hits: 0,
-            judge: None,
-            max_judgements: None,
-            sample: None,
-            autonomous: None,
         }
     }
 }
@@ -396,15 +359,11 @@ pub struct InferConfig {
     pub ask: AskRole,
     pub rerank: Option<RerankRole>,
     pub vision: Option<VisionRole>,
-    /// Emitted by `normalize`. Collected here rather than logged during
-    /// deserialization because a `TryFrom` runs before the subscriber is up,
-    /// and a warning written to nowhere is the same as no warning.
-    pub legacy_warnings: Vec<String>,
 }
 
 /// The file's shape, before tiers are folded into the roles. Every endpoint
 /// field on a role is optional here: it comes from the tier unless the role
-/// overrides it, and in the legacy shape the role carries it directly.
+/// overrides it.
 #[derive(Debug, Deserialize)]
 pub struct RawInferConfig {
     #[serde(default)]
@@ -420,8 +379,7 @@ pub struct RawInferConfig {
 
 #[derive(Debug, Deserialize)]
 struct RawSynthesizeRole {
-    #[serde(default)]
-    tier: Option<String>,
+    tier: String,
     #[serde(default)]
     base_url: Option<String>,
     #[serde(default)]
@@ -442,10 +400,6 @@ struct RawSynthesizeRole {
     structured_output: Option<bool>,
     // Role-only, unchanged.
     output_ratio: f32,
-    #[serde(default)]
-    tokenizer_path: Option<String>,
-    #[serde(default)]
-    cooldown_secs: Option<u64>,
     #[serde(default = "default_context_opening_tokens")]
     context_opening_tokens: usize,
     #[serde(default = "default_context_overlap_tokens")]
@@ -454,8 +408,7 @@ struct RawSynthesizeRole {
 
 #[derive(Debug, Deserialize)]
 struct RawAskRole {
-    #[serde(default)]
-    tier: Option<String>,
+    tier: String,
     #[serde(default)]
     base_url: Option<String>,
     #[serde(default)]
@@ -496,77 +449,28 @@ struct RawVisionRole {
     ceiling_param: Option<CeilingParam>,
 }
 
-/// What `[infer.synthesize]` and `[infer.ask]` can hand to a tier: every
-/// endpoint field they have.
-const ENDPOINT_KEYS: &str = "base_url, model, api_key, context_tokens and max_output_tokens";
-
-/// What `[infer.vision]` can hand to a tier, which is much less. `model` is
-/// required on the role and is never inherited — a vision model is the point of
-/// the block, not a property of the server — and `max_output_tokens` is
-/// deliberately not inherited either, so both have to stay where they are.
-const VISION_ENDPOINT_KEYS: &str = "base_url and api_key (model stays here: it is required on the role and \
-     never comes from a tier)";
-
-/// The endpoint a role runs on: the tier it names, or `None` when it carries
-/// one inline and the caller builds an anonymous tier from the role's own
-/// fields.
+/// The endpoint a role runs on: the tier it names.
 ///
 /// A name that matches nothing is refused rather than defaulted. What that
 /// prevents is a typo running every call of one role against a different model
 /// than the operator wrote down — a divergence no later stage could notice,
 /// let alone report.
-///
-/// `movable_keys` is the caller's because the roles do not share one list. A
-/// migration warning is an instruction someone follows literally, and telling
-/// `[infer.vision]` to move its `model` into a tier would delete the one key it
-/// requires and cannot inherit — the block would stop loading. A shim that
-/// warns instead of refusing has nothing to offer but the accuracy of the
-/// sentence.
 fn resolve_endpoint(
     role: &str,
-    tier_name: Option<&str>,
+    tier_name: &str,
     tiers: &HashMap<String, TierConfig>,
-    inline_base_url: Option<&str>,
-    movable_keys: &str,
-    warnings: &mut Vec<String>,
-) -> Result<Option<TierConfig>, String> {
-    if let Some(name) = tier_name {
-        return tiers.get(name).cloned().map(Some).ok_or_else(|| {
-            let mut known: Vec<&str> = tiers.keys().map(String::as_str).collect();
-            known.sort_unstable();
-            format!(
-                "[infer.{role}] points at tier `{name}`, which is not defined. \
-                 Known tiers: {}. Define it under [infer.tiers.{name}].",
-                if known.is_empty() {
-                    "none".to_string()
-                } else {
-                    known.join(", ")
-                }
-            )
-        });
-    }
-    if inline_base_url.is_some() {
-        warnings.push(format!(
-            "[infer.{role}] carries its endpoint inline. Move {movable_keys} into an \
-             [infer.tiers.<name>] block and write `tier = \"<name>\"` here. The inline form \
-             still works and will be removed."
-        ));
-        return Ok(None);
-    }
-    Err(format!(
-        "[infer.{role}] has neither `tier` nor `base_url`. Point it at an \
-         [infer.tiers.<name>] block."
-    ))
-}
-
-/// A field the inline shape has always required. Named here rather than left
-/// to serde's `missing field`, because the same key is legal to omit in the
-/// tiered shape and the message has to say which of the two is short.
-fn required<T>(v: Option<T>, role: &str, field: &str) -> Result<T, String> {
-    v.ok_or_else(|| {
+) -> Result<TierConfig, String> {
+    tiers.get(tier_name).cloned().ok_or_else(|| {
+        let mut known: Vec<&str> = tiers.keys().map(String::as_str).collect();
+        known.sort_unstable();
         format!(
-            "[infer.{role}] carries its endpoint inline but is missing `{field}`. \
-             Add it, or point the role at an [infer.tiers.<name>] block that has it."
+            "[infer.{role}] points at tier `{tier_name}`, which is not defined. \
+             Known tiers: {}. Define it under [infer.tiers.{tier_name}].",
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
         )
     })
 }
@@ -575,35 +479,10 @@ impl TryFrom<RawInferConfig> for InferConfig {
     type Error = String;
 
     fn try_from(raw: RawInferConfig) -> Result<Self, Self::Error> {
-        let mut legacy_warnings = Vec::new();
         let tiers = &raw.tiers;
 
         let s = raw.synthesize;
-        let st = match resolve_endpoint(
-            "synthesize",
-            s.tier.as_deref(),
-            tiers,
-            s.base_url.as_deref(),
-            ENDPOINT_KEYS,
-            &mut legacy_warnings,
-        )? {
-            Some(t) => t,
-            None => TierConfig {
-                base_url: required(s.base_url.clone(), "synthesize", "base_url")?,
-                model: required(s.model.clone(), "synthesize", "model")?,
-                api_key: s.api_key.clone(),
-                context_tokens: required(s.context_tokens, "synthesize", "context_tokens")?,
-                max_output_tokens: required(
-                    s.max_output_tokens,
-                    "synthesize",
-                    "max_output_tokens",
-                )?,
-                timeout_secs: default_timeout_secs(),
-                reasoning_effort: None,
-                ceiling_param: None,
-                structured_output: default_true(),
-            },
-        };
+        let st = resolve_endpoint("synthesize", &s.tier, tiers)?;
         let synthesize = SynthesizeRole {
             base_url: s.base_url.unwrap_or(st.base_url),
             model: s.model.unwrap_or(st.model),
@@ -611,52 +490,21 @@ impl TryFrom<RawInferConfig> for InferConfig {
             context_tokens: s.context_tokens.unwrap_or(st.context_tokens),
             max_output_tokens: s.max_output_tokens.unwrap_or(st.max_output_tokens),
             output_ratio: s.output_ratio,
-            tokenizer_path: s.tokenizer_path,
             reasoning_effort: s.reasoning_effort.or(st.reasoning_effort),
             ceiling_param: s.ceiling_param.or(st.ceiling_param),
             timeout_secs: s.timeout_secs.unwrap_or(st.timeout_secs),
             structured_output: s.structured_output.unwrap_or(st.structured_output),
-            cooldown_secs: s.cooldown_secs,
             context_opening_tokens: s.context_opening_tokens,
             context_overlap_tokens: s.context_overlap_tokens,
         };
 
         let a = raw.ask;
-        let at = match resolve_endpoint(
-            "ask",
-            a.tier.as_deref(),
-            tiers,
-            a.base_url.as_deref(),
-            ENDPOINT_KEYS,
-            &mut legacy_warnings,
-        )? {
-            Some(t) => t,
-            None => TierConfig {
-                base_url: required(a.base_url.clone(), "ask", "base_url")?,
-                model: required(a.model.clone(), "ask", "model")?,
-                api_key: a.api_key.clone(),
-                context_tokens: required(a.context_tokens, "ask", "context_tokens")?,
-                // The inline shape has always defaulted this rather than
-                // requiring it, and a refactor is the wrong place to stop.
-                max_output_tokens: default_ask_max_output_tokens(),
-                timeout_secs: default_timeout_secs(),
-                reasoning_effort: None,
-                ceiling_param: None,
-                structured_output: default_true(),
-            },
-        };
+        let at = resolve_endpoint("ask", &a.tier, tiers)?;
         // Resolved here rather than where it is used, so a typo in the name is
         // a startup failure like every other tier name instead of a surprise on
         // the first question someone asks.
         let follow_up_endpoint = match a.follow_up_tier.as_deref() {
-            Some(name) => resolve_endpoint(
-                "ask.follow_up_tier",
-                Some(name),
-                tiers,
-                None,
-                ENDPOINT_KEYS,
-                &mut legacy_warnings,
-            )?,
+            Some(name) => Some(resolve_endpoint("ask.follow_up_tier", name, tiers)?),
             None => None,
         };
         let ask = AskRole {
@@ -681,27 +529,8 @@ impl TryFrom<RawInferConfig> for InferConfig {
             None => None,
             Some(v) => {
                 let vt = match v.tier.as_deref() {
-                    Some(name) => resolve_endpoint(
-                        "vision",
-                        Some(name),
-                        tiers,
-                        None,
-                        VISION_ENDPOINT_KEYS,
-                        &mut legacy_warnings,
-                    )?,
-                    None => {
-                        if v.base_url.is_some() {
-                            resolve_endpoint(
-                                "vision",
-                                None,
-                                tiers,
-                                v.base_url.as_deref(),
-                                VISION_ENDPOINT_KEYS,
-                                &mut legacy_warnings,
-                            )?;
-                        }
-                        None
-                    }
+                    Some(name) => Some(resolve_endpoint("vision", name, tiers)?),
+                    None => None,
                 };
                 Some(VisionRole {
                     model: v.model,
@@ -736,7 +565,6 @@ impl TryFrom<RawInferConfig> for InferConfig {
             ask,
             rerank: raw.rerank,
             vision,
-            legacy_warnings,
         })
     }
 }
@@ -769,9 +597,6 @@ pub struct SynthesizeRole {
     pub context_tokens: usize,
     pub max_output_tokens: usize,
     pub output_ratio: f32,
-    /// Retired: budgets use the character estimate.
-    #[serde(default)]
-    pub tokenizer_path: Option<String>,
     /// Sent as `reasoning_effort` when set. A reasoning model spends output
     /// budget thinking before it writes any JSON, and that budget is the same
     /// one the chunk list has to fit in — on a small local model the thinking
@@ -799,16 +624,6 @@ pub struct SynthesizeRole {
     /// Governs the dedupe judge as well, which runs on this endpoint.
     #[serde(default = "default_true")]
     pub structured_output: bool,
-    /// Moved to `[pacing]`, and kept here only to be complained about.
-    ///
-    /// Pacing is one queue in front of one endpoint now, so a cooldown per role
-    /// could never bound the total load — several roles each honouring their own
-    /// still interleave into unbroken work. Nothing reads this, and without the
-    /// field the operator's thermal pacing would parse cleanly and silently stop
-    /// happening: unknown keys are ignored, which is right for forward
-    /// compatibility and wrong for a setting someone chose on purpose.
-    #[serde(default)]
-    pub cooldown_secs: Option<u64>,
     /// Tokens of the document's verbatim opening prepended to every window, so
     /// an artifact from deep in a long document still knows what product and
     /// version it belongs to. Zero disables it.
@@ -1156,63 +971,12 @@ impl Config {
             )
             .build()?;
         let mut cfg: Config = raw.try_deserialize()?;
-        cfg.carry_retired_keys();
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
-        cfg.warn_on_moved_keys();
+        cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
         Ok(cfg)
-    }
-
-    /// A retired key still says what its operator wanted, and is honoured where
-    /// something current can carry it.
-    ///
-    /// `judge` gated whether the dedupe pass was asked anything at all. That
-    /// file is the record of an operator declining the one stage that spends
-    /// inference and hides artifacts, so it is carried to the setting that
-    /// means the same thing now.
-    ///
-    /// `max_judgements` has no successor to carry to — a count per tick and a
-    /// rate are not the same quantity — so it is only named.
-    fn carry_retired_keys(&mut self) {
-        match self.consolidate.judge {
-            Some(false) => {
-                self.consolidate.max_dedupe_per_tick = 0;
-                tracing::warn!(
-                    "consolidate.judge has been retired; reading judge = false as \
-                     max_dedupe_per_tick = 0, which is what stops the dedupe pass \
-                     asking anything now."
-                );
-            }
-            Some(true) => tracing::warn!(
-                "consolidate.judge has been retired and is being ignored; \
-                 max_dedupe_per_tick decides how many groups are asked about per tick"
-            ),
-            None => {}
-        }
-        if let Some(n) = self.consolidate.max_judgements {
-            tracing::warn!(
-                was = n,
-                interval_mins = self.consolidate.dedupe_interval_mins,
-                per_tick = self.consolidate.max_dedupe_per_tick,
-                "consolidate.max_judgements has been retired and is being ignored; \
-                 the budget is a rate now — see dedupe_interval_mins and max_dedupe_per_tick"
-            );
-        }
-        if self.consolidate.sample.is_some() {
-            tracing::warn!(
-                "consolidate.sample has been retired and is being ignored; every artifact \
-                 looks for its own duplicates when it is indexed"
-            );
-        }
-        if self.consolidate.autonomous.is_some() {
-            tracing::warn!(
-                "consolidate.autonomous has been retired and is being ignored; every verdict \
-                 is acted on, and every merge and supersede has an undo. \
-                 max_dedupe_per_tick = 0 is what stops the pass asking"
-            );
-        }
     }
 
     /// Values that would make a feature quietly useless, put back rather than
@@ -1235,9 +999,6 @@ impl Config {
     /// legal search already costs: `MAX_LIMIT` results over-fetched by the
     /// candidate multiplier.
     fn normalize(&mut self) {
-        for w in &self.infer.legacy_warnings {
-            tracing::warn!("{w}");
-        }
         if self.feedback.candidates == 0 {
             let d = FeedbackConfig::default().candidates;
             self.feedback.candidates = d;
@@ -1256,12 +1017,6 @@ impl Config {
                  capping it at the widest ordinary search"
             );
             self.feedback.candidates = ceiling;
-        }
-        if self.consolidate.merge_max_roots.is_some() {
-            tracing::warn!(
-                "consolidate.merge_max_roots is deprecated and ignored: merging is \
-                 pairwise now, so there is no fan-in for one call to survive"
-            );
         }
         // The association widths multiply each other on the search path to
         // size one SQL `LIMIT`, and `interval_mins` is multiplied by sixty to
@@ -1333,30 +1088,10 @@ impl Config {
         Ok(())
     }
 
-    /// A setting that moved is a setting that stopped working, and an unknown
-    /// key parses without complaint. Say so once at startup rather than letting
-    /// an operator discover the pacing they configured has been off since the
-    /// upgrade.
-    fn warn_on_moved_keys(&self) {
-        if self.pacing.breaker_after.is_some() || self.pacing.breaker_probe_secs.is_some() {
-            tracing::warn!(
-                "pacing.breaker_after / breaker_probe_secs have been retired and are being \
-                 ignored; one background call runs at a time and a failing unit backs off"
-            );
-        }
-        if self.infer.synthesize.tokenizer_path.is_some() {
-            tracing::warn!(
-                "infer.synthesize.tokenizer_path has been retired and is being ignored; \
-                 token budgets use the character estimate"
-            );
-        }
-        if self.infer.synthesize.cooldown_secs.is_some() {
-            tracing::warn!(
-                "infer.synthesize.cooldown_secs has moved to [pacing].cooldown_secs and is \
-                 being ignored; pacing is one gap in front of one endpoint now, so it can no \
-                 longer be set per role"
-            );
-        }
+    /// Two switches that only mean something together: say so once at startup
+    /// rather than letting an operator discover the association pass has been
+    /// idle since they turned recording off.
+    fn warn_on_inert_settings(&self) {
         if self.associate.enabled && !self.feedback.enabled {
             tracing::warn!(
                 "associate.enabled has no effect while feedback.enabled is false: links are \
@@ -1564,22 +1299,6 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_cap_is_accepted_and_ignored() {
-        // The key stays parseable for one release so an existing config file
-        // still loads, and says nothing about how the sweep behaves. Left live,
-        // its default of eight quietly switched merging off for every cluster
-        // past eight sources.
-        let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            &dir,
-            &format!("{MINIMAL}\n[consolidate]\nmerge_max_roots = 1\n"),
-        );
-        let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(cfg.consolidate.merge_max_roots, Some(1));
-        assert_eq!(ConsolidateConfig::default().merge_max_roots, None);
-    }
-
-    #[test]
     fn a_zero_candidate_pool_is_put_back_to_the_default() {
         // Zero would store an empty pool for every captured search: nothing to
         // choose on any card, so every judgement is forced through "none of
@@ -1639,11 +1358,14 @@ path = "engram.db"
 url = "http://localhost:6334"
 collection = "chunks"
 
-[infer.synthesize]
+[infer.tiers.efficient]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768
 max_output_tokens = 8192
+
+[infer.synthesize]
+tier = "efficient"
 output_ratio = 1.4
 
 [infer.embed]
@@ -1653,9 +1375,7 @@ dim = 1024
 max_input_tokens = 8192
 
 [infer.ask]
-base_url = "http://localhost:8000/v1"
-model = "qwen"
-context_tokens = 32768
+tier = "efficient"
 
 [auth]
 mode = "local"
@@ -1691,30 +1411,14 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     }
 
     #[test]
-    fn an_operator_who_switched_the_judge_off_is_still_not_asked() {
-        // `judge = false` is the record of someone declining the one stage that
-        // spends inference and hides artifacts. It is carried to the key that
-        // stops the asking.
-        let _guard = env_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let p = write(&dir, &format!("{MINIMAL}\n[consolidate]\njudge = false\n"));
-        let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(
-            cfg.consolidate.max_dedupe_per_tick, 0,
-            "a config declining the model call was asked anyway"
-        );
-    }
-
-    #[test]
-    fn a_retired_key_does_not_stop_a_config_that_otherwise_works() {
-        // Named in the log, not refused. `max_judgements` has no successor to
-        // carry it to, and a server that will not start is a worse answer than
-        // one that says where the setting went.
+    fn an_unknown_key_does_not_stop_a_config_that_otherwise_works() {
+        // Unknown keys are ignored rather than refused: a server that will not
+        // start is a worse answer than one that runs on the keys it knows.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             &dir,
-            &format!("{MINIMAL}\n[consolidate]\nmax_judgements = 20\njudge = true\n"),
+            &format!("{MINIMAL}\n[consolidate]\nnot_a_setting = 20\n"),
         );
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
@@ -1944,13 +1648,11 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         Config::load(Some(&write(&dir, &format!("{body}{AUTH_TAIL}"))))
     }
 
-    /// The whole point of the rename: a role that names a tier and a role that
-    /// carries the same endpoint inline must produce the same completer settings.
-    /// If these ever diverge, an operator's migration silently changes their model.
+    /// A role takes its endpoint from the tier it names.
     #[test]
-    fn a_tier_and_an_inline_endpoint_resolve_to_the_same_role() {
+    fn a_role_resolves_its_endpoint_from_its_tier() {
         let _guard = env_guard();
-        let tiered = load_infer(
+        let cfg = load_infer(
             r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -1978,50 +1680,12 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         )
         .expect("tiered config parses");
 
-        let inline = load_infer(
-            r#"
-        [server]
-        bind = "127.0.0.1:8080"
-        [store]
-        path = "x.db"
-        [vector]
-        url = "http://localhost:6333"
-        collection = "engram"
-        [infer.synthesize]
-        base_url = "http://localhost:8000/v1"
-        model = "qwen"
-        context_tokens = 32768
-        max_output_tokens = 16384
-        output_ratio = 8.0
-        [infer.embed]
-        base_url = "http://localhost:8000/v1"
-        model = "bge-m3"
-        dim = 1024
-        max_input_tokens = 1024
-        [infer.ask]
-        base_url = "http://localhost:8000/v1"
-        model = "qwen"
-        context_tokens = 32768
-        max_output_tokens = 16384
-        "#,
-        )
-        .expect("the legacy shape still parses");
-
-        assert_eq!(
-            tiered.infer.synthesize.base_url,
-            inline.infer.synthesize.base_url
-        );
-        assert_eq!(tiered.infer.synthesize.model, inline.infer.synthesize.model);
-        assert_eq!(
-            tiered.infer.synthesize.context_tokens,
-            inline.infer.synthesize.context_tokens
-        );
-        assert_eq!(
-            tiered.infer.synthesize.max_output_tokens,
-            inline.infer.synthesize.max_output_tokens
-        );
-        assert_eq!(tiered.infer.ask.base_url, inline.infer.ask.base_url);
-        assert_eq!(tiered.infer.ask.model, inline.infer.ask.model);
+        assert_eq!(cfg.infer.synthesize.base_url, "http://localhost:8000/v1");
+        assert_eq!(cfg.infer.synthesize.model, "qwen");
+        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(cfg.infer.ask.base_url, "http://localhost:8000/v1");
+        assert_eq!(cfg.infer.ask.model, "qwen");
     }
 
     /// A role may override any field its tier defines. Without this the two tiers
@@ -2108,56 +1772,8 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert!(err.contains("efficient"), "and what was available: {err}");
     }
 
-    /// The legacy shape is accepted, but never silently: an operator must be told
-    /// what to write instead. Same reasoning as `SynthesizeRole::cooldown_secs`.
-    #[test]
-    fn the_legacy_shape_records_a_warning_naming_its_replacement() {
-        let _guard = env_guard();
-        let cfg = load_infer(
-            r#"
-        [server]
-        bind = "127.0.0.1:8080"
-        [store]
-        path = "x.db"
-        [vector]
-        url = "http://localhost:6333"
-        collection = "engram"
-        [infer.synthesize]
-        base_url = "http://localhost:8000/v1"
-        model = "qwen"
-        context_tokens = 32768
-        max_output_tokens = 16384
-        output_ratio = 8.0
-        [infer.embed]
-        base_url = "http://localhost:8000/v1"
-        model = "bge-m3"
-        dim = 1024
-        max_input_tokens = 1024
-        [infer.ask]
-        base_url = "http://localhost:8000/v1"
-        model = "qwen"
-        context_tokens = 32768
-        max_output_tokens = 16384
-        "#,
-        )
-        .unwrap();
-        assert_eq!(cfg.infer.legacy_warnings.len(), 2, "one per inline role");
-        assert!(
-            cfg.infer
-                .legacy_warnings
-                .iter()
-                .any(|w| w.contains("infer.synthesize"))
-        );
-        assert!(
-            cfg.infer
-                .legacy_warnings
-                .iter()
-                .any(|w| w.contains("infer.tiers"))
-        );
-    }
-
-    /// The example config is the migration's own documentation, so it has to be
-    /// the shape being migrated *to* — and resolve to what it resolved to before.
+    /// The example config is the documentation, so it has to be the shape the
+    /// parser accepts and resolve to what the roles expect.
     #[test]
     fn the_example_config_reaches_its_endpoints_through_tiers() {
         let text = std::fs::read_to_string("config.example.toml").unwrap();
@@ -2166,11 +1782,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "the example must show a tier"
         );
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        assert!(
-            cfg.infer.legacy_warnings.is_empty(),
-            "the example config still carries an inline endpoint: {:?}",
-            cfg.infer.legacy_warnings
-        );
         assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
         assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(cfg.infer.ask.context_tokens, 32768);
@@ -2239,19 +1850,13 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "the tier's 16384 is sized for the segmenter; a description is \
              stored as a corpus and keeps its own bound"
         );
-        assert!(
-            cfg.infer.legacy_warnings.is_empty(),
-            "a fully tiered config has nothing to migrate: {:?}",
-            cfg.infer.legacy_warnings
-        );
         assert!(!cfg.redacted().contains("tier-key"), "tier key leaked");
     }
 
-    /// A vision block with no endpoint at all is the documented common case —
-    /// one server hosting a multimodal model — not a legacy shape. Warning
-    /// about it would train operators to ignore the warning that matters.
+    /// A vision block with no endpoint at all is the documented common case:
+    /// one server hosting a multimodal model too.
     #[test]
-    fn a_vision_role_borrowing_the_synthesize_endpoint_is_not_a_legacy_shape() {
+    fn a_vision_role_borrowing_the_synthesize_endpoint_is_the_common_case() {
         let _guard = env_guard();
         let cfg = load_infer(&format!("{TIERED}\n[infer.vision]\nmodel = \"qwen-vl\"\n")).unwrap();
         let v = cfg.infer.vision.as_ref().expect("configured");
@@ -2268,41 +1873,17 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             v.resolve(&cfg.infer.synthesize).0,
             cfg.infer.synthesize.base_url
         );
-        assert!(
-            cfg.infer.legacy_warnings.is_empty(),
-            "borrowing the synthesize endpoint is not something to migrate: {:?}",
-            cfg.infer.legacy_warnings
-        );
     }
 
-    /// The migration warning is an instruction someone follows literally, so
-    /// per role it must name only the keys that role can actually move. Told to
-    /// move `model` out of `[infer.vision]`, an operator would delete the one
-    /// key the block requires and cannot inherit, and vision would stop loading
-    /// entirely — a shim doing more damage than the shape it deprecates.
+    /// A vision block may name its own endpoint directly, for the case where a
+    /// separate server serves the images.
     #[test]
-    fn the_vision_warning_names_only_the_keys_vision_can_move() {
+    fn a_vision_role_may_carry_its_own_endpoint() {
         let _guard = env_guard();
         let cfg = load_infer(&format!(
             "{TIERED}\n[infer.vision]\nmodel = \"qwen-vl\"\nbase_url = \"http://vision:9000/v1\"\n"
         ))
         .unwrap();
-        assert_eq!(
-            cfg.infer.legacy_warnings.len(),
-            1,
-            "only vision carries an endpoint inline here"
-        );
-        let w = &cfg.infer.legacy_warnings[0];
-        assert!(w.contains("[infer.vision]"), "{w}");
-        assert!(w.contains("base_url and api_key"), "{w}");
-        assert!(
-            w.contains("model stays here"),
-            "the message has to say what not to move: {w}"
-        );
-        assert!(
-            !w.contains("context_tokens"),
-            "not a vision key at all: {w}"
-        );
         // And the endpoint it named is still the one it calls.
         let v = cfg.infer.vision.as_ref().expect("configured");
         assert_eq!(v.resolve(&cfg.infer.synthesize).0, "http://vision:9000/v1");

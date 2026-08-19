@@ -655,8 +655,7 @@ impl Core {
         self.store.set_last_verified_at(id, at).await?;
         if let Err(e) = self.vectors.set_last_verified_at(id, at, true).await {
             // A row that never had a stamp has nothing to roll back to, and
-            // clearing the column is not available here; the drift it leaves is
-            // the one the backfill already stamps.
+            // clearing the column is not available here.
             if let Some(previous) = previous
                 && let Err(undo) = self.store.set_last_verified_at(id, previous).await
             {
@@ -671,76 +670,6 @@ impl Core {
         }
         tracing::info!(artifact_id = id, "verified an artifact");
         Ok(())
-    }
-
-    /// Push every artifact's SQLite-side lifecycle state (source of truth) into
-    /// the vector store. Runs automatically at startup when any point is
-    /// missing its stamp, and on demand via `--backfill-lifecycle` — existing
-    /// points have no `status`/`last_verified_at` until it does, which every
-    /// filter safely treats as active in the meantime, just not yet filterable
-    /// as deprecated.
-    ///
-    /// Batched, and restartable by construction: the work is idempotent and
-    /// driven by a list SQLite regenerates, so a run that dies halfway is
-    /// resumed simply by running it again. One artifact that cannot be read is
-    /// logged and skipped rather than abandoning every artifact after it —
-    /// a single missing row must not be what keeps a base unbackfilled.
-    ///
-    /// A point whose row is gone is stamped from what its own payload says,
-    /// so it does not sit unstamped forever and re-trigger this on every
-    /// start; `heal_store_drift` then reports it.
-    pub async fn backfill_lifecycle(&self) -> Result<usize> {
-        const BATCH: usize = 256;
-        let ids = self.store.list_all_artifact_ids().await?;
-        let total = ids.len();
-        let mut n = 0;
-        for chunk in ids.chunks(BATCH) {
-            let mut rows = Vec::with_capacity(chunk.len());
-            for id in chunk {
-                match self.store.get_artifact(id).await {
-                    Ok(c) => rows.push(crate::vector::LifecycleRow {
-                        artifact_id: c.id.clone(),
-                        status: c.status,
-                        superseded_by: c.superseded_by.clone(),
-                        last_verified_at: c.last_verified_at.unwrap_or(c.created_at),
-                    }),
-                    Err(e) => {
-                        tracing::warn!(artifact_id = %id, error = %e, "skipped in the lifecycle backfill");
-                    }
-                }
-            }
-            self.vectors.apply_lifecycle(&rows).await?;
-            n += rows.len();
-            tracing::info!(done = n, total, "lifecycle backfill progress");
-        }
-        // Orphan points: stamp them as they stand, so the count this pass is
-        // triggered by can reach zero. Nothing about them is invented.
-        let has_row: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let orphans: Vec<String> = self
-            .vectors
-            .all_artifact_ids()
-            .await?
-            .into_iter()
-            .filter(|id| !has_row.contains(id.as_str()))
-            .collect();
-        if !orphans.is_empty() {
-            let rows: Vec<crate::vector::LifecycleRow> = self
-                .vectors
-                .payloads_of(&orphans)
-                .await?
-                .into_values()
-                .map(|p| crate::vector::LifecycleRow {
-                    artifact_id: p.artifact_id,
-                    status: p.status.unwrap_or(ArtifactStatus::Active),
-                    superseded_by: p.superseded_by,
-                    last_verified_at: p.last_verified_at.unwrap_or(p.created_at),
-                })
-                .collect();
-            self.vectors.apply_lifecycle(&rows).await?;
-        }
-        self.heal_store_drift().await?;
-        tracing::info!(n, "backfilled lifecycle fields into the vector store");
-        Ok(n)
     }
 
     /// Notice when the two stores disagree about which artifacts exist.
@@ -1732,7 +1661,6 @@ mod tests {
                     created_at: 0,
                     last_seen_at: None,
                     hit_count: None,
-                    superseded: None,
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
@@ -1836,7 +1764,6 @@ mod tests {
                 created_at: 0,
                 last_seen_at: None,
                 hit_count: None,
-                superseded: None,
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,

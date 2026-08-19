@@ -213,7 +213,7 @@ the file — the loader warns if it finds one.
 | `vector.pinned_boost` | Extra score for an artifact tagged `pinned`. Default 0.15. |
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
-| `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`, `cooldown_secs`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
+| `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
 | `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
@@ -231,10 +231,9 @@ Eight worth knowing:
   and ships **off**: a default here moves after the harness has run, not before.
   `follow_up_tier` puts that call on a cheaper tier than the answer it feeds,
   which is the whole reason tiers are named.
-- **A role may still carry its endpoint inline** instead of naming a tier.
-  That shape parses and warns, naming the block to write instead; it is not an
-  error, because making `tier` required would turn five keys you chose on
-  purpose into unknown keys and ignore them silently.
+- **`tier` is required** on `infer.synthesize` and `infer.ask`. An endpoint is
+  named once under `infer.tiers.<name>` and pointed at, so moving a role to
+  another model is one word.
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
   a way you would not notice for weeks.

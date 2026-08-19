@@ -49,8 +49,8 @@ pinned_boost = 0.15
 # rather than per role: two roles on one tier share a model by saying so, and a
 # role moves to another model by changing one word.
 #
-# A role may still carry base_url/model/context_tokens inline instead. That
-# shape still works and startup warns, naming the tier block to move it to.
+# `tier` is required on [infer.synthesize] and [infer.ask]: an endpoint is
+# defined once, under [infer.tiers.<name>], and the roles point at it.
 
 # Defaults here assume the case engram is built for: a small model on one
 # consumer GPU, answering in minutes rather than seconds. Against a hosted API
@@ -154,9 +154,7 @@ output_ratio = 8.0
 # Any tier field can be overridden here for this role alone, e.g. a shorter
 # ceiling than the tier's:
 # max_output_tokens = 8192
-# Pacing moved to `[pacing]` at the bottom of this file. A `cooldown_secs` here
-# is ignored, and engram says so at startup rather than letting the setting
-# quietly stop happening.
+# Pacing lives in `[pacing]` at the bottom of this file.
 # Tokens of the document's verbatim opening prepended to every window, so an
 # artifact from deep in a long document still knows what product, version and
 # platform it belongs to — which is what the caveats field asks for and what a
@@ -395,9 +393,7 @@ confirmed = 3.0
 
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
-# one GPU, so a per-role cooldown could not bound total load. Upgrading: this
-# replaces `cooldown_secs` under `[infer.synthesize]`, which is now ignored —
-# engram says so at startup if it finds one.
+# one GPU, so a per-role cooldown could not bound total load.
 [pacing]
 # Minimum seconds between the end of one background call and the start of the
 # next, and only one background call runs at a time however many workers are

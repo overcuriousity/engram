@@ -33,18 +33,17 @@ pub async fn run(core: &Core) -> Result<usize> {
             if c.near_dupe_of.is_some() {
                 continue;
             }
-            // A corpus with no window rows at all is deliberately left alone:
-            // its artifacts pre-date windows, and planning it would re-segment
-            // a document that is already fine. Capture arms the planning job;
-            // this sweep is for work that started and stopped.
+            // A corpus with no window rows at all is deliberately left alone —
+            // the placeholder corpora `heal_dangling_supersessions` writes are
+            // the case. Capture arms the planning job; this sweep is for work
+            // that started and stopped.
             let segments = core.store.segments_for_corpus(&c.id).await?;
             let unresolved: Vec<_> = segments
                 .iter()
                 .filter(|w| w.state != SegmentState::Done)
                 .collect();
             if !unresolved.is_empty() {
-                // Windows exist but their units may not: a database written
-                // before units existed has none at all, and a process killed
+                // Windows exist but their units may not: a process killed
                 // between two writes can be missing one. This is what makes a
                 // materialised queue safe — the units stay derivable from the
                 // rows that describe the work, so drift heals on a sweep rather
@@ -76,10 +75,9 @@ pub async fn run(core: &Core) -> Result<usize> {
             //
             // Windowless corpora are excluded here for the same reason they are
             // excluded from planning above, and it has to be said twice because
-            // the coverage test does not imply it: artifacts that pre-date
-            // windows have no coverage either, and so do the placeholder corpora
-            // `heal_dangling_supersessions` writes to give an orphaned artifact a
-            // parent. Settling one finds zero windows, decides everything is
+            // the coverage test does not imply it: the placeholder corpora
+            // `heal_dangling_supersessions` writes to give an orphaned artifact
+            // a parent have no coverage either. Settling one finds zero windows, decides everything is
             // resolved, and runs `finish` — which measures coverage against a
             // placeholder's empty source, logs that most of it is unclaimed, and
             // arms a `Title` unit. That last part is the expensive half: a model
@@ -150,10 +148,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_old_corpus_level_job_becomes_per_window_units() {
-        // The upgrade path. A database written before units existed holds one
-        // Synthesize row per unfinished corpus and no window units at all, so
-        // without this the windows would sit unsegmented until someone noticed.
+    async fn a_corpus_whose_window_units_are_gone_gets_them_back() {
+        // A process killed between planning the windows and arming their units
+        // leaves windows with nothing queued against them. Without this sweep
+        // they would sit unsegmented until someone noticed.
         let core = test_core().await;
         let body = (0..400)
             .map(|i| format!("paragraph {i} with filler text"))
@@ -162,7 +160,7 @@ mod tests {
         let out = core.ingest(&body, "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
 
-        // Wind the clock back to the old shape: windows, no units.
+        // Exactly what the crash leaves: windows, no units.
         sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
             .execute(&core.store.pool)
             .await
