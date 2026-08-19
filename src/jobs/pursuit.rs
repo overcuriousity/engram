@@ -115,9 +115,325 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Placeholder until the sweep lands in the next task.
-pub async fn run(_core: &Core) -> Result<usize> {
-    Ok(0)
+/// Cursor: the moment everything up to which has been grouped into pursuits.
+pub const PURSUIT_AFTER: &str = "pursuit.events_after";
+
+/// One clustered pursuit before a decision: what was asked, and what was done
+/// with the results.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Need {
+    pub queries: Vec<String>,
+    pub opened_at: i64,
+    pub last_at: i64,
+    /// A synthesized artifact led one of the lists above `weak_below`.
+    pub answered: bool,
+    /// A question was answered "not in the knowledge base".
+    pub abstained: bool,
+    /// Engagement weight per artifact, in first-engagement order.
+    pub engagement: Vec<(String, f64)>,
+    pub pivots: usize,
+    pub returns: usize,
+    /// Something opened or confirmed was a strong hit — at or above
+    /// `weak_below` — or a question cited it.
+    pub strong_engaged: bool,
+    /// Searches with nothing opened that were followed by another search.
+    pub refined: usize,
+    /// The last search opened nothing and nothing followed it.
+    pub abandoned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    Satisfied(String),
+    Unsatisfied(String),
+    /// One engaged artifact: its window, not a generation.
+    Promote(String),
+    Generate,
+}
+
+/// The analysis pass, in the spec's order. Pure: every input is in `Need`.
+pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
+    if n.answered {
+        return Decision::Satisfied("a synthesized artifact led the list".into());
+    }
+    let total: f64 = n.engagement.iter().map(|(_, w)| *w).sum();
+    let unsatisfied = !n.strong_engaged || n.refined >= 2 || n.abandoned || n.abstained;
+    if n.engagement.len() < min_sources {
+        if n.engagement.len() == 1 {
+            return Decision::Promote(n.engagement[0].0.clone());
+        }
+        return if unsatisfied {
+            Decision::Unsatisfied("nothing engaged".into())
+        } else {
+            Decision::Satisfied("nothing to assemble".into())
+        };
+    }
+    let assembled = total >= min_engagement;
+    let wanted = n.pivots + n.returns > 0;
+    if assembled && (unsatisfied || wanted) {
+        return Decision::Generate;
+    }
+    if unsatisfied {
+        Decision::Unsatisfied(format!("engaged {total:.1} below min_engagement"))
+    } else {
+        Decision::Satisfied("a strong hit was opened and searching stopped".into())
+    }
+}
+
+/// One event of either kind, as the sweep clusters it.
+struct Ev {
+    at: i64,
+    scope: Option<String>,
+    query: String,
+    vec: Vec<f32>,
+    /// Search only.
+    answered: bool,
+    confirmed: Option<String>,
+    shown: Vec<(String, Option<f32>)>,
+    /// Ask only.
+    is_ask: bool,
+    abstained: bool,
+    cited: Vec<String>,
+}
+
+/// Group quiet searches into pursuits and decide each. Returns how many
+/// pursuit rows were written.
+///
+/// Runs only when everything unprocessed has been idle for `idle_secs`: a
+/// pursuit is a thing that ended, and the cheapest correct idle rule is to
+/// wait until the operator stopped. Local throughout — the only model call is
+/// the one `Generate` makes later, and only for a pursuit that earned it.
+pub async fn run(core: &Core) -> Result<usize> {
+    if !core.pursuit.enabled || !core.associating() {
+        return Ok(0);
+    }
+    let now = crate::store::now();
+    let idle = core.pursuit.idle_secs as i64;
+    let after: i64 = core
+        .store
+        .meta_get(PURSUIT_AFTER)
+        .await?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if let Some(newest) = core.store.newest_event_at().await?
+        && newest > after
+        && now - newest < idle
+    {
+        return Ok(0);
+    }
+    let searches = core.store.events_between(after, now).await?;
+    let asks = core.store.asks_between(after, now).await?;
+    if searches.is_empty() && asks.is_empty() {
+        return Ok(0);
+    }
+    let interactions = core.store.interactions_between(after, now).await?;
+
+    let mut evs: Vec<Ev> = searches
+        .into_iter()
+        .map(|e| Ev {
+            at: e.created_at,
+            scope: e.scope,
+            query: e.query,
+            vec: e.query_vec,
+            answered: e.answered,
+            confirmed: e.confirmed,
+            shown: e.shown,
+            is_ask: false,
+            abstained: false,
+            cited: vec![],
+        })
+        .chain(asks.into_iter().map(|a| Ev {
+            at: a.created_at,
+            scope: a.scope,
+            query: a.question,
+            vec: a.query_vec,
+            answered: false,
+            confirmed: None,
+            shown: vec![],
+            is_ask: true,
+            abstained: a.abstained,
+            cited: a.cited,
+        }))
+        .filter(|e| !e.vec.is_empty())
+        .collect();
+    evs.sort_by_key(|e| e.at);
+
+    // An interaction belongs to the latest event before it, in the same scope,
+    // within the idle window. Never to an answered search: the base answered,
+    // and what was opened afterwards is not a need.
+    let mut attached: Vec<Vec<usize>> = vec![Vec::new(); evs.len()];
+    for (k, i) in interactions.iter().enumerate() {
+        let owner = evs
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.at <= i.at && i.at - e.at <= idle && e.scope == i.scope)
+            .max_by_key(|(_, e)| e.at)
+            .map(|(idx, _)| idx);
+        if let Some(idx) = owner {
+            attached[idx].push(k);
+        }
+    }
+
+    let vecs: Vec<Vec<f32>> = evs.iter().map(|e| e.vec.clone()).collect();
+    let line = crate::core::gaps::link_threshold(&vecs);
+    let refs: Vec<&[f32]> = vecs.iter().map(Vec::as_slice).collect();
+    let clusters = crate::core::gaps::cluster(&refs, line);
+
+    let mut written = 0;
+    for members in clusters {
+        let mut members = members;
+        members.sort_by_key(|&m| evs[m].at);
+        let need = need_of(core, &evs, &members, &attached, &interactions);
+        let sources: Vec<String> = need.engagement.iter().map(|(id, _)| id.clone()).collect();
+        let decision = decide(&need, core.pursuit.min_sources, core.pursuit.min_engagement);
+        let pid = core
+            .store
+            .insert_pursuit(need.opened_at, &need.queries, &sources)
+            .await?;
+        written += 1;
+        match decision {
+            Decision::Satisfied(why) => {
+                core.store
+                    .close_pursuit(&pid, "satisfied", &why, now)
+                    .await?;
+            }
+            Decision::Unsatisfied(why) => {
+                core.store
+                    .close_pursuit(&pid, "unsatisfied", &why, now)
+                    .await?;
+            }
+            Decision::Promote(id) => {
+                core.store
+                    .close_pursuit(
+                        &pid,
+                        "satisfied",
+                        "one artifact engaged: a promotion case",
+                        now,
+                    )
+                    .await?;
+                crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&id), now).await?;
+            }
+            Decision::Generate => {
+                if let Some(covering) = covered_by_existing(core, &sources).await? {
+                    core.store
+                        .close_pursuit(&pid, "satisfied", &format!("covered by {covering}"), now)
+                        .await?;
+                } else {
+                    core.store
+                        .rearm_idle_seq(Stage::Generate, "pursuit", &pid, 0)
+                        .await?;
+                }
+            }
+        }
+    }
+    core.store.meta_set(PURSUIT_AFTER, &now.to_string()).await?;
+    tracing::info!(pursuits = written, line, "pursuit sweep");
+    Ok(written)
+}
+
+/// Score one cluster.
+fn need_of(
+    core: &Core,
+    evs: &[Ev],
+    members: &[usize],
+    attached: &[Vec<usize>],
+    interactions: &[crate::store::pursuits::Interaction],
+) -> Need {
+    use crate::store::links::normalize_query;
+    let mut n = Need {
+        opened_at: evs[members[0]].at,
+        last_at: evs[*members.last().unwrap()].at,
+        ..Default::default()
+    };
+    let mut seen_q: std::collections::HashSet<String> = Default::default();
+    let mut order: Vec<String> = Vec::new();
+    let mut weight: std::collections::HashMap<String, f64> = Default::default();
+    let mut bump = |id: &str, w: f64| {
+        if !weight.contains_key(id) {
+            order.push(id.to_string());
+        }
+        *weight.entry(id.to_string()).or_insert(0.0) += w;
+    };
+    let mut touched: Vec<String> = Vec::new();
+    for (pos, &m) in members.iter().enumerate() {
+        let e = &evs[m];
+        if seen_q.insert(normalize_query(&e.query)) {
+            n.queries.push(e.query.clone());
+        }
+        n.answered |= e.answered;
+        n.abstained |= e.abstained;
+        if e.is_ask {
+            for id in &e.cited {
+                bump(id, 1.0);
+                n.strong_engaged = true;
+            }
+            continue;
+        }
+        if let Some(id) = &e.confirmed {
+            bump(id, 3.0);
+            n.strong_engaged = true;
+        }
+        let mine: Vec<&crate::store::pursuits::Interaction> =
+            attached[m].iter().map(|&k| &interactions[k]).collect();
+        if !e.answered {
+            for i in &mine {
+                let w = if i.kind == "pivoted" {
+                    n.pivots += 1;
+                    1.5
+                } else {
+                    1.0
+                };
+                bump(&i.artifact_id, w);
+                // Came back to it after something else: hard to fake.
+                if touched.last().is_some_and(|t| t != &i.artifact_id)
+                    && touched.contains(&i.artifact_id)
+                {
+                    bump(&i.artifact_id, 2.0);
+                    n.returns += 1;
+                }
+                touched.push(i.artifact_id.clone());
+                let strong = e
+                    .shown
+                    .iter()
+                    .find(|(id, _)| id == &i.artifact_id)
+                    .is_some_and(|(_, sim)| sim.is_none_or(|s| s >= core.weak_below));
+                n.strong_engaged |= strong;
+            }
+        }
+        let followed = pos + 1 < members.len();
+        if mine.is_empty() && e.confirmed.is_none() && !e.answered {
+            if followed {
+                n.refined += 1;
+            } else {
+                n.abandoned = true;
+            }
+        }
+    }
+    n.engagement = order
+        .into_iter()
+        .map(|id| (weight[&id], id))
+        .map(|(w, id)| (id, w))
+        .collect();
+    n
+}
+
+/// The second anchor: are these sources' roots all inside an existing active
+/// generation's roots? Then the need is already written up, whatever the
+/// ranking did with it.
+async fn covered_by_existing(core: &Core, sources: &[String]) -> Result<Option<String>> {
+    let roots = core.store.roots_of(sources).await?;
+    let mine: std::collections::BTreeSet<String> = roots.values().flatten().cloned().collect();
+    if mine.is_empty() {
+        return Ok(None);
+    }
+    for g in core.store.synthesized_artifacts(200).await? {
+        let theirs = core.store.roots_of(std::slice::from_ref(&g.id)).await?;
+        let set: std::collections::BTreeSet<&String> = theirs.values().flatten().collect();
+        if mine.iter().all(|r| set.contains(r)) {
+            return Ok(Some(g.id));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -231,6 +547,270 @@ mod tests {
                 .any(|f| f == crate::infer::verify::FLAG_LITERALS),
             "{:?}",
             g.flags
+        );
+    }
+
+    fn need(engaged: &[(&str, f64)]) -> Need {
+        Need {
+            queries: vec!["q".into()],
+            engagement: engaged.iter().map(|(i, w)| (i.to_string(), *w)).collect(),
+            strong_engaged: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_decision_table_follows_the_spec() {
+        // Answered: nothing else matters.
+        let mut n = need(&[("a", 5.0), ("b", 5.0)]);
+        n.answered = true;
+        assert!(matches!(decide(&n, 2, 3.0), Decision::Satisfied(_)));
+        // One engaged artifact: promotion, not generation.
+        assert_eq!(
+            decide(&need(&[("a", 9.0)]), 2, 3.0),
+            Decision::Promote("a".into())
+        );
+        // Three strong opens in a row, then stopped: reading, not assembling.
+        assert!(matches!(
+            decide(&need(&[("a", 1.0), ("b", 1.0), ("c", 1.0)]), 2, 3.0),
+            Decision::Satisfied(_)
+        ));
+        // The same three with one return: assembled.
+        let mut n = need(&[("a", 3.0), ("b", 1.0), ("c", 1.0)]);
+        n.returns = 1;
+        assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
+        // Two weak opens totalling 2.0: unsatisfied but not worth a call.
+        let mut n = need(&[("a", 1.0), ("b", 1.0)]);
+        n.strong_engaged = false;
+        assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
+        // Two weak opens totalling 3.0: generate.
+        let mut n = need(&[("a", 1.5), ("b", 1.5)]);
+        n.strong_engaged = false;
+        assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
+        // An abstention with two cited sources: generate.
+        let mut n = need(&[("a", 2.0), ("b", 1.0)]);
+        n.abstained = true;
+        assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
+        // Refined twice, assembled: generate.
+        let mut n = need(&[("a", 2.0), ("b", 1.0)]);
+        n.refined = 2;
+        assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
+        // Nothing engaged and abandoned: unsatisfied.
+        let mut n = need(&[]);
+        n.strong_engaged = false;
+        n.abandoned = true;
+        assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
+    }
+
+    /// A core at earned with pursuits on, recording, and a tiny idle window.
+    async fn pursuing_core() -> crate::core::Core {
+        let mut core = test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Earned;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        core.pursuit.idle_secs = 10;
+        core
+    }
+
+    async fn search_event(
+        core: &crate::core::Core,
+        q: &str,
+        vec: Vec<f32>,
+        shown: &[&str],
+        at: i64,
+    ) -> String {
+        let id = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: q.into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("me".into()),
+                    filters: "{}".into(),
+                    query_vec: vec,
+                    embed_model: "fake".into(),
+                    candidates: shown
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| crate::store::feedback::NewCandidate {
+                            artifact_id: a.to_string(),
+                            score: 1.0 - i as f32 * 0.1,
+                            similarity: Some(0.9),
+                            shown: true,
+                        })
+                        .collect(),
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        // Back-date it: `record_search` stamps now, and the sweep wants quiet.
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn the_sweep_groups_quiet_searches_into_pursuits_and_arms_a_generation() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 100;
+        // Two unrelated needs: one assembled by pivoting between two sources,
+        // one a single search with nothing opened.
+        search_event(
+            &core,
+            "read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            t0,
+        )
+        .await;
+        search_event(
+            &core,
+            "journal location",
+            vec![0.99, 0.1],
+            &[&ids[1], &ids[0]],
+            t0 + 2,
+        )
+        .await;
+        search_event(&core, "something else", vec![0.0, 1.0], &[&ids[0]], t0 + 50).await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), t0 + 3)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 4)
+            .await
+            .unwrap();
+
+        let written = run(&core).await.unwrap();
+        assert_eq!(written, 2);
+        let ps = core.store.recent_pursuits(10).await.unwrap();
+        let assembled = ps
+            .iter()
+            .find(|p| p.queries.iter().any(|q| q == "read the journal"))
+            .expect("the journal pursuit");
+        assert_eq!(assembled.state, "open", "{assembled:?}");
+        assert_eq!(assembled.queries.len(), 2, "{assembled:?}");
+        assert_eq!(assembled.sources, ids, "{assembled:?}");
+        assert!(
+            core.store
+                .live_job(Stage::Generate, &assembled.id)
+                .await
+                .unwrap()
+        );
+        let lone = ps
+            .iter()
+            .find(|p| p.queries.iter().any(|q| q == "something else"))
+            .expect("the lone pursuit");
+        assert_eq!(lone.state, "unsatisfied", "{lone:?}");
+        // The watermark moved; a second sweep finds nothing new.
+        assert_eq!(run(&core).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_waits_while_the_operator_is_still_searching() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        search_event(&core, "fresh", vec![1.0, 0.0], &[&ids[0]], now).await;
+        assert_eq!(run(&core).await.unwrap(), 0);
+        assert!(core.store.recent_pursuits(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_need_already_written_up_closes_satisfied_naming_the_generation() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let existing = core
+            .store
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "already written".into(),
+                    title: Some("G".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                &ids,
+            )
+            .await
+            .unwrap();
+        let now = crate::store::now();
+        let t0 = now - 100;
+        search_event(
+            &core,
+            "read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            t0,
+        )
+        .await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), t0 + 2)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 3)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "satisfied", "{p:?}");
+        assert!(
+            p.reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&existing.id),
+            "{p:?}"
+        );
+        assert!(!core.store.live_job(Stage::Generate, &p.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn one_engaged_artifact_is_a_promotion_case() {
+        let core = pursuing_core().await;
+        let out = core
+            .ingest("a verbatim passage", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::passages::capture_verbatim(&core, &out.id)
+            .await
+            .unwrap();
+        let p = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let now = crate::store::now();
+        // Enough activation that the promotion check passes when the sweep asks.
+        core.store
+            .bump_activation(std::slice::from_ref(&p), 5.0, 14.0, now)
+            .await
+            .unwrap();
+        search_event(&core, "that passage", vec![1.0, 0.0], &[&p], now - 100).await;
+        core.store
+            .record_interaction(&p, "opened", None, Some("me"), now - 99)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Pending),
+            "the window was not promoted"
         );
     }
 }

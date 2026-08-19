@@ -372,6 +372,39 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 ///
 /// Returns before its loop when there is nothing to learn from — either the
 /// feature is off, or searches are not being recorded, which is the same thing.
+/// Queue the pursuit sweep on a period shorter than the idle window, so a run
+/// of searches is grouped soon after it goes quiet.
+pub fn spawn_pursuit_ticker(
+    core: crate::core::Core,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !core.pursuit.enabled || !core.associating() {
+            tracing::info!("pursuit sweep disabled");
+            return;
+        }
+        let period = std::time::Duration::from_secs((core.pursuit.idle_secs / 2).max(60));
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    if let Err(e) = core
+                        .store
+                        .enqueue(crate::store::jobs::Stage::Pursuit, "collection", ASSOCIATE_TARGET)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "could not queue the pursuit sweep");
+                    }
+                }
+            }
+        }
+        tracing::info!("pursuit ticker stopped");
+    })
+}
+
 pub fn spawn_associate_ticker(
     core: crate::core::Core,
     mut shutdown: tokio::sync::watch::Receiver<bool>,

@@ -240,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
     let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
     let associate =
         engram::core::background::spawn_associate_ticker(core.clone(), shutdown_rx.clone());
+    let pursuit = engram::core::background::spawn_pursuit_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for them too, rather than
     // leaving tasks the runtime drops mid-enqueue.
@@ -248,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
     handles.push(dedupe);
     handles.push(repair);
     handles.push(associate);
+    handles.push(pursuit);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
