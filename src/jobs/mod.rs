@@ -5,6 +5,7 @@ pub mod describe;
 pub mod embed;
 pub mod gaps;
 pub mod merge;
+pub mod passages;
 pub mod reconcile;
 pub mod relate;
 pub mod synthesize;
