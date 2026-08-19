@@ -7,6 +7,7 @@ pub mod gaps;
 pub mod merge;
 pub mod passages;
 pub mod promote;
+pub mod pursuit;
 pub mod reconcile;
 pub mod relate;
 pub mod synthesize;
@@ -66,9 +67,11 @@ pub async fn run_one(core: &Core) -> Result<bool> {
 /// at `off` it is the verbatim capture path and needs nothing.
 fn needs_model(stage: Stage) -> Option<&'static str> {
     match stage {
-        Stage::SegmentWindow | Stage::Title | Stage::Dedupe | Stage::LinkJudge => {
-            Some("synthesize")
-        }
+        Stage::SegmentWindow
+        | Stage::Title
+        | Stage::Dedupe
+        | Stage::LinkJudge
+        | Stage::Generate => Some("synthesize"),
         _ => None,
     }
 }
@@ -103,6 +106,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
+        (Stage::Pursuit, _) => pursuit::run(core).await.map(|_| ()),
+        (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
     };
 
     match result {

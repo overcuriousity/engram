@@ -58,6 +58,7 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
             last_verified_at: None,
             superseded_by: None,
             origin_corpora: vec![],
+            provenance: None,
         },
     }
 }
@@ -716,6 +717,7 @@ fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
             last_verified_at: None,
             superseded_by: None,
             origin_corpora: vec![],
+            provenance: None,
         },
     }
 }
@@ -917,6 +919,7 @@ fn aged(id: &str, dense: Vec<f32>, days_old: i64, tags: &[&str]) -> VectorPoint 
             last_verified_at: Some(ts),
             superseded_by: None,
             origin_corpora: vec![],
+            provenance: None,
         },
     }
 }

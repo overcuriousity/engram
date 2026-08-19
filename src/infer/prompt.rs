@@ -598,6 +598,71 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
     s
 }
 
+/// The generation behind a pursuit: one self-contained artifact written from
+/// the excerpts the operator engaged with, to answer the questions they asked.
+pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+
+pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
+    let qs = questions
+        .iter()
+        .map(|q| format!("- {q}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ex = sources
+        .iter()
+        .enumerate()
+        .map(|(i, (title, text))| format!("[{}] {title}\n{text}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    format!("Questions:\n{qs}\n\nExcerpts:\n\n{ex}")
+}
+
+pub fn generate_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "artifact": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "text": {"type": "string"},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "caveats": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["title", "text", "category", "tags", "caveats"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["artifact"],
+        "additionalProperties": false
+    })
+}
+
+/// What a generation call produced.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Generated {
+    pub title: String,
+    pub text: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+pub fn parse_generation(reply: &str) -> Result<Generated> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply))
+        .map_err(|e| Error::MalformedLlmOutput(format!("generation was not JSON: {e}")))?;
+    let g: Generated = serde_json::from_value(v["artifact"].clone())
+        .map_err(|e| Error::MalformedLlmOutput(format!("generation had no artifact: {e}")))?;
+    if g.text.trim().is_empty() {
+        return Err(Error::MalformedLlmOutput("generation had no text".into()));
+    }
+    Ok(g)
+}
+
 pub fn gap_label_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",

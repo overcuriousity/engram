@@ -1024,6 +1024,12 @@ impl HttpCompleter {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
     }
 
+    /// The model that writes an artifact from a pursuit, on the judges'
+    /// endpoint: background work in a fixed shape, like every other judge.
+    pub fn for_generating(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("artifact", prompt::generate_schema()))
+    }
+
     /// The model that says, once, what one answer still needs.
     ///
     /// Takes a `TierConfig` rather than a role because that is honestly what it

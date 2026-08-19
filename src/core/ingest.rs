@@ -955,11 +955,19 @@ impl Core {
             | Stage::Title
             | Stage::Dedupe
             | Stage::Relate
-            | Stage::LinkJudge => {
+            | Stage::LinkJudge
+            | Stage::Generate => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"
                         .into(),
+                ));
+            }
+            // The pursuit sweep looks at every recorded search, not at one
+            // corpus.
+            Stage::Pursuit => {
+                return Err(Error::Validation(
+                    "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
             // A stored image can always be read again — with a better model, or

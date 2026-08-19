@@ -92,6 +92,10 @@ pub struct Core {
     /// endpoint as the judges, its own response shape, background only.
     /// `None` with no synthesize role; gaps are then named by their terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
+    /// The model that writes an artifact from a pursuit. Same endpoint as the
+    /// judges, its own response shape, background only. `None` with no
+    /// synthesize role.
+    pub generator: Option<Arc<dyn Completer>>,
     /// The model that says, once, what one answer still needs — and with it,
     /// whether an ask gets a second retrieval round at all.
     ///
@@ -191,6 +195,8 @@ impl Core {
                 .map(|s| Arc::new(HttpCompleter::for_link_judging(s)) as Arc<dyn Completer>),
             gap_namer: synth
                 .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
+            generator: synth
+                .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
             follow_up: cfg.infer.ask.as_ref().and_then(|a| {
                 a.follow_up.then(|| {
                     Arc::new(HttpCompleter::for_follow_up(&a.follow_up_on())) as Arc<dyn Completer>
@@ -347,6 +353,7 @@ pub mod test_support {
             gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
+            generator: Some(Arc::new(FakeCompleter::default())),
             // Off, like the shipped default. The follow-up tests switch it on
             // by putting a completer here, which is the only thing that does.
             follow_up: None,
