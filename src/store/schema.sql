@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS segments (
   -- the heading the splitter carries into a window that continues a section.
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
-  state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed | verbatim
   -- Set when this window is being read again to pick up lines the first read
   -- missed, and cleared once the window reaches `done`. It is what tells
   -- `window::write_segment_artifacts` to append rather than replace: see there

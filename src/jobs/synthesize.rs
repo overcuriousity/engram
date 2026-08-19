@@ -140,7 +140,9 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     core.store.renumber_artifacts(corpus_id).await?;
     let windows = core.store.segments_for_corpus(corpus_id).await?;
-    let degraded = windows.iter().any(|w| w.state != SegmentState::Done);
+    let degraded = windows
+        .iter()
+        .any(|w| !matches!(w.state, SegmentState::Done | SegmentState::Verbatim));
     let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
     if chunks.is_empty() {
         core.store

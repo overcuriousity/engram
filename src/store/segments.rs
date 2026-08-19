@@ -5,13 +5,16 @@ use sqlx::Row;
 /// Where one window of a source stands. `Failed` means the synthesizer never
 /// succeeded here and the lines are represented by no chunk at all — the model
 /// is a hard dependency, so an unsegmentable window leaves a hole that the
-/// source's coverage measures, and the reason it ends up `partial`.
+/// source's coverage measures, and the reason it ends up `partial`. `Verbatim`
+/// means the window was captured as passages and never sent to the synthesizer
+/// — not work owed, and nothing re-arms it; promotion moves it to `pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SegmentState {
     Pending,
     Done,
     Failed,
+    Verbatim,
 }
 
 impl SegmentState {
@@ -20,12 +23,14 @@ impl SegmentState {
             SegmentState::Pending => "pending",
             SegmentState::Done => "done",
             SegmentState::Failed => "failed",
+            SegmentState::Verbatim => "verbatim",
         }
     }
     pub fn parse(s: &str) -> SegmentState {
         match s {
             "done" => SegmentState::Done,
             "failed" => SegmentState::Failed,
+            "verbatim" => SegmentState::Verbatim,
             _ => SegmentState::Pending,
         }
     }
@@ -165,10 +170,13 @@ impl Store {
     /// was asleep, says nothing about the text. Excluding it made the next run
     /// see a finished corpus and close the job, which is how a quarter of a
     /// document stayed missing while the endpoint sat there answering.
+    ///
+    /// `verbatim` is excluded: that window was captured as passages on purpose
+    /// and is owed nothing.
     pub async fn pending_segments(&self, corpus_id: &str) -> Result<Vec<Segment>> {
         let rows = sqlx::query(
             "SELECT * FROM segments
-             WHERE corpus_id = ? AND state != 'done' ORDER BY idx",
+             WHERE corpus_id = ? AND state NOT IN ('done', 'verbatim') ORDER BY idx",
         )
         .bind(corpus_id)
         .fetch_all(&self.pool)
@@ -202,6 +210,19 @@ impl Store {
         .bind(state.as_str())
         .bind(corpus_id)
         .bind(idx)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark every window of a corpus that was never synthesized — and is not
+    /// going to be, at this mode — as captured verbatim. Only `pending` rows:
+    /// a window that is `done` or `failed` has a history this must not erase.
+    pub async fn mark_segments_verbatim(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE segments SET state = 'verbatim' WHERE corpus_id = ? AND state = 'pending'",
+        )
+        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -539,5 +560,39 @@ mod tests {
             .unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.segments_for_corpus(&src.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn verbatim_segments_are_not_pending_work() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[
+                NewSegment {
+                    start_line: 1,
+                    end_line: 5,
+                    text: "a",
+                    carry_lines: 0,
+                },
+                NewSegment {
+                    start_line: 6,
+                    end_line: 9,
+                    text: "b",
+                    carry_lines: 0,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.pending_segments(&src.id).await.unwrap().len(), 2);
+        s.mark_segments_verbatim(&src.id).await.unwrap();
+        assert!(s.pending_segments(&src.id).await.unwrap().is_empty());
+        let rows = s.segments_for_corpus(&src.id).await.unwrap();
+        assert!(rows.iter().all(|w| w.state == SegmentState::Verbatim));
+        assert_eq!(SegmentState::parse("verbatim"), SegmentState::Verbatim);
+        assert_eq!(SegmentState::Verbatim.as_str(), "verbatim");
+        // Resolved, for the progress count: neither is still owed a call.
+        assert_eq!(s.segment_progress(&src.id).await.unwrap(), (2, 2));
     }
 }

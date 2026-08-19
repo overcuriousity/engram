@@ -215,7 +215,9 @@ pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
     let _corpus = core.corpus_lock(corpus_id).await;
     for w in core.store.segments_for_corpus(corpus_id).await? {
         let resolved = match w.state {
-            SegmentState::Done => true,
+            // A verbatim window was captured as passages and is owed nothing;
+            // it resolves the way a synthesized one does.
+            SegmentState::Done | SegmentState::Verbatim => true,
             // `jobs.attempts` rather than a counter on the segment: the unit is
             // the job now, and two counters for one thing is what made the
             // original incident so hard to read.
@@ -727,5 +729,72 @@ mod tests {
             core_text,
             &ctx
         ));
+    }
+
+    #[tokio::test]
+    async fn settle_treats_a_verbatim_segment_as_resolved() {
+        // One promoted window done, every other window verbatim: the corpus
+        // must finish — that is what arms the embed for the promoted artifacts.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2\nl3\nl4", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    crate::store::segments::NewSegment {
+                        start_line: 1,
+                        end_line: 2,
+                        text: "l1\nl2",
+                        carry_lines: 0,
+                    },
+                    crate::store::segments::NewSegment {
+                        start_line: 3,
+                        end_line: 4,
+                        text: "l3\nl4",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store.mark_segments_verbatim(&src.id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "l1 l2".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        settle(&core, &src.id).await.unwrap();
+        let s = core.store.get_corpus(&src.id).await.unwrap();
+        assert_eq!(
+            s.status,
+            crate::store::corpora::CorpusStatus::Embedding,
+            "{:?}",
+            s.status
+        );
+        assert!(
+            core.store
+                .live_job(crate::store::jobs::Stage::Embed, &src.id)
+                .await
+                .unwrap()
+        );
     }
 }
