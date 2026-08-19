@@ -283,13 +283,23 @@ mod tests {
         );
         let w = window(&body, 1, 0);
         let p = split_passages(&w, &TokenCounter, 40);
-        assert!(p.len() >= 2, "{}", p.len());
-        // The first passage holds the heading line verbatim and is titled by it.
-        assert!(p[0].text.contains("## Mounting"));
-        assert_eq!(p[0].title.as_deref(), Some("Mounting"));
+        assert!(p.len() >= 3, "{}", p.len());
+        // The heading opens its own passage, which holds the heading line
+        // verbatim and is titled by it; the intro line before it stands alone
+        // and untitled.
+        let k = p
+            .iter()
+            .position(|x| x.text.contains("## Mounting"))
+            .expect("a passage holds the heading");
+        assert_eq!(p[k].title.as_deref(), Some("Mounting"));
+        assert_eq!(p[0].title, None, "{p:?}");
         // The continuation takes the carried heading as title, not as text.
-        assert_eq!(p[1].title.as_deref(), Some("Mounting"));
-        assert!(!p[1].text.contains("## Mounting"), "{:?}", p[1].text);
+        assert_eq!(p[k + 1].title.as_deref(), Some("Mounting"));
+        assert!(
+            !p[k + 1].text.contains("## Mounting"),
+            "{:?}",
+            p[k + 1].text
+        );
         // And every heading line appears exactly once across the passages.
         let total = p.iter().filter(|x| x.text.contains("## Mounting")).count();
         assert_eq!(total, 1);
