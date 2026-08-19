@@ -183,3 +183,28 @@ The entire choice of rung rests on the assumption that the plain text parser is
 good enough on multi-column, table-bearing documents. If it is not, the answer
 is not a new design — it is `--features pdf-ml`. But that is worth knowing
 before the default build is settled, not after.
+
+### What the spike found
+
+Run on two real documents — a 58k-character software manual and a 24k-character
+course guide — the `pdf-text` rung extracted **complete text in correct reading
+order and not one heading or table row**:
+
+| | characters | headings | table rows |
+|---|---|---|---|
+| a software manual | 58,402 | 0 | 0 |
+| a course guide | 23,781 | 0 | 0 |
+
+That is not a tunable. Heading detection *is* the layout model, which is what
+the `ml` feature gates; no converter option recovers it. HTML entities also
+survive into the output unescaped (`&amp;`).
+
+**The decision was to ship it anyway.** `src/infer/split.rs` prefers headings,
+then blank lines, then a hard cut — so ingest works, on the blank-line
+fallback. What is lost is the heading each window after the first carries over,
+which is how a procedure split across two windows tells the model what it
+belongs to. On a long structured document the artifacts are therefore weaker
+than the same document pasted as text with its markdown intact.
+
+`--features pdf-ml` remains the answer for anyone who wants the structure, and
+the README says plainly that the default build does not recover it.

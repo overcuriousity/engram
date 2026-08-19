@@ -5,6 +5,7 @@ pub mod fetch;
 pub mod gaps;
 pub mod image;
 pub mod ingest;
+pub mod pdf;
 pub mod search;
 
 use crate::config::Config;
