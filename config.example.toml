@@ -436,6 +436,21 @@ retrieved = 1.0
 opened = 0.5
 confirmed = 3.0
 
+# ── Promotion ────────────────────────────────────────────────────────────────
+# At synthesis = "earned", when a passage has earned its window a synthesis
+# call. Read against [activation]: baseline 1.0 at capture, so 4.0 is one
+# confirmation after a retrieval and an open, or about three engaged openings.
+# Checked only when a passage is opened or confirmed — never when it merely
+# appears in results — and the window's new artifacts inherit the access the
+# passages earned.
+[promote]
+activation_above = 4.0
+# At synthesis = "eager": an artifact shown this many times with no
+# confirmation recorded against it is re-read from its source segment. 0
+# disables it, and it ships disabled — re-synthesising changes what an
+# existing base contains without anyone asking.
+resynthesize_after_unconfirmed = 0
+
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
 # one GPU, so a per-role cooldown could not bound total load.
