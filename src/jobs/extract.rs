@@ -37,6 +37,13 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         // A PDF that cannot be parsed will not parse better on the fourth
         // attempt, and a scan will not grow a text layer. Park it now, with
         // the reason on its page, rather than retrying to the ceiling.
+        // The reason is shown to a person on the corpus page, so it is the
+        // message and not the `Error`'s `Display` — which would put
+        // "validation: " in front of a sentence someone has to read.
+        Err(Error::Validation(reason)) => {
+            park_failed(core, corpus_id, &reason).await?;
+            return Ok(());
+        }
         Err(e) if !e.retryable() => {
             park_failed(core, corpus_id, &e.to_string()).await?;
             return Ok(());
@@ -187,7 +194,12 @@ mod tests {
         let src = core.store.get_corpus(&id).await.unwrap();
         assert_eq!(src.status, CorpusStatus::Failed);
         let reason = src.metadata["extract"]["error"].as_str().unwrap();
-        assert!(reason.contains("no embedded text layer"), "{reason}");
+        assert!(reason.contains("no extractable text"), "{reason}");
+        assert!(reason.contains("pdf-ml"), "{reason}");
+        assert!(
+            !reason.starts_with("validation:"),
+            "a person reads this on the corpus page: {reason}"
+        );
     }
 
     #[tokio::test]

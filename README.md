@@ -47,6 +47,23 @@ as `failed` with the reason on its page; **Re-read** on that page (or
 `POST /api/v1/corpora/{id}/reprocess` with `{"stage":"describe"}`) reads it
 again from the stored original, with whatever model is configured now.
 
+A corpus can also be a **PDF** — dropped on the capture page or sent to
+`POST /api/v1/corpora/upload` (multipart `file`, optional `note`). The file is
+kept untouched and served at `GET /api/v1/corpora/{id}/file`; it is read into
+markdown in the background, locally, with no model and nothing to configure.
+The lines shown beside an artifact are that extraction rather than the page as
+it was laid out, and the pane says so — `extraction lines 2–3`, never `page 42`.
+
+Be warned what the default build does not do: it recovers the words and their
+reading order, and **no headings and no tables**. Splitting falls back to blank
+lines, so on a long structured document the artifacts are weaker than the same
+text pasted with its markdown intact. Building with `--features pdf-ml` adds
+docling's layout and table models — and with them the ONNX runtime, pdfium as a
+native library, and a model download. A PDF with no text layer at all, which is
+what a scan is, is shown as `failed` saying exactly that; **Re-extract** on that
+page (or `POST /api/v1/corpora/{id}/reprocess` with `{"stage":"extract"}`) reads
+it again from the stored original, with whatever build is running now.
+
 A **segment** is a slice of one corpus, sized to fit the model's context. The
 split is local and mechanical — a heading, then a blank line, then wherever the
 budget runs out. It stores line numbers rather than a copy, and doubles as the

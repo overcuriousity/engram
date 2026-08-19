@@ -10,6 +10,12 @@
 
 use crate::error::{Error, Result};
 
+/// Said in one place because two paths reach it: docling refuses a page with
+/// no text layer outright, and a text layer holding only whitespace exports to
+/// nothing without any error at all.
+const NO_TEXT_LAYER: &str = "that PDF holds no extractable text — it is probably a scan. \
+     Reading one needs a build with `--features pdf-ml`, which adds the OCR models.";
+
 pub fn to_markdown(bytes: &[u8]) -> Result<String> {
     let source = docling::SourceDocument::from_bytes(
         // The name is docling's label for the input and never reaches a
@@ -21,7 +27,16 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String> {
     );
     let converted = docling::DocumentConverter::new()
         .convert(source)
-        .map_err(|e| Error::Validation(format!("that PDF could not be read: {e}")))?;
+        .map_err(|e| {
+            let detail = e.to_string();
+            // docling names its own cargo feature here, and it is not the one an
+            // engram operator would set. Answer in this application's terms or the
+            // corpus page sends them looking for a flag that does not exist.
+            if detail.contains("no embedded text layer") {
+                return Error::Validation(NO_TEXT_LAYER.into());
+            }
+            Error::Validation(format!("that PDF could not be read: {detail}"))
+        })?;
 
     // `PartialSuccess` is kept rather than refused: a document whose last page
     // defeated the parser is still worth most of what it holds, and refusing
@@ -38,11 +53,7 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String> {
         // A PDF of scanned pages has no text layer, and `pdf-text` cannot
         // invent one. Saying so beats a corpus that is silently empty and a
         // synthesis failure three stages downstream.
-        return Err(Error::Validation(
-            "that PDF holds no extractable text — it is probably a scan, \
-             which needs the pdf-ml build"
-                .into(),
-        ));
+        return Err(Error::Validation(NO_TEXT_LAYER.into()));
     }
     Ok(md)
 }
@@ -109,15 +120,19 @@ mod tests {
         // synthesis would then run on nothing and the failure would surface
         // three stages away from its cause. This is what a scan looks like to
         // the `pdf-text` rung.
-        // docling refuses this itself, before an empty export can happen, and
-        // its message already names both the cause and the way out. The guard
-        // in `to_markdown` stays for a text layer that holds only whitespace,
-        // which docling does not treat as absent.
+        // docling refuses this before an empty export can happen; the guard in
+        // `to_markdown` stays for a text layer holding only whitespace, which
+        // docling does not treat as absent. Both answer in the same words.
         let e = to_markdown(NO_TEXT).unwrap_err();
         let msg = e.to_string();
         assert!(
-            msg.contains("no embedded text layer"),
+            msg.contains("no extractable text"),
             "unhelpful error: {msg}"
+        );
+        assert!(
+            msg.contains("pdf-ml"),
+            "the way out has to be named in this application's terms, not \
+             docling's cargo features: {msg}"
         );
         assert!(!e.retryable(), "a scan does not become readable on a retry");
     }

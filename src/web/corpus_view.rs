@@ -25,7 +25,8 @@ pub struct CorpusLine {
 #[derive(Default)]
 pub struct CorpusSlice {
     pub lines: Vec<CorpusLine>,
-    /// What to call this range in the UI: `lines 118–141`, later `page 42`.
+    /// What to call this range in the UI: `lines 118–141`, or
+    /// `extraction lines 118–141` where the lines are not the source's own.
     pub label: String,
 }
 

@@ -187,9 +187,21 @@ own.
 
 ## [Core Platform & Tooling]
 
-- **PDF capture**, then a **CLI**. A PDF corpus implements the same `CorpusView`
-  trait as text and images — extracted text, a page map, `page 42` as the
-  label — and the detail pane needs no changes.
+- **A CLI.** PDF capture is built: `docling` reads an uploaded PDF into markdown
+  in `Stage::Extract`, locally and without a model, and the corpus is text like
+  any other from there. Spans into it are line spans labelled `extraction`, not
+  `page 42` — a page map is a second coordinate system beside every stored span,
+  and the label was not worth it.
+- **Structure in a PDF.** The default `pdf-text` build recovers words and
+  reading order and *no* headings or tables — measured, and pinned by a test
+  that fails if that improves. The splitter falls back to blank lines, so every
+  window loses the heading it would have carried. `--features pdf-ml` adds the
+  layout and table models, at the price of the ONNX runtime, pdfium as a native
+  library and a model download; a scan is refused with that reason until it is
+  switched on. Making it the default waits on someone wanting it enough to pay
+  for it.
+- **DOCX, EPUB, XLSX and the rest.** `docling` is in the tree and already reads
+  them; only a door and a `kind` are missing. Deliberately out of PDF capture.
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored
   together, so recovery does not mean paying for every embedding again.
 - **OAuth 2.1 for `/mcp`.** OIDC login for the web UI is built; the MCP surface
