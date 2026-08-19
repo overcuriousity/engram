@@ -215,6 +215,18 @@ impl Store {
         Ok(())
     }
 
+    /// One window's state, or `None` for a window that does not exist.
+    pub async fn segment_state(&self, corpus_id: &str, idx: i64) -> Result<Option<SegmentState>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT state FROM segments WHERE corpus_id = ? AND idx = ?",
+        )
+        .bind(corpus_id)
+        .bind(idx)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|s| SegmentState::parse(&s)))
+    }
+
     /// Mark every window of a corpus that was never synthesized — and is not
     /// going to be, at this mode — as captured verbatim. Only `pending` rows:
     /// a window that is `done` or `failed` has a history this must not erase.
@@ -594,5 +606,32 @@ mod tests {
         assert_eq!(SegmentState::Verbatim.as_str(), "verbatim");
         // Resolved, for the progress count: neither is still owed a call.
         assert_eq!(s.segment_progress(&src.id).await.unwrap(), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn segment_state_reads_one_window() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        s.upsert_segments(
+            &src.id,
+            &[NewSegment {
+                start_line: 1,
+                end_line: 2,
+                text: "t",
+                carry_lines: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.segment_state(&src.id, 0).await.unwrap(),
+            Some(SegmentState::Pending)
+        );
+        s.mark_segments_verbatim(&src.id).await.unwrap();
+        assert_eq!(
+            s.segment_state(&src.id, 0).await.unwrap(),
+            Some(SegmentState::Verbatim)
+        );
+        assert_eq!(s.segment_state(&src.id, 9).await.unwrap(), None);
     }
 }

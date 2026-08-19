@@ -420,6 +420,45 @@ impl Store {
         Ok(row_to_artifact(&row))
     }
 
+    /// Every row a window owns, whatever its status, in ordinal order. The
+    /// promotion path reads this to see what it is superseding and, on a
+    /// retry, what it already wrote.
+    pub async fn artifacts_for_segment(&self, corpus_id: &str, idx: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE corpus_id = ? AND segment_idx = ? ORDER BY ordinal",
+        )
+        .bind(corpus_id)
+        .bind(idx)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Set an artifact's activation outright, stamped `at`. Promotion uses it
+    /// to hand a new artifact the access its passages earned; everything else
+    /// goes through `bump_activation`, which adds.
+    pub async fn set_activation(&self, id: &str, value: f64, at: i64) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
+            .bind(value)
+            .bind(at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Has a person ever said this artifact was the answer? A `hit` verdict
+    /// naming it, on any recorded search.
+    pub async fn artifact_confirmed(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM search_events WHERE verdict = 'hit' AND expect_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?
+            > 0)
+    }
+
     /// The rows for these ids, in no particular order; ids that name nothing
     /// are simply absent. One query for a page of hits.
     pub async fn artifacts_by_ids(&self, ids: &[String]) -> Result<Vec<Chunk>> {
@@ -1563,5 +1602,58 @@ mod tests {
             got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             vec!["a"]
         );
+    }
+
+    #[tokio::test]
+    async fn set_activation_writes_value_and_stamp_and_artifacts_for_segment_reads_every_status() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let mut a = nc(0, "a");
+        a.segment_idx = Some(3);
+        let mut b = nc(1, "b");
+        b.segment_idx = Some(3);
+        let mut c = nc(2, "c");
+        c.segment_idx = Some(4);
+        let made = s.insert_artifacts(&src.id, &[a, b, c]).await.unwrap();
+        s.set_superseded_by(&made[1].id, Some(&made[0].id))
+            .await
+            .unwrap();
+        let seg = s.artifacts_for_segment(&src.id, 3).await.unwrap();
+        assert_eq!(
+            seg.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        s.set_activation(&made[0].id, 7.25, 99).await.unwrap();
+        let act = s
+            .activation_of(std::slice::from_ref(&made[0].id))
+            .await
+            .unwrap();
+        assert_eq!(act[&made[0].id], (7.25, 99));
+    }
+
+    #[tokio::test]
+    async fn artifact_confirmed_reads_a_hit_verdict_naming_it() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s.insert_artifacts(&src.id, &[nc(0, "a")]).await.unwrap();
+        assert!(!s.artifact_confirmed(&made[0].id).await.unwrap());
+        let ev = s
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "q".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        s.judge_hit(&ev, &made[0].id).await.unwrap();
+        assert!(s.artifact_confirmed(&made[0].id).await.unwrap());
     }
 }
