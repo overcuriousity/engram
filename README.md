@@ -224,6 +224,7 @@ the file — the loader warns if it finds one.
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`. |
 | `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. On by default — promotion at `earned` reads activation, and activation moves only while searches are recorded. |
+| `pursuit.*` | `enabled` (default off), `idle_secs` (900), `min_sources` (2), `min_engagement` (3.0). A quiet run of searches that engaged several artifacts without the base answering — or by assembling the answer across them — earns one generated artifact, badged, carrying the questions it was written for, superseding nothing. Needs `feedback.enabled`. |
 | `promote.*` | `activation_above` (default 4.0): at `earned`, a passage opened or confirmed past this has its window synthesized. `resynthesize_after_unconfirmed` (default 0 = off): at `eager`, an artifact shown this often and never confirmed is re-read from its segment. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |

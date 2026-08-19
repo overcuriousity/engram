@@ -744,6 +744,10 @@ CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 `search_event_id`; the clustering decides which pursuit that is, so the events
 carry no pursuit id of their own and re-clustering never has to rewrite them.
 
+`dwell` is not recorded by the first implementation — the UI has no timing —
+and the `opened`/`pivoted` rows are attached to search events by time and
+scope at analysis, never by a stored id; `returned` is derived there too.
+
 **Dwell is deliberately the weakest.** Long dwell means *this was useful* or
 *this was confusing and hard to read*; a tab left open means *engaged* or *went
 to lunch*. With one operator there is no volume for the noise to average out.

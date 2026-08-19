@@ -451,6 +451,24 @@ activation_above = 4.0
 # existing base contains without anyone asking.
 resynthesize_after_unconfirmed = 0
 
+# ── Pursuits ─────────────────────────────────────────────────────────────────
+# A coherent run of searches, what was opened and pivoted through, and — when
+# the base did not answer or the answer was assembled by hand — one generated
+# artifact written from exactly that, carrying the questions it was written
+# for. Off until turned on: this writes model-written text into the index.
+# Needs feedback.enabled. Local only, nothing leaves the machine, and the
+# forget button on Settings clears all of it. The grouping line is measured,
+# not configured.
+[pursuit]
+enabled = false
+# A pursuit is over when nothing has happened for this long.
+idle_secs = 900
+# Fewer engaged artifacts than this is a promotion case, not generation.
+min_sources = 2
+# Engagement weight a pursuit needs before it is worth a call: opened 1.0,
+# pivoted 1.5, returned 2.0, confirmed 3.0.
+min_engagement = 3.0
+
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
 # one GPU, so a per-role cooldown could not bound total load.
