@@ -83,14 +83,28 @@ the most recent heading carried into every continuation window. The only thing
 separating a synthesis window from a retrieval passage is the budget passed in.
 
 ```
-raw_text ──split(segment_tokens)──▶ windows   → segments rows (pending, nothing armed)
-             each window.text ──split(chunk_tokens)──▶ passages → artifacts
+raw_text ──split(segment_tokens)──▶ windows   → segments rows (state = verbatim)
+             each window.body ──split(chunk_tokens)──▶ passages → artifacts
 ```
 
 **A passage never crosses a segment boundary.** This is an invariant, not an
 implementation detail: promoting a window later must cover a whole number of
 passages, or the earned tier has a permanent ragged edge where a passage is
 half-superseded.
+
+**The inner split runs over the window's body, not its text.** `Window.text`
+carries the most recent heading in from the previous window as its first
+`carry_lines` lines — they belong to the document further up, not to this
+window's `start_line..=end_line`. Splitting `text` would put that heading
+verbatim into the first passage of every continuation window and then, because
+the splitter carries headings, prepend it again to every continuation passage
+inside the window. So: strip the first `carry_lines` lines off, keep them as
+the heading (next paragraph), split the remainder. The same two-level shift
+`resolve_span` already applies — `w.start_line - 1 - w.carry_lines` — maps a
+passage's line offset inside the body to a `corpus_span`, and the inner
+splitter's own `carry_lines` is discounted the same way one level down. Passage
+spans partition the window's own lines; the carried heading occupies none of
+them.
 
 ## The carried heading becomes the passage's title
 
@@ -101,8 +115,63 @@ document, no inference. This is the single highest-leverage line in the mode:
 it is most of what synthesis was buying at the embedding layer, and section 2
 shows the embedder has a slot built for exactly it.
 
+The heading is the one the splitter tracks: the window's carried heading for a
+continuation window, else the most recent heading inside the window above the
+passage. It is moved into `title` and does **not** stay in `text` — the
+embedding input would otherwise carry it twice, and `text` is meant to be the
+slice of the document the span names. `is_heading` recognises Markdown `#`
+headings only, so plain text, man pages and most fetched pages yield passages
+with no title, which section 2 renders as `title: none`. The leverage is real
+for the sources engram mostly holds and absent for the rest; nothing is
+inferred to fill the gap.
+
 It also has a consequence that section 6 has to handle: every passage in one
 section embeds with the same string in the most weighted position.
+
+## The segment state that says "not synthesized, on purpose"
+
+`segments.state` gains a value: `verbatim`. Capture at `off` and `earned`
+writes every segment row in that state. It is not `pending`, and that is not
+cosmetic: two existing readers treat `pending` as work owed.
+
+- `window::settle` returns early while any segment is `pending`, and only the
+  `finish` it guards renumbers, recomputes coverage and arms `Stage::Embed`.
+  `verbatim` counts as **resolved** there, so a corpus with no synthesized
+  segment settles and finishes like one where every window came back — and,
+  in section 3, so does a corpus where one window was just promoted and the
+  rest were not.
+- The reconciliation sweep (`reconcile.rs:44`) re-arms `Stage::SegmentWindow`
+  for every segment that is not `done`. Left as `pending`, every verbatim
+  segment would be synthesized on the next sweep — eager through the back door,
+  or a `failed` segment with its attempts spent where no synthesizer is
+  configured. The sweep does not touch `verbatim`.
+
+Promotion (section 3) moves a segment `verbatim → pending` and arms it; it
+settles `done` like any other. There is no legacy base to carry, so this is a
+new value in the `CHECK`-less column and a new arm in `SegmentState`, nothing
+more.
+
+## What capture does at `off` and `earned`
+
+Split, write segments `verbatim`, write passages with `provenance = 'passage'`
+(`insert_artifacts` takes the provenance instead of hardcoding `captured`),
+then call `finish` directly — the same function a synthesized corpus reaches
+through its last window's `settle`. `finish` renumbers, records coverage (green
+by construction, below), arms `Stage::Embed` and moves the corpus to
+`embedding`; the embed job moves it to `ready`. The status path is the one the
+UI already knows, minus the `segmenting` stop. `partial` cannot occur at `off`
+and means at `earned` what it means today: a promoted window that spent its
+attempts.
+
+**Segment size without a synthesizer.** `segment_tokens()` derives the window
+budget from the synthesis model's context, and at `off` there need not be one
+(section 1a). When `[infer.synthesize]` is configured the budget is taken from
+it as today, so a later switch to `earned` finds windows the model can read.
+When it is not, the budget is a fixed `[infer] segment_tokens` with a default
+of 4096 estimator tokens. Configuring a synthesizer later whose context is
+smaller than the windows already stored means re-capturing, the same posture
+section 2 takes for the embedding recipe: no migration for a base that does
+not exist yet.
 
 ## What runs, what does not
 
@@ -112,9 +181,30 @@ be a passage at all), near-duplicate shingling at capture, `associate` and
 `Consolidate`, `Merge`.
 
 **Corpus title without a model.** `Stage::Title` is a real inference call. At
-`off` it is replaced by a local derivation: the first heading in `raw_text`,
-else the first non-empty line, truncated. `title_hint` already exists and
-already short-circuits when set.
+`off` and `earned` it is replaced by a local derivation at capture: the first
+heading in `raw_text`, else the first non-empty line, truncated, written as the
+corpus title. `finish` arms `Stage::Title` only at `eager`; at `earned` a
+promotion therefore never spends a model call on a name the document already
+gave, and `title_hint` keeps its meaning — a name a person chose.
+
+## 1a. `[infer.synthesize]` and `[infer.ask]` become optional
+
+`InferConfig` (`config.rs:356`) requires both roles today, and `Core` holds a
+synthesizer and an ask client unconditionally. `off` with neither configured
+is a product state this spec promises, so both become `Option`, with the
+consequences that follow:
+
+- `synthesis = "earned"` or `"eager"` without `[infer.synthesize]` is a
+  startup error, not a runtime one. `off` accepts its absence.
+- `Core.synthesizer` and the ask client are `Option`; the stages that call
+  them (`SegmentWindow`, `Title`, `Relate`'s judge, `Dedupe`, `Merge`,
+  `Generate`) are not armed when the role is absent, and a job row that
+  nevertheless names one — a base captured at `eager`, then reconfigured —
+  settles with a reason rather than retrying to the ceiling.
+- Section 8 follows: what is not configured is not offered.
+
+This is the largest single piece of plumbing in the spec and is listed here so
+it is planned as one, not discovered as many.
 
 ## Coverage is green by construction
 
@@ -157,9 +247,15 @@ splitter can never emit a passage that `split_oversize` then has to cut apart
 again. A splitter and an embedder disagreeing about size is a loop with no good
 end.
 
+The unit is the estimator's. `TokenCounter` is `chars * 2 / 7`
+(`budget.rs:21`), deliberately pessimistic, so 384 is roughly 1,350 characters
+and somewhat fewer real Gemma tokens. Every budget in engram is in these units
+already; the number is stated in them and compared in them.
+
 This number is argued, not measured. `/ui/judge` and `cargo test --test eval`
 can compare 256 / 384 / 512 over one judged pair set, and the harness is what is
-allowed to change it.
+allowed to change it — after the embedding recipe has landed, so the two are
+not measured together.
 
 ---
 
@@ -224,6 +320,18 @@ Templates stay in config rather than hardcoded, because `model` is configurable
 and pointing at `bge-m3` must remain possible. That is three struct fields, not
 a subsystem.
 
+The three strings above are the model card's as of 2026-08-19 (`title: {title |
+"none"} | text: {content}`; `task: search result | query: {content}`; 2048
+context, 768/512/256/128 MRL, 300M parameters). Two things to check once at
+deploy time rather than assume: that the serving stack does not prepend a
+template of its own — an Ollama modelfile or a llama.cpp wrapper that does
+would double the prefix, which the stored vectors would then carry forever —
+and that the server's physical batch is not below 2048. The card also names a
+`task: question answering | query:` prefix; `ask` does not use it, because
+section 4 clusters ask vectors and search vectors together and a second query
+prefix would put them in two subspaces. One query template is a constraint of
+the design, not an oversight.
+
 ## Where it lands
 
 | site | change |
@@ -287,7 +395,7 @@ lacks.
 
 Which means promotion is not new inference code. It is today's
 `Stage::SegmentWindow`, armed by evidence instead of by capture. The `segments`
-rows written at capture sit `pending` with nothing armed, and promotion arms
+rows written at capture sit `verbatim` with nothing armed, and promotion arms
 one.
 
 ## The trigger
@@ -298,16 +406,25 @@ activation_above               = 4.0   # earned
 resynthesize_after_unconfirmed = 0     # eager; 0 disables, and it ships disabled
 ```
 
-`activation_above` read against `[activation]` — baseline `1.0` at creation, `retrieved = 1.0`,
-`opened = 0.5`, `confirmed = 3.0`, half-life 14 days — that threshold means
-**one confirmation, or three retrievals inside the half-life**.
+`activation_above` is read against `[activation]` — baseline `1.0` at
+creation, `retrieved = 1.0`, `opened = 0.5`, `confirmed = 3.0`, half-life 14
+days — and the test is `>=`, after the bump, with decay folded in. The
+baseline decays from the moment of insert, so "one confirmation" is
+`1.0·d + 3.0`, just under the line on its own; in practice a confirmation was
+preceded by the retrieval and open that made it possible, `1 + 1 + 0.5 + 3`,
+and clears it comfortably. Retrievals alone — `1 + 1 + 1 + 1` at best, less
+with any time between them — do not, and the next rule means they are not
+supposed to.
 
 **Engagement, not exposure.** `retrieved` fires when a passage merely *appears
 in a result list*. A threshold on activation alone would spend synthesis on a
-passage that has demonstrably helped nobody. So promotion additionally requires
-that the passage was **opened or confirmed** at least once. One extra condition,
-no new machinery, and it removes the "promoted a passage nobody read" failure
-entirely.
+passage that has demonstrably helped nobody. So the threshold is checked at
+exactly two of the three bump sites: the `opened` bump in `mark_artifact_seen`
+and the `confirmed` bump in the association sweep — never at the `retrieved`
+bump in `mark_seen`. A passage retrieved ten times sits at eleven and is not
+promoted until someone opens it; the act that promotes is always an engagement.
+No stored "was opened" flag, no new table: the condition is *where* the check
+lives.
 
 **Checked at the bump, not on a sweep.** A sweep reads decayed activation, so a
 passage that crossed 4.0 on Tuesday is at 3.6 by Sunday and the threshold
@@ -316,17 +433,45 @@ where `bump_activation` is called is exact. It also means no `max_per_sweep`
 key: the bump *enqueues a job* rather than calling a model, and the job queue
 plus `[pacing] cooldown_secs` already bound GPU load.
 
+**Activation must actually move.** Today every `bump_activation` call is
+gated on `Core::associating()` — `associate.enabled && feedback.enabled` — and
+`feedback.enabled` ships `false`, so on a default install no activation ever
+changes and `earned` would silently be `off`. **`feedback.enabled` becomes
+`true` by default.** Search recording, association and activation are on
+unless turned off; the privacy posture is opt-out, stated in the config
+comment and the README where it was stated the other way. The test
+`associating_requires_both_flags_the_shipped_default_has_only_one` is
+rewritten to assert the new default. `earned` with `feedback.enabled = false`
+is a startup warning naming the consequence, not an error — an operator may
+want verbatim search with no recording, and that is `off` under another name.
+
 ## Mechanically
 
-1. Set `keep_artifacts = 1` on the segment. This flag exists for re-reading a
-   window to pick up missed lines, and it makes `write_segment_artifacts`
-   **append rather than replace** (`window.rs:338`). Without it the promotion
-   would *delete* the passages it is supposed to supersede — artifacts and
-   passages share a `segment_idx`.
+1. Move the segment `verbatim → pending` and set `keep_artifacts = 1` on it.
+   The flag exists for re-reading a window to pick up missed lines, and it
+   makes `write_segment_artifacts` **append rather than replace**
+   (`window.rs:338`). Without it the promotion would *delete* the passages it
+   is supposed to supersede — artifacts and passages share a `segment_idx`.
 2. Arm `Stage::SegmentWindow` for `(corpus_id, segment_idx)`. Unchanged job.
-3. After `write_segment_artifacts`, inside the same `corpus_lock`, supersede the
-   covered passages.
-4. The segment settles `done`, which clears `keep_artifacts`.
+3. After `write_segment_artifacts` returns, under the `corpus_lock` the window
+   job takes for the step, supersede the covered passages and carry access
+   forward (below). `write_segment_artifacts` takes and releases the lock
+   itself, so the supersede is a second locked step in the same job, not a
+   call inside the first.
+4. The segment settles `done`, which clears `keep_artifacts`, and `settle`
+   runs `finish` — every other segment is `verbatim`, which counts as
+   resolved — so the new artifacts are armed for embedding, coverage is
+   recomputed and the corpus goes `embedding → ready` again. Nothing
+   promotion-specific arms the embed; the existing path does, because the
+   state was chosen so that it would.
+
+**Idempotency.** The append is the documented exception to "replace, never
+append", and its documented cost — a process dying between the insert and
+`done` re-runs the window and writes its artifacts twice — was accepted for an
+operator-initiated re-read. Promotion makes it the common path, so the window
+job pays one extra read: under `keep_artifacts`, if the segment already holds
+active rows with `provenance != 'passage'`, the write is a retry and is
+skipped. The dedupe sweep is no longer the thing that cleans up after a crash.
 
 **The guard against re-promotion is the segment state**, not `provenance`: a
 window whose segment is `done` never promotes again. This matters because
@@ -338,9 +483,12 @@ Each new artifact has a `corpus_span` from `resolve_span`; each passage has one
 from the splitter. Both are in the same coordinate space because passages nest
 inside windows.
 
-**A passage is superseded only when some artifact's span covers a majority of
-its lines.** Best overlap wins, ties go to the lowest ordinal, and a passage no
-artifact substantially claims **stays active, verbatim, in results**.
+**A passage is superseded only when some one artifact's span covers a majority
+of its lines.** Per artifact, not cumulative: two artifacts claiming 30% each
+leave the passage standing, because `supersede` names one winner and a passage
+hidden behind an artifact that holds a third of it would send the reader to
+the wrong text. Best overlap wins, ties go to the lowest ordinal, and a passage
+no artifact substantially claims **stays active, verbatim, in results**.
 
 The majority floor is load-bearing. Without it, an artifact overlapping one line
 of a twenty-line passage would remove nineteen lines of verbatim text on a 5%
@@ -408,8 +556,20 @@ would let a wide passage manufacture accessibility. `decayed()` already exists.
 **Links are copied, not moved.** For every link touching a superseded passage,
 write the corresponding link on the artifact and leave the original row in
 place. `links_from` filters superseded endpoints out anyway, so the dead rows
-cost nothing at read time — and undo becomes free, because restoring a passage
-lights its links back up with no reverse migration to get wrong.
+cost nothing at read time. The row on the passage stays because it records
+what the passage earned, and because a copy is one INSERT with no reverse
+migration to get wrong. Undo (below) gets its links back for free as a
+consequence — for as long as the rows exist: `prune_learning_links` removes
+`learning` rows whose decayed weight falls under the floor, and a dead row
+decays like a live one. That is a bounded convenience, not a guarantee, and the
+copy is not justified by it.
+
+The copy is written in state `learning` unless the original was `dismissed`.
+A `related` verdict was passed on the passage's text, which the artifact does
+not have; `reopen_stale_judged_links` would reset it on the next sweep anyway
+once it saw `judged_rev` cleared, and writing the reopened state directly is
+the same result without a window in which a judge's line is shown under text
+the judge never read.
 
 Copying needs collision handling, since two passages in one window can link to
 the same artifact and both become the same `(a_id, b_id)` primary key:
@@ -422,8 +582,30 @@ the same artifact and both become the same `(a_id, b_id)` primary key:
 - `state`: a `dismissed` verdict on either side wins. The operator's "not
   related" is final, and `links_from` already treats it as an invariant rather
   than a filter.
-- `judged_rev_a/b` are cleared. The text changed under the judge, which the
-  schema comment already says reopens the verdict.
+- `judged_rev_a/b` are cleared and `state` is `learning` (or `dismissed`), as
+  above.
+
+## Ordinals after a promotion
+
+`renumber_artifacts` orders every row of a corpus — superseded passages
+included — by `(segment_idx, ordinal, rowid)`, and `finish` runs it after
+every promotion. Inside a promoted window the new artifacts, the passages they
+superseded and the passages that survived are therefore interleaved in one
+ordinal sequence, and "the row at `ordinal ± 1`" stops meaning "the
+neighbouring text". Three readers depend on document order and each gets a
+definition that survives this:
+
+- `adjacent_artifacts` (`artifacts.rs:444`) becomes "the nearest **active**
+  row by ordinal on either side" — `ordinal < ? ORDER BY ordinal DESC LIMIT 1`
+  and its mirror — instead of `ordinal IN (n-1, n+1)`. Today a superseded
+  neighbour returns nothing on that side; at `earned` that is the common case
+  in exactly the windows people use.
+- Stitching in `ask` (section 5) joins passages whose `corpus_span`s abut —
+  `end_line + 1 == start_line` — within one `(corpus_id, segment_idx)`, not
+  consecutive ordinals.
+- The consolidation exclusion (section 6) is by segment, not by ordinal.
+
+Nothing else reads ordinals as adjacency.
 
 **What does not carry:**
 
@@ -442,7 +624,7 @@ not.** That is the fixed/plastic split applied one level down.
 ## Undo
 
 `unsupersede` exists. Undoing a promotion restores the passages to active,
-deprecates the window's artifacts, and sets the segment back to `pending`. The
+deprecates the window's artifacts, and sets the segment back to `verbatim`. The
 copied links and the raised activation stay on the artifact — an asymmetry
 accepted rather than fixed, since both sides describe the same corpus lines.
 
@@ -464,7 +646,18 @@ accepted rather than fixed, since both sides describe the same corpus lines.
 - a `dismissed` link stays dismissed after the copy
 - judged pairs still name the passage after promotion, and `--export-eval`
   resolves it
-- a passage retrieved three times but never opened does **not** promote
+- a passage retrieved three times but never opened does **not** promote; the
+  same passage opened once afterwards does
+- a corpus captured at `off` has every segment `verbatim`, reaches `ready`,
+  and a reconciliation sweep arms no `SegmentWindow` for it
+- after a promotion the window's artifacts are `embed_state = pending` with a
+  live embed job, and coverage was recomputed — with every other segment still
+  `verbatim`
+- a promotion re-run under `keep_artifacts` over a window that already holds
+  non-passage rows writes nothing
+- two artifacts each claiming 30% of one passage leave it active
+- a copied link is `learning`; a copied `dismissed` link is `dismissed`
+- `adjacent_artifacts` skips a superseded row and returns the next active one
 
 ---
 
@@ -485,6 +678,16 @@ pursuits.
 cosine — the same grouping `gaps.rs` already does to name knowledge gaps — and
 each cluster is one **pursuit**: a coherent thing that was wanted, its queries,
 and everything done with the results. Local, no inference.
+
+The same grouping means the same line. `gaps.rs` once used a fixed `0.55` and
+its header records why that failed: under bge-m3 unrelated short queries land
+in 0.45–0.6, single linkage is transitive, and a few dozen of them chain into
+one group. What replaced it is `link_threshold()` — the 99th percentile of
+pairwise cosine over the base's own recorded queries, rounded, clamped to
+`[0.55, 0.9]`. Pursuits use **that function**, not a second constant; a
+`coherence` key would reintroduce the guess the repo already paid to remove,
+and the embedding recipe in section 2 moves the whole cosine distribution in a
+way no constant would follow.
 
 ## What gets recorded
 
@@ -507,7 +710,7 @@ CREATE TABLE interaction_events (
 | `opened` | 1.0 | deliberate |
 | `pivoted` | 1.5 | followed a neighbour, association or continuation — the strongest voluntary act, and unique to this application |
 | `returned` | 2.0 | came back to it later in the pursuit; hard to fake |
-| `confirmed` | 3.0 | already an activation delta; reused verbatim |
+| `confirmed` | 3.0 | already an activation delta; reused verbatim. Not a row here — it is read from `search_events.expect_id`/`verdict`, which already record it |
 | `dwell` | ≤0.5, capped | tiebreak only, never decisive |
 | `refined` | — | searched again without opening anything: a failure signal |
 | `abandoned` | — | searched, opened nothing, no follow-up: the strongest failure signal, and the one the README already says leaves no other trace |
@@ -545,9 +748,19 @@ generating at all.
 
 ## The stopping rule
 
-**A `synthesized` artifact at rank 1, at or above `weak_below`, closes the
-pursuit `satisfied` — no events recorded, no analysis, no generation.** Checked
-at result-assembly time in `search.rs` before anything is written.
+**A `synthesized` artifact at final rank 1, at or above `weak_below`, marks the
+search `answered` — no `interaction_events` are recorded for it, and any
+pursuit the clustering later places it in closes `satisfied` without analysis
+or generation.** The mark is a flag on the `search_events` row, set at
+result-assembly time in `search.rs`; the pursuit does not exist yet at that
+moment — section "The unit is a pursuit" says the clustering decides which one
+an event belongs to — so what is written is the fact, and the analysis pass
+acts on it. The search event itself is still recorded: the judge and the gap
+sweep read it as they always did.
+
+"Final rank" is the rank the page shows — after the reranker, where one is
+configured. `weak` is read from the vector similarity regardless
+(`search.rs:781`), which is why the two are stated separately.
 
 The `weak_below` qualification matters: a fused rank says where a hit placed,
 not how good it was, and a generated artifact at rank 1 with a 0.31 cosine is
@@ -560,28 +773,55 @@ is failing and goes quiet the moment it is not. When a generated artifact later
 goes stale it stops being rank 1, telemetry resumes, a fresh one is generated,
 and consolidation resolves the pair. It self-maintains.
 
+**A second anchor, for when rank 1 is not reached.** The top-1 rule terminates
+only if the generated artifact places first for the *next* phrasing of the
+need, and a paraphrase need not. So before enqueueing, the analysis pass
+resolves the engaged artifacts to roots through `roots_of` and compares the set
+against the roots of every active `synthesized` artifact. **If the pursuit's
+roots are a subset of an existing generation's roots, nothing is generated**,
+and the pursuit closes `satisfied` naming that artifact. Local, one query per
+candidate, no model. This is what stops "the same assembly, again" without
+asking the ranking to have noticed; what the ranking then still has to do is
+surface the artifact, and consolidation gets a second chance if it does not.
+
 A pursuit also closes `satisfied` when any hit above `weak_below` was opened or
-confirmed and searching stopped. Success is success regardless of who wrote the
-hit.
+confirmed and searching stopped, **and** fewer than `min_sources` artifacts
+were engaged. Success is success regardless of who wrote the hit; the second
+clause is the assembly trigger below.
 
 ## The analysis pass — local decides, the model only writes
 
 When a pursuit goes idle, one background job, no inference:
 
-1. group the window's queries into pursuits by cosine ≥ `coherence`
-2. sum engagement per artifact
-3. **unsatisfied?** — no strong hit opened or confirmed, or `refined` ≥ 2, or
+1. group the window's queries into pursuits at `link_threshold()`
+2. any event in the group marked `answered` → close `satisfied`, stop
+3. sum engagement per artifact
+4. **assembled?** — at least `min_sources` distinct artifacts engaged with,
+   and total engagement ≥ `min_engagement`
+5. **unsatisfied?** — no strong hit opened or confirmed, or `refined` ≥ 2, or
    `abandoned`
-4. **assembled?** — at least `min_sources` distinct artifacts engaged with, and
-   total engagement ≥ `min_engagement`
-5. both true → enqueue `Stage::Generate` — a new job stage, and the only one
-   this spec adds
-6. otherwise close the pursuit, recording why
+6. **wanted as a whole?** — assembled, and the engagement includes at least
+   one `pivoted` or `returned` event: the operator moved *between* the
+   sources, which is what distinguishes reading three answers from assembling
+   one out of three
+7. assembled **and** (unsatisfied **or** wanted-as-a-whole) → root-subset
+   check against existing generations → enqueue `Stage::Generate` — a new job
+   stage, and the only one this spec adds
+8. otherwise close the pursuit, recording why
 
 Step 4's `min_sources ≥ 2` does real separating work: **one** engaged artifact
 means there was nothing to assemble, and that is a promotion case — its window,
 section 3 — not a generation case. The two mechanisms partition on the number of
 sources.
+
+Step 6 is the case the section opened with. Five passages across three
+corpora that jointly served one need are each, individually, a strong hit that
+was opened — "satisfied" by step 5's test — and without step 6 the scenario
+that motivates generation would never trigger it. The `pivoted`/`returned`
+requirement keeps the trigger honest: opening three results in a row is
+reading; going back to the first after the third, or following a neighbour
+out of one into another, is assembling. `dwell` does not count toward it for
+the reason given above.
 
 ## The generation job
 
@@ -658,22 +898,31 @@ gets resolved.
 [pursuit]
 enabled        = false   # meaningful at synthesis = "earned" and "eager"
 idle_secs      = 900
-coherence      = 0.6
 min_sources    = 2
 min_engagement = 3.0
 ```
 
-Gated like `feedback.enabled` — off until turned on, local only, nothing leaves
-the machine, and Ops forgets all of it on one press. Same posture as the judge
-data, for the same reason.
+No `coherence` key: the grouping line is measured, per the clustering
+paragraph above. Off until turned on — unlike `feedback.enabled`, which section
+3 makes opt-out, this generates model-written text into the index, and that is
+a step an operator takes deliberately. Local only, nothing leaves the machine,
+and Ops forgets all of it on one press. `pursuit.enabled = true` requires
+`feedback.enabled = true`, since the events it reads are the ones recording
+writes; the combination is a startup error.
 
 ## Tests
 
-- a generated artifact at rank 1 above `weak_below` records nothing and closes
-  the pursuit satisfied; the same artifact at rank 1 *below* it does not
-  suppress
-- two unrelated searches inside one idle window become two pursuits
+- a generated artifact at rank 1 above `weak_below` marks the search
+  `answered`, records no interaction events, and the pursuit it lands in
+  closes satisfied; the same artifact at rank 1 *below* it does not suppress;
+  the search event itself is recorded either way
+- two unrelated searches inside one idle window become two pursuits, at the
+  line `link_threshold()` returns for the base
 - a pursuit engaging one artifact enqueues promotion, not generation
+- three strong hits opened in sequence with no pivot or return close
+  satisfied; the same three with one `returned` event generate
+- a pursuit whose roots are a subset of an existing generation's roots does
+  not generate and closes naming it
 - a pursuit that engaged a generated artifact puts **its own text** in the
   prompt, not its roots
 - `artifact_sources` for that generation names the **captured** roots with
@@ -707,16 +956,20 @@ and becomes a statement about the knowledge base.
 
 ## Contiguous passages are stitched
 
-Passages are consecutive verbatim slices with consecutive ordinals inside a
-segment. When passages 7 and 8 are both selected, they are literally continuous
-text. Presenting them as two excerpts wastes tokens on the twice-repeated
+Passages are consecutive verbatim slices whose spans tile a segment. When
+the passages for lines 40–61 and 62–88 are both selected, they are literally
+continuous text. Presenting them as two excerpts wastes tokens on the twice-repeated
 carried heading, hides the continuity from the model, and cuts whatever sentence
 runs across the boundary.
 
 Before packing: group selected passages by `(corpus_id, segment_idx)`, sort by
-`ordinal`, and merge runs of consecutive ordinals into one excerpt. This
-restores the original text as written, costs fewer tokens than the same passages
-separately, and is local work with no inference.
+`corpus_span.start_line`, and merge runs whose spans abut — each
+`end_line + 1` is the next `start_line` — into one excerpt. Spans rather than
+ordinals, because after a promotion the ordinal sequence interleaves superseded
+and surviving rows (section 3, "Ordinals after a promotion") and two surviving
+passages with a superseded one between them are *not* continuous text. This
+restores the original text as written, costs fewer tokens than the same
+passages separately, and is local work with no inference.
 
 Two conditions keep it honest:
 
@@ -727,12 +980,12 @@ Two conditions keep it honest:
    pursuit analysis all depend on knowing which passages actually carried the
    answer. A stitched excerpt is a presentation, not a new unit.
 
-The existing sideways reach needs no change. `adjacent_artifacts` is a lookup in
-**document order** — `ordinal ± 1`, both sides already — and is a different
-mechanism from `neighbours()` (vector distance, directionless) and
-`artifact_links` (Hebbian association, explicitly undirected). `±1` plus
-stitching is enough; `NEIGHBOUR_ANCHORS` and `NEIGHBOUR_MAX` are ranking
-parameters and move only after the harness.
+The existing sideways reach changes in one line. `adjacent_artifacts` is a
+lookup in **document order** — the nearest active row either side, per section
+3 — and is a different mechanism from `neighbours()` (vector distance,
+directionless) and `artifact_links` (Hebbian association, explicitly
+undirected). One step each way plus stitching is enough; `NEIGHBOUR_ANCHORS`
+and `NEIGHBOUR_MAX` are ranking parameters and move only after the harness.
 
 ## Ask at `earned`: two roles
 
@@ -827,12 +1080,23 @@ for structural reasons, not semantic ones.** Pointed at them, `relate` would
 flood the pair queue with model calls adjudicating paragraphs that merely sit
 next to each other — "pay only where it pays" inverted.
 
-**Consecutive passages within the same corpus are not pair candidates.** Not
-same-corpus: *consecutive*. Boilerplate genuinely repeated in section 2 and
-section 9 is a real duplicate and must still be found; it is specifically
-neighbours under a shared heading whose similarity is an artefact of how they
-were built. One predicate in `classify_pair`, beside the `in_results()` check it
-already makes.
+**Two rows from the same `(corpus_id, segment_idx)` are not pair candidates.**
+Not same-corpus: *same window*. Boilerplate genuinely repeated in section 2 and
+section 9 is a real duplicate and must still be found; what is excluded is
+material that sits together in one window, whose similarity is an artefact of
+how it was built. One predicate in `classify_pair`, beside the `in_results()`
+check it already makes.
+
+The window, not "consecutive ordinals", for two reasons. Ordinals stop meaning
+adjacency after a promotion (section 3), and — the case that actually arises
+at `earned` — a promoted artifact that claimed 40% of a passage leaves that
+passage standing in the same window by the majority rule, and the two then
+look like a duplicate pair to `relate`. Sending that pair to the judge would
+spend a model call to merge, and so hide behind model text, exactly the
+verbatim passage the majority rule just decided to keep. Overlap inside a
+window is the window job's decision, already made; it is not the judge's.
+A document short enough to fit one window loses duplicate detection inside
+itself, which is the shingle path's territory at capture anyway.
 
 One existing rule needs no change: the same-corpus containment check at
 `relate.rs:148` targets a synthesis defect — one call emitting a passage twice —
@@ -948,12 +1212,16 @@ and escalates to a person the same way.
 
 ## Call sites
 
-Four, not 177. Everything else keeps reading `corpus_id` and sees no change.
+Five, not 177. Everything else keeps reading `corpus_id` and sees no change.
 
 1. **Corpus detail page** — a merge now appears under each of its corpora
 2. **Bands and coverage** — parent spans stay claimed, the red hole disappears
 3. **`cross_corpus` in `links_from`** — `x != y` becomes "intersection empty"
-4. **`cap_per_corpus` in `search.rs`** — a merge counts against each of its
+4. **`links_to_judge`** (`links.rs:470`) — the same test, in SQL today
+   (`a.corpus_id IS NULL OR … <>`); it moves into Rust over `origins_of`
+   like `links_from`, or a merge is never judged against its own parents'
+   neighbours and always against everything else
+5. **`cap_per_corpus` in `search.rs`** — a merge counts against each of its
    corpora
 
 ## One payload field
