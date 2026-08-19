@@ -123,6 +123,19 @@
 <h3>Transcription</h3>
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
+{% if !promoted.is_empty() %}
+<p class="muted">
+  {# A window synthesis has read because its passages were read. Undo puts
+     the verbatim text back in results and retires what was written. #}
+  Promoted:
+  {% for w in promoted %}
+  <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" style="display:inline">
+    lines {{ w.from }}–{{ w.to }}
+    <button class="btn btn-ghost btn-sm" type="submit">undo</button>
+  </form>
+  {% endfor %}
+</p>
+{% endif %}
 {% include "_bands.html" %}
 {% endif %}
 

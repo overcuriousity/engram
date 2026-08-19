@@ -503,6 +503,9 @@ struct CorpusTemplate {
     /// a restored placeholder, or a photo not read yet — which falls back to
     /// the flat rendering.
     bands: Vec<BandView>,
+    /// Windows synthesis has read because their passages were read — each with
+    /// an undo, which puts the verbatim text back in results.
+    promoted: Vec<PromotedWindow>,
     /// The artifacts of this capture that name no lines of it, in a section of
     /// their own below the source. Every artifact of a restored placeholder is
     /// here, as is anything written before spans were recorded — and the page
@@ -519,6 +522,13 @@ struct CorpusTemplate {
     /// Stated whether or not a band is red, because the two measures answer
     /// different questions and can disagree.
     coverage: Option<String>,
+}
+
+/// A window a promotion has synthesized, for the corpus page's undo list.
+pub struct PromotedWindow {
+    pub idx: i64,
+    pub from: i64,
+    pub to: i64,
 }
 
 /// One stretch of the source on the corpus page, beside what came of it.
@@ -1279,6 +1289,17 @@ async fn reread_uncovered_ui(
     Ok(back)
 }
 
+/// Undo a promotion: the window's passages back in results, what the
+/// promotion wrote retired, the window `verbatim` again.
+async fn unpromote_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((cid, idx)): Path<(String, i64)>,
+) -> Result<Response> {
+    st.core.undo_promotion(&cid, idx).await?;
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
@@ -1407,6 +1428,23 @@ async fn corpus_detail(
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     let exif_rows = exif_tag_rows(&s.metadata);
+    // A promoted window: `done`, and owning at least one superseded passage.
+    let promoted: Vec<PromotedWindow> = segments
+        .iter()
+        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
+        .filter(|w| {
+            chunks.iter().any(|c| {
+                c.segment_idx == Some(w.idx)
+                    && c.provenance == crate::store::artifacts::Provenance::Passage
+                    && c.superseded_by.is_some()
+            })
+        })
+        .map(|w| PromotedWindow {
+            idx: w.idx,
+            from: w.start_line,
+            to: w.end_line,
+        })
+        .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
@@ -1421,6 +1459,7 @@ async fn corpus_detail(
         exif_rows,
         note,
         bands,
+        promoted,
         unplaced,
         lines_empty: s.raw_text.trim().is_empty(),
         raw_text: s.raw_text.clone(),
@@ -2725,6 +2764,10 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/corpora/{id}/reread", post(reread_uncovered_ui))
+        .route(
+            "/ui/corpora/{id}/segments/{idx}/unpromote",
+            post(unpromote_ui),
+        )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
@@ -7045,5 +7088,83 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(page.contains("href=\"/ui/ask\""), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_promoted_window_is_listed_with_an_undo_that_works() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[crate::store::segments::NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "l1\nl2",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 2,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "passage")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na(1, "artifact")])
+            .await
+            .unwrap();
+        core.supersede(&p[0].id, &a[0].id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&src.id, CorpusStatus::Ready)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
+        let action = format!("/ui/corpora/{}/segments/0/unpromote", src.id);
+        assert!(page.contains(&action), "{page}");
+
+        let res = app
+            .clone()
+            .oneshot(form(&action, &cookie, ""))
+            .await
+            .unwrap();
+        assert!(res.status().is_redirection(), "{:?}", res.status());
+        assert!(
+            core.store
+                .get_artifact(&p[0].id)
+                .await
+                .unwrap()
+                .in_results()
+        );
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
+        assert!(!page.contains(&action), "undo still offered after undoing");
     }
 }

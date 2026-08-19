@@ -484,6 +484,38 @@ impl Core {
         Ok(())
     }
 
+    /// Put a promoted window back: its passages active, the artifacts the
+    /// promotion wrote deprecated, the segment `verbatim` again so it may
+    /// promote afresh. The links copied onto the artifacts and the activation
+    /// they were handed stay where they are — both sides describe the same
+    /// corpus lines, and the asymmetry is accepted rather than fixed.
+    pub async fn undo_promotion(&self, corpus_id: &str, idx: i64) -> Result<()> {
+        use crate::store::artifacts::Provenance;
+        let rows = self.store.artifacts_for_segment(corpus_id, idx).await?;
+        for c in rows
+            .iter()
+            .filter(|c| c.provenance == Provenance::Passage && c.superseded_by.is_some())
+        {
+            self.unsupersede(&c.id).await?;
+        }
+        for c in rows
+            .iter()
+            .filter(|c| c.provenance != Provenance::Passage && c.in_results())
+        {
+            self.deprecate(&c.id).await?;
+        }
+        self.store
+            .set_segment_state(
+                corpus_id,
+                idx,
+                crate::store::segments::SegmentState::Verbatim,
+                None,
+            )
+            .await?;
+        tracing::info!(corpus_id, window = idx, "promotion undone");
+        Ok(())
+    }
+
     /// Move an already-hidden artifact from one winner to another.
     ///
     /// Not `supersede`, which refuses a side that is not active — and both sides
@@ -2073,6 +2105,79 @@ mod tests {
         assert_eq!(
             m["file"],
             serde_json::json!({"name": "n.txt", "size": 5, "mime": "text/plain"})
+        );
+    }
+
+    #[tokio::test]
+    async fn undoing_a_promotion_restores_the_passages_deprecates_the_artifacts_and_resets_the_window()
+     {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[crate::store::segments::NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "l1\nl2",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 2,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "passage")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na(1, "artifact")])
+            .await
+            .unwrap();
+        core.supersede(&p[0].id, &a[0].id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+
+        core.undo_promotion(&src.id, 0).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&p[0].id)
+                .await
+                .unwrap()
+                .in_results()
+        );
+        assert_eq!(
+            core.store.get_artifact(&a[0].id).await.unwrap().status,
+            crate::store::artifacts::ArtifactStatus::Deprecated
+        );
+        assert_eq!(
+            core.store.segment_state(&src.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Verbatim)
         );
     }
 }
