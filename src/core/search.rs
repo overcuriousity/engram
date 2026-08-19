@@ -389,6 +389,7 @@ impl Core {
         // priming, and an install that never opted into `feedback` must see
         // no artifact's activation move, or the ranked order could start
         // changing under a feature it never turned on.
+        // Never `maybe_promote` here: exposure is not engagement.
         if counts_as_hit && self.associating() {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let store = self.store.clone();
@@ -428,12 +429,18 @@ impl Core {
         // layer is off.
         if self.associating() {
             let ids = vec![artifact_id.to_string()];
-            let store = self.store.clone();
+            let core = self.clone();
             let (delta, half_life) = (self.activation.opened, self.activation.half_life_days);
             let at = now_secs();
             self.background.spawn(async move {
-                if let Err(e) = store.bump_activation(&ids, delta, half_life, at).await {
+                if let Err(e) = core.store.bump_activation(&ids, delta, half_life, at).await {
                     tracing::warn!(error = %e, "could not raise activation for opening");
+                    return;
+                }
+                // An open is an engagement: the one kind of bump that can
+                // promote. See `jobs::promote::maybe_promote`.
+                if let Err(e) = crate::jobs::promote::maybe_promote(&core, &ids, at).await {
+                    tracing::warn!(error = %e, "could not check the promotion threshold");
                 }
             });
         }

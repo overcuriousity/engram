@@ -290,6 +290,9 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
                 at,
             )
             .await?;
+        // A confirmation is the strongest engagement there is, and the other
+        // bump that may promote.
+        crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&expect), at).await?;
         // Same reason as in `replay_events`: the bump above propagates, and a
         // verdict counted twice raises an artifact's activation twice.
         if last_of_its_second(&stamps, idx, end) {
