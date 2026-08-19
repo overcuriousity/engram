@@ -45,6 +45,11 @@ pub enum Stage {
     Associate,
     /// One strong cross-corpus link, one call. Target is `"<a_id>|<b_id>"`.
     LinkJudge,
+    /// The pursuit sweep: groups quiet searches, scores what was engaged,
+    /// decides. Local work; arms `Generate`.
+    Pursuit,
+    /// One pursuit, one call: write the artifact it earned.
+    Generate,
 }
 
 impl Stage {
@@ -61,6 +66,8 @@ impl Stage {
             Stage::Describe => "describe",
             Stage::Associate => "associate",
             Stage::LinkJudge => "link_judge",
+            Stage::Pursuit => "pursuit",
+            Stage::Generate => "generate",
         }
     }
     pub fn parse(s: &str) -> Option<Stage> {
@@ -76,6 +83,8 @@ impl Stage {
             "describe" => Some(Stage::Describe),
             "associate" => Some(Stage::Associate),
             "link_judge" => Some(Stage::LinkJudge),
+            "pursuit" => Some(Stage::Pursuit),
+            "generate" => Some(Stage::Generate),
             _ => None,
         }
     }

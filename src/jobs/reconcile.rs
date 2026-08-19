@@ -38,9 +38,11 @@ pub async fn run(core: &Core) -> Result<usize> {
             // the case. Capture arms the planning job; this sweep is for work
             // that started and stopped.
             let segments = core.store.segments_for_corpus(&c.id).await?;
+            // `verbatim` is not unresolved: it is the decided state of a window
+            // at `off`, and arming it would synthesize through the back door.
             let unresolved: Vec<_> = segments
                 .iter()
-                .filter(|w| w.state != SegmentState::Done)
+                .filter(|w| w.state != SegmentState::Done && w.state != SegmentState::Verbatim)
                 .collect();
             if !unresolved.is_empty() {
                 // Windows exist but their units may not: a process killed
@@ -427,6 +429,29 @@ mod tests {
         assert!(
             core.store.claim_job().await.unwrap().is_none(),
             "the sweep queued the same work twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_arms_nothing_for_a_verbatim_corpus() {
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .upsert_segments(&src.id, &[seg(1, 10, "the window")])
+            .await
+            .unwrap();
+        core.store.mark_segments_verbatim(&src.id).await.unwrap();
+        let armed = run(&core).await.unwrap();
+        assert_eq!(armed, 0);
+        assert!(
+            !core
+                .store
+                .live_job(
+                    Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&src.id, 0)
+                )
+                .await
+                .unwrap()
         );
     }
 }

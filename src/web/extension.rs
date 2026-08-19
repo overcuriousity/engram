@@ -21,6 +21,8 @@ use axum::routing::get;
 #[template(path = "extension.html")]
 struct InstallTemplate {
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     origin: String,
     /// Whether the XPI on offer has been through AMO.
     ///
@@ -38,6 +40,7 @@ struct InstallTemplate {
 async fn install_page(State(st): State<AppState>, _id: Identity, headers: HeaderMap) -> Response {
     HtmlTemplate(InstallTemplate {
         judge_pending: judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         origin: request_origin(&headers).unwrap_or_default(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
     })

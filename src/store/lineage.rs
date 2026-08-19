@@ -16,9 +16,18 @@
 
 use super::Store;
 use crate::error::Result;
+use crate::store::artifacts::{Chunk, CorpusSpan};
 use crate::store::pairs::ArtifactPair;
 use sqlx::Row;
 use std::collections::BTreeMap;
+
+/// Where an artifact comes from, as corpus and lines. Derived from lineage,
+/// never stored: membership *is* lineage projected, so it cannot drift.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Origin {
+    pub corpus_id: String,
+    pub span: Option<CorpusSpan>,
+}
 
 impl Store {
     /// The captured roots of each of `artifact_ids`, keyed by the input id.
@@ -31,8 +40,8 @@ impl Store {
     /// A merged artifact resolves through `artifact_sources`, which already
     /// holds the closure, so this is one query per id and not a traversal.
     ///
-    /// A merged artifact with no lineage rows — every root deleted out from
-    /// under it — resolves to the *empty* list, never to itself. Its text is a
+    /// A merged or synthesized artifact with no lineage rows — every root
+    /// deleted out from under it — resolves to the *empty* list, never to itself. Its text is a
     /// synthesis, and handing it back as a root is how a paraphrase of a
     /// paraphrase ends up in a prompt as an original, or recorded as another
     /// merge's `root_id`. The empty answer makes that state visible to the
@@ -53,7 +62,9 @@ impl Store {
                         .bind(id)
                         .fetch_optional(&self.pool)
                         .await?;
-                if provenance.as_deref() == Some("merged") {
+                if provenance.as_deref().is_some_and(|p| {
+                    crate::store::artifacts::Provenance::parse(p).is_model_written()
+                }) {
                     vec![]
                 } else {
                     vec![id.clone()]
@@ -64,6 +75,60 @@ impl Store {
             out.insert(id.clone(), entry);
         }
         Ok(out)
+    }
+
+    /// Mirror of `roots_of`, one step further: every root's corpus and span.
+    /// A passage or captured artifact is its own origin; a merged or
+    /// synthesized one has one origin per root. Non-empty for every active
+    /// artifact — an empty answer is the same broken state `roots_of` reports.
+    /// Derived, never stored: membership *is* lineage projected, so it cannot
+    /// drift.
+    pub async fn origins_of(&self, ids: &[String]) -> Result<BTreeMap<String, Vec<Origin>>> {
+        let roots = self.roots_of(ids).await?;
+        let mut all: Vec<String> = roots.values().flatten().cloned().collect();
+        all.sort();
+        all.dedup();
+        let rows = self.artifacts_by_ids(&all).await?;
+        let by_id: std::collections::HashMap<&str, &Chunk> =
+            rows.iter().map(|c| (c.id.as_str(), c)).collect();
+        let mut out = BTreeMap::new();
+        for (id, rs) in roots {
+            let mut o: Vec<Origin> = rs
+                .iter()
+                .filter_map(|r| by_id.get(r.as_str()))
+                .filter_map(|c| {
+                    Some(Origin {
+                        corpus_id: c.corpus_id.clone()?,
+                        span: c.corpus_span.clone(),
+                    })
+                })
+                .collect();
+            o.sort_by(|a, b| {
+                (a.corpus_id.as_str(), a.span.as_ref().map(|s| s.start_line))
+                    .cmp(&(b.corpus_id.as_str(), b.span.as_ref().map(|s| s.start_line)))
+            });
+            out.insert(id, o);
+        }
+        Ok(out)
+    }
+
+    /// Model-written artifacts with a root in this corpus: what the corpus
+    /// page lists as written from it.
+    pub async fn artifacts_originating_in(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT m.* FROM artifacts m
+               JOIN artifact_sources s ON s.child_id = m.id
+               JOIN artifacts r ON r.id = s.root_id
+              WHERE r.corpus_id = ? AND m.provenance IN ('merged', 'synthesized')
+              ORDER BY m.created_at",
+        )
+        .bind(corpus_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(crate::store::artifacts::row_to_artifact)
+            .collect())
     }
 
     /// Merged artifacts still standing, newest first. What Ops lists.
@@ -296,6 +361,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::Origin;
     use crate::store::Store;
     use crate::store::artifacts::{NewArtifact, NewMerged, Provenance};
 
@@ -635,5 +701,101 @@ mod tests {
         let found = s.pairs_among(&[a.clone(), b.clone()]).await.unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].a_id == a || found[0].b_id == a);
+    }
+
+    #[tokio::test]
+    async fn roots_of_a_model_written_artifact_with_no_lineage_is_empty_not_itself() {
+        // The §9 hazard: a synthesized artifact read as captured would hand its
+        // own model-written text to a merge prompt as an original.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let na = |ordinal: i64, text: &str| crate::store::artifacts::NewArtifact {
+            ordinal,
+            text: text.into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        let made = s
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "written from a pursuit")],
+                crate::store::artifacts::Provenance::Synthesized,
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&made[0].id)).await.unwrap();
+        assert!(roots[&made[0].id].is_empty(), "{roots:?}");
+        // A passage is its own root, like a captured artifact.
+        let p = s
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(1, "verbatim")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&p[0].id)).await.unwrap();
+        assert_eq!(roots[&p[0].id], vec![p[0].id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn origins_of_a_merge_are_its_roots_corpora_and_spans() {
+        let s = Store::memory().await.unwrap();
+        let c1 = s.insert_corpus("one", "web", None).await.unwrap();
+        let c2 = s.insert_corpus("two", "web", None).await.unwrap();
+        let na = |t: &str, a: i64, b: i64| crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: a,
+                end_line: b,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let r1 = s.insert_artifacts(&c1.id, &[na("r1", 1, 3)]).await.unwrap()[0]
+            .id
+            .clone();
+        let r2 = s.insert_artifacts(&c2.id, &[na("r2", 7, 9)]).await.unwrap()[0]
+            .id
+            .clone();
+        let m = s
+            .insert_merged_artifact(&merged("r1 and r2"), &[r1.clone(), r2.clone()])
+            .await
+            .unwrap();
+        let o = s.origins_of(&[m.id.clone(), r1.clone()]).await.unwrap();
+        let mut got: Vec<(String, Option<i64>)> = o[&m.id]
+            .iter()
+            .map(|x| (x.corpus_id.clone(), x.span.as_ref().map(|sp| sp.start_line)))
+            .collect();
+        got.sort();
+        let mut want = vec![(c1.id.clone(), Some(1)), (c2.id.clone(), Some(7))];
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(
+            o[&r1],
+            vec![Origin {
+                corpus_id: c1.id.clone(),
+                span: Some(crate::store::artifacts::CorpusSpan {
+                    start_line: 1,
+                    end_line: 3
+                })
+            }]
+        );
+        // Every active artifact has at least one origin.
+        assert!(o.values().all(|v| !v.is_empty()));
+        // And the corpus page can find the merge from either corpus.
+        let from_c2 = s.artifacts_originating_in(&c2.id).await.unwrap();
+        assert_eq!(
+            from_c2.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            vec![m.id.clone()]
+        );
     }
 }

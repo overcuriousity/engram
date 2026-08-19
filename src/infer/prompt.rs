@@ -391,7 +391,9 @@ If the excerpts cover only part of the question, answer that part and say plainl
 cover — do not withhold a partial answer, and do not stretch an excerpt to cover what it does not. \
 If no excerpt mentions the subject of the question, begin your reply with the exact words \
 `Not in the knowledge base.` and say what is missing rather than guessing. \
-Cite excerpts by their number. \
+Cite excerpts by their number, and cite the excerpt the words you used came from. \
+An excerpt reading `(continues [n])` is the rest of excerpt n: its text is printed there, and a \
+claim drawn from that part of the text is cited by whichever of the two numbers holds it. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
 
@@ -467,11 +469,31 @@ pub fn ask_excerpt(number: usize, title: &str, text: &str, caveats: &[String]) -
     block
 }
 
+/// A passage whose text was printed under an earlier number, because the two
+/// abut and are one piece of continuous text (`Core::stitch_passages`).
+///
+/// It keeps its own number rather than vanishing from the prompt: the number
+/// is what the rail links to the artifact, so a run of three passages printed
+/// under one number leaves the model no way to cite the two it did not print
+/// without pointing the reader at a page that does not hold the words.
+pub fn ask_continues(number: usize, printed_under: usize) -> String {
+    format!("[{number}] (continues [{printed_under}])")
+}
+
 /// The question and whatever excerpts survived the context budget.
 pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
+    // Empty blocks are dropped. Stitching no longer makes any — a stitched
+    // passage keeps its slot and points at the block its text went into — but
+    // an excerpt with neither title nor text still has nothing to say, and a
+    // bare `[7]` in the prompt is worse than one number unused.
+    let shown: Vec<&str> = excerpts
+        .iter()
+        .map(String::as_str)
+        .filter(|e| !e.is_empty())
+        .collect();
     format!(
         "Question: {question}\n\nExcerpts:\n\n{}",
-        excerpts.join("\n\n---\n\n")
+        shown.join("\n\n---\n\n")
     )
 }
 
@@ -589,6 +611,71 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
         s.push('\n');
     }
     s
+}
+
+/// The generation behind a pursuit: one self-contained artifact written from
+/// the excerpts the operator engaged with, to answer the questions they asked.
+pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+
+pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
+    let qs = questions
+        .iter()
+        .map(|q| format!("- {q}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ex = sources
+        .iter()
+        .enumerate()
+        .map(|(i, (title, text))| format!("[{}] {title}\n{text}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    format!("Questions:\n{qs}\n\nExcerpts:\n\n{ex}")
+}
+
+pub fn generate_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "artifact": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "text": {"type": "string"},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "caveats": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["title", "text", "category", "tags", "caveats"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["artifact"],
+        "additionalProperties": false
+    })
+}
+
+/// What a generation call produced.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Generated {
+    pub title: String,
+    pub text: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+pub fn parse_generation(reply: &str) -> Result<Generated> {
+    let v: serde_json::Value = serde_json::from_str(extract_json(reply))
+        .map_err(|e| Error::MalformedLlmOutput(format!("generation was not JSON: {e}")))?;
+    let g: Generated = serde_json::from_value(v["artifact"].clone())
+        .map_err(|e| Error::MalformedLlmOutput(format!("generation had no artifact: {e}")))?;
+    if g.text.trim().is_empty() {
+        return Err(Error::MalformedLlmOutput("generation had no text".into()));
+    }
+    Ok(g)
 }
 
 pub fn gap_label_schema() -> serde_json::Value {
@@ -2170,5 +2257,11 @@ mod tests {
             !p.contains(&long),
             "no question reaches the prompt at full length"
         );
+    }
+
+    #[test]
+    fn ask_prompt_skips_an_empty_excerpt() {
+        let p = ask_prompt("q", &["[1] t\na".into(), String::new(), "[3] t\nc".into()]);
+        assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
     }
 }

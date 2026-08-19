@@ -51,6 +51,11 @@ pub struct RenderedResult {
     /// The title of the ranked hit that recalled this one. Set only on an
     /// associated hit, and it is what the row names.
     pub via_title: Option<String>,
+    /// A model wrote this — merged, or generated from a pursuit. Badged, so
+    /// it is never silently indistinguishable from captured text.
+    pub model_written: bool,
+    /// How many corpora it draws from, for the badge.
+    pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
 }
@@ -138,6 +143,10 @@ pub struct ArtifactDetail {
     /// highlighted" label over an empty link and an empty line table — on
     /// exactly the artifact whose orphan notice matters most.
     pub merged: bool,
+    /// Written from a pursuit: shows the questions it was written for.
+    pub synthesized: bool,
+    /// Those questions.
+    pub cues: Vec<String>,
     /// True when one of those sources has since been deleted. The text still
     /// carries what it said, so this is a missing link rather than missing
     /// knowledge — and saying so beats listing one source fewer in silence.
@@ -360,6 +369,8 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 struct CaptureTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
     pairs: Vec<PairRow>,
@@ -428,6 +439,8 @@ struct CapturedTemplate {
 struct SearchTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// Kept so a reload or a deep link restores the box with its results.
     q: String,
     /// What this collection can actually be narrowed by. Rendered as chips, so
@@ -466,6 +479,8 @@ struct QueueTemplate {
 struct CorpusTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     id: String,
     status: String,
     badge: &'static str,
@@ -497,11 +512,17 @@ struct CorpusTemplate {
     /// a restored placeholder, or a photo not read yet — which falls back to
     /// the flat rendering.
     bands: Vec<BandView>,
+    /// Windows synthesis has read because their passages were read — each with
+    /// an undo, which puts the verbatim text back in results.
+    promoted: Vec<PromotedWindow>,
     /// The artifacts of this capture that name no lines of it, in a section of
     /// their own below the source. Every artifact of a restored placeholder is
     /// here, as is anything written before spans were recorded — and the page
     /// showed none of them once it rendered bands alone.
     unplaced: Vec<ArtifactView>,
+    /// Merged and synthesized artifacts with a root in this capture. A merge
+    /// belongs to every corpus it drew from, and this is where that shows.
+    written_from: Vec<ArtifactView>,
     /// Nothing was captured here at all, so the flat fallback has nothing to
     /// show either.
     lines_empty: bool,
@@ -513,6 +534,13 @@ struct CorpusTemplate {
     /// Stated whether or not a band is red, because the two measures answer
     /// different questions and can disagree.
     coverage: Option<String>,
+}
+
+/// A window a promotion has synthesized, for the corpus page's undo list.
+pub struct PromotedWindow {
+    pub idx: i64,
+    pub from: i64,
+    pub to: i64,
 }
 
 /// One stretch of the source on the corpus page, beside what came of it.
@@ -551,6 +579,8 @@ struct ArtifactDetailFragment {
 struct ArtifactDetailPage {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     d: ArtifactDetail,
 }
 
@@ -559,6 +589,8 @@ struct ArtifactDetailPage {
 struct OpsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -584,6 +616,12 @@ struct OpsTemplate {
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
+    /// Artifacts written from pursuits, newest first, each one click from
+    /// deprecated.
+    generated: Vec<GeneratedRow>,
+    /// Recent pursuits, only when the feature is on.
+    pursuit_enabled: bool,
+    pursuits: Vec<PursuitRow>,
 }
 
 #[derive(Template)]
@@ -591,6 +629,8 @@ struct OpsTemplate {
 struct SettingsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -600,6 +640,24 @@ struct SettingsTemplate {
     /// only the searches let an operator clear their query log without knowing
     /// the judged questions went with it.
     asks: Option<crate::store::asks::AskStats>,
+}
+
+/// One generated artifact on Ops.
+struct GeneratedRow {
+    id: String,
+    title: String,
+    subtitle: String,
+    cues: Vec<String>,
+    sources: Vec<SourceRow>,
+}
+
+/// One pursuit on Ops: what was wanted, what came of it.
+struct PursuitRow {
+    when: String,
+    state: String,
+    reason: String,
+    queries: Vec<String>,
+    artifact_id: Option<String>,
 }
 
 struct MergedRow {
@@ -677,6 +735,8 @@ struct TokenCreatedTemplate {
 struct AskTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// A question to prefill the box with — a gap's "ask again".
     q: String,
 }
@@ -787,6 +847,7 @@ async fn capture_page(
     };
     Ok(HtmlTemplate(CaptureTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         pairs,
         more_pairs,
         vision_enabled: st.core.describer.is_some(),
@@ -900,6 +961,7 @@ async fn search_page(
     ensure_facet(&mut facets.categories, &category);
     Ok(HtmlTemplate(SearchTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         q: p.q,
         facets,
         category,
@@ -1072,6 +1134,8 @@ fn render_hit(
         past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
+        model_written: h.model_written,
+        origin_count: h.origin_count,
     }
 }
 
@@ -1263,6 +1327,35 @@ async fn reread_uncovered_ui(
     Ok(back)
 }
 
+#[derive(serde::Deserialize)]
+struct DwellForm {
+    #[serde(default)]
+    secs: i64,
+}
+
+/// The page saying how long an artifact was open, sent as the reader leaves
+/// it. `sendBeacon` lands here; nothing is rendered back.
+async fn artifact_dwell(
+    State(st): State<AppState>,
+    id: Identity,
+    Path(aid): Path<String>,
+    Form(f): Form<DwellForm>,
+) -> Result<Response> {
+    st.core.record_dwell(&aid, f.secs, Some(&id.subject));
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
+/// Undo a promotion: the window's passages back in results, what the
+/// promotion wrote retired, the window `verbatim` again.
+async fn unpromote_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path((cid, idx)): Path<(String, i64)>,
+) -> Result<Response> {
+    st.core.undo_promotion(&cid, idx).await?;
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
+}
+
 async fn corpus_detail(
     State(st): State<AppState>,
     _id: Identity,
@@ -1391,8 +1484,35 @@ async fn corpus_detail(
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     let exif_rows = exif_tag_rows(&s.metadata);
+    let written_from: Vec<ArtifactView> = st
+        .core
+        .store
+        .artifacts_originating_in(&cid)
+        .await?
+        .iter()
+        .filter(|c| c.in_results())
+        .map(artifact_view)
+        .collect();
+    // A promoted window: `done`, and owning at least one superseded passage.
+    let promoted: Vec<PromotedWindow> = segments
+        .iter()
+        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
+        .filter(|w| {
+            chunks.iter().any(|c| {
+                c.segment_idx == Some(w.idx)
+                    && c.provenance == crate::store::artifacts::Provenance::Passage
+                    && c.superseded_by.is_some()
+            })
+        })
+        .map(|w| PromotedWindow {
+            idx: w.idx,
+            from: w.start_line,
+            to: w.end_line,
+        })
+        .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -1404,7 +1524,9 @@ async fn corpus_detail(
         exif_rows,
         note,
         bands,
+        promoted,
         unplaced,
+        written_from,
         lines_empty: s.raw_text.trim().is_empty(),
         raw_text: s.raw_text.clone(),
         coverage,
@@ -1723,6 +1845,7 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
 async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
         feedback: match st.core.feedback.enabled {
             true => Some(st.core.store.feedback_stats().await?),
@@ -1835,6 +1958,44 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     let more_merged = merged.len() > TABLE_CAP as usize;
     merged.truncate(TABLE_CAP as usize);
+
+    let mut generated = Vec::new();
+    let gen_chunks = st.core.store.synthesized_artifacts(TABLE_CAP).await?;
+    let gen_ids: Vec<String> = gen_chunks.iter().map(|c| c.id.clone()).collect();
+    let gen_roots = st.core.store.roots_of(&gen_ids).await.unwrap_or_default();
+    for c in gen_chunks {
+        let sources = source_rows(
+            &st.core.store,
+            &c.id,
+            gen_roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
+        generated.push(GeneratedRow {
+            title: title_of(&c),
+            subtitle: row_subtitle(&c),
+            cues: c.cues.clone(),
+            id: c.id,
+            sources,
+        });
+    }
+    let pursuit_enabled = st.core.pursuit.enabled;
+    let pursuits: Vec<PursuitRow> = if pursuit_enabled {
+        st.core
+            .store
+            .recent_pursuits(50)
+            .await?
+            .into_iter()
+            .map(|p| PursuitRow {
+                when: fmt_time(p.opened_at),
+                state: p.state,
+                reason: p.reason.unwrap_or_default(),
+                queries: p.queries,
+                artifact_id: p.artifact_id,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
 
@@ -1872,6 +2033,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     Ok(HtmlTemplate(OpsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         retrying,
         parked,
         superseded,
@@ -1891,6 +2053,9 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             true => Some(st.core.store.link_counts().await?),
             false => None,
         },
+        generated,
+        pursuit_enabled,
+        pursuits,
     })
     .into_response())
 }
@@ -2128,11 +2293,17 @@ async fn ask_page(
     State(st): State<AppState>,
     _id: Identity,
     Query(p): Query<AskPrefill>,
-) -> impl IntoResponse {
-    HtmlTemplate(AskTemplate {
+) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
+    Ok(HtmlTemplate(AskTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         q: p.q,
     })
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -2151,6 +2322,10 @@ async fn ask_submit(
     id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     // Refused before anything is parked, so an empty box costs no entry in the
     // map and no second round trip to find out.
     if f.q.trim().is_empty() {
@@ -2182,6 +2357,10 @@ async fn ask_stream(
     id: Identity,
     Path(handoff): Path<String>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     use tokio_stream::StreamExt as _;
 
     // Unknown, already spent, expired, or somebody else's — all one answer.
@@ -2411,6 +2590,10 @@ async fn ask_verdict(
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     match f.verdict.as_str() {
         "none" => st.core.store.unjudge_ask(&id).await?,
         v => {
@@ -2433,6 +2616,10 @@ async fn ask_carried(
     Path(id): Path<String>,
     Form(f): Form<CarriedForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     let carried = st.core.store.toggle_carried(&id, f.n).await?;
     let bar = ask_verdict_bar(&st, &id, true).await?;
     Ok(HtmlTemplate(AskCarriedTemplate {
@@ -2591,7 +2778,9 @@ pub(crate) async fn build_artifact_detail(
         status: c.status,
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
-        merged: c.provenance == crate::store::artifacts::Provenance::Merged,
+        merged: c.provenance.is_model_written(),
+        synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
+        cues: c.cues,
         corpus_id: c.corpus_id,
         // A merged artifact has no corpus and so cannot have a restored one.
         corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
@@ -2606,13 +2795,17 @@ pub(crate) async fn build_artifact_detail(
 struct ArtifactViewParams {
     #[serde(default)]
     terms: String,
+    /// The artifact this one was reached from — a neighbour, an association,
+    /// a continuation — when the link came from another artifact's page.
+    #[serde(default)]
+    via: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
 async fn artifact_detail(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     headers: axum::http::HeaderMap,
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
@@ -2620,11 +2813,15 @@ async fn artifact_detail(
     let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     st.core.mark_artifact_seen(&cid);
+    // And the act the pursuit sweep reads: opened, or pivoted through.
+    st.core
+        .record_interaction(&cid, p.via.as_deref(), Some(&id.subject));
     if headers.contains_key("hx-request") {
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         d,
     })
     .into_response())
@@ -2683,6 +2880,10 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
         .route("/ui/corpora/{id}/reprocess", post(reprocess_ui))
         .route("/ui/corpora/{id}/reread", post(reread_uncovered_ui))
+        .route(
+            "/ui/corpora/{id}/segments/{idx}/unpromote",
+            post(unpromote_ui),
+        )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
@@ -2690,6 +2891,7 @@ pub fn ui_router() -> Router<AppState> {
             post(dismiss_link),
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
+        .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
@@ -3332,6 +3534,7 @@ mod tests {
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
                         candidates: vec![],
+                        answered: false,
                     },
                     // No folding: these stand for separate searches, not one
                     // being typed.
@@ -3972,6 +4175,9 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
         };
 
         let loose = render_hit(0, result(true), &Default::default());
@@ -4005,6 +4211,8 @@ mod tests {
             past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
+            model_written: false,
+            origin_count: 0,
         }
     }
 
@@ -4117,6 +4325,8 @@ mod tests {
             past_cliff: false,
             via_title: None,
             reason: None,
+            model_written: false,
+            origin_count: 0,
         }
     }
 
@@ -6267,9 +6477,9 @@ mod tests {
             .await
             .unwrap();
         // Swapped in after indexing, so only the answer comes from it.
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("First run `wipefs --all /dev/sdX`, then read alpha.".into()),
-        });
+        }));
         let (app, cookie) = app_with_cookie(core).await;
         let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
         assert!(html.contains("unsupported literal(s)"), "no badge: {html}");
@@ -6654,9 +6864,9 @@ mod tests {
             .unwrap();
         // Swapped in after indexing, so the citations in the answer are this
         // reply's and not something retrieval happened to produce.
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("alpha [1], bravo [2], and alpha again [01].".into()),
-        });
+        }));
         let (app, cookie) = app_with_cookie(core).await;
 
         let body = ask_over_sse(&app, &cookie, "what+is+alpha").await;
@@ -6970,5 +7180,365 @@ mod tests {
             out, r##"<a href="/x?q=[1]"><a class="cite" href="#cite-1">[1]</a></a>"##,
             "{out}"
         );
+    }
+
+    #[tokio::test]
+    async fn without_an_ask_model_there_is_no_ask_page_and_no_ask_link() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.completer = None;
+        let (app, cookie) = app_with_cookie(core).await;
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(!page.contains("href=\"/ui/ask\""), "{page}");
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ask")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = app
+            .oneshot(form("/ui/ask", &cookie, "q=anything"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn with_an_ask_model_the_link_is_there() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(page.contains("href=\"/ui/ask\""), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_promoted_window_is_listed_with_an_undo_that_works() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[crate::store::segments::NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "l1\nl2",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 2,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "passage")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na(1, "artifact")])
+            .await
+            .unwrap();
+        core.supersede(&p[0].id, &a[0].id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&src.id, CorpusStatus::Ready)
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
+        let action = format!("/ui/corpora/{}/segments/0/unpromote", src.id);
+        assert!(page.contains(&action), "{page}");
+
+        let res = app
+            .clone()
+            .oneshot(form(&action, &cookie, ""))
+            .await
+            .unwrap();
+        assert!(res.status().is_redirection(), "{:?}", res.status());
+        assert!(
+            core.store
+                .get_artifact(&p[0].id)
+                .await
+                .unwrap()
+                .in_results()
+        );
+        let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
+        assert!(!page.contains(&action), "undo still offered after undoing");
+    }
+
+    #[tokio::test]
+    async fn a_merge_is_listed_under_each_corpus_it_drew_from() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let c1 = core.store.insert_corpus("one", "web", None).await.unwrap();
+        let c2 = core.store.insert_corpus("two", "web", None).await.unwrap();
+        let na = |t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 1,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let r1 = core
+            .store
+            .insert_artifacts(&c1.id, &[na("root one")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let r2 = core
+            .store
+            .insert_artifacts(&c2.id, &[na("root two")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "the merge of one and two".into(),
+                    title: Some("Merged title".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[r1, r2],
+            )
+            .await
+            .unwrap();
+        for c in [&c1, &c2] {
+            core.store
+                .set_corpus_status(&c.id, CorpusStatus::Ready)
+                .await
+                .unwrap();
+            let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", c.id)).await;
+            assert!(page.contains("Written from this corpus"), "{page}");
+            assert!(page.contains(&m.id), "{page}");
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_from_another_artifacts_page_records_a_pivot() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let made = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "a".into(),
+                        corpus_span: None,
+                        title: Some("A".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "b".into(),
+                        corpus_span: None,
+                        title: Some("B".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        get_body(&app, &cookie, &format!("/ui/artifacts/{}", made[0].id)).await;
+        get_body(
+            &app,
+            &cookie,
+            &format!("/ui/artifacts/{}?via={}", made[1].id, made[0].id),
+        )
+        .await;
+        handle.background.wait_idle().await;
+        let now = crate::store::now();
+        let got = handle.store.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].kind, "opened");
+        assert_eq!(got[1].kind, "pivoted");
+        assert_eq!(got[1].via.as_deref(), Some(made[0].id.as_str()));
+        assert_eq!(got[1].scope.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.pursuit.enabled = true;
+        core.feedback.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let s = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "source text".into(),
+                    corpus_span: None,
+                    title: Some("S".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let g = handle
+            .store
+            .insert_synthesized_artifact(
+                &crate::store::artifacts::NewSynthesized {
+                    text: "generated from S".into(),
+                    title: Some("Generated title".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec!["why was this asked".into()],
+                },
+                &[s[0].id.clone()],
+            )
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&handle, &g.id).await.unwrap();
+        handle
+            .store
+            .insert_pursuit(1, &["why was this asked".into()], &[s[0].id.clone()])
+            .await
+            .unwrap();
+
+        let detail = get_body(&app, &cookie, &format!("/ui/artifacts/{}", g.id)).await;
+        assert!(
+            detail.contains("Written because these were asked"),
+            "{detail}"
+        );
+        assert!(detail.contains("why was this asked"), "{detail}");
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(ops.contains("Generated"), "{ops}");
+        assert!(
+            ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
+            "{ops}"
+        );
+        assert!(ops.contains("Pursuits"), "{ops}");
+
+        let rail = get_body(
+            &app,
+            &cookie,
+            "/ui/search/results?q=Generated%20title%0Agenerated%20from%20S",
+        )
+        .await;
+        assert!(rail.contains("model-written"), "{rail}");
+    }
+
+    #[tokio::test]
+    async fn the_pursuit_section_is_not_there_when_pursuits_are_off() {
+        let (app, cookie) = app_with_session().await;
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(!ops.contains("<h3>Pursuits</h3>"), "{ops}");
+    }
+
+    #[tokio::test]
+    async fn the_page_reports_how_long_an_artifact_was_open() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                "secs=42",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        handle.background.wait_idle().await;
+        let now = crate::store::now();
+        let got = handle.store.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, "dwell");
+        assert_eq!(got[0].detail.as_deref(), Some("42"));
+        // The detail root names the artifact, which is what the page's timer reads.
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+        assert!(page.contains(&format!("data-artifact=\"{a}\"")), "{page}");
     }
 }

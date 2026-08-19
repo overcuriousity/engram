@@ -123,6 +123,19 @@
 <h3>Transcription</h3>
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
+{% if !promoted.is_empty() %}
+<p class="muted">
+  {# A window synthesis has read because its passages were read. Undo puts
+     the verbatim text back in results and retires what was written. #}
+  Promoted:
+  {% for w in promoted %}
+  <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" style="display:inline">
+    lines {{ w.from }}–{{ w.to }}
+    <button class="btn btn-ghost btn-sm" type="submit">undo</button>
+  </form>
+  {% endfor %}
+</p>
+{% endif %}
 {% include "_bands.html" %}
 {% endif %}
 
@@ -144,6 +157,20 @@
 </p>
 <div class="unplaced">
   {% for c in unplaced %}{% include "_artifact.html" %}{% endfor %}
+</div>
+{% endif %}
+
+{% if !written_from.is_empty() %}
+{# A merged or synthesized artifact belongs to every corpus it drew from — its
+   origins are its roots' corpora, derived from lineage, never stored — and
+   this capture is one of them. #}
+<h3>Written from this corpus</h3>
+<p class="muted">
+  Model-written artifacts with a source here. Each lists what it was written
+  from on its own page.
+</p>
+<div class="unplaced">
+  {% for c in written_from %}{% include "_artifact.html" %}{% endfor %}
 </div>
 {% endif %}
 {% endblock %}

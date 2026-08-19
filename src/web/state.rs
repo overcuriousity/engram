@@ -87,6 +87,12 @@ impl AppState {
     }
 }
 
+/// Whether the ask door is open: `[infer.ask]` is configured. The nav reads
+/// it through every page's template, the same way it reads `judge_pending`.
+pub fn ask_enabled(st: &AppState) -> bool {
+    st.core.asks()
+}
+
 /// What the nav needs to know about judging: how many searches are waiting, or
 /// `None` when nothing is being captured and the entry does not belong there.
 ///

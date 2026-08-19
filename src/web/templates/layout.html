@@ -48,7 +48,11 @@
          already appears. #}
       <a href="/ui/capture">Capture</a>
       <a href="/ui/search">Search</a>
+      {# Present only where there is a model to answer. No greyed-out entry,
+         no page behind it that says so: the door is simply not there. #}
+      {% if ask_enabled %}
       <a href="/ui/ask">Ask</a>
+      {% endif %}
       {# A fourth destination only where searches are actually being recorded.
          It was reachable from one conditional sentence on Ops before, which is
          a page you open when something is wrong — the wrong place for the one
@@ -79,8 +83,10 @@
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Capture</a>
     <a href="/ui/search">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="9" cy="9" r="5.5"/><path d="M13 13l4 4"/></svg>Search</a>
+    {% if ask_enabled %}
     <a href="/ui/ask">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M7 7.5a3 3 0 115 2.2c-.8.7-1.2 1.2-1.2 2.3M10 15.5v.01"/></svg>Ask</a>
+    {% endif %}
     {# Same rule as the top row: present only where there is something to judge
        at all. A dot rather than a number, because the tab is 52px tall and the
        count is not the point — that anything is waiting is. #}

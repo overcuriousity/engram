@@ -292,11 +292,15 @@ impl Walk<'_> {
                 children: Vec::new(),
             };
         };
-        let merged = c.provenance == crate::store::artifacts::Provenance::Merged;
         let (source_href, source_label) = self.source_of(&c).await;
         LineageNode {
             title: crate::web::ui::title_of(&c),
-            kind: if merged { "merge" } else { "captured" },
+            kind: match c.provenance {
+                crate::store::artifacts::Provenance::Merged => "merge",
+                crate::store::artifacts::Provenance::Synthesized => "synthesized",
+                crate::store::artifacts::Provenance::Passage => "passage",
+                crate::store::artifacts::Provenance::Captured => "captured",
+            },
             when: crate::web::ui::fmt_time(c.created_at),
             created_at: c.created_at,
             source_href,

@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod lineage;
 pub mod links;
 pub mod pairs;
+pub mod pursuits;
 pub mod segments;
 pub mod shingle;
 
@@ -260,6 +261,7 @@ mod tests {
                 "carry_lines",
                 "state",
                 "keep_artifacts",
+                "no_promote",
                 "attempts",
                 "last_error",
             ],

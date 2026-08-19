@@ -163,10 +163,20 @@ own.
   exists, and `ask/retrieve.rs` already decides which hits are reliable enough
   to reach from. What is left is the presentation — saying so on the rail, and
   the click.
-- **Server-side grouping.** The per-corpus cap is applied client-side over a
-  candidate pool three times the limit; a corpus whose artifacts fill the pool
-  leaves nothing to promote. Qdrant's `query/groups` retrieves per group.
-  `cap_per_corpus` in `src/core/search.rs` becomes the in-memory fallback.
+- **Server-side grouping — now a prerequisite, not a nice-to-have.** The
+  per-corpus cap is applied client-side over a candidate pool three times the
+  limit; a corpus whose artifacts fill the pool leaves nothing to promote. At
+  `synthesis = "off"` a 10,000-token document yields ~26 passages rather than
+  ~8 artifacts, adjacent passages are additionally similar through their
+  shared heading, and one long document fills the pool reliably. The
+  tiered-synthesis spec (§5, "What `off` makes mandatory") names Qdrant's
+  `query/groups` as part of the design; what landed is the fallback only —
+  `cap_per_corpus` in `src/core/search.rs` now counts a merge against each of
+  its origin corpora (`VectorPayload.origin_corpora`). Still to build: the
+  `query/groups` call in `vector/qdrant.rs`, its emulation in
+  `vector/memory.rs`, and the measurement against the judged-pair set, since
+  it moves ranking. Until then a very long document at `off` can dominate a
+  result list.
 - **Reranking on by default**, once there is a default endpoint worth assuming.
   A cross-encoder, not a model call; the harness — both of them — decides.
 

@@ -173,6 +173,7 @@ mod tests {
                         similarity: Some(0.7),
                         shown: true,
                     }],
+                    answered: false,
                 },
                 0,
             )
@@ -295,6 +296,9 @@ mod tests {
                     .map(|id| crate::store::asks::NewAskCitation {
                         artifact_id: id.to_string(),
                         score: 1.0,
+                        // The harness names what the answer drew on, not what
+                        // it was shown; here they are the same list.
+                        used: true,
                     })
                     .collect(),
             })

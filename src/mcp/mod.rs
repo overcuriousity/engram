@@ -85,8 +85,18 @@ pub struct AskParams {
     pub q: String,
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl PkdbTools {
+    /// The tools this core can actually serve. `ask` is not a tool that says
+    /// "not configured" — it is not a tool.
+    pub(crate) fn routes(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let mut r = Self::tool_router();
+        if !self.core.asks() {
+            r.remove_route("ask");
+        }
+        r
+    }
+
     #[tool(
         name = "ingest",
         description = "Store text in the personal knowledge base. Returns immediately; \
@@ -168,6 +178,9 @@ impl PkdbTools {
         }
     }
 }
+
+#[rmcp::tool_handler(router = self.routes())]
+impl rmcp::ServerHandler for PkdbTools {}
 
 /// An answer, with everything the page would have shown around it.
 ///
@@ -366,6 +379,9 @@ mod tests {
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
         }
     }
 
@@ -397,5 +413,17 @@ mod tests {
         assert!(out.contains("### 1. ranked"), "{out}");
         assert!(out.contains("### recalled"), "{out}");
         assert!(!out.contains("### 2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn the_ask_tool_is_offered_only_with_an_ask_model() {
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools { core: core.clone() };
+        assert!(tools.routes().has_route("ask"));
+        let mut core = core;
+        core.completer = None;
+        let tools = PkdbTools { core };
+        assert!(!tools.routes().has_route("ask"));
+        assert!(tools.routes().has_route("search"));
     }
 }

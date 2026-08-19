@@ -461,6 +461,7 @@ mod tests {
                     query_vec: vec,
                     embed_model: "fake".into(),
                     candidates: vec![],
+                    answered: false,
                 },
                 0,
             )

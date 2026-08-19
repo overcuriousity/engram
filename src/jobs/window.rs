@@ -42,12 +42,20 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     if w.state == SegmentState::Done {
         return Ok(());
     }
+    // No synthesizer: the unit cannot run, and `run_claimed` closes it before
+    // it gets here. Said again at the call so a direct caller gets an answer
+    // and not a panic.
+    let Some(synth) = core.synthesizer.clone() else {
+        return Err(Error::Validation(
+            "[infer.synthesize] is not configured; this window cannot be synthesized".into(),
+        ));
+    };
 
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
     let ctx = crate::infer::context::WindowContext::build(
         &all_texts,
         idx as usize,
-        core.synthesizer.budget().context,
+        synth.budget().context,
         &core.counter,
     );
     // The stored text, not a re-derivation from the line range: line numbers
@@ -70,10 +78,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // `text_with_no_structure_still_splits_by_line_cap` has always asserted.
     // What must never happen is unbounded — the corpus that came back fifteen
     // times its budget.
-    let window_budget = crate::infer::budget::segment_tokens(
-        core.synthesizer.budget(),
-        super::synthesize::prompt_overhead(core),
-    );
+    let window_budget = super::synthesize::segment_budget(core);
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,
@@ -90,8 +95,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     }
 
     let permit = core.gate.background().await;
-    let first = core
-        .synthesizer
+    let first = synth
         .segment(crate::infer::SegmentInput {
             core: &text,
             context: &ctx,
@@ -128,8 +132,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             "literals missing; re-segmenting once"
         );
         let permit = core.gate.background().await;
-        let second = core
-            .synthesizer
+        let second = synth
             .segment(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
@@ -181,14 +184,88 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
     }
 
+    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?;
     let written =
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
     flag_unverified(core, &written, &text).await?;
+    if keep {
+        // The replacements have to be searchable before the originals stop
+        // being. `supersede_covered` takes the passages out of results, and the
+        // artifacts standing in for them are still `pending` until the corpus
+        // embed job settling arms below gets its turn — under a backed-up queue
+        // and `[pacing] cooldown_secs` that is however long the queue takes,
+        // and for all of it this window's lines are reachable from neither
+        // side. Embedded here, inline, so the swap is a swap.
+        //
+        // A refusal leaves the passages standing and the artifacts queued: the
+        // window is captured either way, the corpus embed job below will pick
+        // the artifacts up, and the next settle re-runs this. Hiding readable
+        // text behind text nothing can find is the one outcome not worth
+        // risking, so it is the direction this fails in.
+        let embedded = embed_written(core, &written).await;
+        if let Err(e) = &embedded {
+            tracing::warn!(
+                corpus_id,
+                window = idx,
+                error = %e,
+                "the promoted window's artifacts could not be embedded; \
+                 leaving its passages in results"
+            );
+        }
+        if let Ok(written) = &embedded {
+            // A promotion: what the window's artifacts cover, they supersede,
+            // and the passages' access comes with them. Under the corpus lock
+            // as a second locked step — `write_segment_artifacts` took and
+            // released it.
+            let _corpus = core.corpus_lock(corpus_id).await;
+            let n = crate::jobs::promote::supersede_covered(
+                core,
+                corpus_id,
+                idx,
+                written,
+                crate::store::now(),
+            )
+            .await?;
+            tracing::info!(
+                corpus_id,
+                window = idx,
+                superseded = n,
+                "promotion superseded its covered passages"
+            );
+        }
+    }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;
 
     settle(core, corpus_id).await
+}
+
+/// Embed one promoted window's artifacts now, rather than leaving them to the
+/// corpus batch. Only a promotion needs this: it is the one path that hides
+/// existing text on the strength of text it has just written.
+///
+/// Returns the artifacts that are actually there afterwards. An oversize one is
+/// replaced by siblings and its own row goes away, so what was written is not
+/// always what is now searchable — and superseding a passage behind an id that
+/// no longer exists is the failure this whole step is here to avoid. The
+/// siblings cover the same lines and could be traced to the same passages, but
+/// working that out is `resolve_span`'s job on a re-run; dropping them leaves
+/// the passages standing, which is the direction promotion may fail in.
+async fn embed_written(
+    core: &Core,
+    written: &[crate::store::artifacts::Chunk],
+) -> Result<Vec<crate::store::artifacts::Chunk>> {
+    for c in written {
+        crate::jobs::embed::run(core, &c.id).await?;
+    }
+    let ids: Vec<String> = written.iter().map(|c| c.id.clone()).collect();
+    let live = core.store.artifacts_by_ids(&ids).await?;
+    Ok(written
+        .iter()
+        .filter(|c| live.iter().any(|l| l.id == c.id))
+        .cloned()
+        .collect())
 }
 
 /// Everything that can only be decided once every window has resolved.
@@ -212,7 +289,9 @@ pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
     let _corpus = core.corpus_lock(corpus_id).await;
     for w in core.store.segments_for_corpus(corpus_id).await? {
         let resolved = match w.state {
-            SegmentState::Done => true,
+            // A verbatim window was captured as passages and is owed nothing;
+            // it resolves the way a synthesized one does.
+            SegmentState::Done | SegmentState::Verbatim => true,
             // `jobs.attempts` rather than a counter on the segment: the unit is
             // the job now, and two counters for one thing is what made the
             // original incident so hard to read.
@@ -335,6 +414,34 @@ pub(crate) async fn write_segment_artifacts(
         .store
         .segment_keeps_artifacts(corpus_id, segment_idx)
         .await?;
+    if keep {
+        // A promotion re-run: the process died between the insert and `done`.
+        // Under `keep_artifacts` the write appends, so writing again would put
+        // the window's artifacts in twice. A window holding passages is a
+        // promotion (an operator's re-read has none); rows in it that are not
+        // passages are the earlier write — return them and insert none.
+        let rows = core
+            .store
+            .artifacts_for_segment(corpus_id, segment_idx)
+            .await?;
+        let is_promotion = rows
+            .iter()
+            .any(|c| c.provenance == crate::store::artifacts::Provenance::Passage);
+        let have: Vec<_> = rows
+            .into_iter()
+            .filter(|c| {
+                c.provenance != crate::store::artifacts::Provenance::Passage && c.in_results()
+            })
+            .collect();
+        if is_promotion && !have.is_empty() {
+            tracing::info!(
+                corpus_id,
+                window = segment_idx,
+                "window already written under keep_artifacts; not writing again"
+            );
+            return Ok(have);
+        }
+    }
     if !keep {
         let old = core
             .store
@@ -594,6 +701,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_promotion_embeds_what_it_wrote_before_it_hides_anything() {
+        // The window that promotes is the one window whose artifacts cannot
+        // wait for the corpus batch: `supersede_covered` takes the passages out
+        // of results, and until the replacements are indexed the lines are
+        // reachable from neither side. Under a backed-up queue that gap is as
+        // long as the queue.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let before = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+
+        // The keep mark is what makes the re-read a promotion.
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let after = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        let written: Vec<String> = after
+            .into_iter()
+            .filter(|id| !before.contains(id))
+            .collect();
+        assert!(!written.is_empty(), "the fixture must promote something");
+        for c in core.store.artifacts_by_ids(&written).await.unwrap() {
+            assert_eq!(
+                c.embed_state,
+                crate::store::artifacts::EmbedState::Embedded,
+                "the promotion superseded while {} was still {:?}",
+                c.id,
+                c.embed_state
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_unit_whose_window_no_longer_exists_is_not_found() {
         // Re-segmenting can shorten a document. The stale unit must be dropped
         // by run_one's NotFound path rather than retried for six hours.
@@ -610,8 +762,9 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"));
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
+        ));
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");
@@ -723,5 +876,72 @@ mod tests {
             core_text,
             &ctx
         ));
+    }
+
+    #[tokio::test]
+    async fn settle_treats_a_verbatim_segment_as_resolved() {
+        // One promoted window done, every other window verbatim: the corpus
+        // must finish — that is what arms the embed for the promoted artifacts.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2\nl3\nl4", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    crate::store::segments::NewSegment {
+                        start_line: 1,
+                        end_line: 2,
+                        text: "l1\nl2",
+                        carry_lines: 0,
+                    },
+                    crate::store::segments::NewSegment {
+                        start_line: 3,
+                        end_line: 4,
+                        text: "l3\nl4",
+                        carry_lines: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store.mark_segments_verbatim(&src.id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "l1 l2".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        settle(&core, &src.id).await.unwrap();
+        let s = core.store.get_corpus(&src.id).await.unwrap();
+        assert_eq!(
+            s.status,
+            crate::store::corpora::CorpusStatus::Embedding,
+            "{:?}",
+            s.status
+        );
+        assert!(
+            core.store
+                .live_job(crate::store::jobs::Stage::Embed, &src.id)
+                .await
+                .unwrap()
+        );
     }
 }

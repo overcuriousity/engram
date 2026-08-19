@@ -56,6 +56,25 @@ pinned_boost = 0.15
 # consumer GPU, answering in minutes rather than seconds. Against a hosted API
 # you can raise output_ratio's window and lower timeout_secs considerably.
 
+[infer]
+# How much inference capture spends.
+#   "off"    — split the text into verbatim passages, embed them, call nothing.
+#              [infer.synthesize] and [infer.ask] may be left out entirely.
+#   "earned" — the same capture; synthesis runs later where use has shown it
+#              is worth it. Needs [infer.synthesize]. The default.
+#   "eager"  — one synthesis call per segment at capture.
+#
+# "earned" is the default because capture cannot know which paragraph will be
+# asked about. Your text goes in as you wrote it; a window is rewritten once
+# reading has shown the rewrite is worth making, and every synthesized artifact
+# in the base can name the use that earned it. Choose "eager" when you want
+# everything pre-written and are willing to pay a model call per segment for
+# text most of which is never retrieved.
+synthesis = "earned"
+# Window size when there is no [infer.synthesize] to derive one from, in
+# engram's estimator tokens. Ignored when a synthesizer is configured.
+# segment_tokens = 4096
+
 # The working tier: everything that runs unattended, in bulk, and is paid for
 # by the corpus rather than by a person waiting.
 [infer.tiers.efficient]
@@ -169,18 +188,50 @@ output_ratio = 8.0
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
-model = "bge-m3"
+# EmbeddingGemma. 308M parameters, 768 dimensions, a 2048-token window, and an
+# asymmetric interface: queries and documents are embedded through different
+# prompts, which the three templates below are. The model card's exact strings
+# are the defaults, so nothing below `max_input_tokens` needs setting for it.
+model = "embeddinggemma"
 # Embedding is fast even locally; a shorter ceiling surfaces a wedged endpoint
 # instead of holding a worker for a quarter of an hour.
 timeout_secs = 120
 # MUST match the vector dimension of the Qdrant collection. Changing this
-# against an existing collection is refused at startup.
-dim = 1024
+# against an existing collection is refused at startup. The full Matryoshka
+# width: truncating to 512/256/128 buys memory at a recall cost, and recall is
+# the point.
+dim = 768
 # The server's real ceiling, not the model's nominal one. llama.cpp refuses any
-# input above its physical batch size (often 1024) with a 500, and no retry can
-# fix that — engram splits the artifact instead, but it splits sooner and cheaper
-# if this number is honest. Many embedding models cap at 512; check yours.
-max_input_tokens = 1024
+# input above its physical batch size with a 500, and no retry can fix that —
+# engram splits the artifact instead, but it splits sooner and cheaper if this
+# number is honest. 2048 is the model's window; use the server's if lower.
+max_input_tokens = 2048
+# Passage size at synthesis = "off"/"earned", in estimator tokens: about a
+# paragraph and a half, which is about one idea. Clamped to what the embedder
+# will take (max_input_tokens * 0.8). Argued, not measured — the judge
+# harness is what is allowed to move it.
+# chunk_tokens = 384
+# The recipe. `{text}` is the query or the body; `{title}` is the artifact's
+# title. A document with no title takes the `_untitled` template — the model
+# card substitutes the literal word `none`, so it is a second template and not
+# an empty field. Changing any of these invalidates every stored vector as
+# surely as changing `model` does: drop the collection and re-capture. engram
+# records the recipe — model, dim and the three templates — and says so at boot
+# when it no longer matches what the stored vectors were embedded under. Check
+# once that your serving stack does not prepend a prompt of its own, or the
+# prefix is sent twice and every vector carries it.
+# query_template             = "task: search result | query: {text}"
+# document_template          = "title: {title} | text: {text}"
+# document_template_untitled = "title: none | text: {text}"
+#
+# A symmetric embedder — bge-m3, which engram shipped with — wants the text as
+# it is. That is these three lines, with `dim = 1024` and the server's ceiling:
+# model = "bge-m3"
+# dim = 1024
+# max_input_tokens = 1024
+# query_template             = "{text}"
+# document_template          = "{title}\n{text}"
+# document_template_untitled = "{text}"
 
 [infer.ask]
 tier = "deep"
@@ -325,7 +376,10 @@ max_dedupe_per_tick = 5
 # one there is. Typing bursts fold into their final wording, so `daten`,
 # `datentr`, `datenträger nicht erkannt` is one event rather than three.
 [feedback]
-enabled = false
+# On by default: promotion at synthesis = "earned" reads activation, and
+# activation only moves while searches are recorded. Everything stays on this
+# machine and Ops forgets it on one press; set false to record nothing at all.
+enabled = true
 # Candidates stored per search. Wider than the answer on purpose — retrieval
 # over-fetches anyway, so the extra rows cost nothing, and they are what lets an
 # artifact the ranking buried still be confirmed as the right one. 0 is not a
@@ -390,6 +444,39 @@ half_life_days = 14
 retrieved = 1.0
 opened = 0.5
 confirmed = 3.0
+
+# ── Promotion ────────────────────────────────────────────────────────────────
+# At synthesis = "earned", when a passage has earned its window a synthesis
+# call. Read against [activation]: baseline 1.0 at capture, so 4.0 is one
+# confirmation after a retrieval and an open, or about three engaged openings.
+# Checked only when a passage is opened or confirmed — never when it merely
+# appears in results — and the window's new artifacts inherit the access the
+# passages earned.
+[promote]
+activation_above = 4.0
+# At synthesis = "eager": an artifact shown this many times with no
+# confirmation recorded against it is re-read from its source segment. 0
+# disables it, and it ships disabled — re-synthesising changes what an
+# existing base contains without anyone asking.
+resynthesize_after_unconfirmed = 0
+
+# ── Pursuits ─────────────────────────────────────────────────────────────────
+# A coherent run of searches, what was opened and pivoted through, and — when
+# the base did not answer or the answer was assembled by hand — one generated
+# artifact written from exactly that, carrying the questions it was written
+# for. Off until turned on: this writes model-written text into the index.
+# Needs feedback.enabled. Local only, nothing leaves the machine, and the
+# forget button on Settings clears all of it. The grouping line is measured,
+# not configured.
+[pursuit]
+enabled = false
+# A pursuit is over when nothing has happened for this long.
+idle_secs = 900
+# Fewer engaged artifacts than this is a promotion case, not generation.
+min_sources = 2
+# Engagement weight a pursuit needs before it is worth a call: opened 1.0,
+# pivoted 1.5, returned 2.0, confirmed 3.0.
+min_engagement = 3.0
 
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share

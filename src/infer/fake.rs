@@ -22,11 +22,21 @@ pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
 /// Hashes text into a fixed-dimension unit vector. Identical text gives an
 /// identical vector and different text gives a different one, which is all the
 /// retrieval tests need from an embedding model.
+///
+/// Renders with the *legacy* templates by default — `{text}` for a query,
+/// `{title}\n{text}` for a document — so a test that queries with
+/// `"title\ntext"` lands on the document it seeded, exactly as before
+/// templates existed. `with_templates` gives a fake the asymmetric recipe for
+/// the tests that are about the recipe.
 pub struct FakeEmbedder {
     dim: usize,
+    templates: crate::config::EmbedTemplates,
     /// How many times the endpoint was called. Batching is invisible in the
     /// output — only the call count shows whether it happened.
     calls: std::sync::atomic::AtomicUsize,
+    /// Every string handed to `embed_raw`, in order: what a real endpoint
+    /// would have been sent.
+    sent: std::sync::Mutex<Vec<String>>,
     /// When set, every call is refused with this reason — the endpoint's "no",
     /// which a worker must not retry.
     reject_with: Option<String>,
@@ -34,9 +44,15 @@ pub struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub fn new(dim: usize) -> Self {
+        Self::with_templates(dim, crate::config::EmbedTemplates::legacy())
+    }
+
+    pub fn with_templates(dim: usize, templates: crate::config::EmbedTemplates) -> Self {
         Self {
             dim,
+            templates,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            sent: std::sync::Mutex::new(Vec::new()),
             reject_with: None,
         }
     }
@@ -50,13 +66,21 @@ impl FakeEmbedder {
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// What was sent, rendered, in order.
+    pub fn sent(&self) -> Vec<String> {
+        self.sent.lock().map(|s| s.clone()).unwrap_or_default()
+    }
 }
 
 #[async_trait]
 impl Embedder for FakeEmbedder {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut s) = self.sent.lock() {
+            s.extend(texts.iter().cloned());
+        }
         if let Some(m) = &self.reject_with {
             return Err(Error::InferenceRejected {
                 role: "embed",
@@ -78,6 +102,9 @@ impl Embedder for FakeEmbedder {
                 v.iter().map(|x| x / norm).collect()
             })
             .collect())
+    }
+    fn templates(&self) -> &crate::config::EmbedTemplates {
+        &self.templates
     }
     fn dim(&self) -> usize {
         self.dim
@@ -376,7 +403,7 @@ impl StrictEmbedder {
 
 #[async_trait]
 impl Embedder for StrictEmbedder {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         for t in texts {
             // The same crude estimate the budget code uses, so the test does
             // not depend on a tokenizer.
@@ -408,7 +435,10 @@ impl Embedder for StrictEmbedder {
                 });
             }
         }
-        self.inner.embed(texts).await
+        self.inner.embed_raw(texts).await
+    }
+    fn templates(&self) -> &crate::config::EmbedTemplates {
+        self.inner.templates()
     }
     fn dim(&self) -> usize {
         self.inner.dim()
@@ -644,5 +674,48 @@ mod tests {
         drop(rx);
         let done = c.answer_streaming("sys", "usr", 128, tx).await.unwrap();
         assert_eq!(done.text, "the answer");
+    }
+
+    use crate::config::EmbedTemplates;
+    use crate::infer::EmbedDoc;
+
+    #[tokio::test]
+    async fn the_fake_renders_like_the_real_one_and_keeps_what_it_sent() {
+        // With the asymmetric templates the same words embed to different
+        // vectors as a query and as a document — the property the real
+        // embedder has, exercised here so a test can rely on it.
+        let e = FakeEmbedder::with_templates(8, EmbedTemplates::default());
+        let d = e
+            .embed_documents(&[EmbedDoc {
+                title: None,
+                text: "alpha".into(),
+            }])
+            .await
+            .unwrap();
+        let q = e.embed_query("alpha").await.unwrap();
+        assert_ne!(d[0], q);
+        assert_eq!(
+            e.sent(),
+            vec![
+                "title: none | text: alpha".to_string(),
+                "task: search result | query: alpha".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_fake_is_symmetric_so_a_query_can_name_a_document() {
+        // What every retrieval test in the crate depends on: querying with
+        // "title\ntext" lands on the document seeded with that title and text.
+        let e = FakeEmbedder::new(8);
+        let d = e
+            .embed_documents(&[EmbedDoc {
+                title: Some("t0".into()),
+                text: "alpha".into(),
+            }])
+            .await
+            .unwrap();
+        let q = e.embed_query("t0\nalpha").await.unwrap();
+        assert_eq!(d[0], q);
     }
 }

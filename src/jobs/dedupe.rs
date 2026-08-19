@@ -121,7 +121,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let mut context: Vec<Vec<Chunk>> = Vec::new();
     for c in &members {
         let mut v = Vec::new();
-        if c.provenance == crate::store::artifacts::Provenance::Merged {
+        if c.provenance.is_model_written() {
             for rid in &root_map[&c.id] {
                 match core.store.get_artifact(rid).await {
                     Ok(r) => v.push(r),
@@ -142,9 +142,14 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     //
     // No count-based cap. `merge_max_roots` was one, left at a default of eight
     // nobody typed, and it settled whole clusters before any call was made.
+    let Some(judge) = core.judge.clone() else {
+        // Nothing to ask. The pair stays pending; `run_claimed` closes the unit
+        // before it gets here when there is no synthesize role at all.
+        return Ok(());
+    };
     let counter = crate::infer::budget::TokenCounter;
-    let window = core.judge.context_tokens();
-    let ceiling = core.judge.max_output_tokens();
+    let window = judge.context_tokens();
+    let ceiling = judge.max_output_tokens();
     let system = counter.count(crate::infer::prompt::DEDUPE_SYSTEM);
     let user = loop {
         let user = build_prompt(&members, &context, p.judge_attempts);
@@ -185,8 +190,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     core.store.record_judge_attempt(p.id).await?;
 
     let permit = core.gate.background().await;
-    let reply = core
-        .judge
+    let reply = judge
         .complete(crate::infer::prompt::DEDUPE_SYSTEM, &user)
         .await;
     permit.finished();
@@ -459,8 +463,8 @@ mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         let asker = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = judge.clone();
-        core.completer = asker.clone();
+        core.judge = Some(judge.clone());
+        core.completer = Some(asker.clone());
         let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])]).await;
         let seed_pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -489,9 +493,9 @@ mod tests {
         // and it no longer merely flags them — a merge would grind a reference
         // document into one paragraph that describes none of its subjects.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"two different filesystems"}"#.into(),
-        ]));
+        ])));
         let ids = seed_titled(
             &core,
             &[
@@ -539,9 +543,9 @@ mod tests {
         // job. This is the one queue that expects a human, and autonomy does not
         // empty it.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
-        ]));
+        ])));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -572,9 +576,9 @@ mod tests {
         // the path by which the fidelity thesis keeps holding under autonomy —
         // so the prompt prefers it and this pins that the code does too.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
-        ]));
+        ])));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -613,9 +617,9 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"b","detail":"x"}"#.into(),
-        ]));
+        ])));
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
         run(&core, &pair.to_string()).await.unwrap();
@@ -649,11 +653,11 @@ mod tests {
         // a version number — evidence too thin to put on a card someone has to
         // act on, in a voice unlike every other line beside it.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"engram needs Rust 1.30.0 to build.","tags":[],"caveats":[]}}"#
                 .into(),
-        ]));
+        ])));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -692,7 +696,7 @@ mod tests {
         let completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"unrelated"}"#.into(),
         ]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         let ids = seed(
             &core,
             &[
@@ -713,7 +717,7 @@ mod tests {
     async fn a_failed_dedupe_leaves_the_pair_pending() {
         // A dead endpoint must not silently clear a queue of real duplicates.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec!["not json".into()]));
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec!["not json".into()])));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -734,7 +738,7 @@ mod tests {
     async fn a_pair_whose_member_was_retired_is_dismissed_without_a_call() {
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
         core.deprecate(&ids[0]).await.unwrap();
@@ -760,7 +764,7 @@ mod tests {
         // generation per merge, which the lineage design exists to prevent.
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         let ids = disagreeing(&core).await;
         let m = core
             .store
@@ -804,9 +808,9 @@ mod tests {
         // as "awaiting confirmation" — with Keep buttons that could only
         // return a validation error against the already-superseded side.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
-        ]));
+        ])));
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
@@ -865,9 +869,9 @@ mod tests {
         // pair in it with one verdict. A sibling pair is a separate question
         // about a different pair of artifacts, and it keeps its own turn.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
+        ])));
         let ids = seed(
             &core,
             &[
@@ -908,9 +912,9 @@ mod tests {
         // was settled Oversized, terminal, with no call ever made. Nothing about
         // it is oversized now — it is a sequence of two-artifact questions.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
+        ])));
         let rows: Vec<(&str, [f32; 2])> = vec![
             ("t0", [1.00, 0.00]),
             ("t1", [0.99, 0.01]),
@@ -985,9 +989,9 @@ mod tests {
         // newest artifact in its own lineage.
         let stored = core.store.get_pair(pair).await.unwrap();
         let letter = if stored.a_id == ids[2] { "a" } else { "b" };
-        core.judge = Arc::new(ScriptedCompleter::new(vec![format!(
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![format!(
             r#"{{"relation":"replaced","detail":"stale","supersedes":"{letter}"}}"#
-        )]));
+        )])));
 
         run(&core, &pair.to_string()).await.unwrap();
 
@@ -1017,7 +1021,7 @@ mod tests {
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.judge = judge.clone();
+        core.judge = Some(judge.clone());
         let ids = seed_titled(
             &core,
             &[
@@ -1058,7 +1062,7 @@ mod tests {
         // matches itself, at the price of a call.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = judge.clone();
+        core.judge = Some(judge.clone());
         let ids = seed(&core, &[("a text", [1.0, 0.0]), ("b text", [0.99, 0.05])]).await;
         let m = merged_from(
             &core,
@@ -1092,11 +1096,11 @@ mod tests {
         // whole flattened lineage instead, a value dropped a generation ago
         // would fail every later merge in that lineage forever and freeze it.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same thing",
                 "merged":{"title":"Pool","text":"the pool holds sixteen connections","tags":[],"caveats":[]}}"#
                 .into(),
-        ]));
+        ])));
         let ids = seed_titled(
             &core,
             &[
@@ -1138,11 +1142,11 @@ mod tests {
         // again, and it carries the flattened lineage of both sides rather than
         // naming the intermediate.
         let mut core = test_core().await;
-        core.judge = Arc::new(ScriptedCompleter::new(vec![
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same thing",
                 "merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","tags":[],"caveats":[]}}"#
                 .into(),
-        ]));
+        ])));
         let ids = seed_titled(
             &core,
             &[
@@ -1191,7 +1195,7 @@ mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
         judge.set_context_tokens(1200);
-        core.judge = judge.clone();
+        core.judge = Some(judge.clone());
         let long = "verylongsourcetoken ".repeat(400);
         let ids = seed_titled(
             &core,
@@ -1237,7 +1241,7 @@ mod tests {
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![]));
         judge.set_context_tokens(100);
-        core.judge = judge.clone();
+        core.judge = Some(judge.clone());
         let long = "verylongartifacttoken ".repeat(500);
         let ids = seed_titled(
             &core,

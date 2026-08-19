@@ -1,4 +1,4 @@
-<div data-terms="{{ d.terms }}">
+<div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}">
   {# The way back to the list, for a narrow window where opening a result hides
      it. An installed app has no back button to fall back on. Hidden above
      60rem, where the rail is still on screen beside this — the same width that
@@ -180,8 +180,8 @@
       <div class="pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
-        <a class="rail-item" href="/ui/artifacts/{{ r.id }}"
-           hx-get="/ui/artifacts/{{ r.id }}"
+        <a class="rail-item" href="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
+           hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">
           <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
@@ -198,8 +198,8 @@
       <div class="related">
         {% for r in d.seen_together %}
         <div class="seen-row{% if !r.cross_corpus %} muted{% endif %}">
-          <a class="rail-item" href="/ui/artifacts/{{ r.id }}"
-             hx-get="/ui/artifacts/{{ r.id }}"
+          <a class="rail-item" href="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
+             hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
              hx-target="closest [data-terms]" hx-swap="outerHTML"
              hx-push-url="true">
             <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
