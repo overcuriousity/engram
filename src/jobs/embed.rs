@@ -29,6 +29,17 @@ fn render(core: &Core, chunk: &Chunk) -> String {
     core.embedder.render_document(&doc_of(chunk))
 }
 
+/// What the envelope around an empty body costs: the title, and the template
+/// around it. Siblings inherit both, so only what this leaves over is available
+/// to their text.
+fn envelope_cost(core: &Core, title: Option<&str>) -> usize {
+    core.counter
+        .count(&core.embedder.render_document(&EmbedDoc {
+            title: title.map(str::to_string),
+            text: String::new(),
+        }))
+}
+
 /// The lexical half. Title on its own line above the body — the words, not the
 /// template: `title:` and `text:` are in every document and would match every
 /// query that happens to contain them.
@@ -377,14 +388,12 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     // so the attempts at it are skipped rather than made and refused.
     let splittable = chunk.corpus_id.is_some();
     // The limit is checked against what actually gets embedded, and that is the
-    // title followed by the text. Siblings inherit the title, so only what the
-    // title leaves over is available to their text. Giving the text the whole
-    // limit produced siblings that measured oversize again the instant they
-    // were re-queued, each one replaced by another exactly like it, forever.
-    let title_cost = chunk
-        .title
-        .as_deref()
-        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    // rendered document — title, text and the template around them. Siblings
+    // inherit the title and the template, so only what the envelope leaves
+    // over is available to their text. Giving the text the whole limit
+    // produced siblings that measured oversize again the instant they were
+    // re-queued, each one replaced by another exactly like it, forever.
+    let title_cost = envelope_cost(core, chunk.title.as_deref());
     let budget = limit.saturating_sub(title_cost);
 
     // A title that fills the limit on its own cannot be cut out of the way:
@@ -485,10 +494,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
 /// and that is worth saying out loud in the log, because a merge this long is
 /// usually a merge that should have stayed two artifacts.
 async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
-    let title_cost = chunk
-        .title
-        .as_deref()
-        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    let title_cost = envelope_cost(core, chunk.title.as_deref());
     let budget = limit.saturating_sub(title_cost);
     let head = if budget > 0 {
         split_by_lines(&chunk.text, budget, &core.counter)
@@ -1267,6 +1273,79 @@ mod tests {
             assert!(
                 core.counter.count(&render(&core, c)) <= limit,
                 "sibling is still oversize: {:?}",
+                c.text
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_envelope_is_charged_so_a_chunk_that_fits_bare_and_overflows_rendered_splits_once()
+    {
+        // Same loop as the test above, reopened slightly narrower: with a real
+        // template the title is not the only thing around the text. `title: `
+        // plus ` | text: ` costs tokens, and a split that budgets for the title
+        // alone emits siblings that measure oversize again once rendered —
+        // each replaced by another exactly like it, forever.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::FakeEmbedder::with_templates(
+            crate::core::test_support::TEST_DIM,
+            crate::config::EmbedTemplates::default(),
+        ));
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+
+        let title = "heading".to_string();
+        let text = format!("{}\n\n{}", "alpha ".repeat(12), "beta ".repeat(12));
+        let limit = 40;
+        let bare = format!("{title}\n{text}");
+        assert!(
+            core.counter.count(&bare) <= limit,
+            "title + text must fit without the envelope ({})",
+            core.counter.count(&bare)
+        );
+        let rendered = core.embedder.render_document(&crate::infer::EmbedDoc {
+            title: Some(title.clone()),
+            text: text.clone(),
+        });
+        assert!(
+            core.counter.count(&rendered) > limit,
+            "the envelope must be what pushes it over ({})",
+            core.counter.count(&rendered)
+        );
+
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.clone(),
+                    corpus_span: None,
+                    title: Some(title),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        run_with_limit(&core, &made[0].id, limit).await.unwrap();
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert!(
+            chunks.len() > 1,
+            "the chunk was not split: {} row(s)",
+            chunks.len()
+        );
+        assert!(
+            !chunks.iter().any(|c| c.text == text && c.id != made[0].id),
+            "the parent was replaced by an identical copy of itself"
+        );
+        for c in &chunks {
+            assert!(
+                core.counter.count(&render(&core, c)) <= limit,
+                "sibling is still oversize once rendered: {:?}",
                 c.text
             );
         }
