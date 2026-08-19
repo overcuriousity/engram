@@ -988,7 +988,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::infer::Embedder for Keyed {
-        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             Ok(texts
                 .iter()
                 .map(|t| {
@@ -1001,6 +1001,11 @@ mod tests {
                     v
                 })
                 .collect())
+        }
+        fn templates(&self) -> &crate::config::EmbedTemplates {
+            static LEGACY: std::sync::LazyLock<crate::config::EmbedTemplates> =
+                std::sync::LazyLock::new(crate::config::EmbedTemplates::legacy);
+            &LEGACY
         }
         fn dim(&self) -> usize {
             crate::core::test_support::TEST_DIM

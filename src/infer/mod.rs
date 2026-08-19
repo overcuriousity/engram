@@ -61,12 +61,53 @@ pub trait Synthesizer: Send + Sync {
     }
 }
 
+/// One document as the embedder sees it: what goes into the `title:` slot and
+/// what goes into the `text:` slot. Built by `jobs::embed` from a `Chunk`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbedDoc {
+    pub title: Option<String>,
+    pub text: String,
+}
+
+/// Asymmetric by interface. A query and a document are rendered through
+/// different templates before they reach the model, and the rendering happens
+/// *inside* the trait — `embed_documents` and `embed_query` are provided — so
+/// there is no call site that can forget it. `embed_raw` is the wire call and
+/// is what an implementation supplies; nothing outside an `Embedder` should
+/// call it.
 #[async_trait]
 pub trait Embedder: Send + Sync {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// The strings sent, exactly as given. Implementations only.
+    async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn templates(&self) -> &crate::config::EmbedTemplates;
     fn dim(&self) -> usize;
     fn model(&self) -> &str;
     fn max_input_tokens(&self) -> usize;
+
+    /// The string a document becomes. Exposed so budgets can be measured
+    /// against what will actually be sent — the envelope costs tokens too.
+    fn render_document(&self, doc: &EmbedDoc) -> String {
+        self.templates()
+            .render_document(doc.title.as_deref(), &doc.text)
+    }
+
+    async fn embed_documents(&self, docs: &[EmbedDoc]) -> Result<Vec<Vec<f32>>> {
+        let texts: Vec<String> = docs.iter().map(|d| self.render_document(d)).collect();
+        self.embed_raw(&texts).await
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let mut out = self
+            .embed_raw(&[self.templates().render_query(query)])
+            .await?;
+        if out.is_empty() {
+            return Err(crate::error::Error::Inference {
+                role: "embed",
+                detail: "no vector came back for the query".into(),
+            });
+        }
+        Ok(out.remove(0))
+    }
 }
 
 #[async_trait]

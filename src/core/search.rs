@@ -698,11 +698,7 @@ impl Core {
         let vector = match cached {
             Some(v) => v,
             None => {
-                let v = self
-                    .embedder
-                    .embed(&[query.q.trim().to_string()])
-                    .await?
-                    .remove(0);
+                let v = self.embedder.embed_query(query.q.trim()).await?;
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
                 }
@@ -990,10 +986,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::infer::Embedder for BlockingEmbedder {
-        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             self.started.notify_one();
             self.release.notified().await;
-            self.inner.embed(texts).await
+            self.inner.embed_raw(texts).await
+        }
+        fn templates(&self) -> &crate::config::EmbedTemplates {
+            self.inner.templates()
         }
         fn dim(&self) -> usize {
             self.inner.dim()

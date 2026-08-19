@@ -619,6 +619,7 @@ pub struct HttpEmbedder {
     ep: Endpoint,
     dim: usize,
     max_input_tokens: usize,
+    templates: crate::config::EmbedTemplates,
 }
 
 impl HttpEmbedder {
@@ -633,13 +634,14 @@ impl HttpEmbedder {
             ),
             dim: cfg.dim,
             max_input_tokens: cfg.max_input_tokens,
+            templates: cfg.templates(),
         }
     }
 }
 
 #[async_trait]
 impl Embedder for HttpEmbedder {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -707,6 +709,9 @@ impl Embedder for HttpEmbedder {
     }
     fn max_input_tokens(&self) -> usize {
         self.max_input_tokens
+    }
+    fn templates(&self) -> &crate::config::EmbedTemplates {
+        &self.templates
     }
 }
 
@@ -1730,7 +1735,7 @@ mod tests {
             .mount(&server)
             .await;
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["x".into()])
+            .embed_raw(&["x".into()])
             .await
             .unwrap_err();
         assert!(e.retryable());
@@ -1757,9 +1762,60 @@ mod tests {
             .await;
 
         let e = HttpEmbedder::new(&embed_cfg(server.uri()));
-        let out = e.embed(&["first".into(), "second".into()]).await.unwrap();
+        let out = e
+            .embed_raw(&["first".into(), "second".into()])
+            .await
+            .unwrap();
         assert_eq!(out[0], vec![0.0, 1.0, 0.0, 0.0]);
         assert_eq!(out[1], vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[tokio::test]
+    async fn documents_and_queries_are_rendered_through_the_templates_before_the_post() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        let one = serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]});
+        let two = serde_json::json!({"data":[
+            {"index":0,"embedding":[1.0,0.0,0.0,0.0]},
+            {"index":1,"embedding":[0.0,1.0,0.0,0.0]}
+        ]});
+        // The document side: titled and untitled take different templates.
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(body_partial_json(serde_json::json!({
+                "input": ["title: Recovering | text: run fsck", "title: none | text: bare"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(two))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The query side: the retrieval task prefix, nothing else.
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(body_partial_json(serde_json::json!({
+                "input": ["task: search result | query: fsck"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(one))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let e = HttpEmbedder::new(&embed_cfg(server.uri()));
+        let docs = vec![
+            crate::infer::EmbedDoc {
+                title: Some("Recovering".into()),
+                text: "run fsck".into(),
+            },
+            crate::infer::EmbedDoc {
+                title: None,
+                text: "bare".into(),
+            },
+        ];
+        let out = e.embed_documents(&docs).await.unwrap();
+        assert_eq!(out.len(), 2);
+        let q = e.embed_query("fsck").await.unwrap();
+        assert_eq!(q, vec![1.0, 0.0, 0.0, 0.0]);
+        // `.expect(1)` on both mocks is verified when `server` drops.
     }
 
     #[tokio::test]
@@ -1774,7 +1830,7 @@ mod tests {
         // Config says dim 4, server returned 2. Writing this to Qdrant would
         // corrupt the collection.
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["x".into()])
+            .embed_raw(&["x".into()])
             .await
             .unwrap_err();
         assert!(e.to_string().contains("dimension"));
@@ -1792,7 +1848,7 @@ mod tests {
             .mount(&server)
             .await;
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["a".into(), "b".into()])
+            .embed_raw(&["a".into(), "b".into()])
             .await
             .unwrap_err();
         assert!(e.to_string().contains("skipped"), "got: {e}");
@@ -2313,7 +2369,7 @@ mod tests {
             .mount(&server)
             .await;
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed(&["x".into()])
+            .embed_raw(&["x".into()])
             .await
             .unwrap_err();
         assert!(
