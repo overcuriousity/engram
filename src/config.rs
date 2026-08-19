@@ -21,6 +21,8 @@ pub struct Config {
     pub associate: AssociateConfig,
     #[serde(default)]
     pub activation: ActivationConfig,
+    #[serde(default)]
+    pub promote: PromoteConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -85,9 +87,11 @@ pub struct PacingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct FeedbackConfig {
-    /// Whether real searches are recorded at all. Off by default: the wording of
-    /// a query is personal, and nothing here is useful to anyone but the
-    /// operator.
+    /// Whether real searches are recorded at all. On by default: promotion at
+    /// `synthesis = "earned"` reads activation, and activation moves only
+    /// while searches are recorded. The wording of a query is personal and
+    /// nothing here leaves the machine; this is the switch for the operator
+    /// who wants none of it kept.
     pub enabled: bool,
     /// Candidates stored per event. Wider than the answer on purpose — search
     /// over-fetches anyway, so the extra rows are free, and they are what lets a
@@ -107,7 +111,10 @@ pub struct FeedbackConfig {
 impl Default for FeedbackConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // On: promotion at `synthesis = "earned"` reads activation, and
+            // activation moves only while searches are recorded. Recording is
+            // the thing an operator turns *off*.
+            enabled: true,
             candidates: 20,
             coalesce_secs: 15,
             retain_days: 0,
@@ -165,6 +172,36 @@ impl Default for AssociateConfig {
             spread_max: 3,
             prime_margin: 0.5,
             prime_lift: 2,
+        }
+    }
+}
+
+/// When a passage has earned its window a synthesis call, and when an eager
+/// artifact has earned a second one.
+///
+/// `activation_above` is read against `[activation]`: baseline `1.0`,
+/// `retrieved = 1.0`, `opened = 0.5`, `confirmed = 3.0`, half-life 14 days.
+/// Checked with `>=` after the bump, decay folded in, and only at the two
+/// engagement bumps — opened and confirmed — never at retrieved, so a passage
+/// that merely keeps appearing in result lists is never promoted.
+///
+/// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
+/// shown this many times with no confirmation recorded against it is
+/// re-synthesised from its segment. `0` disables it, and it ships disabled —
+/// re-synthesising changes what an existing base contains without anyone
+/// asking, so it is a default the harness moves.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PromoteConfig {
+    pub activation_above: f64,
+    pub resynthesize_after_unconfirmed: i64,
+}
+
+impl Default for PromoteConfig {
+    fn default() -> Self {
+        Self {
+            activation_above: 4.0,
+            resynthesize_after_unconfirmed: 0,
         }
     }
 }
@@ -1337,6 +1374,12 @@ impl Config {
     /// rather than letting an operator discover the association pass has been
     /// idle since they turned recording off.
     fn warn_on_inert_settings(&self) {
+        if self.infer.synthesis == SynthesisMode::Earned && !self.feedback.enabled {
+            tracing::warn!(
+                "infer.synthesis = \"earned\" with feedback.enabled = false: activation never \
+                 moves, so nothing is ever promoted — this is `off` under another name."
+            );
+        }
         if self.associate.enabled && !self.feedback.enabled {
             tracing::warn!(
                 "associate.enabled has no effect while feedback.enabled is false: links are \
@@ -1895,9 +1938,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
         assert!(cfg.associate.enabled);
-        // ...and the feature is inert regardless, because there is nothing to
-        // learn from until searches are recorded.
-        assert!(!cfg.feedback.enabled);
+        // ...and recording is on too, so the feature is live out of the box:
+        // promotion reads activation, and activation moves only while
+        // searches are recorded.
+        assert!(cfg.feedback.enabled);
     }
 
     #[test]
@@ -2597,5 +2641,43 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         .unwrap();
         // 256 * 0.8 = 204: what the embedder will take wins over what was asked.
         assert_eq!(cfg.infer.embed.effective_chunk_tokens(), 204);
+    }
+
+    #[test]
+    fn promote_defaults_and_feedback_ships_on() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer.synthesize]
+            tier = \"efficient\"
+            output_ratio = 8.0
+            [infer.ask]
+            tier = \"efficient\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.promote.activation_above, 4.0);
+        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
+        // Opt-out now: promotion reads activation, and activation only moves
+        // while searches are recorded.
+        assert!(cfg.feedback.enabled);
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer.synthesize]
+            tier = \"efficient\"
+            output_ratio = 8.0
+            [infer.ask]
+            tier = \"efficient\"
+            [promote]
+            activation_above = 2.5
+            resynthesize_after_unconfirmed = 12
+            [feedback]
+            enabled = false
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.promote.activation_above, 2.5);
+        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
+        assert!(!cfg.feedback.enabled);
     }
 }

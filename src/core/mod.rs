@@ -130,6 +130,9 @@ pub struct Core {
     /// the sweep, so it lives here rather than being threaded down.
     pub associate: crate::config::AssociateConfig,
     pub activation: crate::config::ActivationConfig,
+    /// When a passage has earned its window a synthesis call. See
+    /// `PromoteConfig`.
+    pub promote: crate::config::PromoteConfig,
     /// The pacer every inference call passes through. Shared by every clone,
     /// because a per-clone gate would pace nothing: the point is one queue of
     /// calls in front of one GPU.
@@ -207,6 +210,7 @@ impl Core {
             capture: cfg.capture.clone(),
             associate: cfg.associate.clone(),
             activation: cfg.activation.clone(),
+            promote: cfg.promote.clone(),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
             )),
@@ -355,13 +359,18 @@ pub mod test_support {
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
             weak_below: 0.0,
-            // Off, like the shipped default. The capture tests switch it on.
-            feedback: crate::config::FeedbackConfig::default(),
+            // Off in tests, whatever ships: the capture tests switch it on and
+            // the rest assert nothing is recorded.
+            feedback: crate::config::FeedbackConfig {
+                enabled: false,
+                ..Default::default()
+            },
             capture: crate::config::CaptureConfig::default(),
             // On, like the shipped default — and inert in most tests, because
             // nothing has learned a link yet. The association tests seed one.
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
+            promote: crate::config::PromoteConfig::default(),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
@@ -408,11 +417,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn associating_requires_both_flags_the_shipped_default_has_only_one() {
+    async fn associating_requires_both_flags_and_the_shipped_default_has_both() {
         // Shipped defaults: `associate.enabled = true`, `feedback.enabled =
-        // false`. Links are learned from recorded searches, and recording is
-        // a separate privacy decision, so the layer must stay dark until both
-        // are on.
+        // true` — promotion reads activation, and activation only moves while
+        // searches are recorded, so recording is opt-out. The test core keeps
+        // feedback off so every other test starts from nothing recorded, and
+        // the layer must still stay dark until both are on.
+        assert!(crate::config::FeedbackConfig::default().enabled);
+        assert!(crate::config::AssociateConfig::default().enabled);
         let mut core = test_support::test_core().await;
         assert!(core.associate.enabled && !core.feedback.enabled);
         assert!(!core.associating(), "on with only associate.enabled set");

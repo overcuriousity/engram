@@ -540,10 +540,14 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         ))),
         consolidate: engram::config::ConsolidateConfig::default(),
         weak_below: 0.0,
-        feedback: engram::config::FeedbackConfig::default(),
+        feedback: engram::config::FeedbackConfig {
+            enabled: false,
+            ..Default::default()
+        },
         capture: engram::config::CaptureConfig::default(),
         associate: engram::config::AssociateConfig::default(),
         activation: engram::config::ActivationConfig::default(),
+        promote: engram::config::PromoteConfig::default(),
         // The benchmark makes no background inference call, so the pacer never
         // has anything to hold back.
         gate: std::sync::Arc::new(engram::infer::gate::InferenceGate::new(

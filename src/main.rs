@@ -368,6 +368,7 @@ mod startup_tests {
             pacing: engram::config::PacingConfig::default(),
             associate: AssociateConfig::default(),
             activation: ActivationConfig::default(),
+            promote: engram::config::PromoteConfig::default(),
         }
     }
 
