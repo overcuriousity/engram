@@ -56,6 +56,18 @@ pinned_boost = 0.15
 # consumer GPU, answering in minutes rather than seconds. Against a hosted API
 # you can raise output_ratio's window and lower timeout_secs considerably.
 
+[infer]
+# How much inference capture spends.
+#   "off"    — split the text into verbatim passages, embed them, call nothing.
+#              [infer.synthesize] and [infer.ask] may be left out entirely.
+#   "earned" — the same capture; synthesis runs later where use has shown it
+#              is worth it. Needs [infer.synthesize].
+#   "eager"  — one synthesis call per segment at capture. The default.
+synthesis = "eager"
+# Window size when there is no [infer.synthesize] to derive one from, in
+# engram's estimator tokens. Ignored when a synthesizer is configured.
+# segment_tokens = 4096
+
 # The working tier: everything that runs unattended, in bulk, and is paid for
 # by the corpus rather than by a person waiting.
 [infer.tiers.efficient]
@@ -187,6 +199,11 @@ dim = 768
 # engram splits the artifact instead, but it splits sooner and cheaper if this
 # number is honest. 2048 is the model's window; use the server's if lower.
 max_input_tokens = 2048
+# Passage size at synthesis = "off"/"earned", in estimator tokens: about a
+# paragraph and a half, which is about one idea. Clamped to what the embedder
+# will take (max_input_tokens * 0.8). Argued, not measured — the judge
+# harness is what is allowed to move it.
+# chunk_tokens = 384
 # The recipe. `{text}` is the query or the body; `{title}` is the artifact's
 # title. A document with no title takes the `_untitled` template — the model
 # card substitutes the literal word `none`, so it is a second template and not

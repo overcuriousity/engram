@@ -162,7 +162,8 @@ cp config.example.toml config.toml
 ```
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
-through `raw → synthesizing → embedding → ready` on Browse. `partial` means part
+through `raw → synthesizing → embedding → ready` (at `infer.synthesis = "off"`:
+`raw → embedding → ready`) on Browse. `partial` means part
 of it has not come through yet; Ops says what is retrying and when, and nothing
 there needs you.
 
@@ -214,6 +215,9 @@ the file — the loader warns if it finds one.
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
 | `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
+| `infer.synthesis` | `"off"`, `"earned"` or `"eager"` (default). `off` embeds the source text verbatim and calls no model at capture; `[infer.synthesize]` and `[infer.ask]` may then be omitted, and the doors that need them are not offered. |
+| `infer.segment_tokens` | Window size when no synthesizer is configured. Default 4096. |
+| `infer.embed.chunk_tokens` | Passage size at `off`/`earned`. Default 384, clamped to the embedder. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`, and the three prompt templates `query_template`, `document_template`, `document_template_untitled`. Defaults are EmbeddingGemma's; a symmetric model sets the three to `{text}` / `{title}\n{text}` / `{text}`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
 | `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
@@ -231,9 +235,10 @@ Eight worth knowing:
   and ships **off**: a default here moves after the harness has run, not before.
   `follow_up_tier` puts that call on a cheaper tier than the answer it feeds,
   which is the whole reason tiers are named.
-- **`tier` is required** on `infer.synthesize` and `infer.ask`. An endpoint is
-  named once under `infer.tiers.<name>` and pointed at, so moving a role to
-  another model is one word.
+- **`tier` is required** on `infer.synthesize` and `infer.ask` when those
+  tables are present. An endpoint is named once under `infer.tiers.<name>` and
+  pointed at, so moving a role to another model is one word. At
+  `infer.synthesis = "off"` both tables may be omitted.
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
   a way you would not notice for weeks.

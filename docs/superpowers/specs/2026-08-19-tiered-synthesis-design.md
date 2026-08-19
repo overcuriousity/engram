@@ -382,6 +382,11 @@ Existing tests asserting the joined embedding text (`embed.rs:1702` and
 siblings) are updated to the new rendering rather than pinned. They no longer
 guard anything.
 
+The default `FakeEmbedder` is symmetric — it renders with the legacy templates
+— so the retrieval tests that query with `"title\ntext"` keep landing on what
+they seeded; `FakeEmbedder::with_templates` exercises the asymmetric recipe in
+the tests that are about it.
+
 ---
 
 # 3. Promotion
