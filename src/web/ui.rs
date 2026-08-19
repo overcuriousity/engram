@@ -380,6 +380,14 @@ struct CaptureTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the page offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
+    ///
+    /// At `earned` and `off` it spends none: the text is embedded as written,
+    /// and at `earned` a window is rewritten later only where reading has
+    /// earned it. The page has to say which of those is happening — promising
+    /// "16 model calls" on a base that will make none is the page lying about
+    /// what the button costs.
+    eager: bool,
     /// The holes, grouped and named by the sweep. Empty when feedback is off.
     gaps: Vec<GapGroup>,
     /// Open gaps the sweep has not grouped yet.
@@ -856,6 +864,7 @@ async fn capture_page(
         pairs,
         more_pairs,
         vision_enabled: st.core.describer.is_some(),
+        eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
         gaps,
         loose,
         prefill_text,
@@ -3446,6 +3455,34 @@ mod tests {
             !html.contains("Re-segment"),
             "nothing was extracted; there is nothing to re-segment: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_prices_a_capture_by_the_mode_it_will_run_in() {
+        // At `earned` — the default — capture synthesizes nothing: the text is
+        // embedded as written and a window is rewritten later only where
+        // reading earns it. Promising "16 model calls" there is the page
+        // lying about what the button costs.
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Earned;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, "/ui/capture", &cookie).await;
+        assert!(
+            html.contains("kept as you wrote it"),
+            "the standing line still prices a call: {html}"
+        );
+        assert!(html.contains("var EAGER = false"));
+        assert!(
+            !html.contains("one model call each"),
+            "the standing line still prices a call: {html}"
+        );
+
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Eager;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, "/ui/capture", &cookie).await;
+        assert!(html.contains("one model call each"));
+        assert!(html.contains("var EAGER = true"));
     }
 
     #[tokio::test]

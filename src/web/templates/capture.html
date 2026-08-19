@@ -9,10 +9,16 @@
 <form id="capture" hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if (event.detail.successful) { this.reset(); htmx.trigger(document.body, 'captured') }"
       class="stack">
-  {# One line. The segment-count hint below the box says the expensive part,
-     and says it only once it is true. #}
+  {# One line, and it has to match the mode. At `eager` the expensive part is
+     the synthesis call per segment; at `earned` and `off` capture calls nothing
+     and the text is stored as it was written. The segment-count hint below the
+     box says the rest, and says it only once it is true. #}
   <p class="muted" style="margin:0">
+    {% if eager %}
     Paste a chapter at a time — long text is split into segments, one model call each.
+    {% else %}
+    Paste a chapter at a time — long text is split into segments and kept as you wrote it.
+    {% endif %}
   </p>
   {# No `autofocus`: this page is the app's `start_url`, so on a phone the
      attribute opened the software keyboard over "Needs you" and "Recent" the
@@ -99,11 +105,16 @@
     if (!box || !hint) return;
     // Rough stand-in for the tokeniser: enough to warn, never to block.
     var CHARS_PER_SEGMENT = 12000;
+    // At `earned` and `off` capture makes no synthesis call, so the hint must
+    // not price one. See `CaptureTemplate.eager`.
+    var EAGER = {% if eager %}true{% else %}false{% endif %};
     box.addEventListener('input', function () {
       var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
       hint.hidden = segments < 2;
-      hint.textContent = 'About ' + segments + ' segments — roughly ' + segments +
-        ' model calls before this is searchable.';
+      hint.textContent = EAGER
+        ? 'About ' + segments + ' segments — roughly ' + segments +
+          ' model calls before this is searchable.'
+        : 'About ' + segments + ' segments — searchable as written, once embedded.';
     });
 
     var drop = document.getElementById('drop');
