@@ -186,13 +186,13 @@ pub async fn supersede_covered(
     let pairs: Vec<(&str, &str)> = covered_by(&passages, &artifacts)
         .into_iter()
         .filter(|(p, a)| {
-            let (Some(pt), Some(at)) = (
+            let (Some(passage_text), Some(artifact_text)) = (
                 text_of(p),
                 written.iter().find(|c| c.id == *a).map(|c| c.text.as_str()),
             ) else {
                 return false;
             };
-            crate::infer::verify::locate_span(at, pt, 1).is_some()
+            crate::infer::verify::locate_span(artifact_text, passage_text, 1).is_some()
         })
         .collect();
     if pairs.is_empty() {

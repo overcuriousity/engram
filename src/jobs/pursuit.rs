@@ -62,8 +62,26 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             .collect();
         let user = prompt::generate_prompt(&p.queries, &excerpts);
         let spent = system + core.counter.count(&user);
-        if spent + ceiling.min(window / 2) <= window || sources.len() <= core.pursuit.min_sources {
+        if spent + ceiling.min(window / 2) <= window {
             break user;
+        }
+        // Dropping the tail is what makes it fit, and `min_sources` is the
+        // floor below which a generation has too little to stand on. Reaching
+        // that floor still over budget is not a smaller prompt to try — it is
+        // a fact about how long these particular artifacts are. Sending it
+        // anyway spends a 400 and then `MAX_ATTEMPTS` more on byte-identical
+        // content, so the pursuit is closed here with the reason on it,
+        // the way `dedupe` refuses a pair that cannot fit one call.
+        if sources.len() <= core.pursuit.min_sources {
+            core.store
+                .close_pursuit(
+                    pursuit_id,
+                    "unsatisfied",
+                    "the fewest sources worth generating from do not fit one call",
+                    now,
+                )
+                .await?;
+            return Ok(());
         }
         sources.pop();
     };
@@ -463,11 +481,17 @@ async fn covered_by_existing(core: &Core, sources: &[String]) -> Result<Option<S
     if mine.is_empty() {
         return Ok(None);
     }
-    for g in core.store.synthesized_artifacts(200).await? {
-        let theirs = core.store.roots_of(std::slice::from_ref(&g.id)).await?;
-        let set: std::collections::BTreeSet<&String> = theirs.values().flatten().collect();
+    // One lineage read for the whole candidate set rather than one per
+    // candidate inside the loop: the answer is the same, and the walk stays a
+    // single awaited call however many generations are on the list.
+    let generated = core.store.synthesized_artifacts(200).await?;
+    let ids: Vec<String> = generated.iter().map(|g| g.id.clone()).collect();
+    let theirs = core.store.roots_of(&ids).await?;
+    for g in &generated {
+        let set: std::collections::BTreeSet<&String> =
+            theirs.get(&g.id).into_iter().flatten().collect();
         if mine.iter().all(|r| set.contains(r)) {
-            return Ok(Some(g.id));
+            return Ok(Some(g.id.clone()));
         }
     }
     Ok(None)

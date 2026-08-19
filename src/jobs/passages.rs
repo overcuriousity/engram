@@ -35,6 +35,22 @@ pub fn heading_title(line: &str) -> String {
     line.trim().trim_start_matches('#').trim().to_string()
 }
 
+/// The first heading among the next `n` lines, with all `n` consumed.
+///
+/// Consuming all of them is the whole point. The carried lines belong to the
+/// window above rather than to this passage's body, so the iterator must be
+/// left standing just past them — and `find` alone stops at the heading, which
+/// leaves every carried line after it to be read as body text. `flush` emits a
+/// carry of 0 or 1 today, and at 1 the two spellings agree; at 2 they would
+/// not, and every passage span below here would quietly shift by a line.
+fn carried_heading<'a>(lines: &mut impl Iterator<Item = &'a str>, n: usize) -> Option<String> {
+    let carried: Vec<&str> = lines.take(n).collect();
+    carried
+        .into_iter()
+        .find(|l| is_heading(l))
+        .map(heading_title)
+}
+
 /// Split one window into passages sized to the embedder.
 ///
 /// The same splitter that made the window, called again with the retrieval
@@ -58,13 +74,7 @@ pub fn split_passages(
     let carry = window.carry_lines.max(0) as usize;
     let mut lines = window.text.lines();
     let outer_heading: Option<String> = (carry > 0)
-        .then(|| {
-            lines
-                .by_ref()
-                .take(carry)
-                .find(|l| is_heading(l))
-                .map(heading_title)
-        })
+        .then(|| carried_heading(&mut lines, carry))
         .flatten();
     let body: String = lines.collect::<Vec<_>>().join("\n");
 
@@ -75,13 +85,7 @@ pub fn split_passages(
         let pc = p.carry_lines.max(0) as usize;
         let mut plines = p.text.lines();
         let carried: Option<String> = (pc > 0)
-            .then(|| {
-                plines
-                    .by_ref()
-                    .take(pc)
-                    .find(|l| is_heading(l))
-                    .map(heading_title)
-            })
+            .then(|| carried_heading(&mut plines, pc))
             .flatten();
         let own: Vec<&str> = plines.collect();
         let inside: Option<String> = own.iter().find(|l| is_heading(l)).map(|l| heading_title(l));

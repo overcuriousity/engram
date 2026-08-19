@@ -573,8 +573,30 @@ impl Core {
                 .iter()
                 .map(|&m| hits[members[m].3].text.as_str())
                 .collect();
-            blocks[anchor_pos] =
-                crate::infer::prompt::ask_excerpt(anchor_pos + 1, head, &text.join("\n"), &[]);
+            // The caveats of everything the block now contains, not of the
+            // anchor alone. A stitched excerpt is one presentation of several
+            // passages, and the run's other members are no longer rendered
+            // anywhere — so a warning carried by the third passage in a run
+            // would leave the prompt entirely if only the anchor's came along.
+            // The caveats are the safety margin on an excerpt: dropping them
+            // silently is the one direction this must not fail in.
+            let mut caveats: Vec<String> = Vec::new();
+            for &m in &run {
+                let id = &hits[members[m].3].artifact_id;
+                if let Some(c) = rows.iter().find(|r| &r.id == id) {
+                    for cv in &c.caveats {
+                        if !caveats.contains(cv) {
+                            caveats.push(cv.clone());
+                        }
+                    }
+                }
+            }
+            blocks[anchor_pos] = crate::infer::prompt::ask_excerpt(
+                anchor_pos + 1,
+                head,
+                &text.join("\n"),
+                &caveats,
+            );
             for &m in &run {
                 if m != anchor {
                     blocks[members[m].3].clear();

@@ -19,7 +19,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::store::artifacts::Chunk;
+use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::jobs::Stage;
 use crate::store::pairs::PairState;
 
@@ -38,7 +38,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let me = core.store.get_artifact(artifact_id).await?;
     // A passage is not anchored: see `embed::mark_indexed`. Said here too, so a
     // unit armed some other way files nothing.
-    if me.provenance == crate::store::artifacts::Provenance::Passage {
+    if me.provenance == Provenance::Passage {
         return Ok(());
     }
     // A retired artifact has no duplicates worth recording. Every pair naming
@@ -135,10 +135,18 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     // job's decision — the majority rule — already made. Sending that pair to
     // the judge would spend a call to merge, and so hide behind model text,
     // exactly the verbatim passage promotion just decided to keep.
+    //
+    // Both of those cases have a passage on at least one side, which is what
+    // the last clause asks. Two *written* rows from one window are the case
+    // neither reason covers: one synthesis call emitting the same passage
+    // twice is a defect in its output, not a decision anything made, and
+    // excluding it would leave the containment rule below unable to reach the
+    // very case it was written for. So model-written pairs fall through.
     if a.corpus_id.is_some()
         && a.corpus_id == b.corpus_id
         && a.segment_idx.is_some()
         && a.segment_idx == b.segment_idx
+        && (a.provenance == Provenance::Passage || b.provenance == Provenance::Passage)
     {
         return Ok(false);
     }
@@ -149,10 +157,12 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     // `pairs_to_judge` orders by score and so asks about it first.
 
     // One synthesis call emitting the same passage twice: the shorter text is
-    // wholly inside the longer, and both came out of the same document. That is
-    // a defect in one artifact rather than two sources saying different things,
-    // and nothing is lost by hiding it — the survivor says everything it said,
-    // Ops lists it, and one press undoes it.
+    // wholly inside the longer, and both came out of the same document — the
+    // same window of it, when the call repeated itself inside one window, which
+    // is why the exclusion above lets a written pair through. That is a defect
+    // in one artifact rather than two sources saying different things, and
+    // nothing is lost by hiding it — the survivor says everything it said, Ops
+    // lists it, and one press undoes it.
     //
     // Same corpus is the whole of the condition. Two documents that share a
     // sentence are two sources, and hiding one of those on a 0.9 similarity is
@@ -222,6 +232,21 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             }
             return Ok(false);
         }
+    }
+
+    // The other half of the same-window rule. A written pair from one window
+    // was let through above so containment could reach it; containment did not
+    // fire, so what is left is two rows that merely resemble each other — and
+    // resemblance inside one window is what the rule at the top calls a fact
+    // about how they were built. Filing it would put the window job's own
+    // output in front of the judge as a merge candidate, which is the cost the
+    // exclusion exists to avoid. Containment is the whole of what gets through.
+    if a.corpus_id.is_some()
+        && a.corpus_id == b.corpus_id
+        && a.segment_idx.is_some()
+        && a.segment_idx == b.segment_idx
+    {
+        return Ok(false);
     }
 
     // Everything else is a question for the dedupe pass.
@@ -506,7 +531,8 @@ mod tests {
     async fn two_rows_from_one_window_are_never_a_pair() {
         // A promoted artifact and the passage it left standing in the same
         // window look like a duplicate pair and are not one: overlap inside a
-        // window is the window job's decision, already made.
+        // window is the window job's decision, already made. A passage on
+        // either side is what marks that case, and what this pins.
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let na = |o: i64, t: &str, seg: i64| crate::store::artifacts::NewArtifact {
@@ -519,17 +545,22 @@ mod tests {
             segment_idx: Some(seg),
             caveats: vec![],
         };
-        let same = core
+        // One written row and the verbatim passage beside it, in one window.
+        let written = core
             .store
-            .insert_artifacts(
+            .insert_artifacts(&src.id, &[na(0, "mount the disk first", 0)])
+            .await
+            .unwrap();
+        let passage = core
+            .store
+            .insert_artifacts_with_provenance(
                 &src.id,
-                &[
-                    na(0, "mount the disk first", 0),
-                    na(1, "mount the disk first", 0),
-                ],
+                &[na(1, "mount the disk first", 0)],
+                Provenance::Passage,
             )
             .await
             .unwrap();
+        let same: Vec<_> = written.iter().chain(passage.iter()).cloned().collect();
         let other = core
             .store
             .insert_artifacts(&src.id, &[na(2, "mount the disk first", 1)])
@@ -568,6 +599,57 @@ mod tests {
                 .any(|p| p.a_id == other[0].id || p.b_id == other[0].id),
             "cross-window pair not filed: {pending:?} {settled:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn one_call_emitting_a_passage_twice_is_still_caught_inside_a_window() {
+        // The case the same-window exclusion must not swallow: no passage on
+        // either side, so nothing here is the window job's decision — just one
+        // synthesis call that wrote the same text twice, the shorter wholly
+        // inside the longer. Containment settles it and hides the copy.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: None,
+            title: Some("same heading".into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let rows = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    na(0, "mount the disk first, then run the installer"),
+                    na(1, "mount the disk first"),
+                ],
+            )
+            .await
+            .unwrap();
+        for c in &rows {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        let (long, short) = (&rows[0], &rows[1]);
+        let a = core.store.get_artifact(&long.id).await.unwrap();
+        let b = core.store.get_artifact(&short.id).await.unwrap();
+        classify_pair(&core, &a, &b, 0.95).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::NoConflict, 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|p| (p.a_id == a.id && p.b_id == b.id)
+                    || (p.a_id == b.id && p.b_id == a.id)),
+            "a duplicate inside one window was not settled"
+        );
+        let after = core.store.get_artifact(&short.id).await.unwrap();
+        assert!(!after.in_results(), "the duplicated copy is still visible");
     }
 
     #[tokio::test]

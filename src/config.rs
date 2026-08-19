@@ -1393,6 +1393,19 @@ impl Config {
                     .into(),
             ));
         }
+        // The other half of the same gate. Both the sweep and its ticker run
+        // behind `associating()`, which is these two flags together, so a
+        // pursuit configured without associating is not a degraded feature —
+        // it is a ticker that returns on its first line and a config that
+        // never writes a pursuit at all. Refused rather than warned, because
+        // the `feedback` half above is refused and the effect is identical.
+        if self.pursuit.enabled && !self.associate.enabled {
+            return Err(ConfigError::Invalid(
+                "pursuit.enabled = true needs associate.enabled = true: pursuits are swept on \
+                 the associative pass, which does not run without it"
+                    .into(),
+            ));
+        }
         if let Some(v) = &self.infer.vision
             && v.base_url.is_none()
             && self.infer.synthesize.is_none()
@@ -2737,5 +2750,15 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         .unwrap_err()
         .to_string();
         assert!(err.contains("pursuit.enabled"), "{err}");
+        // Associating is both flags, so the other half is refused the same
+        // way: with feedback on and associate off, the sweep and its ticker
+        // still never run, and a config that silently writes no pursuit is
+        // the thing this refusal exists to prevent.
+        let err = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[associate]\nenabled = false\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("associate.enabled = true"), "{err}");
     }
 }

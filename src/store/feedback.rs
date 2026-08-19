@@ -741,7 +741,17 @@ impl Store {
         Ok(out)
     }
 
-    /// When the most recent search or question was recorded, if any.
+    /// When the session was last active, if it ever was.
+    ///
+    /// Every kind of event, not just the ones that open a pursuit. A search is
+    /// what a pursuit is built around, but reading is what the operator spends
+    /// the session doing: one search at the top of the hour, then twenty
+    /// minutes of opening and pivoting through what it returned. Counting only
+    /// searches calls that session idle while it is at its most active, and the
+    /// sweep that then fires is not merely early — it advances the cursor past
+    /// the search, so every interaction still to come arrives with no search of
+    /// its own left in range, finds no owner, and is dropped. The long read is
+    /// scored as an abandonment, which is the one reading it least resembles.
     pub async fn newest_event_at(&self) -> Result<Option<i64>> {
         let s: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM search_events")
             .fetch_one(&self.pool)
@@ -749,11 +759,10 @@ impl Store {
         let a: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM ask_events")
             .fetch_one(&self.pool)
             .await?;
-        Ok(match (s, a) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (x, None) => x,
-            (None, y) => y,
-        })
+        let i: Option<i64> = sqlx::query_scalar("SELECT MAX(at) FROM interaction_events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok([s, a, i].into_iter().flatten().max())
     }
 }
 
