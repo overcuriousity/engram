@@ -142,9 +142,7 @@ async fn main() -> anyhow::Result<()> {
 
     if args.reindex {
         let vectors = engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?;
-        let target = vectors
-            .reindex(cfg.infer.embed.dim)
-            .await?;
+        let target = vectors.reindex(cfg.infer.embed.dim).await?;
         println!("{} now serves `{}`", cfg.vector.collection, target);
         return Ok(());
     }

@@ -14,6 +14,7 @@ pub mod shingle;
 
 use crate::config::StoreConfig;
 use crate::error::Result;
+use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
@@ -59,6 +60,13 @@ impl Store {
     /// creates what is missing on a fresh database and is a no-op on one that
     /// already has it. Changing a column means changing `schema.sql` and
     /// recreating the database.
+    ///
+    /// Which is exactly why it checks afterwards. `CREATE TABLE IF NOT EXISTS`
+    /// leaves an existing table as it is, columns and all, so adding a column
+    /// to `schema.sql` without recreating the base changes nothing here and
+    /// fails much later, inside a request, with a bare `ColumnNotFound` that
+    /// names no cause. Nothing is altered to fix that — recreating is still the
+    /// answer — but it is said here, at boot, with the columns named.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
 
@@ -66,6 +74,32 @@ impl Store {
             .execute(&self.pool)
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+
+        let mut missing = Vec::new();
+        for (table, columns) in schema_columns(SCHEMA) {
+            // The table-valued form of `PRAGMA table_info`, which takes a bind
+            // parameter where the pragma statement would need the name spliced
+            // into the SQL.
+            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+                .bind(&table)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| r.get::<String, _>("name"))
+                .collect();
+            for c in columns {
+                if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
+                    missing.push(format!("{table}.{c}"));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            return Err(crate::error::Error::Store(format!(
+                "this database is older than the schema: {} missing. \
+                 Recreate it, or add the columns by hand.",
+                missing.join(", ")
+            )));
+        }
         Ok(())
     }
 
@@ -87,6 +121,45 @@ impl Store {
         store.migrate().await?;
         Ok(store)
     }
+}
+
+/// The `(table, columns)` pairs `schema.sql` declares.
+///
+/// Read out of the file rather than listed by hand, so it cannot fall behind
+/// the schema it is checking — a hand-kept list of "columns added recently" is
+/// exactly the thing everyone forgets to append to. The file is ours and one
+/// column per line, which is what makes this much parsing enough: a line inside
+/// a `CREATE TABLE` block starts with the column's name, unless it starts with a
+/// comment or a table constraint.
+fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
+    const CONSTRAINTS: [&str; 5] = ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"];
+    let mut tables: Vec<(String, Vec<String>)> = Vec::new();
+    let mut open: Option<(String, Vec<String>)> = None;
+
+    for line in sql.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            let name = rest.trim_end_matches('(').trim();
+            open = Some((name.to_string(), Vec::new()));
+            continue;
+        }
+        let Some((_, columns)) = open.as_mut() else {
+            continue;
+        };
+        if line.starts_with(')') {
+            tables.push(open.take().expect("just borrowed"));
+            continue;
+        }
+        if line.is_empty() || line.starts_with("--") {
+            continue;
+        }
+        let first = line.split([' ', '(', ',']).next().unwrap_or_default();
+        if first.is_empty() || CONSTRAINTS.iter().any(|k| k.eq_ignore_ascii_case(first)) {
+            continue;
+        }
+        columns.push(first.to_string());
+    }
+    tables
 }
 
 pub fn now() -> i64 {
@@ -167,5 +240,70 @@ mod tests {
 
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_schema_parses_into_the_columns_it_declares() {
+        let tables = schema_columns(include_str!("schema.sql"));
+        let segments = tables
+            .iter()
+            .find(|(t, _)| t == "segments")
+            .expect("segments is in the schema");
+        assert_eq!(
+            segments.1,
+            vec![
+                "corpus_id",
+                "idx",
+                "start_line",
+                "end_line",
+                "text",
+                "carry_lines",
+                "state",
+                "keep_artifacts",
+                "attempts",
+                "last_error",
+            ],
+            "comments and the PRIMARY KEY line must not be read as columns"
+        );
+        assert!(
+            tables.len() >= 9,
+            "every CREATE TABLE must be found, got {}",
+            tables.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_database_missing_a_column_is_refused_with_the_column_named() {
+        // The failure this replaces: `CREATE TABLE IF NOT EXISTS` leaves an
+        // older table exactly as it is, so startup succeeded and every corpus
+        // view, synthesis run and reconcile job then panicked on a column that
+        // was never added.
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE segments (
+               corpus_id TEXT NOT NULL, idx INTEGER NOT NULL,
+               start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
+               state TEXT NOT NULL DEFAULT 'pending',
+               attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+               PRIMARY KEY (corpus_id, idx))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = Store {
+            pool,
+            capture: Default::default(),
+        };
+
+        let err = store.migrate().await.unwrap_err().to_string();
+        assert!(err.contains("segments.text"), "unhelpful message: {err}");
+        assert!(err.contains("segments.carry_lines"), "{err}");
     }
 }

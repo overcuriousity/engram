@@ -469,24 +469,26 @@ impl QdrantVectors {
             .map(|a| a.collection_name))
     }
 
-    /// Every collection belonging to this alias: the numbered generations, plus
-    /// a pre-alias collection named exactly like it if one is still around.
+    /// Every collection belonging to this alias: the numbered generations, and
+    /// nothing else.
     ///
-    /// Membership is by parsed generation number, never by prefix. A collection
-    /// called `{alias}_vault` belongs to whoever made it, and this list is what
-    /// `drop_collection` deletes.
+    /// Membership is by parsed generation number, never by prefix and never by
+    /// the alias name itself. A collection called `{alias}_vault` belongs to
+    /// whoever made it, and so does one called `{alias}` — that one is the
+    /// collision `name_collision` reports and refuses to touch. This list is
+    /// what `drop_collection` deletes, so anything it claims wrongly is
+    /// somebody else's data.
     async fn generations(&self) -> Result<Vec<String>> {
         let list: CollectionList = self.call(Method::GET, "/collections", None).await?;
         Ok(list
             .collections
             .into_iter()
             .map(|c| c.name)
-            .filter(|n| *n == self.alias || generation_number(&self.alias, n).is_some())
+            .filter(|n| generation_number(&self.alias, n).is_some())
             .collect())
     }
 
-    /// The highest-numbered generation that exists, ignoring any pre-alias
-    /// collection sharing the alias name.
+    /// The highest-numbered generation that exists.
     async fn newest_generation(&self) -> Result<Option<String>> {
         Ok(self
             .generations()
@@ -502,13 +504,15 @@ impl QdrantVectors {
     /// Asked of the alias' target rather than of the alias, because a dangling
     /// alias — one left pointing at a generation that was dropped — is exactly
     /// the fault this has to report, and a check that resolved it away would
-    /// call it healthy. No alias row at all is not yet an answer either: a
-    /// collection named exactly like the alias may still be serving, which is
-    /// the pre-alias shape `generations` allows for.
+    /// call it healthy. No alias row at all is the same kind of fault: a
+    /// collection named exactly like the alias is not ours and is not serving
+    /// anything, it is the collision `ensure_collection` refuses to start on,
+    /// so answering "live" there would turn every point lookup into a silent
+    /// `None`.
     async fn collection_is_live(&self) -> Result<bool> {
         match self.resolve_alias().await? {
             Some(target) => self.collection_exists(&target).await,
-            None => self.collection_exists(&self.alias).await,
+            None => Ok(false),
         }
     }
 

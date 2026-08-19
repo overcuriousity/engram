@@ -886,7 +886,6 @@ impl Store {
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-
     /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(

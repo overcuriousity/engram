@@ -545,7 +545,27 @@ async fn a_plain_collection_holding_the_alias_name_is_refused_at_startup() {
     let err = v.ensure_collection(4).await.unwrap_err().to_string();
     assert!(err.contains("vector.collection"), "unhelpful: {err}");
 
-    raw(reqwest::Method::DELETE, &format!("/collections/{name}"), None).await;
+    // ...and having called it somebody else's, nothing here may delete it.
+    // `drop_collection` deletes every generation the alias claims, and a
+    // collection wearing the alias name is not one of them.
+    v.drop_collection().await.unwrap();
+    let body = raw(
+        reqwest::Method::GET,
+        &format!("/collections/{name}/exists"),
+        None,
+    )
+    .await;
+    assert!(
+        body.contains("true"),
+        "the collision was reported and then deleted anyway: {body}"
+    );
+
+    raw(
+        reqwest::Method::DELETE,
+        &format!("/collections/{name}"),
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]
