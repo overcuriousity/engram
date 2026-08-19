@@ -658,6 +658,25 @@ pub struct EmbedRole {
     pub max_input_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// See `EmbedTemplates`. Flat on the role rather than nested, so the TOML
+    /// reads `[infer.embed] query_template = ...` beside `model`, which is the
+    /// other half of the same identity.
+    #[serde(default = "default_query_template")]
+    pub query_template: String,
+    #[serde(default = "default_document_template")]
+    pub document_template: String,
+    #[serde(default = "default_document_template_untitled")]
+    pub document_template_untitled: String,
+}
+
+impl EmbedRole {
+    pub fn templates(&self) -> EmbedTemplates {
+        EmbedTemplates {
+            query_template: self.query_template.clone(),
+            document_template: self.document_template.clone(),
+            document_template_untitled: self.document_template_untitled.clone(),
+        }
+    }
 }
 
 /// The three strings that, with `model`, fix what a stored vector means.
@@ -1207,6 +1226,11 @@ impl Config {
                 c.auto_supersede, c.review_min
             )));
         }
+        self.infer
+            .embed
+            .templates()
+            .validate()
+            .map_err(ConfigError::Invalid)?;
         Ok(())
     }
 
@@ -2167,5 +2191,79 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
                 .unwrap_err()
                 .contains("document_template_untitled")
         );
+    }
+
+    /// The preamble every `[infer.embed]` test below shares: a valid config
+    /// with the embed block left for the test to write.
+    const EMBED_PREAMBLE: &str = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        [infer.synthesize]
+        tier = "efficient"
+        output_ratio = 8.0
+        [infer.ask]
+        tier = "efficient"
+    "#;
+
+    #[test]
+    fn embed_templates_default_to_embeddinggemma_when_unset() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"embeddinggemma\"
+            dim = 768
+            max_input_tokens = 2048
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.embed.templates(), EmbedTemplates::default());
+    }
+
+    #[test]
+    fn embed_templates_are_read_from_config() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"bge-m3\"
+            dim = 1024
+            max_input_tokens = 1024
+            query_template = \"{{text}}\"
+            document_template = \"{{title}}\\n{{text}}\"
+            document_template_untitled = \"{{text}}\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.embed.templates(), EmbedTemplates::legacy());
+    }
+
+    #[test]
+    fn a_template_missing_its_placeholder_fails_at_load() {
+        let _guard = env_guard();
+        let err = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"embeddinggemma\"
+            dim = 768
+            max_input_tokens = 2048
+            query_template = \"task: search result | query: \"
+            "
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("query_template"), "got: {err}");
     }
 }

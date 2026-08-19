@@ -1417,6 +1417,7 @@ mod tests {
         }
     }
     fn embed_cfg(base: String) -> EmbedRole {
+        let t = crate::config::EmbedTemplates::default();
         EmbedRole {
             base_url: base,
             model: "e".into(),
@@ -1424,6 +1425,9 @@ mod tests {
             dim: 4,
             max_input_tokens: 512,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+            query_template: t.query_template,
+            document_template: t.document_template,
+            document_template_untitled: t.document_template_untitled,
         }
     }
 

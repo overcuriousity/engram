@@ -329,6 +329,10 @@ mod startup_tests {
                     dim: 1024,
                     max_input_tokens: 8192,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
+                    query_template: engram::config::EmbedTemplates::default().query_template,
+                    document_template: engram::config::EmbedTemplates::default().document_template,
+                    document_template_untitled: engram::config::EmbedTemplates::default()
+                        .document_template_untitled,
                 },
                 ask: AskRole {
                     base_url: "http://localhost:8000/v1".into(),
