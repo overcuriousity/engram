@@ -342,7 +342,7 @@ impl Core {
         // are what a camera and a clipboard call everything. Seeding the title
         // from it would disarm the one stage that can name the capture.
 
-        let attachment = crate::store::attachments::NewImage {
+        let attachment = crate::store::attachments::NewFile {
             kind: "image",
             mime: prepared.mime,
             filename: filename.as_deref(),
@@ -353,11 +353,12 @@ impl Core {
         };
         let src = match self
             .store
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 &hash,
                 ORIGIN_IMAGE,
                 title_hint.as_deref(),
                 &metadata,
+                crate::store::corpora::Reading::VISION,
                 &attachment,
             )
             .await?
@@ -996,7 +997,7 @@ impl Core {
                     ));
                 }
                 self.forget_derived_work(&src.id).await?;
-                self.store.clear_described_text(&src.id).await?;
+                self.store.clear_read_text(&src.id).await?;
                 let mut meta = src.metadata.clone();
                 if let Some(m) = meta.as_object_mut() {
                     m.remove("describe");

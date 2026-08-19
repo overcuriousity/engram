@@ -3404,7 +3404,7 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let src = core
             .store
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "h",
                 "image",
                 Some("IMG.png"),
@@ -3415,7 +3415,8 @@ mod tests {
                              "gps": {"lat": 1.5, "lon": 2.5},
                              "tags": {"LensModel": "24mm f/1.8", "ExposureTime": "1/120"}}
                 }),
-                &crate::store::attachments::NewImage {
+                crate::store::corpora::Reading::VISION,
+                &crate::store::attachments::NewFile {
                     kind: "image",
                     mime: "image/png",
                     filename: Some("IMG.png"),
@@ -3429,7 +3430,7 @@ mod tests {
             .unwrap()
             .into_corpus();
         core.store
-            .set_described_text(&src.id, "# Porch\n\nblue door", vec![])
+            .set_read_text(&src.id, "# Porch\n\nblue door", vec![])
             .await
             .unwrap();
         let (app, cookie) = app_for(core).await;

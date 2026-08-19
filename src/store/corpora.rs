@@ -25,6 +25,29 @@ impl Insertion {
     }
 }
 
+/// How a capture that arrived as bytes waits to be read: the status the row
+/// sits in, and the unit that will move it on.
+///
+/// One value rather than two arguments, because they are never chosen
+/// independently. A row parked in `extracting` with a `Describe` unit behind it
+/// would wait for a stage that skips it, and the corpus would sit in flight for
+/// ever with nothing wrong that any one line would show.
+// Not `Copy`: `CorpusStatus` is not, and making a fieldless enum copyable to
+// suit one struct is a change to every place that holds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    pub status: CorpusStatus,
+    pub stage: Stage,
+}
+
+impl Reading {
+    /// A photo, read by the vision model.
+    pub const VISION: Reading = Reading {
+        status: CorpusStatus::Describing,
+        stage: Stage::Describe,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
@@ -493,19 +516,22 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
-    /// The row for a captured image. There is no text yet — the vision stage
-    /// writes it — so the hash is the caller's, over the image bytes, and the
-    /// row starts in `describing`. Same conflict handling as a text capture:
-    /// the same photo twice is one row. Row, attachment and the Describe unit
-    /// land in one transaction: a photo with no attachment, or one no job will
-    /// ever read, is a row that lies about what it holds.
-    pub async fn insert_image_corpus(
+    /// The row for a capture whose source is bytes rather than text. There is
+    /// no text yet — a reading stage writes it — so the hash is the caller's,
+    /// over those bytes. Same conflict handling as a text capture: the same
+    /// file twice is one row. Row, attachment and the reading unit land in one
+    /// transaction: a capture with no attachment, or one no job will ever
+    /// read, is a row that lies about what it holds.
+    ///
+    /// `reading` is the caller's because it is what differs between the doors.
+    pub async fn insert_attached_corpus(
         &self,
         content_hash: &str,
         origin: &str,
         title_hint: Option<&str>,
         metadata: &serde_json::Value,
-        attachment: &super::attachments::NewImage<'_>,
+        reading: Reading,
+        attachment: &super::attachments::NewFile<'_>,
     ) -> Result<Insertion> {
         let at = now();
         let src = Corpus {
@@ -514,7 +540,7 @@ impl Store {
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
             content_hash: content_hash.to_string(),
-            status: CorpusStatus::Describing,
+            status: reading.status,
             created_at: at,
             updated_at: at,
             coverage: None,
@@ -529,20 +555,21 @@ impl Store {
         if !insert_corpus_row(&mut *tx, &src).await? {
             tx.rollback().await?;
             let existing = self.find_by_hash(content_hash).await?.ok_or_else(|| {
-                Error::Store("image capture conflicted with a corpus that then vanished".into())
+                Error::Store("a file capture conflicted with a corpus that then vanished".into())
             })?;
             return Ok(Insertion::Existing(existing));
         }
         super::attachments::insert_attachment_with(&mut *tx, &attachment.for_corpus(&src.id))
             .await?;
-        super::jobs::enqueue_with(&mut *tx, Stage::Describe, "corpus", &src.id).await?;
+        super::jobs::enqueue_with(&mut *tx, reading.stage, "corpus", &src.id).await?;
         tx.commit().await?;
         Ok(Insertion::Created(src))
     }
 
-    /// The reverse of `set_described_text`, for a re-read: no text and no
-    /// signature, so the row is comparable to nothing until the model speaks.
-    pub async fn clear_described_text(&self, id: &str) -> Result<()> {
+    /// The reverse of `set_read_text`, for a re-read: no text and no
+    /// signature, so the row is comparable to nothing until the stage that
+    /// reads it speaks again.
+    pub async fn clear_read_text(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE corpora SET raw_text = '', shingles = '', updated_at = ? WHERE id = ?")
             .bind(now())
             .bind(id)
@@ -551,10 +578,11 @@ impl Store {
         Ok(())
     }
 
-    /// What the vision stage read. Text and signature together, so the row is
-    /// never comparable-by-shingle to something it does not say. Status is
-    /// left to the caller, who knows whether this parks or proceeds.
-    pub async fn set_described_text(&self, id: &str, text: &str, shingles: Vec<u64>) -> Result<()> {
+    /// What a reading stage made of the bytes — vision for a photo, extraction
+    /// for a PDF. Text and signature together, so the row is never
+    /// comparable-by-shingle to something it does not say. Status is left to
+    /// the caller, who knows whether this parks or proceeds.
+    pub async fn set_read_text(&self, id: &str, text: &str, shingles: Vec<u64>) -> Result<()> {
         let res = sqlx::query(
             "UPDATE corpora SET raw_text = ?, shingles = ?, updated_at = ? WHERE id = ?",
         )
@@ -942,8 +970,8 @@ mod tests {
         assert!(s.get_corpus(&src.id).await.unwrap().near_dupe_of.is_none());
     }
 
-    fn a_test_image() -> super::super::attachments::NewImage<'static> {
-        super::super::attachments::NewImage {
+    fn a_test_image() -> super::super::attachments::NewFile<'static> {
+        super::super::attachments::NewFile {
             kind: "image",
             mime: "image/png",
             filename: Some("x.png"),
@@ -1007,11 +1035,12 @@ mod tests {
     async fn an_image_row_its_attachment_and_its_job_land_together() {
         let s = Store::memory().await.unwrap();
         let src = s
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "hash-1",
                 "image",
                 None,
                 &serde_json::json!({}),
+                crate::store::corpora::Reading::VISION,
                 &a_test_image(),
             )
             .await
@@ -1022,7 +1051,7 @@ mod tests {
         assert!(s.live_job(Stage::Describe, &src.id).await.unwrap());
         // The same hash again: Existing, and nothing new written.
         assert!(matches!(
-            s.insert_image_corpus("hash-1", "image", None, &serde_json::json!({}), &a_test_image())
+            s.insert_attached_corpus("hash-1", "image", None, &serde_json::json!({}), Reading::VISION, &a_test_image())
                 .await
                 .unwrap(),
             Insertion::Existing(e) if e.id == src.id
@@ -1039,7 +1068,14 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let meta = serde_json::json!({"file": {"name": "a.jpg"}, "note": "whiteboard"});
         let ins = s
-            .insert_image_corpus("hash-1", "image", Some("a.jpg"), &meta, &a_test_image())
+            .insert_attached_corpus(
+                "hash-1",
+                "image",
+                Some("a.jpg"),
+                &meta,
+                crate::store::corpora::Reading::VISION,
+                &a_test_image(),
+            )
             .await
             .unwrap();
         let src = ins.into_corpus();
@@ -1052,7 +1088,7 @@ mod tests {
 
         // The same photo again is the same row.
         assert!(matches!(
-            s.insert_image_corpus("hash-1", "image", None, &meta, &a_test_image())
+            s.insert_attached_corpus("hash-1", "image", None, &meta, Reading::VISION, &a_test_image())
                 .await
                 .unwrap(),
             Insertion::Existing(e) if e.id == src.id
@@ -1063,18 +1099,19 @@ mod tests {
     async fn describing_writes_the_text_and_signature_but_keeps_the_hash() {
         let s = Store::memory().await.unwrap();
         let src = s
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "hash-2",
                 "image",
                 None,
                 &serde_json::json!({}),
+                crate::store::corpora::Reading::VISION,
                 &a_test_image(),
             )
             .await
             .unwrap()
             .into_corpus();
         let sig = crate::store::shingle::signature("hello world");
-        s.set_described_text(&src.id, "hello world", sig.clone())
+        s.set_read_text(&src.id, "hello world", sig.clone())
             .await
             .unwrap();
         let back = s.get_corpus(&src.id).await.unwrap();

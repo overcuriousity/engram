@@ -1,8 +1,9 @@
 //! The bytes a corpus was captured from, when it was not text.
 //!
-//! One row per image corpus today. The original is kept exactly as uploaded —
-//! that is the verbatim source, the way `raw_text` is for a paste — and the
-//! preview is derived once, for the model and the screen.
+//! One row per image or PDF corpus. The original is kept exactly as uploaded —
+//! that is the verbatim source, the way `raw_text` is for a paste. `preview` is
+//! the derived copy a photo is shown and read through; a PDF has none, because
+//! rendering its first page needs pdfium and that is the ML build's dependency.
 
 use super::{Store, now};
 use crate::error::Result;
@@ -35,7 +36,7 @@ pub struct NewAttachment<'a> {
 
 /// An attachment for a corpus that does not exist yet: `NewAttachment` minus
 /// the id, for the door that writes row and attachment in one transaction.
-pub struct NewImage<'a> {
+pub struct NewFile<'a> {
     pub kind: &'a str,
     pub mime: &'a str,
     pub filename: Option<&'a str>,
@@ -45,7 +46,7 @@ pub struct NewImage<'a> {
     pub height: Option<i64>,
 }
 
-impl<'a> NewImage<'a> {
+impl<'a> NewFile<'a> {
     pub fn for_corpus(&self, corpus_id: &'a str) -> NewAttachment<'a> {
         NewAttachment {
             corpus_id,

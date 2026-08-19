@@ -370,12 +370,13 @@ mod tests {
     async fn an_image_corpus_labels_its_lines_as_transcription() {
         let s = crate::store::Store::memory().await.unwrap();
         let src = s
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "h",
                 "image",
                 None,
                 &serde_json::json!({}),
-                &crate::store::attachments::NewImage {
+                crate::store::corpora::Reading::VISION,
+                &crate::store::attachments::NewFile {
                     kind: "image",
                     mime: "image/png",
                     filename: None,
@@ -388,9 +389,7 @@ mod tests {
             .await
             .unwrap()
             .into_corpus();
-        s.set_described_text(&src.id, "a\nb\nc", vec![])
-            .await
-            .unwrap();
+        s.set_read_text(&src.id, "a\nb\nc", vec![]).await.unwrap();
         let src = s.get_corpus(&src.id).await.unwrap();
         assert_eq!(
             slice(
