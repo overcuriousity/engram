@@ -6,7 +6,8 @@
   <span class="spacer"></span>
   {# Re-segmenting a placeholder would delete the restored artifacts and pay the
      model to re-derive them from their own text. Nothing to re-segment. An
-     image with no reading yet has nothing to re-segment either. #}
+     image with no reading yet has nothing to re-segment either, and neither
+     does a PDF with no extraction yet. #}
   {% if !restored && !unread %}
   <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline">
     <button class="btn btn-sm" type="submit">Re-segment</button>
@@ -17,6 +18,14 @@
         onsubmit="return confirm('Read the photo again? The current reading and its artifacts are replaced.')">
     <input type="hidden" name="stage" value="describe">
     <button class="btn btn-sm" type="submit">Re-read</button>
+  </form>
+  {% endif %}
+  {% if pdf %}
+  <a class="btn btn-sm" href="/api/v1/corpora/{{ id }}/file">Original PDF</a>
+  <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline"
+        onsubmit="return confirm('Read the PDF again? The current extraction and its artifacts are replaced.')">
+    <input type="hidden" name="stage" value="extract">
+    <button class="btn btn-sm" type="submit">Re-extract</button>
   </form>
   {% endif %}
   <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
@@ -69,8 +78,30 @@
   </details>
   {% endif %}
 </div>
-{% else if let Some(n) = note %}
-<p><b>Note:</b> {{ n }}</p>
+{% endif %}
+
+{# The photo card's twin. Everything the door recorded lives here, the failure
+   reason included — without it a PDF that could not be read said nothing about
+   why on the one page someone would look. There is no preview to show: that
+   needs pdfium, which is the ML build's dependency. #}
+{% if pdf %}
+<div class="card">
+  <div class="card-head">
+    <span class="card-title">Document</span>
+    <span class="spacer"></span>
+    <a class="quiet-link" href="/api/v1/corpora/{{ id }}/file">original</a>
+  </div>
+  {% if let Some(n) = note %}<p><b>Note:</b> {{ n }}</p>{% endif %}
+  {% if !meta_rows.is_empty() %}
+  <table class="meta">
+    {% for r in meta_rows %}<tr><td class="muted">{{ r.0 }}</td><td>{{ r.1 }}</td></tr>{% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% else if !image %}
+{# Neither card is on the page: a pasted or fetched source carries its note
+   nowhere else. Guarded on `image` too, or the photo card's note prints twice. #}
+{% if let Some(n) = note %}<p><b>Note:</b> {{ n }}</p>{% endif %}
 {% endif %}
 
 {% if restored %}
@@ -123,6 +154,19 @@
 <h3>Transcription</h3>
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
+{% if !promoted.is_empty() %}
+<p class="muted">
+  {# A window synthesis has read because its passages were read. Undo puts
+     the verbatim text back in results and retires what was written. #}
+  Promoted:
+  {% for w in promoted %}
+  <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" style="display:inline">
+    lines {{ w.from }}–{{ w.to }}
+    <button class="btn btn-ghost btn-sm" type="submit">undo</button>
+  </form>
+  {% endfor %}
+</p>
+{% endif %}
 {% include "_bands.html" %}
 {% endif %}
 
@@ -144,6 +188,20 @@
 </p>
 <div class="unplaced">
   {% for c in unplaced %}{% include "_artifact.html" %}{% endfor %}
+</div>
+{% endif %}
+
+{% if !written_from.is_empty() %}
+{# A merged or synthesized artifact belongs to every corpus it drew from — its
+   origins are its roots' corpora, derived from lineage, never stored — and
+   this capture is one of them. #}
+<h3>Written from this corpus</h3>
+<p class="muted">
+  Model-written artifacts with a source here. Each lists what it was written
+  from on its own page.
+</p>
+<div class="unplaced">
+  {% for c in written_from %}{% include "_artifact.html" %}{% endfor %}
 </div>
 {% endif %}
 {% endblock %}

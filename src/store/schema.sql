@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- corpus it did not come from would put the wrong lines beside it in the
   -- detail pane, which is the one dishonesty merging must not commit.
   corpus_id        TEXT REFERENCES corpora(id) ON DELETE CASCADE,
-  -- 'captured' | 'merged'. The discriminator every consumer branches on, rather
+  -- 'passage' | 'captured' | 'merged' | 'synthesized'. The discriminator every
+  -- consumer branches on, rather
   -- than `corpus_id IS NULL`: a null is an absence, and the failure modes
   -- merging can produce want to hang off an assertion.
   provenance       TEXT NOT NULL DEFAULT 'captured',
@@ -113,7 +114,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- weight. In SQLite rather than the vector payload because the query path
   -- already needs one SQLite read for links, and the same read returns this
   -- — one crossing.
-  activated_at     INTEGER NOT NULL DEFAULT 0
+  activated_at     INTEGER NOT NULL DEFAULT 0,
+  -- For a synthesized artifact: the questions it was written for, JSON list.
+  cues             TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -131,7 +134,9 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
 -- parent edges. `root_id` always names a `provenance = 'captured'` artifact, so
 -- a re-merge reads the leaves in one query and is never written from text a
 -- model produced — which is what keeps information loss one generation deep
--- however many times a group is merged.
+-- however many times a group is merged. That sentence is about *merging*: a
+-- `synthesized` artifact may be written from another synthesized one, and then
+-- `root_id` still names source text while `via_id` names the intermediate.
 --
 -- The closure duplicates what edges would imply. That is the trade: the fan-in
 -- cap bounds how much, and it buys a hot-path read with no recursive CTE.
@@ -171,12 +176,17 @@ CREATE TABLE IF NOT EXISTS segments (
   -- the heading the splitter carries into a window that continues a section.
   -- An offset measured inside the window is that much too high without it.
   carry_lines INTEGER NOT NULL DEFAULT 0,
-  state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  state      TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | failed | verbatim
   -- Set when this window is being read again to pick up lines the first read
   -- missed, and cleared once the window reaches `done`. It is what tells
   -- `window::write_segment_artifacts` to append rather than replace: see there
   -- for why the two reasons to re-run a window want opposite answers.
   keep_artifacts INTEGER NOT NULL DEFAULT 0,
+  -- Set when an operator undid this window's promotion. The passages keep the
+  -- activation that earned the promotion in the first place, so `verbatim`
+  -- alone would let the very next open promote it again and undo the undo.
+  -- Cleared when the window is re-split: that is a different window.
+  no_promote INTEGER NOT NULL DEFAULT 0,
   -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
   -- is the count that governs its backoff and its settling, and two counters for
   -- one thing is exactly what made the incident behind that change so hard to
@@ -268,7 +278,10 @@ CREATE TABLE IF NOT EXISTS search_events (
   expect_id   TEXT,
   skips       INTEGER NOT NULL DEFAULT 0,
   -- Set when the operator says a `gap` search has since been covered.
-  dismissed_at INTEGER
+  dismissed_at INTEGER,
+  -- A synthesized artifact led the list above `weak_below`: the base
+  -- answered, and the pursuit this lands in closes satisfied.
+  answered    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -324,6 +337,10 @@ CREATE TABLE IF NOT EXISTS ask_citations (
   score       REAL NOT NULL,
   -- The operator said this excerpt carried the answer.
   carried     INTEGER NOT NULL DEFAULT 0,
+  -- The answer actually referenced this [n]. Being shown to the model is not
+  -- engagement: the pursuit sweep scores what the answer drew on, and an
+  -- abstention draws on nothing.
+  used        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, n)
 );
 
@@ -373,8 +390,44 @@ CREATE TABLE IF NOT EXISTS artifact_links (
 CREATE INDEX IF NOT EXISTS idx_links_b ON artifact_links(b_id);
 CREATE INDEX IF NOT EXISTS idx_links_state ON artifact_links(state, weight DESC);
 
--- Cursors that have no row to live on. Two keys so far:
--- `associate.events_after` and `associate.judged_after`.
+-- ── Pursuits ─────────────────────────────────────────────────────────────────
+-- What happened after a result list rendered. Joined to a pursuit through
+-- time and scope at analysis, never by a stored pursuit id: the clustering
+-- decides, and re-clustering never has to rewrite these.
+CREATE TABLE IF NOT EXISTS interaction_events (
+  id          INTEGER PRIMARY KEY,
+  artifact_id TEXT REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- 'opened' | 'pivoted' | 'dwell'
+  kind        TEXT NOT NULL,
+  -- The artifact this was reached from, for 'pivoted'.
+  via         TEXT,
+  -- Seconds, for 'dwell'. Read on Ops; the sweep parses it.
+  detail      TEXT,
+  scope       TEXT,
+  at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interactions_at ON interaction_events(at);
+
+-- A coherent thing that was wanted: its queries, and what came of it.
+CREATE TABLE IF NOT EXISTS pursuits (
+  id           TEXT PRIMARY KEY,
+  opened_at    INTEGER NOT NULL,
+  closed_at    INTEGER,
+  -- open | satisfied | unsatisfied | generated | dismissed
+  state        TEXT NOT NULL DEFAULT 'open',
+  -- Why it closed, in one line. Read on Ops; never parsed.
+  reason       TEXT,
+  -- The clustered queries, JSON. Becomes the artifact's `cues` on generation.
+  queries      TEXT NOT NULL DEFAULT '[]',
+  -- The engaged artifact ids, JSON, in engagement order. What generation reads.
+  sources      TEXT NOT NULL DEFAULT '[]',
+  -- The generated artifact, once there is one.
+  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
+
+-- Cursors that have no row to live on. Three keys so far:
+-- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

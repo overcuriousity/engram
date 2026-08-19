@@ -1,5 +1,6 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
+use crate::infer::EmbedDoc;
 use crate::store::artifacts::{ArtifactStatus, Chunk, NewArtifact};
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
@@ -13,9 +14,36 @@ const SAFETY: f32 = 0.8;
 /// can hold hundreds of chunks and endpoints cap how many inputs they accept.
 const BATCH: usize = 32;
 
-/// Text for the embedding carries the title: it holds topical signal the body
-/// often leaves implicit.
-fn embed_text(chunk: &Chunk) -> String {
+/// The document as the embedder will see it.
+fn doc_of(chunk: &Chunk) -> EmbedDoc {
+    EmbedDoc {
+        title: chunk.title.clone(),
+        text: chunk.text.clone(),
+    }
+}
+
+/// What will actually be sent for this chunk — title slot, text slot and the
+/// template around them. Every budget in this file measures this string, so
+/// the splitter and the embedder cannot disagree about size.
+fn render(core: &Core, chunk: &Chunk) -> String {
+    core.embedder.render_document(&doc_of(chunk))
+}
+
+/// What the envelope around an empty body costs: the title, and the template
+/// around it. Siblings inherit both, so only what this leaves over is available
+/// to their text.
+fn envelope_cost(core: &Core, title: Option<&str>) -> usize {
+    core.counter
+        .count(&core.embedder.render_document(&EmbedDoc {
+            title: title.map(str::to_string),
+            text: String::new(),
+        }))
+}
+
+/// The lexical half. Title on its own line above the body — the words, not the
+/// template: `title:` and `text:` are in every document and would match every
+/// query that happens to contain them.
+fn lexical_text(chunk: &Chunk) -> String {
     match &chunk.title {
         Some(t) => format!("{t}\n{}", chunk.text),
         None => chunk.text.clone(),
@@ -66,7 +94,7 @@ fn input_too_large(e: &Error) -> bool {
 
 pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Result<()> {
     let chunk = core.store.get_artifact(artifact_id).await?;
-    let text = embed_text(&chunk);
+    let text = render(core, &chunk);
 
     if core.counter.count(&text) > limit {
         // Our own estimate, which can be wrong in either direction. Do not
@@ -77,7 +105,7 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
     // Paced like every other inference call. `split_into_artifact_jobs` can
     // leave hundreds of these behind for one document.
     let permit = core.gate.background().await;
-    let outcome = embed_batch(core, std::slice::from_ref(&chunk), vec![text.clone()]).await;
+    let outcome = embed_batch(core, std::slice::from_ref(&chunk)).await;
     permit.finished();
     match outcome {
         Ok(()) => {}
@@ -125,9 +153,8 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     // along in a batch — and finding out how to cut it can itself cost a call.
     // It gets a unit of its own and this job goes on without it.
     let mut batch: Vec<Chunk> = Vec::with_capacity(pending.len());
-    let mut texts: Vec<String> = Vec::with_capacity(pending.len());
     for chunk in pending {
-        let text = embed_text(&chunk);
+        let text = render(core, &chunk);
         if core.counter.count(&text) > limit {
             // Splitting is not free: `split_oversize` falls through to embedding
             // the chunk whole when there is no boundary to cut on, and that is a
@@ -144,7 +171,6 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
                 .rearm_idle_seq(Stage::Embed, "artifact", &chunk.id, 0)
                 .await?;
         } else {
-            texts.push(text);
             batch.push(chunk);
         }
     }
@@ -159,7 +185,7 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
     }
 
     let permit = core.gate.background().await;
-    let outcome = embed_batch(core, &batch[..take], texts[..take].to_vec()).await;
+    let outcome = embed_batch(core, &batch[..take]).await;
     permit.finished();
     match outcome {
         Ok(()) => {}
@@ -236,11 +262,13 @@ pub async fn rearm_if_more(core: &Core, corpus_id: &str) -> Result<()> {
 /// One inference call and one upsert for the whole slice. Chunks are marked
 /// embedded only once Qdrant has durably accepted their vectors, so a crash
 /// leaves work to redo rather than a chunk that claims to be searchable.
-async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Result<()> {
+async fn embed_batch(core: &Core, chunks: &[Chunk]) -> Result<()> {
     if chunks.is_empty() {
         return Ok(());
     }
-    let vectors = core.embedder.embed(&texts).await?;
+    let docs: Vec<EmbedDoc> = chunks.iter().map(doc_of).collect();
+    let vectors = core.embedder.embed_documents(&docs).await?;
+    let origins = origins_for(core, chunks).await?;
     if vectors.len() != chunks.len() {
         return Err(Error::Inference {
             role: "embed",
@@ -255,14 +283,14 @@ async fn embed_batch(core: &Core, chunks: &[Chunk], texts: Vec<String>) -> Resul
 
     let points = chunks
         .iter()
-        .zip(texts.iter())
         .zip(vectors)
-        .map(|((c, text), vector)| VectorPoint {
+        .map(|(c, vector)| VectorPoint {
             vector,
-            // The same text the embedder saw, so the lexical and the semantic
-            // half of a hit always describe the same thing.
-            sparse: crate::vector::sparse::encode_document(text),
-            payload: payload_of(c),
+            // The words the dense side saw, without the template around them,
+            // so the lexical and the semantic half of a hit describe the same
+            // document.
+            sparse: crate::vector::sparse::encode_document(&lexical_text(c)),
+            payload: with_origins(payload_of(c), &origins),
         })
         .collect();
     upsert_with_current_lifecycle(core, points).await?;
@@ -301,7 +329,13 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // nothing. Both have a backstop in the sweep: an artifact with no relate
     // row is armed there, and an unfinished merge is found through
     // `merged_with_active_roots`.
-    if let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await {
+    //
+    // A passage is never a relate anchor: neighbours under one heading are
+    // similar for structural reasons, and duplicate detection over verbatim
+    // text waits until use promotes it (spec §6).
+    if chunk.provenance != crate::store::artifacts::Provenance::Passage
+        && let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await
+    {
         tracing::warn!(
             artifact_id = %chunk.id,
             error = %e,
@@ -361,14 +395,12 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     // so the attempts at it are skipped rather than made and refused.
     let splittable = chunk.corpus_id.is_some();
     // The limit is checked against what actually gets embedded, and that is the
-    // title followed by the text. Siblings inherit the title, so only what the
-    // title leaves over is available to their text. Giving the text the whole
-    // limit produced siblings that measured oversize again the instant they
-    // were re-queued, each one replaced by another exactly like it, forever.
-    let title_cost = chunk
-        .title
-        .as_deref()
-        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    // rendered document — title, text and the template around them. Siblings
+    // inherit the title and the template, so only what the envelope leaves
+    // over is available to their text. Giving the text the whole limit
+    // produced siblings that measured oversize again the instant they were
+    // re-queued, each one replaced by another exactly like it, forever.
+    let title_cost = envelope_cost(core, chunk.title.as_deref());
     let budget = limit.saturating_sub(title_cost);
 
     // A title that fills the limit on its own cannot be cut out of the way:
@@ -400,7 +432,10 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         "oversize chunk has no split available; embedding as-is"
     );
     let permit = core.gate.background().await;
-    let embedded = core.embedder.embed(std::slice::from_ref(&chunk.text)).await;
+    let embedded = core
+        .embedder
+        .embed_documents(std::slice::from_ref(&doc_of(chunk)))
+        .await;
     permit.finished();
     let vectors = match embedded {
         Ok(v) => v,
@@ -430,12 +465,13 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         }
         Err(e) => return Err(e),
     };
+    let origins = origins_for(core, std::slice::from_ref(chunk)).await?;
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
             vector: vectors.into_iter().next().unwrap(),
-            sparse: crate::vector::sparse::encode_document(&chunk.text),
-            payload: payload_of(chunk),
+            sparse: crate::vector::sparse::encode_document(&lexical_text(chunk)),
+            payload: with_origins(payload_of(chunk), &origins),
         }],
     )
     .await?;
@@ -466,10 +502,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
 /// and that is worth saying out loud in the log, because a merge this long is
 /// usually a merge that should have stayed two artifacts.
 async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
-    let title_cost = chunk
-        .title
-        .as_deref()
-        .map_or(0, |t| core.counter.count(&format!("{t}\n")));
+    let title_cost = envelope_cost(core, chunk.title.as_deref());
     let budget = limit.saturating_sub(title_cost);
     let head = if budget > 0 {
         split_by_lines(&chunk.text, budget, &core.counter)
@@ -497,15 +530,19 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
          indexing its opening"
     );
 
-    let input = match chunk.title.as_deref() {
-        Some(t) => format!("{t}\n{head}"),
-        None => head,
+    let input = EmbedDoc {
+        title: chunk.title.clone(),
+        text: head,
     };
     let permit = core.gate.background().await;
-    let embedded = core.embedder.embed(std::slice::from_ref(&input)).await;
+    let embedded = core
+        .embedder
+        .embed_documents(std::slice::from_ref(&input))
+        .await;
     permit.finished();
     let vectors = embedded?;
 
+    let origins = origins_for(core, std::slice::from_ref(chunk)).await?;
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
@@ -513,8 +550,8 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
             // The whole artifact, unlike the dense side. Lexical retrieval has
             // no length limit to respect, so there is no reason to lose the
             // tail on both halves of the query at once.
-            sparse: crate::vector::sparse::encode_document(&chunk.text),
-            payload: payload_of(chunk),
+            sparse: crate::vector::sparse::encode_document(&lexical_text(chunk)),
+            payload: with_origins(payload_of(chunk), &origins),
         }],
     )
     .await?;
@@ -675,6 +712,30 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     Ok(())
 }
 
+/// Every corpus each chunk draws from, through its lineage. One query for the
+/// batch; a passage or captured row answers with its own corpus.
+async fn origins_for(
+    core: &Core,
+    chunks: &[Chunk],
+) -> Result<std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>> {
+    let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+    core.store.origins_of(&ids).await
+}
+
+/// The payload's `origin_corpora`: the distinct corpora of the chunk's
+/// origins, sorted, so `cap_per_corpus` can count a merge against each.
+fn with_origins(
+    mut payload: VectorPayload,
+    origins: &std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>,
+) -> VectorPayload {
+    let set: std::collections::BTreeSet<String> = origins
+        .get(&payload.artifact_id)
+        .map(|o| o.iter().map(|x| x.corpus_id.clone()).collect())
+        .unwrap_or_default();
+    payload.origin_corpora = set.into_iter().collect();
+    payload
+}
+
 fn payload_of(chunk: &Chunk) -> VectorPayload {
     VectorPayload {
         artifact_id: chunk.id.clone(),
@@ -705,6 +766,8 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // The same rule as `status`: a point that says superseded while naming
         // no winner is a hidden artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
+        origin_corpora: vec![],
+        provenance: Some(chunk.provenance.as_str().to_string()),
     }
 }
 
@@ -884,13 +947,9 @@ mod tests {
         assert!(stale.superseded_by.is_some(), "the fixture is not hidden");
 
         core.unsupersede(&ids[0]).await.unwrap();
-        embed_batch(
-            &core,
-            std::slice::from_ref(&stale),
-            vec![embed_text(&stale)],
-        )
-        .await
-        .unwrap();
+        embed_batch(&core, std::slice::from_ref(&stale))
+            .await
+            .unwrap();
 
         let hits = core
             .vectors
@@ -915,13 +974,9 @@ mod tests {
         let stale = core.store.get_artifact(&ids[0]).await.unwrap();
 
         core.store.delete_artifact(&ids[0]).await.unwrap();
-        embed_batch(
-            &core,
-            std::slice::from_ref(&stale),
-            vec![embed_text(&stale)],
-        )
-        .await
-        .unwrap();
+        embed_batch(&core, std::slice::from_ref(&stale))
+            .await
+            .unwrap();
 
         assert!(
             !core
@@ -951,13 +1006,9 @@ mod tests {
         core.supersede(&ids[0], &ids[1]).await.unwrap();
         let hidden = core.store.get_artifact(&ids[0]).await.unwrap();
 
-        embed_batch(
-            &core,
-            std::slice::from_ref(&hidden),
-            vec![embed_text(&hidden)],
-        )
-        .await
-        .unwrap();
+        embed_batch(&core, std::slice::from_ref(&hidden))
+            .await
+            .unwrap();
 
         assert!(
             core.store
@@ -1255,8 +1306,81 @@ mod tests {
         // pass splits it again and the loop is only slower.
         for c in &chunks {
             assert!(
-                core.counter.count(&embed_text(c)) <= limit,
+                core.counter.count(&render(&core, c)) <= limit,
                 "sibling is still oversize: {:?}",
+                c.text
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_envelope_is_charged_so_a_chunk_that_fits_bare_and_overflows_rendered_splits_once()
+    {
+        // Same loop as the test above, reopened slightly narrower: with a real
+        // template the title is not the only thing around the text. `title: `
+        // plus ` | text: ` costs tokens, and a split that budgets for the title
+        // alone emits siblings that measure oversize again once rendered —
+        // each replaced by another exactly like it, forever.
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::FakeEmbedder::with_templates(
+            crate::core::test_support::TEST_DIM,
+            crate::config::EmbedTemplates::default(),
+        ));
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+
+        let title = "heading".to_string();
+        let text = format!("{}\n\n{}", "alpha ".repeat(12), "beta ".repeat(12));
+        let limit = 40;
+        let bare = format!("{title}\n{text}");
+        assert!(
+            core.counter.count(&bare) <= limit,
+            "title + text must fit without the envelope ({})",
+            core.counter.count(&bare)
+        );
+        let rendered = core.embedder.render_document(&crate::infer::EmbedDoc {
+            title: Some(title.clone()),
+            text: text.clone(),
+        });
+        assert!(
+            core.counter.count(&rendered) > limit,
+            "the envelope must be what pushes it over ({})",
+            core.counter.count(&rendered)
+        );
+
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.clone(),
+                    corpus_span: None,
+                    title: Some(title),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        run_with_limit(&core, &made[0].id, limit).await.unwrap();
+
+        let chunks = core.store.artifacts_for_corpus(&src.id).await.unwrap();
+        assert!(
+            chunks.len() > 1,
+            "the chunk was not split: {} row(s)",
+            chunks.len()
+        );
+        assert!(
+            !chunks.iter().any(|c| c.text == text && c.id != made[0].id),
+            "the parent was replaced by an identical copy of itself"
+        );
+        for c in &chunks {
+            assert!(
+                core.counter.count(&render(&core, c)) <= limit,
+                "sibling is still oversize once rendered: {:?}",
                 c.text
             );
         }
@@ -1699,12 +1823,12 @@ mod tests {
         // The payload must carry enough to render a result without touching SQLite.
         let q = core
             .embedder
-            .embed(&["t0\n## A\nthe body".to_string()])
+            .embed_query("t0\n## A\nthe body")
             .await
             .unwrap();
         let hits = core
             .vectors
-            .search(&q[0], &Default::default(), 5, &Default::default())
+            .search(&q, &Default::default(), 5, &Default::default())
             .await
             .unwrap();
         assert_eq!(hits[0].payload.corpus_id, src_id);

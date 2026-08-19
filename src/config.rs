@@ -21,6 +21,10 @@ pub struct Config {
     pub associate: AssociateConfig,
     #[serde(default)]
     pub activation: ActivationConfig,
+    #[serde(default)]
+    pub promote: PromoteConfig,
+    #[serde(default)]
+    pub pursuit: PursuitConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -47,6 +51,11 @@ pub struct CaptureConfig {
     /// Longest edge, in pixels, of the preview the vision model is shown and
     /// the UI displays. The original is stored untouched regardless.
     pub image_preview_edge: u32,
+    /// Bytes an uploaded PDF may weigh. A book is tens of megabytes; this is
+    /// the per-route ceiling for the upload door, the global body limit stays.
+    /// Nothing else bounds a PDF — no page cap: feeding a book to engram is a
+    /// deliberate act, and the queue behind it is already throttled.
+    pub pdf_max_bytes: usize,
 }
 
 impl Default for CaptureConfig {
@@ -57,6 +66,7 @@ impl Default for CaptureConfig {
             min_extracted_chars: 200,
             image_max_bytes: 25 * 1024 * 1024,
             image_preview_edge: 2048,
+            pdf_max_bytes: 50 * 1024 * 1024,
         }
     }
 }
@@ -85,9 +95,11 @@ pub struct PacingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct FeedbackConfig {
-    /// Whether real searches are recorded at all. Off by default: the wording of
-    /// a query is personal, and nothing here is useful to anyone but the
-    /// operator.
+    /// Whether real searches are recorded at all. On by default: promotion at
+    /// `synthesis = "earned"` reads activation, and activation moves only
+    /// while searches are recorded. The wording of a query is personal and
+    /// nothing here leaves the machine; this is the switch for the operator
+    /// who wants none of it kept.
     pub enabled: bool,
     /// Candidates stored per event. Wider than the answer on purpose — search
     /// over-fetches anyway, so the extra rows are free, and they are what lets a
@@ -107,7 +119,10 @@ pub struct FeedbackConfig {
 impl Default for FeedbackConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // On: promotion at `synthesis = "earned"` reads activation, and
+            // activation moves only while searches are recorded. Recording is
+            // the thing an operator turns *off*.
+            enabled: true,
             candidates: 20,
             coalesce_secs: 15,
             retain_days: 0,
@@ -169,6 +184,66 @@ impl Default for AssociateConfig {
     }
 }
 
+/// When a passage has earned its window a synthesis call, and when an eager
+/// artifact has earned a second one.
+///
+/// `activation_above` is read against `[activation]`: baseline `1.0`,
+/// `retrieved = 1.0`, `opened = 0.5`, `confirmed = 3.0`, half-life 14 days.
+/// Checked with `>=` after the bump, decay folded in, and only at the two
+/// engagement bumps — opened and confirmed — never at retrieved, so a passage
+/// that merely keeps appearing in result lists is never promoted.
+///
+/// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
+/// shown this many times with no confirmation recorded against it is
+/// re-synthesised from its segment. `0` disables it, and it ships disabled —
+/// re-synthesising changes what an existing base contains without anyone
+/// asking, so it is a default the harness moves.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PromoteConfig {
+    pub activation_above: f64,
+    pub resynthesize_after_unconfirmed: i64,
+}
+
+impl Default for PromoteConfig {
+    fn default() -> Self {
+        Self {
+            activation_above: 4.0,
+            resynthesize_after_unconfirmed: 0,
+        }
+    }
+}
+
+/// What a coherent run of searches — a pursuit — may earn: one generated
+/// artifact, written from what was engaged with, when the base did not answer
+/// or the answer was assembled by hand. Off until turned on: this writes
+/// model-written text into the index, and that is a step an operator takes.
+/// Needs `feedback.enabled`, since the events it reads are the ones recording
+/// writes. The grouping line is not a key: it is measured, like the gap
+/// clusters', by `core::gaps::link_threshold`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PursuitConfig {
+    pub enabled: bool,
+    /// A pursuit is over when nothing has happened for this long.
+    pub idle_secs: u64,
+    /// Fewer engaged artifacts than this is a promotion case, not generation.
+    pub min_sources: usize,
+    /// Total engagement weight a pursuit needs before it is worth a call.
+    pub min_engagement: f64,
+}
+
+impl Default for PursuitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_secs: 900,
+            min_sources: 2,
+            min_engagement: 3.0,
+        }
+    }
+}
+
 /// How accessible an artifact is, and what raises it.
 ///
 /// Being surfaced *because* of activation raises nothing: `resurface` and
@@ -208,10 +283,12 @@ pub struct ConsolidateConfig {
     pub near_dupe_min: f64,
     /// Cosine at or above which a pair is worth an operator's attention.
     pub review_min: f32,
-    /// Cosine at or above which the older artifact is superseded without
-    /// asking. Deliberately far above `review_min`: two genuinely distinct
-    /// artifacts about one subsystem sit around 0.88 routinely, and superseding
-    /// at that score destroys knowledge rather than duplication.
+    /// Cosine at or above which a pair is judged *first* — a fast lane to the
+    /// dedupe judge, no longer a hide. It used to supersede the older artifact
+    /// on the score alone; embeddings barely distinguish negation, and "runs
+    /// on ext4" / "does not run on ext4" sit far above any realistic
+    /// threshold, so the judge's `losses` check now stands behind every hide.
+    /// Still validated above `review_min`.
     pub auto_supersede: f32,
     /// Neighbours considered per artifact when it looks for duplicates.
     pub per_point: usize,
@@ -346,6 +423,54 @@ pub struct TierConfig {
     pub structured_output: bool,
 }
 
+/// How much inference capture spends. `Off` embeds the source text verbatim
+/// and calls nothing; `Earned` does the same at capture and synthesizes later
+/// where use has shown it is worth it; `Eager` is one synthesis call per
+/// segment at capture — what engram did before the other two existed.
+///
+/// `Earned` is the default. What a base is for is answering, and capture
+/// cannot know which of ten thousand paragraphs will ever be asked about — so
+/// synthesising all of them spends a model call per segment on text most of
+/// which is never retrieved, and replaces the operator's own words with a
+/// rewrite before anyone has asked for one. At `earned` the source goes in as
+/// it was written and stays that way; a window is rewritten when reading has
+/// shown it is worth rewriting, and every artifact in the base can name the
+/// use that earned it. `eager` remains supported for a base that wants
+/// everything pre-written and is willing to pay for it up front.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SynthesisMode {
+    Off,
+    #[default]
+    Earned,
+    Eager,
+}
+
+impl SynthesisMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SynthesisMode::Off => "off",
+            SynthesisMode::Earned => "earned",
+            SynthesisMode::Eager => "eager",
+        }
+    }
+}
+
+/// The window budget when no synthesizer is configured to derive one from.
+/// Estimator tokens. A synthesizer configured later whose context is smaller
+/// than the windows already stored means re-capturing; there is no migration.
+pub const DEFAULT_SEGMENT_TOKENS: usize = 4096;
+/// The retrieval unit. A target, not a ceiling: see the spec on why it is
+/// fixed rather than derived from the embedder's capacity.
+pub const DEFAULT_CHUNK_TOKENS: usize = 384;
+
+fn default_segment_tokens() -> usize {
+    DEFAULT_SEGMENT_TOKENS
+}
+fn default_chunk_tokens() -> usize {
+    DEFAULT_CHUNK_TOKENS
+}
+
 /// The resolved roles. Deserialised through [`RawInferConfig`] so that tiers
 /// are flattened away before anything downstream sees a role: `HttpCompleter`
 /// and friends keep taking a struct whose every field is concrete, and a tier
@@ -354,9 +479,13 @@ pub struct TierConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(try_from = "RawInferConfig")]
 pub struct InferConfig {
-    pub synthesize: SynthesizeRole,
+    pub synthesis: SynthesisMode,
+    pub segment_tokens: usize,
+    /// `None` is allowed only at `synthesis = "off"`.
+    pub synthesize: Option<SynthesizeRole>,
     pub embed: EmbedRole,
-    pub ask: AskRole,
+    /// `None` closes the ask door: no page, no nav entry, no tool.
+    pub ask: Option<AskRole>,
     pub rerank: Option<RerankRole>,
     pub vision: Option<VisionRole>,
 }
@@ -368,9 +497,15 @@ pub struct InferConfig {
 pub struct RawInferConfig {
     #[serde(default)]
     tiers: HashMap<String, TierConfig>,
-    synthesize: RawSynthesizeRole,
+    #[serde(default)]
+    synthesis: SynthesisMode,
+    #[serde(default = "default_segment_tokens")]
+    segment_tokens: usize,
+    #[serde(default)]
+    synthesize: Option<RawSynthesizeRole>,
     embed: EmbedRole,
-    ask: RawAskRole,
+    #[serde(default)]
+    ask: Option<RawAskRole>,
     #[serde(default)]
     rerank: Option<RerankRole>,
     #[serde(default)]
@@ -481,44 +616,52 @@ impl TryFrom<RawInferConfig> for InferConfig {
     fn try_from(raw: RawInferConfig) -> Result<Self, Self::Error> {
         let tiers = &raw.tiers;
 
-        let s = raw.synthesize;
-        let st = resolve_endpoint("synthesize", &s.tier, tiers)?;
-        let synthesize = SynthesizeRole {
-            base_url: s.base_url.unwrap_or(st.base_url),
-            model: s.model.unwrap_or(st.model),
-            api_key: s.api_key.or(st.api_key),
-            context_tokens: s.context_tokens.unwrap_or(st.context_tokens),
-            max_output_tokens: s.max_output_tokens.unwrap_or(st.max_output_tokens),
-            output_ratio: s.output_ratio,
-            reasoning_effort: s.reasoning_effort.or(st.reasoning_effort),
-            ceiling_param: s.ceiling_param.or(st.ceiling_param),
-            timeout_secs: s.timeout_secs.unwrap_or(st.timeout_secs),
-            structured_output: s.structured_output.unwrap_or(st.structured_output),
-            context_opening_tokens: s.context_opening_tokens,
-            context_overlap_tokens: s.context_overlap_tokens,
+        let synthesize = match raw.synthesize {
+            None => None,
+            Some(s) => {
+                let st = resolve_endpoint("synthesize", &s.tier, tiers)?;
+                Some(SynthesizeRole {
+                    base_url: s.base_url.unwrap_or(st.base_url),
+                    model: s.model.unwrap_or(st.model),
+                    api_key: s.api_key.or(st.api_key),
+                    context_tokens: s.context_tokens.unwrap_or(st.context_tokens),
+                    max_output_tokens: s.max_output_tokens.unwrap_or(st.max_output_tokens),
+                    output_ratio: s.output_ratio,
+                    reasoning_effort: s.reasoning_effort.or(st.reasoning_effort),
+                    ceiling_param: s.ceiling_param.or(st.ceiling_param),
+                    timeout_secs: s.timeout_secs.unwrap_or(st.timeout_secs),
+                    structured_output: s.structured_output.unwrap_or(st.structured_output),
+                    context_opening_tokens: s.context_opening_tokens,
+                    context_overlap_tokens: s.context_overlap_tokens,
+                })
+            }
         };
 
-        let a = raw.ask;
-        let at = resolve_endpoint("ask", &a.tier, tiers)?;
-        // Resolved here rather than where it is used, so a typo in the name is
-        // a startup failure like every other tier name instead of a surprise on
-        // the first question someone asks.
-        let follow_up_endpoint = match a.follow_up_tier.as_deref() {
-            Some(name) => Some(resolve_endpoint("ask.follow_up_tier", name, tiers)?),
+        let ask = match raw.ask {
             None => None,
-        };
-        let ask = AskRole {
-            base_url: a.base_url.unwrap_or(at.base_url),
-            model: a.model.unwrap_or(at.model),
-            api_key: a.api_key.or(at.api_key),
-            context_tokens: a.context_tokens.unwrap_or(at.context_tokens),
-            max_output_tokens: a.max_output_tokens.unwrap_or(at.max_output_tokens),
-            timeout_secs: a.timeout_secs.unwrap_or(at.timeout_secs),
-            reasoning_effort: a.reasoning_effort.or(at.reasoning_effort),
-            ceiling_param: a.ceiling_param.or(at.ceiling_param),
-            structured_output: at.structured_output,
-            follow_up: a.follow_up,
-            follow_up_endpoint,
+            Some(a) => {
+                let at = resolve_endpoint("ask", &a.tier, tiers)?;
+                // Resolved here rather than where it is used, so a typo in the name is
+                // a startup failure like every other tier name instead of a surprise on
+                // the first question someone asks.
+                let follow_up_endpoint = match a.follow_up_tier.as_deref() {
+                    Some(name) => Some(resolve_endpoint("ask.follow_up_tier", name, tiers)?),
+                    None => None,
+                };
+                Some(AskRole {
+                    base_url: a.base_url.unwrap_or(at.base_url),
+                    model: a.model.unwrap_or(at.model),
+                    api_key: a.api_key.or(at.api_key),
+                    context_tokens: a.context_tokens.unwrap_or(at.context_tokens),
+                    max_output_tokens: a.max_output_tokens.unwrap_or(at.max_output_tokens),
+                    timeout_secs: a.timeout_secs.unwrap_or(at.timeout_secs),
+                    reasoning_effort: a.reasoning_effort.or(at.reasoning_effort),
+                    ceiling_param: a.ceiling_param.or(at.ceiling_param),
+                    structured_output: at.structured_output,
+                    follow_up: a.follow_up,
+                    follow_up_endpoint,
+                })
+            }
         };
 
         // Vision is the one role whose endpoint may legitimately be absent:
@@ -560,6 +703,8 @@ impl TryFrom<RawInferConfig> for InferConfig {
         };
 
         Ok(InferConfig {
+            synthesis: raw.synthesis,
+            segment_tokens: raw.segment_tokens,
             synthesize,
             embed: raw.embed,
             ask,
@@ -658,6 +803,194 @@ pub struct EmbedRole {
     pub max_input_tokens: usize,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// See `EmbedTemplates`. Flat on the role rather than nested, so the TOML
+    /// reads `[infer.embed] query_template = ...` beside `model`, which is the
+    /// other half of the same identity.
+    #[serde(default = "default_query_template")]
+    pub query_template: String,
+    #[serde(default = "default_document_template")]
+    pub document_template: String,
+    #[serde(default = "default_document_template_untitled")]
+    pub document_template_untitled: String,
+    /// Passage size at `synthesis = "off"`/`"earned"`, in estimator tokens.
+    /// Under `embed` because it is sized to the retrieval unit, not to a
+    /// model's context. Clamped to what the embedder will take — see
+    /// `effective_chunk_tokens`.
+    #[serde(default = "default_chunk_tokens")]
+    pub chunk_tokens: usize,
+}
+
+impl EmbedRole {
+    /// What a stored vector means, in one string: the model, the dimension,
+    /// and the three templates the text is rendered through before the call.
+    ///
+    /// All five are one identity. A vector embedded under `task: search
+    /// result | {title}\n{text}` is not comparable with one embedded under
+    /// bare `{text}`, and nothing in the vector says which it was — the
+    /// collection keeps its name, the model field is unchanged, and the only
+    /// symptom is retrieval quietly getting worse. Recorded at boot so a
+    /// change can at least be *said*; the answer to it is a re-capture.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(
+            format!(
+                "{}\n{}\n{}\n{}\n{}",
+                self.model,
+                self.dim,
+                self.query_template,
+                self.document_template,
+                self.document_template_untitled,
+            )
+            .as_bytes(),
+        ))
+    }
+
+    /// `chunk_tokens`, never above the embed path's own ceiling
+    /// (`max_input_tokens * 0.8`).
+    ///
+    /// A ceiling on the passage, not a promise about the rendered document.
+    /// What `embed` measures is `render(chunk)` — the title and the template
+    /// around it as well as the text — against that same number, so a config
+    /// that sets `chunk_tokens` at or near the ceiling still produces passages
+    /// that measure oversize once rendered. That costs one split round-trip,
+    /// not a loop: `split_oversize` cuts against `limit - envelope_cost`, so
+    /// the pieces it makes fit with the envelope on. The envelope is a title
+    /// and a template this type has neither of, which is why the allowance is
+    /// left where it can be measured rather than guessed at here.
+    pub fn effective_chunk_tokens(&self) -> usize {
+        let ceiling = (self.max_input_tokens as f32 * 0.8) as usize;
+        self.chunk_tokens.min(ceiling).max(1)
+    }
+
+    pub fn templates(&self) -> EmbedTemplates {
+        EmbedTemplates {
+            query_template: self.query_template.clone(),
+            document_template: self.document_template.clone(),
+            document_template_untitled: self.document_template_untitled.clone(),
+        }
+    }
+}
+
+/// The three strings that, with `model`, fix what a stored vector means.
+///
+/// EmbeddingGemma is asymmetric: a query and a document are embedded through
+/// different prompts, and a document without a title substitutes the literal
+/// `none` rather than an empty field. Changing any of these invalidates every
+/// stored vector as thoroughly as changing `model` does; there is no fingerprint
+/// or rebuild path because there is no base to look after yet — the answer is
+/// to drop the collection and re-capture.
+///
+/// Kept in config rather than code so that a symmetric embedder — `bge-m3`,
+/// which engram shipped with — stays one TOML block away: see `legacy()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbedTemplates {
+    /// `{text}` is the query.
+    pub query_template: String,
+    /// `{title}` and `{text}`.
+    pub document_template: String,
+    /// `{text}` only; used when the document has no title.
+    pub document_template_untitled: String,
+}
+
+pub(crate) fn default_query_template() -> String {
+    "task: search result | query: {text}".into()
+}
+pub(crate) fn default_document_template() -> String {
+    "title: {title} | text: {text}".into()
+}
+pub(crate) fn default_document_template_untitled() -> String {
+    "title: none | text: {text}".into()
+}
+
+impl Default for EmbedTemplates {
+    fn default() -> Self {
+        Self {
+            query_template: default_query_template(),
+            document_template: default_document_template(),
+            document_template_untitled: default_document_template_untitled(),
+        }
+    }
+}
+
+impl EmbedTemplates {
+    /// What `embed_text` produced before templates existed: the title on its
+    /// own line above the body, the query as typed. The right block for a
+    /// symmetric embedder, and what every test double renders with, so a test
+    /// that queries with `"title\ntext"` lands on the document it seeded.
+    pub fn legacy() -> Self {
+        Self {
+            query_template: "{text}".into(),
+            document_template: "{title}\n{text}".into(),
+            document_template_untitled: "{text}".into(),
+        }
+    }
+
+    pub fn render_query(&self, query: &str) -> String {
+        substitute(&self.query_template, &[("text", query)])
+    }
+
+    pub fn render_document(&self, title: Option<&str>, text: &str) -> String {
+        match title {
+            Some(t) => substitute(&self.document_template, &[("title", t), ("text", text)]),
+            None => substitute(&self.document_template_untitled, &[("text", text)]),
+        }
+    }
+
+    /// Every template must be able to carry what it is for. Checked at config
+    /// load; a template that drops `{text}` would embed the same string for
+    /// every document and nothing downstream would notice.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.query_template.contains("{text}") {
+            return Err("infer.embed.query_template must contain {text}".into());
+        }
+        if !self.document_template.contains("{text}") {
+            return Err("infer.embed.document_template must contain {text}".into());
+        }
+        if !self.document_template.contains("{title}") {
+            return Err("infer.embed.document_template must contain {title}; \
+                        use document_template_untitled for the case with no title"
+                .into());
+        }
+        if !self.document_template_untitled.contains("{text}") {
+            return Err("infer.embed.document_template_untitled must contain {text}".into());
+        }
+        Ok(())
+    }
+}
+
+/// Fill `{name}` placeholders in one left-to-right pass.
+///
+/// One pass rather than chained `replace` calls: a value that itself contains
+/// a placeholder — a heading that reads "about {text}" — must land verbatim,
+/// not have the next value spliced into it. A `{name}` that matches no
+/// variable is left as written.
+pub(crate) fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let name = &after[..close];
+                match vars.iter().find(|(k, _)| *k == name) {
+                    Some((_, v)) => out.push_str(v),
+                    None => {
+                        out.push('{');
+                        out.push_str(name);
+                        out.push('}');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -854,23 +1187,29 @@ fn default_vision_max_output_tokens() -> usize {
 impl VisionRole {
     /// The endpoint and key this role actually calls: its own where given,
     /// the synthesize role's otherwise.
-    pub fn resolve(&self, synth: &SynthesizeRole) -> (String, Option<String>) {
+    pub fn resolve(&self, synth: Option<&SynthesizeRole>) -> (String, Option<String>) {
         (
             self.base_url
                 .clone()
-                .unwrap_or_else(|| synth.base_url.clone()),
-            self.api_key.clone().or_else(|| synth.api_key.clone()),
+                .or_else(|| synth.map(|s| s.base_url.clone()))
+                // Validation refuses a vision role with neither; this arm is
+                // unreachable after `Config::load` and exists so the type
+                // system does not have to be argued with here.
+                .unwrap_or_default(),
+            self.api_key
+                .clone()
+                .or_else(|| synth.and_then(|s| s.api_key.clone())),
         )
     }
 
     /// Which name to send the output ceiling under. Inherited only when this
     /// role borrows the synthesize endpoint: a setting about how one server
     /// reads a request says nothing about a different server.
-    pub fn ceiling_param(&self, synth: &SynthesizeRole) -> Option<CeilingParam> {
+    pub fn ceiling_param(&self, synth: Option<&SynthesizeRole>) -> Option<CeilingParam> {
         self.ceiling_param.or_else(|| {
             self.base_url
                 .is_none()
-                .then_some(synth.ceiling_param)
+                .then(|| synth.and_then(|s| s.ceiling_param))
                 .flatten()
         })
     }
@@ -884,10 +1223,13 @@ impl VisionRole {
     /// different names for the one server they share. This role never sends
     /// `reasoning_effort` itself — it is read here only as the signal about how
     /// that server reads a request.
-    pub fn inherited_reasoning_effort<'a>(&self, synth: &'a SynthesizeRole) -> Option<&'a str> {
+    pub fn inherited_reasoning_effort<'a>(
+        &self,
+        synth: Option<&'a SynthesizeRole>,
+    ) -> Option<&'a str> {
         self.base_url
             .is_none()
-            .then_some(synth.reasoning_effort.as_deref())
+            .then(|| synth.and_then(|s| s.reasoning_effort.as_deref()))
             .flatten()
     }
 }
@@ -1071,20 +1413,65 @@ impl Config {
 
     /// Rules that a config can satisfy syntactically and still be wrong.
     ///
-    /// The thresholds are the only ones so far, and they are worth refusing to
-    /// start over: `auto_supersede` at or below `review_min` means every pair
-    /// the sweep finds is hidden without asking, with no review band left at
-    /// all. That destroys knowledge quietly, and the operator who typed one
-    /// number would find out from search results going missing weeks later.
+    /// The thresholds are the only ones so far. `auto_supersede` no longer
+    /// hides anything on the score alone — it marks the band the sweep asks
+    /// about *first*, ordering `pairs_to_judge` — but it is still refused at or
+    /// below `review_min`, because a fast lane that starts below the floor for
+    /// looking at a pair at all is a number that cannot mean anything. The
+    /// operator who typed it means one of the two, and neither is what they
+    /// would get.
     fn validate(&self) -> Result<(), ConfigError> {
         let c = &self.consolidate;
         if c.auto_supersede <= c.review_min {
             return Err(ConfigError::Invalid(format!(
-                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}), \
-                 or every pair found is hidden without review",
+                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}): \
+                 it marks the pairs asked about first, and cannot sit below the score at \
+                 which a pair is worth asking about",
                 c.auto_supersede, c.review_min
             )));
         }
+        if self.infer.synthesis != SynthesisMode::Off && self.infer.synthesize.is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "infer.synthesis = \"{}\" needs [infer.synthesize]; only \"off\" runs without a \
+                 synthesizer",
+                self.infer.synthesis.as_str()
+            )));
+        }
+        if self.pursuit.enabled && !self.feedback.enabled {
+            return Err(ConfigError::Invalid(
+                "pursuit.enabled = true needs feedback.enabled = true: the events it reads are \
+                 the ones recording writes"
+                    .into(),
+            ));
+        }
+        // The other half of the same gate. Both the sweep and its ticker run
+        // behind `associating()`, which is these two flags together, so a
+        // pursuit configured without associating is not a degraded feature —
+        // it is a ticker that returns on its first line and a config that
+        // never writes a pursuit at all. Refused rather than warned, because
+        // the `feedback` half above is refused and the effect is identical.
+        if self.pursuit.enabled && !self.associate.enabled {
+            return Err(ConfigError::Invalid(
+                "pursuit.enabled = true needs associate.enabled = true: pursuits are swept on \
+                 the associative pass, which does not run without it"
+                    .into(),
+            ));
+        }
+        if let Some(v) = &self.infer.vision
+            && v.base_url.is_none()
+            && self.infer.synthesize.is_none()
+        {
+            return Err(ConfigError::Invalid(
+                "infer.vision has no base_url or tier and there is no [infer.synthesize] to \
+                 borrow an endpoint from"
+                    .into(),
+            ));
+        }
+        self.infer
+            .embed
+            .templates()
+            .validate()
+            .map_err(ConfigError::Invalid)?;
         Ok(())
     }
 
@@ -1092,6 +1479,12 @@ impl Config {
     /// rather than letting an operator discover the association pass has been
     /// idle since they turned recording off.
     fn warn_on_inert_settings(&self) {
+        if self.infer.synthesis == SynthesisMode::Earned && !self.feedback.enabled {
+            tracing::warn!(
+                "infer.synthesis = \"earned\" with feedback.enabled = false: activation never \
+                 moves, so nothing is ever promoted — this is `off` under another name."
+            );
+        }
         if self.associate.enabled && !self.feedback.enabled {
             tracing::warn!(
                 "associate.enabled has no effect while feedback.enabled is false: links are \
@@ -1126,19 +1519,18 @@ impl Config {
     /// The roles whose output-ceiling name is a guess: `reasoning_effort` set,
     /// `ceiling_param` not. Each with the effort the guess is made from.
     fn inferred_ceiling_params(&self) -> Vec<(&'static str, &str)> {
-        let synth = &self.infer.synthesize;
-        let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = vec![
-            (
+        let synth = self.infer.synthesize.as_ref();
+        let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = Vec::new();
+        if let Some(s) = synth {
+            roles.push((
                 "infer.synthesize",
-                synth.reasoning_effort.as_deref(),
-                synth.ceiling_param,
-            ),
-            (
-                "infer.ask",
-                self.infer.ask.reasoning_effort.as_deref(),
-                self.infer.ask.ceiling_param,
-            ),
-        ];
+                s.reasoning_effort.as_deref(),
+                s.ceiling_param,
+            ));
+        }
+        if let Some(a) = &self.infer.ask {
+            roles.push(("infer.ask", a.reasoning_effort.as_deref(), a.ceiling_param));
+        }
         // Vision resolves a name the same way, off values it may have inherited
         // from synthesize — and it is the role a dropped ceiling costs most,
         // since what it writes is stored as a corpus and segmented again.
@@ -1153,7 +1545,12 @@ impl Config {
         // off a tier of its own — so a guess there is not covered by the ask
         // line above. Without a named tier it runs on ask's endpoint under
         // ask's values, and the ask line is the one that speaks for it.
-        if let Some(f) = &self.infer.ask.follow_up_endpoint {
+        if let Some(f) = self
+            .infer
+            .ask
+            .as_ref()
+            .and_then(|a| a.follow_up_endpoint.as_ref())
+        {
             roles.push((
                 "infer.ask.follow_up_tier",
                 f.reasoning_effort.as_deref(),
@@ -1192,11 +1589,15 @@ impl Config {
         let mut c = self.clone();
         const R: &str = "REDACTED";
         c.vector.api_key = c.vector.api_key.map(|_| R.into());
-        c.infer.synthesize.api_key = c.infer.synthesize.api_key.map(|_| R.into());
+        if let Some(s) = c.infer.synthesize.as_mut() {
+            s.api_key = s.api_key.as_ref().map(|_| R.into());
+        }
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
-        c.infer.ask.api_key = c.infer.ask.api_key.map(|_| R.into());
-        if let Some(f) = c.infer.ask.follow_up_endpoint.as_mut() {
-            f.api_key = f.api_key.as_ref().map(|_| R.into());
+        if let Some(a) = c.infer.ask.as_mut() {
+            a.api_key = a.api_key.as_ref().map(|_| R.into());
+            if let Some(f) = a.follow_up_endpoint.as_mut() {
+                f.api_key = f.api_key.as_ref().map(|_| R.into());
+            }
         }
         if let Some(r) = c.infer.rerank.as_mut() {
             r.api_key = r.api_key.as_ref().map(|_| R.into());
@@ -1268,7 +1669,14 @@ mod tests {
 
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert!(
-            cfg.infer.ask.ceiling_param.is_none() && cfg.infer.synthesize.ceiling_param.is_none(),
+            cfg.infer.ask.as_ref().unwrap().ceiling_param.is_none()
+                && cfg
+                    .infer
+                    .synthesize
+                    .as_ref()
+                    .unwrap()
+                    .ceiling_param
+                    .is_none(),
             "the example config pins a ceiling name it should be leaving to the guess"
         );
     }
@@ -1292,10 +1700,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(cfg.infer.synthesize.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().timeout_secs,
+            DEFAULT_TIMEOUT_SECS
+        );
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
-        assert_eq!(cfg.infer.ask.timeout_secs, DEFAULT_TIMEOUT_SECS);
-        assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
+        assert_eq!(
+            cfg.infer.ask.as_ref().unwrap().timeout_secs,
+            DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().reasoning_effort,
+            None
+        );
     }
 
     #[test]
@@ -1429,9 +1846,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 
     #[test]
     fn thresholds_that_leave_no_review_band_are_refused() {
-        // `auto_supersede` at or below `review_min` hides every pair the sweep
-        // finds without asking anyone. The operator would find out from search
-        // results going missing, weeks later.
+        // `auto_supersede` marks the pairs the sweep asks about first. Below
+        // `review_min` — the score at which a pair is worth asking about at
+        // all — it names a lane no pair can be in, which is a number that
+        // means neither of the two things the operator could have intended.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(
@@ -1466,6 +1884,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "vision must default to disabled"
         );
         assert_eq!(cfg.capture.image_max_bytes, 25 * 1024 * 1024);
+        assert_eq!(cfg.capture.pdf_max_bytes, 50 * 1024 * 1024);
         assert_eq!(cfg.capture.image_preview_edge, 2048);
     }
 
@@ -1483,9 +1902,9 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(v.timeout_secs, 120);
         // Its own ceiling, sent on every call like every other role's.
         assert_eq!(v.max_output_tokens, 4096);
-        let (url, key) = v.resolve(&cfg.infer.synthesize);
-        assert_eq!(url, cfg.infer.synthesize.base_url);
-        assert_eq!(key, cfg.infer.synthesize.api_key);
+        let (url, key) = v.resolve(cfg.infer.synthesize.as_ref());
+        assert_eq!(url, cfg.infer.synthesize.as_ref().unwrap().base_url);
+        assert_eq!(key, cfg.infer.synthesize.as_ref().unwrap().api_key);
     }
 
     /// How a request is read is a property of the server reading it, so the
@@ -1499,20 +1918,20 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.ceiling_param = Some(CeilingParam::MaxTokens);
-        let synth = cfg.infer.synthesize.clone();
+        cfg.infer.synthesize.as_mut().unwrap().ceiling_param = Some(CeilingParam::MaxTokens);
+        let synth = cfg.infer.synthesize.as_ref().unwrap().clone();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
-        assert_eq!(v.ceiling_param(&synth), Some(CeilingParam::MaxTokens));
+        assert_eq!(v.ceiling_param(Some(&synth)), Some(CeilingParam::MaxTokens));
 
         // Its own endpoint: a different server, and nothing carries over.
         v.base_url = Some("http://vision:9000/v1".into());
-        assert_eq!(v.ceiling_param(&synth), None);
+        assert_eq!(v.ceiling_param(Some(&synth)), None);
 
         // Unless it says so itself, which beats both.
         v.ceiling_param = Some(CeilingParam::MaxCompletionTokens);
         assert_eq!(
-            v.ceiling_param(&synth),
+            v.ceiling_param(Some(&synth)),
             Some(CeilingParam::MaxCompletionTokens)
         );
     }
@@ -1531,16 +1950,20 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.reasoning_effort = Some("high".into());
-        let synth = cfg.infer.synthesize.clone();
+        cfg.infer.synthesize.as_mut().unwrap().reasoning_effort = Some("high".into());
+        let synth = cfg.infer.synthesize.as_ref().unwrap().clone();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
-        assert_eq!(v.ceiling_param(&synth), None, "nothing explicit to inherit");
-        assert_eq!(v.inherited_reasoning_effort(&synth), Some("high"));
+        assert_eq!(
+            v.ceiling_param(Some(&synth)),
+            None,
+            "nothing explicit to inherit"
+        );
+        assert_eq!(v.inherited_reasoning_effort(Some(&synth)), Some("high"));
 
         // Its own address is its own server, and the signal stops there.
         v.base_url = Some("http://vision:9000/v1".into());
-        assert_eq!(v.inherited_reasoning_effort(&synth), None);
+        assert_eq!(v.inherited_reasoning_effort(Some(&synth)), None);
     }
 
     /// The ceiling's name is guessed from `reasoning_effort`, and the two ways
@@ -1585,7 +2008,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             .vision
             .as_ref()
             .unwrap()
-            .resolve(&cfg.infer.synthesize);
+            .resolve(cfg.infer.synthesize.as_ref());
         assert_eq!(url, "http://vision:9000/v1");
         assert_eq!(key.as_deref(), Some("vk"));
         assert!(!cfg.redacted().contains("\"vk\""), "vision key leaked");
@@ -1599,6 +2022,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "example config must show the vision block"
         );
         assert!(text.contains("image_max_bytes"));
+        assert!(text.contains("pdf_max_bytes"));
     }
 
     #[test]
@@ -1622,9 +2046,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
         assert!(cfg.associate.enabled);
-        // ...and the feature is inert regardless, because there is nothing to
-        // learn from until searches are recorded.
-        assert!(!cfg.feedback.enabled);
+        // ...and recording is on too, so the feature is live out of the box:
+        // promotion reads activation, and activation moves only while
+        // searches are recorded.
+        assert!(cfg.feedback.enabled);
     }
 
     #[test]
@@ -1680,12 +2105,21 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         )
         .expect("tiered config parses");
 
-        assert_eq!(cfg.infer.synthesize.base_url, "http://localhost:8000/v1");
-        assert_eq!(cfg.infer.synthesize.model, "qwen");
-        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
-        assert_eq!(cfg.infer.ask.base_url, "http://localhost:8000/v1");
-        assert_eq!(cfg.infer.ask.model, "qwen");
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().base_url,
+            "http://localhost:8000/v1"
+        );
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().model, "qwen");
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
+        assert_eq!(
+            cfg.infer.ask.as_ref().unwrap().base_url,
+            "http://localhost:8000/v1"
+        );
+        assert_eq!(cfg.infer.ask.as_ref().unwrap().model, "qwen");
     }
 
     /// A role may override any field its tier defines. Without this the two tiers
@@ -1722,14 +2156,19 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         )
         .unwrap();
         assert_eq!(
-            cfg.infer.ask.max_output_tokens, 4096,
+            cfg.infer.ask.as_ref().unwrap().max_output_tokens,
+            4096,
             "the role's value wins"
         );
         assert_eq!(
-            cfg.infer.ask.context_tokens, 131072,
+            cfg.infer.ask.as_ref().unwrap().context_tokens,
+            131072,
             "unset fields come from the tier"
         );
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
     }
 
     /// A typo in a tier name must be a startup failure naming the typo, never a
@@ -1782,10 +2221,13 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "the example must show a tier"
         );
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
-        assert_eq!(cfg.infer.ask.context_tokens, 32768);
-        assert_eq!(cfg.infer.ask.max_output_tokens, 4096);
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
+        assert_eq!(cfg.infer.ask.as_ref().unwrap().context_tokens, 32768);
+        assert_eq!(cfg.infer.ask.as_ref().unwrap().max_output_tokens, 4096);
     }
     /// A tiered config with one endpoint everything can point at, so the tests
     /// below say only the thing they are about. `[infer.ask]` is last, which is
@@ -1870,8 +2312,8 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "with no tier to take one from, the role keeps its own two minutes"
         );
         assert_eq!(
-            v.resolve(&cfg.infer.synthesize).0,
-            cfg.infer.synthesize.base_url
+            v.resolve(cfg.infer.synthesize.as_ref()).0,
+            cfg.infer.synthesize.as_ref().unwrap().base_url
         );
     }
 
@@ -1886,7 +2328,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         .unwrap();
         // And the endpoint it named is still the one it calls.
         let v = cfg.infer.vision.as_ref().expect("configured");
-        assert_eq!(v.resolve(&cfg.infer.synthesize).0, "http://vision:9000/v1");
+        assert_eq!(
+            v.resolve(cfg.infer.synthesize.as_ref()).0,
+            "http://vision:9000/v1"
+        );
     }
 
     /// The follow-up call's whole reason to name a tier is to run somewhere
@@ -1899,6 +2344,8 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let f = cfg
             .infer
             .ask
+            .as_ref()
+            .unwrap()
             .follow_up_endpoint
             .as_ref()
             .expect("the named tier resolved");
@@ -1924,14 +2371,26 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "ceiling_param = \"max_completion_tokens\"\nstructured_output = false",
         );
         let cfg = load_infer(&toml).unwrap();
-        assert!(cfg.infer.ask.follow_up_endpoint.is_none());
+        assert!(cfg.infer.ask.as_ref().unwrap().follow_up_endpoint.is_none());
         assert!(
-            !cfg.infer.ask.follow_up_on().structured_output,
+            !cfg.infer
+                .ask
+                .as_ref()
+                .unwrap()
+                .follow_up_on()
+                .structured_output,
             "the tier said no response format; the fallback endpoint said yes"
         );
         // And the default remains on, as it is for every tier.
         let cfg = load_infer(TIERED).unwrap();
-        assert!(cfg.infer.ask.follow_up_on().structured_output);
+        assert!(
+            cfg.infer
+                .ask
+                .as_ref()
+                .unwrap()
+                .follow_up_on()
+                .structured_output
+        );
     }
 
     /// A named follow-up tier infers its ceiling name the same way every role
@@ -1973,5 +2432,387 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "the error must name the typo: {err}"
         );
         assert!(err.contains("efficient"), "and what was available: {err}");
+    }
+
+    #[test]
+    fn query_and_document_render_differently_for_the_same_text() {
+        let t = EmbedTemplates::default();
+        let q = t.render_query("how do I recover deleted entries");
+        let d = t.render_document(None, "how do I recover deleted entries");
+        assert_ne!(q, d);
+        assert_eq!(
+            q,
+            "task: search result | query: how do I recover deleted entries"
+        );
+        assert_eq!(d, "title: none | text: how do I recover deleted entries");
+    }
+
+    #[test]
+    fn a_titled_and_an_untitled_document_take_different_templates() {
+        let t = EmbedTemplates::default();
+        assert_eq!(
+            t.render_document(Some("Recovering deleted entries"), "run fsck first"),
+            "title: Recovering deleted entries | text: run fsck first"
+        );
+        assert_eq!(
+            t.render_document(None, "run fsck first"),
+            "title: none | text: run fsck first"
+        );
+    }
+
+    #[test]
+    fn the_legacy_templates_reproduce_the_old_join() {
+        // What `embed_text` produced before templates existed, and what a
+        // bge-m3 operator configures. The test doubles default to it so every
+        // retrieval test that queries with "title\ntext" keeps matching.
+        let t = EmbedTemplates::legacy();
+        assert_eq!(t.render_query("t0\nalpha"), "t0\nalpha");
+        assert_eq!(t.render_document(Some("t0"), "alpha"), "t0\nalpha");
+        assert_eq!(t.render_document(None, "alpha"), "alpha");
+    }
+
+    #[test]
+    fn substitution_is_one_pass_so_a_value_cannot_be_substituted_again() {
+        // A title that happens to contain the text placeholder must not have
+        // the body spliced into it. Two chained `replace` calls would.
+        let t = EmbedTemplates::default();
+        assert_eq!(
+            t.render_document(Some("about {text}"), "body"),
+            "title: about {text} | text: body"
+        );
+        assert_eq!(
+            substitute("a {x} b {y} c {x}", &[("x", "1"), ("y", "2")]),
+            "a 1 b 2 c 1"
+        );
+        // An unknown placeholder is left as written rather than eaten.
+        assert_eq!(substitute("{nope} {x}", &[("x", "1")]), "{nope} 1");
+    }
+
+    #[test]
+    fn a_template_without_its_placeholder_is_rejected() {
+        assert!(EmbedTemplates::default().validate().is_ok());
+        let t = EmbedTemplates {
+            query_template: "task: search result | query: ".into(),
+            ..EmbedTemplates::default()
+        };
+        assert!(t.validate().unwrap_err().contains("query_template"));
+        let t = EmbedTemplates {
+            document_template: "text: {text}".into(),
+            ..EmbedTemplates::default()
+        };
+        assert!(t.validate().unwrap_err().contains("{title}"));
+        let t = EmbedTemplates {
+            document_template_untitled: "title: none | text: ".into(),
+            ..EmbedTemplates::default()
+        };
+        assert!(
+            t.validate()
+                .unwrap_err()
+                .contains("document_template_untitled")
+        );
+    }
+
+    /// The preamble every `[infer.embed]` test below shares: a valid config
+    /// with the embed block left for the test to write.
+    const EMBED_PREAMBLE: &str = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        [infer.synthesize]
+        tier = "efficient"
+        output_ratio = 8.0
+        [infer.ask]
+        tier = "efficient"
+    "#;
+
+    #[test]
+    fn embed_templates_default_to_embeddinggemma_when_unset() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"embeddinggemma\"
+            dim = 768
+            max_input_tokens = 2048
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.embed.templates(), EmbedTemplates::default());
+    }
+
+    #[test]
+    fn embed_templates_are_read_from_config() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"bge-m3\"
+            dim = 1024
+            max_input_tokens = 1024
+            query_template = \"{{text}}\"
+            document_template = \"{{title}}\\n{{text}}\"
+            document_template_untitled = \"{{text}}\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.embed.templates(), EmbedTemplates::legacy());
+    }
+
+    #[test]
+    fn a_template_missing_its_placeholder_fails_at_load() {
+        let _guard = env_guard();
+        let err = load_infer(&format!(
+            "{EMBED_PREAMBLE}
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"embeddinggemma\"
+            dim = 768
+            max_input_tokens = 2048
+            query_template = \"task: search result | query: \"
+            "
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("query_template"), "got: {err}");
+    }
+
+    /// Everything but `[infer.*]` roles: the tests below write those themselves.
+    const BARE_PREAMBLE: &str = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "embeddinggemma"
+        dim = 768
+        max_input_tokens = 2048
+    "#;
+
+    /// `BARE_PREAMBLE` without its `[infer.embed]` table, for a test that
+    /// writes its own.
+    const BARE_PREAMBLE_NO_EMBED: &str = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer.tiers.efficient]
+        base_url = "http://localhost:8000/v1"
+        model = "qwen"
+        context_tokens = 32768
+        max_output_tokens = 16384
+    "#;
+
+    #[test]
+    fn synthesis_defaults_to_earned_and_parses_the_three_modes() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer.synthesize]
+            tier = \"efficient\"
+            output_ratio = 8.0
+            [infer.ask]
+            tier = \"efficient\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);
+        assert_eq!(cfg.infer.segment_tokens, DEFAULT_SEGMENT_TOKENS);
+        for (word, mode) in [
+            ("off", SynthesisMode::Off),
+            ("earned", SynthesisMode::Earned),
+            ("eager", SynthesisMode::Eager),
+        ] {
+            let cfg = load_infer(&format!(
+                "{BARE_PREAMBLE}
+                [infer]
+                synthesis = \"{word}\"
+                [infer.synthesize]
+                tier = \"efficient\"
+                output_ratio = 8.0
+                [infer.ask]
+                tier = \"efficient\"
+                "
+            ))
+            .unwrap();
+            assert_eq!(cfg.infer.synthesis, mode, "{word}");
+        }
+    }
+
+    #[test]
+    fn off_needs_neither_synthesize_nor_ask() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer]
+            synthesis = \"off\"
+            segment_tokens = 2048
+            "
+        ))
+        .unwrap();
+        assert!(cfg.infer.synthesize.is_none());
+        assert!(cfg.infer.ask.is_none());
+        assert_eq!(cfg.infer.segment_tokens, 2048);
+    }
+
+    #[test]
+    fn earned_and_eager_refuse_to_start_without_a_synthesizer() {
+        let _guard = env_guard();
+        for word in ["earned", "eager"] {
+            let err = load_infer(&format!(
+                "{BARE_PREAMBLE}
+                [infer]
+                synthesis = \"{word}\"
+                "
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("infer.synthesize"), "{word}: {err}");
+            assert!(err.contains(word), "{word}: {err}");
+        }
+    }
+
+    #[test]
+    fn vision_without_an_endpoint_of_its_own_needs_the_synthesizer() {
+        let _guard = env_guard();
+        let err = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer]
+            synthesis = \"off\"
+            [infer.vision]
+            model = \"llava\"
+            "
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("infer.vision"), "{err}");
+        // With its own address it stands alone.
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer]
+            synthesis = \"off\"
+            [infer.vision]
+            model = \"llava\"
+            base_url = \"http://localhost:9000/v1\"
+            "
+        ))
+        .unwrap();
+        let v = cfg.infer.vision.as_ref().unwrap();
+        assert_eq!(v.resolve(None).0, "http://localhost:9000/v1");
+    }
+
+    #[test]
+    fn chunk_tokens_defaults_to_384_and_is_clamped_to_the_embedder() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer]
+            synthesis = \"off\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.infer.embed.chunk_tokens, DEFAULT_CHUNK_TOKENS);
+        assert_eq!(cfg.infer.embed.effective_chunk_tokens(), 384);
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE_NO_EMBED}
+            [infer]
+            synthesis = \"off\"
+            [infer.embed]
+            base_url = \"http://localhost:8000/v1\"
+            model = \"small\"
+            dim = 384
+            max_input_tokens = 256
+            chunk_tokens = 1000
+            "
+        ))
+        .unwrap();
+        // 256 * 0.8 = 204: what the embedder will take wins over what was asked.
+        assert_eq!(cfg.infer.embed.effective_chunk_tokens(), 204);
+    }
+
+    #[test]
+    fn promote_defaults_and_feedback_ships_on() {
+        let _guard = env_guard();
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer.synthesize]
+            tier = \"efficient\"
+            output_ratio = 8.0
+            [infer.ask]
+            tier = \"efficient\"
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.promote.activation_above, 4.0);
+        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
+        // Opt-out now: promotion reads activation, and activation only moves
+        // while searches are recorded.
+        assert!(cfg.feedback.enabled);
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}
+            [infer.synthesize]
+            tier = \"efficient\"
+            output_ratio = 8.0
+            [infer.ask]
+            tier = \"efficient\"
+            [promote]
+            activation_above = 2.5
+            resynthesize_after_unconfirmed = 12
+            [feedback]
+            enabled = false
+            "
+        ))
+        .unwrap();
+        assert_eq!(cfg.promote.activation_above, 2.5);
+        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
+        assert!(!cfg.feedback.enabled);
+    }
+
+    #[test]
+    fn pursuit_defaults_and_requires_feedback() {
+        let _guard = env_guard();
+        let roles = "[infer.synthesize]\ntier = \"efficient\"\noutput_ratio = 8.0\n[infer.ask]\ntier = \"efficient\"\n";
+        let cfg = load_infer(&format!("{BARE_PREAMBLE}\n{roles}")).unwrap();
+        assert!(!cfg.pursuit.enabled);
+        assert_eq!(cfg.pursuit.idle_secs, 900);
+        assert_eq!(cfg.pursuit.min_sources, 2);
+        assert_eq!(cfg.pursuit.min_engagement, 3.0);
+        let err = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[feedback]\nenabled = false\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pursuit.enabled"), "{err}");
+        // Associating is both flags, so the other half is refused the same
+        // way: with feedback on and associate off, the sweep and its ticker
+        // still never run, and a config that silently writes no pursuit is
+        // the thing this refusal exists to prevent.
+        let err = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[associate]\nenabled = false\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("associate.enabled = true"), "{err}");
     }
 }

@@ -42,6 +42,18 @@ pub struct VectorPayload {
     /// without a second lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// Every corpus this artifact draws from — one for a passage or captured
+    /// row, several for a merge. A projection of `artifact_sources`, the way
+    /// `status` is a projection of the row; SQLite stays the authority.
+    /// `cap_per_corpus` groups on it, so a merge counts against each of its
+    /// corpora instead of all merges landing under one empty key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_corpora: Vec<String>,
+    /// `passage` | `captured` | `merged` | `synthesized` — mirrors the row so a
+    /// result can say a model wrote it without a second lookup, and so the
+    /// search path can see a synthesized artifact lead the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
 }
 
 #[derive(Debug, Clone)]

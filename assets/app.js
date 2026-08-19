@@ -308,11 +308,46 @@
     });
   }
 
+  // ── Dwell ─────────────────────────────────────────────────────────────────
+  //
+  // How long an artifact stayed open, reported as the reader leaves it: the
+  // next pane swap, the page going away, the tab going hidden. The weakest
+  // pursuit signal there is, and it is sent as a beacon so leaving costs
+  // nothing. Under three seconds is a glance, not a read, and is not sent.
+  var dwell = { id: null, since: 0 };
+  function flushDwell() {
+    if (!dwell.id) return;
+    var secs = Math.round((Date.now() - dwell.since) / 1000);
+    var id = dwell.id;
+    dwell.id = null;
+    if (secs < 3) return;
+    var body = new URLSearchParams({ secs: String(secs) });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/ui/artifacts/' + id + '/dwell', body);
+    } else {
+      fetch('/ui/artifacts/' + id + '/dwell', { method: 'POST', body: body, keepalive: true });
+    }
+  }
+  function trackDwell() {
+    var open = document.querySelector('[data-artifact]');
+    var id = open ? open.getAttribute('data-artifact') : null;
+    if (id === dwell.id) return;
+    flushDwell();
+    if (id) { dwell.id = id; dwell.since = Date.now(); }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     askDriver();
+    trackDwell();
+    window.addEventListener('pagehide', flushDwell);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') flushDwell();
+      else trackDwell();
+    });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       enhance(e.target);
+      trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.workspace');
       if (ws && e.target.id === 'pane') ws.classList.add('has-selection');

@@ -69,6 +69,69 @@
 {% endif %}
 {% endif %}
 
+{% if !generated.is_empty() %}
+<h3>Generated</h3>
+<p class="muted">
+  Artifacts written from a pursuit: what was asked, and what was engaged with
+  while the base did not answer. Each supersedes nothing — what it was written
+  from stays in results beside it. Deprecating one hides it; it can be
+  reactivated from the deprecated list.
+</p>
+<table class="grid">
+  <thead><tr><th>Artifact</th><th>Written because</th><th>Written from</th><th></th></tr></thead>
+  <tbody>
+  {% for g in generated %}
+    <tr>
+      <td>
+        <a href="/ui/artifacts/{{ g.id }}">{{ g.title }}</a>
+        <div class="muted row-sub">{{ g.subtitle }}</div>
+      </td>
+      <td>
+        {% for q in g.cues %}<div class="muted">{{ q }}</div>{% endfor %}
+      </td>
+      <td>
+        {% for src in g.sources %}
+        <div>
+          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
+          <div class="muted row-sub">{{ src.subtitle }}</div>
+        </div>
+        {% endfor %}
+      </td>
+      <td>
+        <form method="post" action="/ui/ops/artifacts/{{ g.id }}/deprecate">
+          <button class="btn btn-sm" type="submit">Deprecate</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if pursuit_enabled %}
+<h3>Pursuits</h3>
+{% if pursuits.is_empty() %}
+<p class="muted">No run of searches has gone quiet yet.</p>
+{% else %}
+<table class="grid">
+  <thead><tr><th>When</th><th>Asked</th><th>Outcome</th></tr></thead>
+  <tbody>
+  {% for p in pursuits %}
+    <tr>
+      <td>{{ p.when }}</td>
+      <td>{% for q in p.queries %}<div>{{ q }}</div>{% endfor %}</td>
+      <td>
+        {{ p.state }}
+        {% if let Some(a) = p.artifact_id %} · <a href="/ui/artifacts/{{ a }}">the artifact</a>{% endif %}
+        {% if !p.reason.is_empty() %}<div class="muted row-sub">{{ p.reason }}</div>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
 {% if !deprecated.is_empty() %}
 <h3>Deprecated</h3>
 <p class="muted">Flagged stale with no specific replacement. Still stored and still readable; kept out of results only.</p>

@@ -19,6 +19,35 @@ pub(super) fn unsupported_literals(answer: &str, excerpts: &[String]) -> Vec<Str
         .collect()
 }
 
+/// Which of the `n` excerpts the answer actually referenced.
+///
+/// The ask prompt numbers the excerpts and the answer cites them as `[k]`;
+/// the page turns those brackets into links (`ui::link_citations`). The same
+/// scan, run once at record time, is what tells a pursuit apart from a
+/// question that was merely handed a lot of text: being packed into the prompt
+/// is not engagement, and an abstention references nothing however many
+/// excerpts it was given.
+///
+/// A bare scan, deliberately. An `arr[1]` inside a code fence counts as a
+/// reference it is not, and the cost of that is one artifact scored a point
+/// too high in a sweep — against the cost of teaching this function markdown.
+pub(super) fn referenced(answer: &str, n: usize) -> Vec<bool> {
+    let mut used = vec![false; n];
+    let mut rest = answer;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if after[digits.len()..].starts_with(']')
+            && let Ok(k) = digits.parse::<usize>()
+            && (1..=n).contains(&k)
+        {
+            used[k - 1] = true;
+        }
+        rest = after;
+    }
+    used
+}
+
 /// A candidate that is a bullet of prose rather than a literal.
 ///
 /// `extract_literals` treats a line indented four spaces as code, which is
@@ -208,6 +237,22 @@ fn mark_text(text: &str, needles: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_numbers_the_answer_used_come_back() {
+        let used = super::referenced("The path is /etc [2], and see [4] — not [9] or [x].", 4);
+        assert_eq!(used, vec![false, true, false, true]);
+        // An abstention references nothing, however much it was shown.
+        assert_eq!(
+            super::referenced("Not in the knowledge base. Nothing covers it.", 3),
+            vec![false; 3]
+        );
+        // `[04]` is excerpt four: the number is parsed, not the digits.
+        assert_eq!(
+            super::referenced("see [04]", 4),
+            vec![false, false, false, true]
+        );
+    }
+
     /// A fenced block is `<pre><code>`, so the two do nest. A flag cleared at
     /// the inner `</code>` would call whatever follows it prose, which is what
     /// a citation linker would then happily link.

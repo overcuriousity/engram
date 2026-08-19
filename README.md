@@ -3,14 +3,24 @@
 **A trace of everything worth keeping.**
 
 A self-hosted knowledge base you search by meaning. Paste text and engram
-rewrites it into self-contained markdown artifacts, embeds them, and answers
-queries with ranked excerpts — no generation step in the way. Asking a question
-across several artifacts is a separate endpoint you call explicitly.
+splits it into passages, embeds them, and answers queries with ranked excerpts —
+your words, not a rewrite of them, and no generation step in the way. Asking a
+question across several artifacts is a separate endpoint you call explicitly.
 
-Everything after the paste happens on its own: splitting, synthesis, embedding,
-duplicate hygiene, and the sweeps that repair whatever was interrupted. Every
-artifact stays anchored to the lines of the source it came from, so a rewritten
-passage can always be read beside the original wording.
+Rewriting is *earned*. Capture cannot know which of ten thousand paragraphs
+will ever be asked about, so engram does not spend a model call on each of them
+up front. A window is rewritten into a self-contained artifact once reading has
+shown it is worth rewriting — a passage opened and confirmed often enough, or a
+run of searches that assembled an answer the base did not hold. Every
+synthesized artifact can therefore name the use that earned it, and the rest of
+your text stays exactly as you wrote it. That is `infer.synthesis = "earned"`,
+the default; `"eager"` rewrites everything at capture, and `"off"` never
+rewrites anything and needs no chat model at all.
+
+Everything after the paste happens on its own: splitting, embedding, whatever
+synthesis was earned, duplicate hygiene, and the sweeps that repair whatever was
+interrupted. Every artifact stays anchored to the lines of the source it came
+from, so a rewritten passage can always be read beside the original wording.
 
 Three front doors over one backend: a web UI, a REST API, and an MCP server, so
 Claude Code or Claude Desktop can read and write it mid-session.
@@ -37,18 +47,39 @@ as `failed` with the reason on its page; **Re-read** on that page (or
 `POST /api/v1/corpora/{id}/reprocess` with `{"stage":"describe"}`) reads it
 again from the stored original, with whatever model is configured now.
 
+A corpus can also be a **PDF** — dropped on the capture page or sent to
+`POST /api/v1/corpora/upload` (multipart `file`, optional `note`). The file is
+kept untouched and served at `GET /api/v1/corpora/{id}/file`; it is read into
+markdown in the background, locally, with no model and nothing to configure.
+The lines shown beside an artifact are that extraction rather than the page as
+it was laid out, and the pane says so — `extraction lines 2–3`, never `page 42`.
+
+Be warned what the default build does not do: it recovers the words and their
+reading order, and **no headings and no tables**. Splitting falls back to blank
+lines, so on a long structured document the artifacts are weaker than the same
+text pasted with its markdown intact. Building with `--features pdf-ml` adds
+docling's layout and table models — and with them the ONNX runtime, pdfium as a
+native library, and a model download. A PDF with no text layer at all, which is
+what a scan is, is shown as `failed` saying exactly that; **Re-extract** on that
+page (or `POST /api/v1/corpora/{id}/reprocess` with `{"stage":"extract"}`) reads
+it again from the stored original, with whatever build is running now.
+
 A **segment** is a slice of one corpus, sized to fit the model's context. The
 split is local and mechanical — a heading, then a blank line, then wherever the
 budget runs out. It stores line numbers rather than a copy, and doubles as the
 memory that lets a failed run resume instead of restarting.
 
-An **artifact** is what the model makes from a segment: a passage rewritten to
-stand on its own, with a title, a category and tags. Artifacts are what gets
-embedded, ranked, read and edited. One call turns one segment into several
-artifacts; no artifact spans two segments.
+An **artifact** is a unit of retrieval: a piece of text with a title, a
+category and tags, embedded, ranked, read and edited on its own. At the default
+`earned` most artifacts are *passages* — a slice of a segment, split on the
+document's own headings and paragraphs and stored verbatim. A *synthesized*
+artifact is one the model wrote, from a window whose reading earned it or from a
+pursuit; it is badged as such wherever it is shown, and one click retires it. No
+artifact spans two segments.
 
-Most artifacts are *captured* — written from one segment of one corpus, with the
-lines they came from shown beside them. A few are *merged*: written by
+At `eager` a synthesis call turns each segment into several *captured*
+artifacts at capture time instead — written from one segment of one corpus, with
+the lines they came from shown beside them. A few are *merged*: written by
 consolidation out of two or more captured artifacts that said the same thing,
 and listing what they were written from instead of corpus lines. The originals
 are hidden rather than deleted, one button restores them, and no merge is
@@ -162,7 +193,8 @@ cp config.example.toml config.toml
 ```
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
-through `raw → synthesizing → embedding → ready` on Browse. `partial` means part
+through `raw → embedding → ready` on Browse (at `infer.synthesis = "eager"`,
+`raw → synthesizing → embedding → ready`). `partial` means part
 of it has not come through yet; Ops says what is retrying and when, and nothing
 there needs you.
 
@@ -214,12 +246,17 @@ the file — the loader warns if it finds one.
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
 | `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
-| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
+| `infer.synthesis` | `"earned"` (default), `"off"` or `"eager"`. `earned` embeds the source text verbatim at capture and synthesizes a window later, once reading has shown it is worth it. `off` is the same capture with no synthesis at all: `[infer.synthesize]` and `[infer.ask]` may then be omitted, and the doors that need them are not offered. `eager` spends one synthesis call per segment at capture. |
+| `infer.segment_tokens` | Window size when no synthesizer is configured. Default 4096. |
+| `infer.embed.chunk_tokens` | Passage size at `off`/`earned`. Default 384, clamped to the embedder. |
+| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`, and the three prompt templates `query_template`, `document_template`, `document_template_untitled`. Defaults are EmbeddingGemma's; a symmetric model sets the three to `{text}` / `{title}\n{text}` / `{text}`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
 | `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`. |
-| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. Off by default. |
+| `feedback.*` | Recording real searches for later judging: `enabled`, `candidates`, `coalesce_secs`, `retain_days` (unjudged searches only), `sweep_hours`. On by default — promotion at `earned` reads activation, and activation moves only while searches are recorded. |
+| `pursuit.*` | `enabled` (default off), `idle_secs` (900), `min_sources` (2), `min_engagement` (3.0). A quiet run of searches that engaged several artifacts without the base answering — or by assembling the answer across them — earns one generated artifact, badged, carrying the questions it was written for, superseding nothing. Needs `feedback.enabled`. |
+| `promote.*` | `activation_above` (default 4.0): at `earned`, a passage opened or confirmed past this has its window synthesized. `resynthesize_after_unconfirmed` (default 0 = off): at `eager`, an artifact shown this often and never confirmed is re-read from its segment. |
 | `auth.mode` | `oidc` or `local`. |
 | `auth.oidc.*` | `issuer_url`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `allowed_subs` / `allowed_emails` / `allowed_groups`. |
 | `auth.local.*` | `username` and an argon2id `password_hash`. Development only. |
@@ -231,9 +268,10 @@ Eight worth knowing:
   and ships **off**: a default here moves after the harness has run, not before.
   `follow_up_tier` puts that call on a cheaper tier than the answer it feeds,
   which is the whole reason tiers are named.
-- **`tier` is required** on `infer.synthesize` and `infer.ask`. An endpoint is
-  named once under `infer.tiers.<name>` and pointed at, so moving a role to
-  another model is one word.
+- **`tier` is required** on `infer.synthesize` and `infer.ask` when those
+  tables are present. An endpoint is named once under `infer.tiers.<name>` and
+  pointed at, so moving a role to another model is one word. At
+  `infer.synthesis = "off"` both tables may be omitted.
 - **`infer.embed.dim`** must match the collection. If it does not, engram
   refuses to start and names both numbers. Mismatched vectors corrupt search in
   a way you would not notice for weeks.
@@ -244,6 +282,10 @@ Eight worth knowing:
 - **`infer.embed.max_input_tokens`** must be the *server's* ceiling, not the
   model's nominal one. llama.cpp refuses input above its physical batch size —
   often 1024 — with a 500 no retry can fix.
+- **`infer.embed.*_template`** and `model` together are one identity: a
+  vector's meaning is fixed by the model *and* by the text handed to it.
+  Editing a template later silently mixes embedding spaces. There is no
+  rebuild path; drop the collection and re-capture.
 - **`infer.ask.max_output_tokens`** defaults to 4096 and comes out of
   `context_tokens`. The endpoint measures the prompt and this ceiling against
   one window, so `ask` reserves it and packs excerpts into the remainder:

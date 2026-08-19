@@ -3,8 +3,12 @@ pub mod consolidate;
 pub mod dedupe;
 pub mod describe;
 pub mod embed;
+pub mod extract;
 pub mod gaps;
 pub mod merge;
+pub mod passages;
+pub mod promote;
+pub mod pursuit;
 pub mod reconcile;
 pub mod relate;
 pub mod synthesize;
@@ -60,7 +64,33 @@ pub async fn run_one(core: &Core) -> Result<bool> {
     run_claimed(core, job).instrument(span).await
 }
 
+/// The role a stage cannot run without. `Synthesize` is deliberately absent:
+/// at `off` it is the verbatim capture path and needs nothing.
+fn needs_model(stage: Stage) -> Option<&'static str> {
+    match stage {
+        Stage::SegmentWindow
+        | Stage::Title
+        | Stage::Dedupe
+        | Stage::LinkJudge
+        | Stage::Generate => Some("synthesize"),
+        _ => None,
+    }
+}
+
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
+    // A unit that needs a model the configuration does not have can never run.
+    // Close it with a reason rather than retrying to the ceiling for ever —
+    // a base captured at `eager`, then reconfigured, has rows like this.
+    if let Some(role) = needs_model(job.stage)
+        && !core.synthesizes()
+    {
+        tracing::warn!(
+            stage = job.stage.as_str(),
+            "no [infer.{role}] configured; dropping the unit"
+        );
+        core.store.complete_job(job.id).await?;
+        return Ok(true);
+    }
     let result = match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
@@ -77,6 +107,9 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
+        (Stage::Extract, _) => extract::run(core, &job.target_id).await,
+        (Stage::Pursuit, _) => pursuit::run(core).await.map(|_| ()),
+        (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
     };
 
     match result {
@@ -116,7 +149,16 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // is simply not configured, which is a wait, not a failure.
                 (Stage::Describe, _) if exhausted && core.describer.is_some() => {
                     tracing::warn!(error = %e, "could not read this image; parking it");
-                    park_failed_if_still_there(core, &job.target_id, &e).await?;
+                    park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
+                    core.store.complete_job(job.id).await?;
+                }
+                // The PDF is stored, so nothing is lost by stopping — but a
+                // corpus shown as in flight forever is a lie. No role guard,
+                // unlike `Describe`: extraction needs nothing configured, so
+                // this can never be a wait for a role that has not arrived.
+                (Stage::Extract, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not extract this PDF; parking it");
+                    park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
                 // A whole source failing together usually means the endpoint is
@@ -146,8 +188,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // isolation the exhausted path buys is worth buying here.
                 (Stage::Embed, "corpus") => split_or_fail(core, &job, &e).await?,
                 (Stage::Embed, _) => settle_failed_artifact(core, &job, &e).await?,
-                (Stage::Describe, _) => {
-                    park_failed_if_still_there(core, &job.target_id, &e).await?;
+                (Stage::Describe | Stage::Extract, _) => {
+                    park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
                 // Kept armed at the unit's own attempt count, floored at
@@ -173,8 +215,18 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
 /// the failed read and this write. Letting that `NotFound` out of `run_claimed`
 /// would leave the job `running` until `reclaim_stuck` picks it up ten minutes
 /// later, only to lose the same race again.
-async fn park_failed_if_still_there(core: &Core, corpus_id: &str, e: &Error) -> Result<()> {
-    match describe::park_failed(core, corpus_id, &e.to_string()).await {
+async fn park_failed_if_still_there(
+    core: &Core,
+    stage: Stage,
+    corpus_id: &str,
+    e: &Error,
+) -> Result<()> {
+    let reason = e.to_string();
+    let parked = match stage {
+        Stage::Extract => extract::park_failed(core, corpus_id, &reason).await,
+        _ => describe::park_failed(core, corpus_id, &reason).await,
+    };
+    match parked {
         Err(Error::NotFound) => {
             tracing::info!(corpus_id, "corpus went away before it could be parked");
             Ok(())
@@ -309,9 +361,9 @@ mod tests {
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
         let mut core = test_core().await;
-        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
+        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
             "HTTP 400: context length exceeded",
-        ));
+        )));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -366,6 +418,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_model_stage_job_with_no_model_is_closed_not_retried() {
+        // A dedupe unit left over from an `eager` base, reconfigured to run
+        // with no [infer.synthesize]: there is nothing that could ever run it,
+        // so it settles with a reason rather than sitting at the backoff
+        // ceiling for ever.
+        let mut core = test_core().await;
+        core.synthesizer = None;
+        core.judge = None;
+        core.store
+            .enqueue(Stage::Dedupe, "pair", "p1")
+            .await
+            .unwrap();
+        assert!(run_one(&core).await.unwrap(), "the job was claimed");
+        assert!(
+            !core.store.live_job(Stage::Dedupe, "p1").await.unwrap(),
+            "the unit is still armed"
+        );
+    }
+
+    #[tokio::test]
     async fn run_one_reports_when_the_queue_is_empty() {
         let core = test_core().await;
         assert!(!run_one(&core).await.unwrap(), "no jobs means no work done");
@@ -393,9 +465,9 @@ mod tests {
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
         let mut core = test_core().await;
-        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::failing(
             "endpoint down",
-        ));
+        )));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to

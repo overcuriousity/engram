@@ -92,29 +92,60 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         }
     });
 
-    engram::infer::openai::probe(
-        "chunk",
-        &cfg.infer.synthesize.base_url,
-        cfg.infer.synthesize.api_key.as_deref(),
-    )
-    .await;
+    if let Some(s) = &cfg.infer.synthesize {
+        engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
+    } else {
+        tracing::info!(
+            "synthesize not configured; capture embeds verbatim and nothing is synthesized"
+        );
+    }
     engram::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
+    embed_recipe_check(core, cfg).await?;
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
     } else {
         tracing::info!("rerank not configured; search returns vector order");
     }
     if let Some(v) = &cfg.infer.vision {
-        let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
+        let (base_url, api_key) = v.resolve(cfg.infer.synthesize.as_ref());
         engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
     } else {
         tracing::info!("vision not configured; the image door is closed");
     }
+    Ok(())
+}
+
+/// Say it out loud when the embedding recipe changed under a base that already
+/// has vectors in it.
+///
+/// `model`, `dim` and the three templates together decide what a stored vector
+/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
+/// in the collection describe the old recipe while every new query is rendered
+/// through the new one — a base that answers worse for no visible reason, with
+/// nothing in any log tying it to the config edit that caused it.
+///
+/// A warning and not a refusal: the operator may be mid-migration, and a base
+/// that will not boot is worse than one that says what is wrong with it. The
+/// fingerprint is stored either way, so the warning is printed once rather than
+/// every restart.
+async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
+    const KEY: &str = "embed.recipe";
+    let now = cfg.infer.embed.fingerprint();
+    match core.store.meta_get(KEY).await? {
+        Some(before) if before != now => tracing::warn!(
+            model = %cfg.infer.embed.model,
+            "the embedding recipe changed — model, dim or a template. Vectors stored under the \
+             old one do not compare with queries rendered through the new one: drop the \
+             collection and re-capture, or put the old recipe back"
+        ),
+        _ => {}
+    }
+    core.store.meta_set(KEY, &now).await?;
     Ok(())
 }
 
@@ -239,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
     let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
     let associate =
         engram::core::background::spawn_associate_ticker(core.clone(), shutdown_rx.clone());
+    let pursuit = engram::core::background::spawn_pursuit_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for them too, rather than
     // leaving tasks the runtime drops mid-enqueue.
@@ -247,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
     handles.push(dedupe);
     handles.push(repair);
     handles.push(associate);
+    handles.push(pursuit);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
@@ -308,7 +341,9 @@ mod startup_tests {
                 weak_below: 0.35,
             },
             infer: InferConfig {
-                synthesize: SynthesizeRole {
+                synthesis: engram::config::SynthesisMode::Eager,
+                segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
+                synthesize: Some(SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -321,7 +356,7 @@ mod startup_tests {
                     structured_output: true,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
-                },
+                }),
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "e".into(),
@@ -329,8 +364,13 @@ mod startup_tests {
                     dim: 1024,
                     max_input_tokens: 8192,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
+                    query_template: engram::config::EmbedTemplates::default().query_template,
+                    document_template: engram::config::EmbedTemplates::default().document_template,
+                    document_template_untitled: engram::config::EmbedTemplates::default()
+                        .document_template_untitled,
+                    chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
                 },
-                ask: AskRole {
+                ask: Some(AskRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -342,7 +382,7 @@ mod startup_tests {
                     follow_up: false,
                     structured_output: true,
                     follow_up_endpoint: None,
-                },
+                }),
                 rerank: None,
                 vision: None,
             },
@@ -360,6 +400,8 @@ mod startup_tests {
             pacing: engram::config::PacingConfig::default(),
             associate: AssociateConfig::default(),
             activation: ActivationConfig::default(),
+            promote: engram::config::PromoteConfig::default(),
+            pursuit: engram::config::PursuitConfig::default(),
         }
     }
 

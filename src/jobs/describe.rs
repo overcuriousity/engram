@@ -49,7 +49,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         .store
         .find_near_duplicate(&sig, core.consolidate.near_dupe_min)
         .await?;
-    core.store.set_described_text(corpus_id, &text, sig).await?;
+    core.store.set_read_text(corpus_id, &text, sig).await?;
     core.park_or_queue(corpus_id, near.as_ref()).await?;
     tracing::info!(
         corpus_id,
@@ -268,12 +268,13 @@ mod tests {
         metadata: serde_json::Value,
     ) -> crate::store::corpora::Corpus {
         core.store
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "h",
                 "image",
                 None,
                 &metadata,
-                &crate::store::attachments::NewImage {
+                crate::store::corpora::Reading::VISION,
+                &crate::store::attachments::NewFile {
                     kind: "image",
                     mime: "image/png",
                     filename: None,

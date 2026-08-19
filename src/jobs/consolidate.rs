@@ -4,12 +4,16 @@
 //! This sweep is the backstop for that arming, the clustering that spans many
 //! pairs at once, the pacing of the dedupe units, and the repairs.
 //!
-//! Two thresholds still divide the work. At or above `auto_supersede` a group
-//! collapses onto its newest member for free: no call, no rewrite, and the
-//! survivor is a stored original. Between `review_min` and that, the group goes
-//! to `jobs::dedupe`, because two genuinely distinct artifacts about one
-//! subsystem sit at 0.88 routinely and acting on that score alone destroys
-//! knowledge rather than duplication.
+//! Two thresholds still shape the work, and neither hides anything on its own.
+//! From `review_min` up a pair is a question for `jobs::dedupe`, because two
+//! genuinely distinct artifacts about one subsystem sit at 0.88 routinely and
+//! acting on that score alone destroys knowledge rather than duplication. At
+//! or above `auto_supersede` it is the *first* question asked — a fast lane,
+//! by score — and still a question: embeddings barely distinguish negation,
+//! and "runs on ext4" / "does not run on ext4" sit far above any realistic
+//! threshold. The judge's `losses` check stands behind every hide. The cluster
+//! pass below still closes `NearIdentical` rows an older base filed; nothing
+//! files new ones.
 //!
 //! **On merging.** This header used to say that nothing here rewrites an
 //! artifact, and that a merged artifact would be synthetic text standing where
@@ -507,6 +511,8 @@ pub(crate) mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
                 },
             })
             .collect();
@@ -553,27 +559,28 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_near_identical_pair_supersedes_the_older_artifact() {
+    async fn a_near_identical_pair_goes_to_the_judge_first_and_hides_nothing() {
+        // `auto_supersede` used to hide the older member on the score alone:
+        // no call, no `losses` check. Embeddings barely distinguish negation —
+        // "runs on ext4" and "does not run on ext4" sit far above any realistic
+        // threshold — so the sweep now hides nothing by itself. The pair is a
+        // question for the judge, and by score it is the first one asked.
         let core = test_core().await;
         let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
 
         let out = run(&core).await.unwrap();
-        assert_eq!(out.superseded, 1, "{out:?}");
-
-        // The older one loses: ordinal 0 was inserted first.
-        let older = core.store.get_artifact(&ids[0]).await.unwrap();
-        let newer = core.store.get_artifact(&ids[1]).await.unwrap();
-        assert_eq!(older.superseded_by.as_deref(), Some(ids[1].as_str()));
-        assert!(newer.superseded_by.is_none());
-
-        // And it is out of search, which is the whole point.
+        assert_eq!(out.superseded, 0, "{out:?}");
+        assert!(out.judged >= 1, "{out:?}");
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        // Both are still in search.
         let hits = core
             .vectors
             .search(&[1.0, 0.0], &Default::default(), 10, &Default::default())
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].payload.artifact_id, ids[1]);
+        assert_eq!(hits.len(), 2);
     }
 
     #[tokio::test]
@@ -768,7 +775,12 @@ pub(crate) mod tests {
         // copy that no longer exists — the surviving text becomes invisible,
         // which is the loss this whole feature exists to prevent.
         let core = test_core().await;
-        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
+        // Filed by hand: an older base's row, which the cluster pass still acts on.
+        core.store
+            .record_settled_pair(&ids[0], &ids[1], 0.999, PairState::NearIdentical)
+            .await
+            .unwrap();
         run(&core).await.unwrap();
         let mut hidden = None;
         for id in &ids {
@@ -818,7 +830,7 @@ pub(crate) mod tests {
         // posts a contradiction about something nobody can see.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         // Queue the pair with the judge off, so the only call this test can
         // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
@@ -870,7 +882,7 @@ pub(crate) mod tests {
         // only, which a deprecation never sets.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
 
@@ -1273,11 +1285,13 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_artifact_is_never_superseded_twice() {
-        // Three near-identical artifacts. Whatever survives, exactly one must,
-        // and no artifact may point at one that is itself superseded — that is
-        // a chain the UI cannot resolve and the reader cannot follow.
+        // Three near-identical rows an older base filed. Whatever survives,
+        // exactly one must, and no artifact may point at one that is itself
+        // superseded — that is a chain the UI cannot resolve and the reader
+        // cannot follow. Nothing files `NearIdentical` any more; the cluster
+        // pass still closes what is there.
         let core = test_core().await;
-        let ids = seed_related(
+        let ids = seed(
             &core,
             &[
                 ("first", [1.0, 0.0]),
@@ -1286,6 +1300,12 @@ pub(crate) mod tests {
             ],
         )
         .await;
+        for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+            core.store
+                .record_settled_pair(&ids[a], &ids[b], 0.999, PairState::NearIdentical)
+                .await
+                .unwrap();
+        }
 
         run(&core).await.unwrap();
 
@@ -1372,7 +1392,7 @@ pub(crate) mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         seed_related(
             &core,
             &[
@@ -1582,7 +1602,7 @@ pub(crate) mod tests {
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         disagreeing(&core).await;
 
         let out = run(&core).await.unwrap();
@@ -1606,14 +1626,14 @@ pub(crate) mod tests {
     async fn a_pair_the_model_keeps_failing_on_goes_to_the_back_of_the_queue() {
         // An unreadable reply leaves the pair pending on purpose. Ordered by
         // score alone, the same top-scoring pair would then absorb every
-        // sweep's budget forever and the rest would never be judged at all.
+        // sweep's budget forever and the rest would never be judged at all:
+        // after one unreadable attempt the *other* pair must come first.
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
-        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            "not json".into(),
-            r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
-        ]));
-        seed_related(
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec!["not json".into()]),
+        ));
+        let ids = seed(
             &core,
             &[
                 ("timeout is 30 seconds", [1.0, 0.0]),
@@ -1622,26 +1642,50 @@ pub(crate) mod tests {
             ],
         )
         .await;
+        // 30 and 60 sit in one window, so they are not a pair (the same-window
+        // rule) and the fixture has two pairs: 30–90 (0.898) and 60–90 (0.903).
+        for id in &ids[..2] {
+            sqlx::query("UPDATE artifacts SET segment_idx = 0 WHERE id = ?")
+                .bind(id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        for id in &ids {
+            crate::jobs::relate::run(&core, id).await.unwrap();
+        }
 
-        sweep_and_dedupe(&core).await;
-        sweep_and_dedupe(&core).await;
-
-        let pending = core.store.pairs_to_judge(10).await.unwrap();
-        assert!(
-            pending.iter().all(|p| p.judge_attempts <= 1),
-            "the second sweep judged the same pair again: {pending:?}"
-        );
-        assert_eq!(
-            core.store
-                .pairs_by_state(PairState::Contradiction, 10)
+        // One sweep arms the top pair by score; work the queue until that one
+        // dedupe unit has run and read "not json" — other units (the sweep's
+        // own housekeeping) may sit ahead of it.
+        run(&core).await.unwrap();
+        for _ in 0..20 {
+            let asked = core
+                .store
+                .pairs_to_judge(10)
                 .await
                 .unwrap()
-                .len(),
-            1,
-            "the second sweep never reached an unjudged pair"
-        );
-    }
+                .iter()
+                .any(|p| p.judge_attempts > 0);
+            if asked {
+                break;
+            }
+            sqlx::query("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            assert!(crate::jobs::run_one(&core).await.unwrap(), "queue ran dry");
+        }
 
+        let pending = core.store.pairs_to_judge(10).await.unwrap();
+        assert_eq!(pending.len(), 2, "{pending:?}");
+        // The pair that was asked and answered unreadably has one attempt
+        // against it and has dropped behind the pair with none — although its
+        // score is the higher.
+        assert_eq!(pending[0].judge_attempts, 0, "{pending:?}");
+        assert_eq!(pending[1].judge_attempts, 1, "{pending:?}");
+        assert!(pending[0].score < pending[1].score, "{pending:?}");
+    }
     #[tokio::test]
     async fn a_pair_whose_artifact_vanished_does_not_abandon_the_rest_of_the_sweep() {
         // `pairs_to_judge` hands back a snapshot, and the arming loop is full of

@@ -44,6 +44,17 @@
         {% if r.primed %}
         <span class="badge" title="Moved up: you reach this one often">primed</span>
         {% endif %}
+        {% if r.model_written %}
+        {# Never silently indistinguishable from captured text. The count comes
+           off the vector payload, so a hit that was reached rather than ranked
+           — a neighbour, an association — does not carry one. Zero there means
+           "not read", not "no sources", and the badge said the second. #}
+        {% if r.origin_count > 0 %}
+        <span class="badge" title="A model wrote this, from {{ r.origin_count }} source corpus/corpora">model-written · {{ r.origin_count }}</span>
+        {% else %}
+        <span class="badge" title="A model wrote this">model-written</span>
+        {% endif %}
+        {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in

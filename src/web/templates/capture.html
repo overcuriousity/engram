@@ -9,10 +9,16 @@
 <form id="capture" hx-post="/ui/capture" hx-target="#capture-result" hx-swap="innerHTML"
       hx-on::after-request="if (event.detail.successful) { this.reset(); htmx.trigger(document.body, 'captured') }"
       class="stack">
-  {# One line. The segment-count hint below the box says the expensive part,
-     and says it only once it is true. #}
+  {# One line, and it has to match the mode. At `eager` the expensive part is
+     the synthesis call per segment; at `earned` and `off` capture calls nothing
+     and the text is stored as it was written. The segment-count hint below the
+     box says the rest, and says it only once it is true. #}
   <p class="muted" style="margin:0">
+    {% if eager %}
     Paste a chapter at a time — long text is split into segments, one model call each.
+    {% else %}
+    Paste a chapter at a time — long text is split into segments and kept as you wrote it.
+    {% endif %}
   </p>
   {# No `autofocus`: this page is the app's `start_url`, so on a phone the
      attribute opened the software keyboard over "Needs you" and "Recent" the
@@ -38,11 +44,11 @@
   <label class="row muted" id="drop"
          style="border:1px dashed var(--line);padding:.6rem;border-radius:.4rem">
     {% if vision_enabled %}
-    <input type="file" name="file" accept=".txt,text/plain,image/*" hidden>
-    <span>…or drop a <code>.txt</code> file or an image here — on a phone, tap to take a photo.</span>
+    <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf,image/*" hidden>
+    <span>…or drop a <code>.txt</code> file, a PDF or an image here — on a phone, tap to take a photo.</span>
     {% else %}
-    <input type="file" name="file" accept=".txt,text/plain" hidden>
-    <span>…or drop a <code>.txt</code> file here.</span>
+    <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf" hidden>
+    <span>…or drop a <code>.txt</code> file or a PDF here.</span>
     {% endif %}
   </label>
 </form>
@@ -99,11 +105,16 @@
     if (!box || !hint) return;
     // Rough stand-in for the tokeniser: enough to warn, never to block.
     var CHARS_PER_SEGMENT = 12000;
+    // At `earned` and `off` capture makes no synthesis call, so the hint must
+    // not price one. See `CaptureTemplate.eager`.
+    var EAGER = {% if eager %}true{% else %}false{% endif %};
     box.addEventListener('input', function () {
       var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
       hint.hidden = segments < 2;
-      hint.textContent = 'About ' + segments + ' segments — roughly ' + segments +
-        ' model calls before this is searchable.';
+      hint.textContent = EAGER
+        ? 'About ' + segments + ' segments — roughly ' + segments +
+          ' model calls before this is searchable.'
+        : 'About ' + segments + ' segments — searchable as written, once embedded.';
     });
 
     var drop = document.getElementById('drop');
@@ -113,6 +124,9 @@
     function send(file) {
       if (!file) return;
       var isImage = file.type.indexOf('image/') === 0;
+      // By name as well as by type: a drop from some file managers carries no
+      // type at all, and the door judges those by their name too.
+      var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
       var result = document.getElementById('capture-result');
       if (isImage && !VISION) {
         result.textContent = 'Image capture is not configured on this server.';
@@ -120,7 +134,10 @@
       }
       var payload = new FormData();
       if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
-      payload.append(isImage ? 'image' : 'file', file, file.name || (isImage ? 'photo.jpg' : 'paste.txt'));
+      // The fallback name matters: a PDF that arrived unnamed and went up as
+      // `paste.txt` would be refused by the very door it belongs to.
+      var fallbackName = isImage ? 'photo.jpg' : (isPdf ? 'capture.pdf' : 'paste.txt');
+      payload.append(isImage ? 'image' : 'file', file, file.name || fallbackName);
       var url = isImage ? '/api/v1/corpora/image' : '/api/v1/corpora/upload';
       // The session cookie authenticates this: it is same-origin, so no token
       // is involved.
@@ -140,7 +157,9 @@
           // hide what actually goes wrong here: wrong type, wrong encoding,
           // an image door that is closed.
           result.textContent = pair[0]
-            ? (isImage ? 'Captured — the photo is queued to be read.' : 'Captured.')
+            ? (isImage ? 'Captured — the photo is queued to be read.'
+               : isPdf ? 'Captured — the PDF is queued to be extracted.'
+               : 'Captured.')
             : (pair[1].error || 'Upload failed.');
           if (pair[0]) {
             if (noteBox) noteBox.value = '';

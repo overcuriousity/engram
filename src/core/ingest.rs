@@ -10,6 +10,10 @@ use crate::store::now;
 /// The channel an image arrives through. Its own value, like `upload`, so
 /// the queue and the detail page can tell a photo from a paste.
 pub const ORIGIN_IMAGE: &str = "image";
+/// The channel a PDF arrives through. Its own value for the same reason a
+/// photo has one: the queue and the detail page have to tell a document that
+/// was extracted from one that was typed.
+pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
 /// An answer the operator chose to keep. Its own value because a corpus whose
@@ -69,6 +73,15 @@ pub enum NearDupeAction {
     KeepBoth,
     /// The new capture adds nothing. Delete it.
     Discard,
+}
+
+/// One PDF, whichever door it arrived through.
+#[derive(Debug, Clone)]
+pub struct PdfCapture {
+    pub bytes: Vec<u8>,
+    pub filename: Option<String>,
+    pub title_hint: Option<String>,
+    pub note: Option<String>,
 }
 
 /// One image, whichever door it arrived through.
@@ -286,6 +299,72 @@ impl Core {
     /// Store the image and queue the vision stage. Like `ingest_capture`, this
     /// makes no inference call: the phone gets its answer the moment the bytes
     /// are safe, and a dead vision endpoint costs a wait, not a photo.
+    /// Store the bytes and queue the reading. No gate: extraction is local, so
+    /// unlike the image door this one is open whatever `[infer]` holds.
+    ///
+    /// No decode permit either — there is no pixel work to bound — and no
+    /// preview, because rendering a first page needs pdfium and that is the ML
+    /// build's dependency, not this one's.
+    pub async fn ingest_pdf(&self, c: PdfCapture) -> Result<IngestOutcome> {
+        let PdfCapture {
+            bytes,
+            filename,
+            title_hint,
+            note,
+        } = c;
+        // Hashed before anything else touches it: the same PDF sent twice
+        // costs one SHA-256 the second time, not an extraction.
+        let hash = content_hash(&bytes);
+        if let Some(existing) = self.store.find_by_hash(&hash).await? {
+            tracing::info!(corpus_id = %existing.id, "duplicate PDF, returning existing source");
+            return Ok(IngestOutcome::existing(&existing));
+        }
+
+        // The same `file` namespace the image door writes, so the corpus page
+        // reads both through one path. No width or height: a PDF has pages,
+        // and this build does not count them.
+        let mut file = serde_json::json!({
+            "size": bytes.len(),
+            "mime": "application/pdf",
+        });
+        if let Some(n) = filename.as_deref() {
+            file["name"] = serde_json::Value::String(n.to_string());
+        }
+        let mut metadata = serde_json::json!({ "file": file });
+        if let Some(n) = clean_note(note) {
+            metadata["note"] = serde_json::json!(n);
+        }
+
+        let inserted = self
+            .store
+            .insert_attached_corpus(
+                &hash,
+                ORIGIN_PDF,
+                title_hint.as_deref(),
+                &metadata,
+                crate::store::corpora::Reading::EXTRACTION,
+                &crate::store::attachments::NewFile {
+                    kind: "pdf",
+                    mime: "application/pdf",
+                    filename: filename.as_deref(),
+                    bytes: &bytes,
+                    preview: &[],
+                    width: None,
+                    height: None,
+                },
+            )
+            .await?;
+        Ok(match inserted {
+            Insertion::Existing(c) => IngestOutcome::existing(&c),
+            Insertion::Created(c) => IngestOutcome {
+                id: c.id,
+                status: c.status,
+                duplicate: false,
+                near_duplicate: None,
+            },
+        })
+    }
+
     pub async fn ingest_image(&self, c: ImageCapture) -> Result<IngestOutcome> {
         if self.describer.is_none() {
             return Err(Error::Validation(
@@ -342,7 +421,7 @@ impl Core {
         // are what a camera and a clipboard call everything. Seeding the title
         // from it would disarm the one stage that can name the capture.
 
-        let attachment = crate::store::attachments::NewImage {
+        let attachment = crate::store::attachments::NewFile {
             kind: "image",
             mime: prepared.mime,
             filename: filename.as_deref(),
@@ -353,11 +432,12 @@ impl Core {
         };
         let src = match self
             .store
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 &hash,
                 ORIGIN_IMAGE,
                 title_hint.as_deref(),
                 &metadata,
+                crate::store::corpora::Reading::VISION,
                 &attachment,
             )
             .await?
@@ -481,6 +561,48 @@ impl Core {
             self.store.mark_source_restored(artifact_id).await?;
         }
         tracing::info!(artifact_id, "restored a superseded artifact to search");
+        Ok(())
+    }
+
+    /// Put a promoted window back: its passages active, the artifacts the
+    /// promotion wrote deprecated, the segment `verbatim` again — and marked
+    /// `no_promote`, so it stays that way. The links copied onto the artifacts
+    /// and the activation they were handed stay where they are — both sides
+    /// describe the same corpus lines, and the asymmetry is accepted rather
+    /// than fixed.
+    ///
+    /// The mark is what makes this an undo rather than a pause. The passages
+    /// keep the activation that armed the promotion, and `maybe_promote` reads
+    /// activation at the bump: restoring `verbatim` alone would let the next
+    /// open of any restored passage promote the window again, immediately,
+    /// leaving the operator with the same promotion and a set of deprecated
+    /// artifacts beside it. Only a re-split clears the mark — a window whose
+    /// text changed is a different window.
+    pub async fn undo_promotion(&self, corpus_id: &str, idx: i64) -> Result<()> {
+        use crate::store::artifacts::Provenance;
+        let rows = self.store.artifacts_for_segment(corpus_id, idx).await?;
+        for c in rows
+            .iter()
+            .filter(|c| c.provenance == Provenance::Passage && c.superseded_by.is_some())
+        {
+            self.unsupersede(&c.id).await?;
+        }
+        for c in rows
+            .iter()
+            .filter(|c| c.provenance != Provenance::Passage && c.in_results())
+        {
+            self.deprecate(&c.id).await?;
+        }
+        self.store
+            .set_segment_state(
+                corpus_id,
+                idx,
+                crate::store::segments::SegmentState::Verbatim,
+                None,
+            )
+            .await?;
+        self.store.set_segment_no_promote(corpus_id, idx).await?;
+        tracing::info!(corpus_id, window = idx, "promotion undone");
         Ok(())
     }
 
@@ -888,6 +1010,16 @@ impl Core {
                         "this image has not been read yet — re-read it instead".into(),
                     ));
                 }
+                // Same situation, same answer: re-segmenting starts from
+                // `raw_text`, and a PDF whose extraction has not landed has
+                // none.
+                if src.status == CorpusStatus::Extracting
+                    || (src.origin == ORIGIN_PDF && src.raw_text.trim().is_empty())
+                {
+                    return Err(Error::Validation(
+                        "this PDF has not been extracted yet — re-extract it instead".into(),
+                    ));
+                }
                 self.forget_derived_work(&src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
@@ -923,19 +1055,55 @@ impl Core {
             | Stage::Title
             | Stage::Dedupe
             | Stage::Relate
-            | Stage::LinkJudge => {
+            | Stage::LinkJudge
+            | Stage::Generate => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"
                         .into(),
                 ));
             }
+            // The pursuit sweep looks at every recorded search, not at one
+            // corpus.
+            Stage::Pursuit => {
+                return Err(Error::Validation(
+                    "that stage is a collection-wide sweep, not a per-corpus stage".into(),
+                ));
+            }
+            // A stored PDF can always be read again — with the ML build, or
+            // after a docling upgrade. The extraction and everything derived
+            // from it are replaced wholesale, because an artifact of the old
+            // reading has no span in the new one.
+            Stage::Extract => {
+                if src.origin != ORIGIN_PDF || !self.store.has_attachment(&src.id).await? {
+                    return Err(Error::Validation(
+                        "only a captured PDF can be re-extracted".into(),
+                    ));
+                }
+                self.forget_derived_work(&src.id).await?;
+                self.store.clear_read_text(&src.id).await?;
+                let mut meta = src.metadata.clone();
+                if let Some(m) = meta.as_object_mut() {
+                    m.remove("extract");
+                }
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::Extracting)
+                    .await?;
+                self.heal_dangling_supersessions().await?;
+                self.store
+                    .enqueue(Stage::Extract, "corpus", &src.id)
+                    .await?;
+            }
             // A stored image can always be read again — with a better model, or
             // after the endpoint that refused it is fixed. The reading and
             // everything derived from it are replaced wholesale, because a
             // chunk of the old reading has no span in the new one.
             Stage::Describe => {
-                if !self.store.has_attachment(&src.id).await? {
+                // Origin, not just "has an attachment": a PDF has one too, and
+                // sending one through here would wipe its extraction and hand
+                // the vision model a preview it does not have.
+                if src.origin != ORIGIN_IMAGE || !self.store.has_attachment(&src.id).await? {
                     return Err(Error::Validation(
                         "only a captured image can be re-read".into(),
                     ));
@@ -946,7 +1114,7 @@ impl Core {
                     ));
                 }
                 self.forget_derived_work(&src.id).await?;
-                self.store.clear_described_text(&src.id).await?;
+                self.store.clear_read_text(&src.id).await?;
                 let mut meta = src.metadata.clone();
                 if let Some(m) = meta.as_object_mut() {
                     m.remove("describe");
@@ -967,13 +1135,74 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE,
+        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
     };
     use crate::core::test_support::test_core;
     use crate::error::Error;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    fn a_pdf_fixture() -> Vec<u8> {
+        include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
+    }
+
+    fn a_pdf_capture() -> PdfCapture {
+        PdfCapture {
+            bytes: a_pdf_fixture(),
+            filename: Some("plan.pdf".into()),
+            title_hint: None,
+            note: Some("the quarterly plan".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pdf_is_stored_whole_and_queued_to_be_extracted() {
+        let core = test_core().await;
+        let out = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Extracting);
+        assert_eq!(src.origin, ORIGIN_PDF);
+        assert_eq!(
+            src.raw_text, "",
+            "the text arrives from the stage, not here"
+        );
+        assert_eq!(src.metadata["note"], "the quarterly plan");
+        assert_eq!(src.metadata["file"]["name"], "plan.pdf");
+        assert_eq!(src.metadata["file"]["mime"], "application/pdf");
+
+        let (mime, bytes) = core
+            .store
+            .attachment_original(&out.id)
+            .await
+            .unwrap()
+            .expect("the PDF itself is kept");
+        assert_eq!(mime, "application/pdf");
+        assert_eq!(bytes, a_pdf_fixture(), "stored byte for byte");
+
+        let job = core.store.claim_job().await.unwrap().expect("a job");
+        assert_eq!(job.stage, Stage::Extract);
+        assert_eq!(job.target_id, out.id);
+    }
+
+    #[tokio::test]
+    async fn the_same_pdf_twice_is_one_corpus() {
+        let core = test_core().await;
+        let first = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        let again = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+    }
+
+    #[tokio::test]
+    async fn the_pdf_door_is_open_without_any_model_configured() {
+        // Unlike the image door, which refuses without `[infer.vision]`:
+        // extraction is local, so nothing gates it.
+        let core = crate::core::test_support::test_core_without_vision().await;
+        assert!(core.ingest_pdf(a_pdf_capture()).await.is_ok());
+    }
 
     fn a_seeded_png(seed: u8) -> Vec<u8> {
         use image::{ImageBuffer, Rgb};
@@ -1183,6 +1412,32 @@ mod tests {
             core.reprocess(&src.id, Stage::Describe).await,
             Err(Error::Validation(_))
         ));
+    }
+
+    /// `describe` is guarded by origin, not by "has an attachment": a PDF has
+    /// one too, and letting it through would clear the extraction and every
+    /// artifact behind it before handing the vision model a preview a PDF is
+    /// stored without.
+    #[tokio::test]
+    async fn a_pdf_cannot_be_re_read_through_the_vision_stage() {
+        let core = test_core().await;
+        let out = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        core.store
+            .set_read_text(&out.id, "# Plan\n\nthe text docling found", vec![])
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            core.reprocess(&out.id, Stage::Describe).await,
+            Err(Error::Validation(_))
+        ));
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(
+            src.raw_text, "# Plan\n\nthe text docling found",
+            "the extraction survived the refusal"
+        );
+        assert_ne!(src.status, CorpusStatus::Describing);
     }
 
     #[tokio::test]
@@ -1580,8 +1835,8 @@ mod tests {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
-            "endpoint down",
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::failing("endpoint down"),
         ));
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
@@ -1664,6 +1919,8 @@ mod tests {
                     status: None,
                     last_verified_at: None,
                     superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
                 },
             }])
             .await
@@ -1767,6 +2024,8 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
+                origin_corpora: vec![],
+                provenance: None,
             },
         }
     }
@@ -2073,6 +2332,79 @@ mod tests {
         assert_eq!(
             m["file"],
             serde_json::json!({"name": "n.txt", "size": 5, "mime": "text/plain"})
+        );
+    }
+
+    #[tokio::test]
+    async fn undoing_a_promotion_restores_the_passages_deprecates_the_artifacts_and_resets_the_window()
+     {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[crate::store::segments::NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "l1\nl2",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 2,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "passage")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na(1, "artifact")])
+            .await
+            .unwrap();
+        core.supersede(&p[0].id, &a[0].id).await.unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, crate::store::segments::SegmentState::Done, None)
+            .await
+            .unwrap();
+
+        core.undo_promotion(&src.id, 0).await.unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&p[0].id)
+                .await
+                .unwrap()
+                .in_results()
+        );
+        assert_eq!(
+            core.store.get_artifact(&a[0].id).await.unwrap().status,
+            crate::store::artifacts::ArtifactStatus::Deprecated
+        );
+        assert_eq!(
+            core.store.segment_state(&src.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Verbatim)
         );
     }
 }

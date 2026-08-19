@@ -135,9 +135,10 @@ pub async fn sweep(core: &Core) -> Result<SweepReport> {
 /// One bounded call under the background lane. Any failure — endpoint down,
 /// unreadable reply — is `None`, and the caller falls back to terms.
 async fn name(core: &Core, questions: &[&str]) -> Option<String> {
+    // No model, no name: the caller falls back to the cluster's terms.
+    let namer = core.gap_namer.clone()?;
     let permit = core.gate.background().await;
-    let reply = core
-        .gap_namer
+    let reply = namer
         .complete(
             crate::infer::prompt::GAP_LABEL_SYSTEM,
             &crate::infer::prompt::gap_label_prompt(questions),
@@ -236,9 +237,9 @@ mod tests {
     #[tokio::test]
     async fn without_a_readable_model_a_cluster_is_named_by_its_terms_and_retried_later() {
         let mut core = test_core().await;
-        core.gap_namer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.gap_namer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("not json".into()),
-        });
+        }));
         nothing_here(&core, "mount an E01 image", vec![1.0]).await;
         nothing_here(&core, "E01 mount read only", vec![1.0]).await;
         let r = sweep(&core).await.unwrap();
@@ -247,9 +248,9 @@ mod tests {
         assert_eq!(rows[0].labelled_by, "terms");
         assert!(rows[0].label.contains("e01"), "{}", rows[0].label);
 
-        core.gap_namer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.gap_namer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"label":"Image mounting"}"#.into()),
-        });
+        }));
         assert_eq!(sweep(&core).await.unwrap().named, 1);
         assert_eq!(
             core.store.gap_rows(core.embedder.model()).await.unwrap().0[0].label,

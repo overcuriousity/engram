@@ -1,8 +1,9 @@
 //! The bytes a corpus was captured from, when it was not text.
 //!
-//! One row per image corpus today. The original is kept exactly as uploaded —
-//! that is the verbatim source, the way `raw_text` is for a paste — and the
-//! preview is derived once, for the model and the screen.
+//! One row per image or PDF corpus. The original is kept exactly as uploaded —
+//! that is the verbatim source, the way `raw_text` is for a paste. `preview` is
+//! the derived copy a photo is shown and read through; a PDF has none, because
+//! rendering its first page needs pdfium and that is the ML build's dependency.
 
 use super::{Store, now};
 use crate::error::Result;
@@ -35,7 +36,7 @@ pub struct NewAttachment<'a> {
 
 /// An attachment for a corpus that does not exist yet: `NewAttachment` minus
 /// the id, for the door that writes row and attachment in one transaction.
-pub struct NewImage<'a> {
+pub struct NewFile<'a> {
     pub kind: &'a str,
     pub mime: &'a str,
     pub filename: Option<&'a str>,
@@ -45,7 +46,7 @@ pub struct NewImage<'a> {
     pub height: Option<i64>,
 }
 
-impl<'a> NewImage<'a> {
+impl<'a> NewFile<'a> {
     pub fn for_corpus(&self, corpus_id: &'a str) -> NewAttachment<'a> {
         NewAttachment {
             corpus_id,
@@ -129,13 +130,20 @@ impl Store {
 
     /// The preview alone. Separate from `attachment_for_corpus` so serving a
     /// thumbnail does not read the original's megabytes off disk.
+    ///
+    /// An empty blob is no preview rather than a zero-byte JPEG — a PDF is
+    /// stored without one, and answering `Some` for it hands the caller a
+    /// broken image under an `image/jpeg` header instead of a plain no.
     pub async fn attachment_preview(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
         let row =
             sqlx::query("SELECT preview FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1")
                 .bind(corpus_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.map(|r| (PREVIEW_MIME.to_string(), r.get("preview"))))
+        Ok(row
+            .map(|r| r.get::<Vec<u8>, _>("preview"))
+            .filter(|p| !p.is_empty())
+            .map(|p| (PREVIEW_MIME.to_string(), p)))
     }
 
     pub async fn attachment_original(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
@@ -210,5 +218,33 @@ mod tests {
 
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.attachment_for_corpus(&src.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_attachment_stored_without_a_preview_reads_as_having_none() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "pdf", None).await.unwrap();
+        s.insert_attachment(&NewAttachment {
+            corpus_id: &src.id,
+            kind: "pdf",
+            mime: "application/pdf",
+            filename: Some("plan.pdf"),
+            bytes: b"%PDF-",
+            preview: &[],
+            width: None,
+            height: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(s.has_attachment(&src.id).await.unwrap());
+        assert!(
+            s.attachment_preview(&src.id).await.unwrap().is_none(),
+            "no preview is no preview, not a zero-byte JPEG"
+        );
+        assert_eq!(
+            s.attachment_original(&src.id).await.unwrap().unwrap(),
+            ("application/pdf".to_string(), b"%PDF-".to_vec())
+        );
     }
 }

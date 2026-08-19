@@ -106,12 +106,30 @@ impl VectorStore for MemoryVectors {
                 .superseded_by
                 .clone()
                 .or_else(|| p.payload.superseded_by.clone());
+            // Both carry `skip_serializing_if`, so Qdrant never receives them
+            // from a caller that left them empty and the stored values stand.
+            // Only `jobs::embed` knows either: every other caller — the tag and
+            // category edits above all — builds a payload with no corpora and
+            // no provenance, and copying that over the stored one would strip a
+            // synthesized artifact of the mark that earns it its badge and its
+            // stopping rule, on a tag edit, in this backend only.
+            let corpora = if payload.origin_corpora.is_empty() {
+                p.payload.origin_corpora.clone()
+            } else {
+                payload.origin_corpora.clone()
+            };
+            let provenance = payload
+                .provenance
+                .clone()
+                .or_else(|| p.payload.provenance.clone());
             p.payload = payload.clone();
             p.payload.last_seen_at = seen;
             p.payload.hit_count = hits;
             p.payload.status = status;
             p.payload.last_verified_at = verified;
             p.payload.superseded_by = superseded_by;
+            p.payload.origin_corpora = corpora;
+            p.payload.provenance = provenance;
         }
         Ok(())
     }
@@ -417,6 +435,8 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
+                origin_corpora: vec![],
+                provenance: None,
             },
         }
     }

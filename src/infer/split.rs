@@ -62,57 +62,104 @@ pub fn split_into_segments(
         .collect();
     let lines: Vec<(&str, i64)> = owned.iter().map(|(s, n)| (s.as_str(), *n)).collect();
     let mut windows: Vec<Window> = Vec::new();
-    let mut buf: Vec<&str> = Vec::new();
+    // Each buffered line with its document number, so a window can be cut
+    // *inside* the buffer — at the last boundary before the line that
+    // overflowed — and both halves still know where they came from.
+    let mut buf: Vec<(&str, i64)> = Vec::new();
     let mut buf_tokens = 0usize;
-    let mut start_line = 1i64;
-    // The line the buffer currently reaches, which is not always the line
-    // before the one being placed: cutting a long line puts several pieces on
-    // one number, so a window can begin and end on the same line.
-    let mut buf_end = 1i64;
     let mut last_heading: Option<String> = None;
     let mut carry: Option<String> = None;
 
     for (line, line_no) in lines.iter().copied() {
         let line_tokens = counter.count(line) + 1; // +1 for the newline
         let at_boundary = is_heading(line) || line.trim().is_empty();
-
-        // Flush when the line would overflow the window. Prefer to break at a
-        // heading or blank line; if the buffer has grown well past the budget
-        // with no boundary in sight, cut anyway rather than emit one huge window.
         let overflows = !buf.is_empty() && buf_tokens + line_tokens > segment_tokens;
         let blank = line.trim().is_empty();
 
-        if overflows && (at_boundary || buf_tokens >= segment_tokens) {
+        if overflows && at_boundary {
+            // Prefer to break at a heading or blank line. A blank line closes
+            // the window it follows rather than opening the next one with an
+            // empty first line; a heading opens the window it introduces.
             if blank {
-                // A blank line separates; it closes the window it follows
-                // rather than opening the next one with an empty first line.
-                buf.push(line);
-                flush(&mut windows, &mut buf, start_line, line_no, &carry);
-                start_line = line_no + 1;
+                buf.push((line, line_no));
+                flush_buf(&mut windows, &mut buf, &carry);
+                carry = last_heading.clone();
+                buf_tokens = 0;
             } else {
-                // A heading opens the window it introduces.
-                flush(&mut windows, &mut buf, start_line, buf_end, &carry);
-                start_line = line_no;
-                if is_heading(line) {
-                    last_heading = Some(line.to_string());
-                }
-                buf.push(line);
+                flush_buf(&mut windows, &mut buf, &carry);
+                last_heading = Some(line.to_string());
+                carry = last_heading.clone();
+                buf.push((line, line_no));
+                buf_tokens = line_tokens;
             }
-            buf_end = line_no;
-            buf_tokens = if blank { 0 } else { line_tokens };
-            carry = last_heading.clone();
             continue;
+        }
+
+        if overflows {
+            // The overflowing line is text, not a boundary. Cut at the last
+            // boundary already in the buffer, if there is one: the window
+            // before it respects the budget, and this line joins the one
+            // after. Without this a paragraph that overflows rode along until
+            // the next heading, and a 384-token passage came out at 500.
+            let cut = buf
+                .iter()
+                .enumerate()
+                .skip(1)
+                .rev()
+                .find_map(|(i, (l, _))| {
+                    if is_heading(l) {
+                        Some(i) // the heading opens the next window
+                    } else if l.trim().is_empty() && i + 1 < buf.len() {
+                        Some(i + 1) // the blank line closes this one
+                    } else {
+                        None
+                    }
+                });
+            if let Some(i) = cut {
+                let rest: Vec<(&str, i64)> = buf.split_off(i);
+                // The heading the kept half continues under: the last one the
+                // flushed half held, else whatever was carried before it.
+                let flushed_heading = buf
+                    .iter()
+                    .rev()
+                    .find(|(l, _)| is_heading(l))
+                    .map(|(l, _)| l.to_string());
+                flush_buf(&mut windows, &mut buf, &carry);
+                if let Some(h) = flushed_heading {
+                    carry = Some(h);
+                } else if carry.is_none() {
+                    carry = last_heading.clone();
+                }
+                buf = rest;
+                buf_tokens = buf.iter().map(|(l, _)| counter.count(l) + 1).sum();
+            } else if buf_tokens >= segment_tokens {
+                // No boundary anywhere in a buffer already past the budget:
+                // cut here rather than emit one huge window.
+                flush_buf(&mut windows, &mut buf, &carry);
+                carry = last_heading.clone();
+                buf_tokens = 0;
+            }
         }
 
         if is_heading(line) {
             last_heading = Some(line.to_string());
         }
-        buf.push(line);
-        buf_end = line_no;
+        buf.push((line, line_no));
         buf_tokens += line_tokens;
     }
-    flush(&mut windows, &mut buf, start_line, buf_end, &carry);
+    flush_buf(&mut windows, &mut buf, &carry);
     windows
+}
+
+fn flush_buf(windows: &mut Vec<Window>, buf: &mut Vec<(&str, i64)>, carry: &Option<String>) {
+    if buf.is_empty() {
+        return;
+    }
+    let start = buf[0].1;
+    let end = buf[buf.len() - 1].1;
+    let mut lines: Vec<&str> = buf.iter().map(|(l, _)| *l).collect();
+    flush(windows, &mut lines, start, end, carry);
+    buf.clear();
 }
 
 fn flush(
@@ -348,5 +395,36 @@ mod tests {
     #[test]
     fn empty_input_produces_nothing() {
         assert!(split_into_segments("   \n  ", &TokenCounter, 100).is_empty());
+    }
+
+    #[test]
+    fn a_paragraph_that_overflows_is_cut_at_the_boundary_before_it() {
+        // Three sections of ~60 tokens each, budget 100. The third body line
+        // overflows; the cut must fall at "## C" (before it), not at the next
+        // heading after it — so no window exceeds the budget while a boundary
+        // exists to cut at.
+        let body = "word ".repeat(40); // ~57 tokens
+        let text = format!("## A\n\n{body}\n\n## B\n\n{body}\n\n## C\n\n{body}\n\n## D\n\n{body}");
+        let ws = split_into_segments(&text, &TokenCounter, 100);
+        assert!(ws.len() >= 3, "{}", ws.len());
+        for w in &ws {
+            let own: String = w
+                .text
+                .lines()
+                .skip(w.carry_lines as usize)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                TokenCounter.count(&own) <= 100,
+                "window over budget ({} tokens): {:?}",
+                TokenCounter.count(&own),
+                own
+            );
+        }
+        // Every heading opens its own window.
+        assert!(
+            ws.iter()
+                .all(|w| w.text.lines().any(|l| l.starts_with("## ")))
+        );
     }
 }

@@ -58,6 +58,16 @@ html2md = "0.2.15"
 # Decoding fetched pages that are not UTF-8. Already in the tree by way of
 # the HTML crates; named here because this uses it directly.
 encoding_rs = "0.8.35"
+# PDF → markdown. The layout work is docling's; the alternative is lopdf plus
+# hand-written column and heading heuristics, which is marker's job description.
+# Pinned exactly: 1.x is days old. The fallback if it becomes unacceptable is
+# pdf-extract, which costs the splitter its heading boundaries.
+#
+# `pdf-text` is the pure-Rust rung: no ONNX runtime, no native libraries, no
+# models to fetch. `--features pdf-ml` swaps in the layout and table models for
+# anyone who wants them; nothing in this tree assumes they are there.
+docling = { version = "=1.14.0", default-features = false, features = ["pdf-text"] }
+
 url = "2"
 schemars = "1.2.2"
 # Decoding, orientation and the downscaled preview of a captured image. Only
@@ -81,3 +91,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 # runtime one: the zip is a build artifact, not something the server assembles
 # per request.
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[features]
+default = []
+pdf-ml = ["docling/pdf"]

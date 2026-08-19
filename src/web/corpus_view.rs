@@ -1,8 +1,10 @@
 //! How the right-hand pane gets at the text a chunk claims to come from.
 //!
 //! A text source is answered by its lines; an image source by the model's
-//! reading of the picture, labelled as such. A PDF source would be one more
-//! arm of `slice`, its label reading `page 42`.
+//! reading of the picture, labelled as such; a PDF source by docling's
+//! extraction of it, labelled as such. All three count lines. `page 42` would
+//! be a nicer label for a PDF and a second coordinate system beside every
+//! stored span, and the spec rejected it on those terms.
 
 use crate::store::artifacts::CorpusSpan;
 use crate::store::corpora::Corpus;
@@ -23,17 +25,23 @@ pub struct CorpusLine {
 #[derive(Default)]
 pub struct CorpusSlice {
     pub lines: Vec<CorpusLine>,
-    /// What to call this range in the UI: `lines 118–141`, later `page 42`.
+    /// What to call this range in the UI: `lines 118–141`, or
+    /// `extraction lines 118–141` where the lines are not the source's own.
     pub label: String,
 }
 
 /// The lines of `source` around `span`, labelled for the pane. Without a span
 /// the opening of the source is shown as context.
 pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
-    // An image corpus's lines are the model's reading of the picture, and the
-    // label says so: a span into a transcription is a claim about what the
-    // model wrote, not about what the photo shows.
-    let transcript = source.origin == crate::core::ingest::ORIGIN_IMAGE;
+    // An image corpus's lines are the model's reading of the picture, and a
+    // PDF's are docling's extraction of it. The label says so in both cases: a
+    // span into either is a claim about what was written down, not about what
+    // the source showed.
+    let written_down = match source.origin.as_str() {
+        crate::core::ingest::ORIGIN_IMAGE => Some("transcription"),
+        crate::core::ingest::ORIGIN_PDF => Some("extraction"),
+        _ => None,
+    };
     let all: Vec<&str> = source.raw_text.lines().collect();
     let total = all.len() as i64;
 
@@ -49,12 +57,7 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
                     in_span: false,
                 })
                 .collect(),
-            label: if transcript {
-                "transcription"
-            } else {
-                "corpus"
-            }
-            .into(),
+            label: written_down.unwrap_or("corpus").into(),
         };
     };
 
@@ -78,13 +81,13 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
         label: if span.start_line == span.end_line {
             format!(
                 "{}line {}",
-                if transcript { "transcription " } else { "" },
+                written_down.map(|w| format!("{w} ")).unwrap_or_default(),
                 span.start_line
             )
         } else {
             format!(
                 "{}lines {}–{}",
-                if transcript { "transcription " } else { "" },
+                written_down.map(|w| format!("{w} ")).unwrap_or_default(),
                 span.start_line,
                 span.end_line
             )
@@ -367,15 +370,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pdf_corpus_labels_its_lines_as_an_extraction() {
+        // The lines belong to docling, not to the PDF's layout, and a span
+        // into them is a claim about what was extracted. Same move as the
+        // image arm's `transcription`, same reason.
+        let s = crate::store::Store::memory().await.unwrap();
+        let src = s
+            .insert_attached_corpus(
+                "h",
+                crate::core::ingest::ORIGIN_PDF,
+                None,
+                &serde_json::json!({}),
+                crate::store::corpora::Reading::EXTRACTION,
+                &crate::store::attachments::NewFile {
+                    kind: "pdf",
+                    mime: "application/pdf",
+                    filename: None,
+                    bytes: b"%PDF-",
+                    preview: b"",
+                    width: None,
+                    height: None,
+                },
+            )
+            .await
+            .unwrap()
+            .into_corpus();
+        s.set_read_text(&src.id, "a\nb\nc", vec![]).await.unwrap();
+        let src = s.get_corpus(&src.id).await.unwrap();
+        assert_eq!(slice(&src, None, 0).label, "extraction");
+        assert_eq!(
+            slice(
+                &src,
+                Some(&CorpusSpan {
+                    start_line: 2,
+                    end_line: 3
+                }),
+                0
+            )
+            .label,
+            "extraction lines 2–3"
+        );
+    }
+
+    #[tokio::test]
     async fn an_image_corpus_labels_its_lines_as_transcription() {
         let s = crate::store::Store::memory().await.unwrap();
         let src = s
-            .insert_image_corpus(
+            .insert_attached_corpus(
                 "h",
                 "image",
                 None,
                 &serde_json::json!({}),
-                &crate::store::attachments::NewImage {
+                crate::store::corpora::Reading::VISION,
+                &crate::store::attachments::NewFile {
                     kind: "image",
                     mime: "image/png",
                     filename: None,
@@ -388,9 +435,7 @@ mod tests {
             .await
             .unwrap()
             .into_corpus();
-        s.set_described_text(&src.id, "a\nb\nc", vec![])
-            .await
-            .unwrap();
+        s.set_read_text(&src.id, "a\nb\nc", vec![]).await.unwrap();
         let src = s.get_corpus(&src.id).await.unwrap();
         assert_eq!(
             slice(

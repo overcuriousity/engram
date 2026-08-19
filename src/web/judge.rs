@@ -61,6 +61,8 @@ struct JudgeTemplate {
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     stats: Stats,
     recall: String,
     mrr: String,
@@ -217,6 +219,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.feedback.enabled.then_some(stats.pending),
+        ask_enabled: crate::web::state::ask_enabled(&st),
         recall: format!("{:.2}", stats.recall_at_10),
         mrr: format!("{:.2}", stats.mrr),
         target: FIRST_SWEEP_AT,
@@ -605,6 +608,7 @@ mod tests {
                                 shown: i < 10,
                             })
                             .collect(),
+                        answered: false,
                     },
                     0,
                 )
@@ -1009,6 +1013,7 @@ mod tests {
                     query_vec: vec![0.1, 0.2],
                     embed_model: "fake".into(),
                     candidates: vec![],
+                    answered: false,
                 },
                 0,
             )

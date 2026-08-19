@@ -107,6 +107,16 @@ impl Core {
             if req.q.trim().is_empty() {
                 Err(Error::Validation("question is empty".into()))?;
             }
+            // No ask model: the door is not offered anywhere, and a caller that
+            // found the route anyway is told why rather than served an answer
+            // from nothing.
+            if core.completer.is_none() {
+                Err(Error::Validation("[infer.ask] is not configured".into()))?;
+            }
+            let completer = core
+                .completer
+                .clone()
+                .expect("checked just above");
 
             // Held for the whole answer rather than around the completion, because
             // a search embeds the query and that is a model call too. A gap between
@@ -161,6 +171,7 @@ impl Core {
 
             // Highest score first, so what gets cut is what mattered least.
             let mut kept = pack_by_budget(&blocks, &core.counter, budget);
+            core.stitch_passages(&hits[..kept], &mut blocks[..kept]).await;
             let mut ranked = first.ranked;
             let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
             if dropped > 0 {
@@ -224,9 +235,14 @@ impl Core {
                         // appended to what round one packed: the second round's
                         // excerpts have to fit the same window as the first, and
                         // the only honest way to know what fits is to pack it.
-                        let merged_blocks = core.excerpts(&merged.hits).await;
+                        let mut merged_blocks = core.excerpts(&merged.hits).await;
                         let merged_kept =
                             pack_by_budget(&merged_blocks, &core.counter, budget);
+                        core.stitch_passages(
+                            &merged.hits[..merged_kept],
+                            &mut merged_blocks[..merged_kept],
+                        )
+                        .await;
 
                         // A re-pack that fits nothing leaves round one standing.
                         // The prompt cannot be empty because the follow-up found
@@ -303,9 +319,9 @@ impl Core {
             // being an estimate.
             let spent = core.counter.count(ASK_SYSTEM) + core.counter.count(&user);
             let ceiling = crate::infer::budget::ceiling_for_prompt(
-                core.completer.context_tokens(),
+                completer.context_tokens(),
                 spent,
-                core.completer.max_output_tokens(),
+                completer.max_output_tokens(),
             );
 
             // The excerpts go out before the first token, so the rail beside the
@@ -321,7 +337,6 @@ impl Core {
             // longer than the channel — which is every answer worth reading — and
             // would still pass any test whose fake reply fits in 64 deltas.
             let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::infer::Delta>(64);
-            let completer = core.completer.clone();
             let prompt = user.clone();
             let held = std::sync::Arc::clone(&lane);
             let call = tokio::spawn(async move {
@@ -490,10 +505,134 @@ impl Core {
             .collect()
     }
 
+    /// Put consecutive passages back together as the text they are.
+    ///
+    /// Passages are verbatim slices whose spans tile a segment; two that abut
+    /// are literally continuous text, and showing them as two excerpts repeats
+    /// the carried heading, hides the continuity from the model, and cuts the
+    /// sentence running across the boundary. Here — after packing, over the
+    /// kept prefix only — runs of abutting passages from one `(corpus,
+    /// segment)` are merged into the block of the run's *first* member, in
+    /// document order, and every other member keeps its own numbered block
+    /// carrying a pointer to it.
+    ///
+    /// The pointer, rather than an emptied block, is what keeps a citation
+    /// honest. The rail beside the answer links `[n]` to the artifact at
+    /// position `n` of `hits`, so a run rendered under one number offers the
+    /// model exactly one number for text drawn from three artifacts, and a
+    /// claim taken from the second passage of a run is then linked to a page
+    /// that does not contain it. With a block each, whichever number the model
+    /// cites resolves to a passage of the run it actually read.
+    ///
+    /// The text goes to the run's first member and not to its best-ranked one
+    /// for the same reason: the block's heading is the heading the text opens
+    /// under, the rail row for that number is the artifact where the text
+    /// begins, and the reader who follows the link lands where they were
+    /// reading. Numbering the block after the best-ranked member instead put a
+    /// heading from one artifact over a rail row naming another.
+    ///
+    /// A stitched excerpt is a presentation, not a new unit: `hits` is
+    /// untouched, every constituent stays a citation, and the literal check
+    /// reads the same text the model did. Passages only — two adjacent
+    /// *artifacts* are two rewrites, not continuous text.
+    async fn stitch_passages(&self, hits: &[SearchResult], blocks: &mut [String]) {
+        use crate::store::artifacts::{CorpusSpan, Provenance};
+        let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
+        let rows = match self.store.artifacts_by_ids(&ids).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "ask: could not read spans; excerpts stay unstitched");
+                return;
+            }
+        };
+        let mut pos: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, h) in hits.iter().enumerate() {
+            pos.insert(h.artifact_id.as_str(), i);
+        }
+        // (corpus, segment, span, position in hits), for passages with a span.
+        let mut members: Vec<(String, i64, CorpusSpan, usize)> = rows
+            .iter()
+            .filter(|c| c.provenance == Provenance::Passage)
+            .filter_map(|c| {
+                Some((
+                    c.corpus_id.clone()?,
+                    c.segment_idx?,
+                    c.corpus_span.clone()?,
+                    *pos.get(c.id.as_str())?,
+                ))
+            })
+            .collect();
+        members.sort_by(|a, b| {
+            (a.0.as_str(), a.1, a.2.start_line).cmp(&(b.0.as_str(), b.1, b.2.start_line))
+        });
+
+        let mut i = 0;
+        while i < members.len() {
+            let mut run = vec![i];
+            while i + 1 < members.len()
+                && members[i + 1].0 == members[i].0
+                && members[i + 1].1 == members[i].1
+                && members[i + 1].2.start_line == members[i].2.end_line + 1
+            {
+                i += 1;
+                run.push(i);
+            }
+            i += 1;
+            if run.len() < 2 {
+                continue;
+            }
+            // `run` is in document order by construction — that is what it
+            // was built by — so its first member is where the text begins, and
+            // the heading the reader is under is that member's.
+            let head_pos = members[run[0]].3;
+            let head = hits[head_pos].title.as_deref().unwrap_or_default();
+            let text: Vec<&str> = run
+                .iter()
+                .map(|&m| hits[members[m].3].text.as_str())
+                .collect();
+            // The caveats of everything the block now contains, not of the
+            // anchor alone. A stitched excerpt is one presentation of several
+            // passages, and the run's other members are no longer rendered
+            // anywhere — so a warning carried by the third passage in a run
+            // would leave the prompt entirely if only the anchor's came along.
+            // The caveats are the safety margin on an excerpt: dropping them
+            // silently is the one direction this must not fail in.
+            let mut caveats: Vec<String> = Vec::new();
+            for &m in &run {
+                let id = &hits[members[m].3].artifact_id;
+                if let Some(c) = rows.iter().find(|r| &r.id == id) {
+                    for cv in &c.caveats {
+                        if !caveats.contains(cv) {
+                            caveats.push(cv.clone());
+                        }
+                    }
+                }
+            }
+            blocks[head_pos] =
+                crate::infer::prompt::ask_excerpt(head_pos + 1, head, &text.join("\n"), &caveats);
+            // Every other member keeps its slot and points at the block its
+            // text went into. Cheap — one line each — and it is what lets the
+            // model cite the passage it drew on rather than the one that
+            // happened to rank highest.
+            for &m in &run {
+                let p = members[m].3;
+                if p != head_pos {
+                    blocks[p] = crate::infer::prompt::ask_continues(p + 1, head_pos + 1);
+                }
+            }
+        }
+    }
+
     /// How many tokens of excerpt one answer may be built from: the rule
     /// `excerpt_budget` states, for the answer model under the ask prompt.
     fn excerpt_budget(&self, question: &str) -> usize {
-        excerpt_budget(&*self.completer, &self.counter, ASK_SYSTEM, question)
+        // Only reached from `ask_events`, which returned before here without a
+        // completer; a caller that gets past that has one.
+        let completer = self
+            .completer
+            .as_deref()
+            .expect("ask_events refuses before budgeting without [infer.ask]");
+        excerpt_budget(completer, &self.counter, ASK_SYSTEM, question)
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent
@@ -622,6 +761,9 @@ impl Core {
                 status: Some(c.status),
                 superseded_by: c.superseded_by,
                 last_verified_at: c.last_verified_at,
+                model_written: c.provenance.is_model_written(),
+                synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
+                origin_count: 0,
                 // Weakness is read from a similarity to the query, and there is
                 // no similarity here to read. It has to be demonstrated, never
                 // assumed — in either direction.
@@ -669,14 +811,23 @@ impl Core {
             abstained: response.abstained,
             dropped: response.dropped,
             truncated: response.truncated,
-            citations: response
-                .citations
-                .iter()
-                .map(|c| NewAskCitation {
-                    artifact_id: c.artifact_id.clone(),
-                    score: c.score,
-                })
-                .collect(),
+            // What the answer referenced, not what it was shown. The sweep
+            // reads these as engagement, and every excerpt that fit the window
+            // would otherwise count as one — enough, on its own, to arm a
+            // generation off a question the model declined to answer.
+            citations: {
+                let used = check::referenced(&response.answer, response.citations.len());
+                response
+                    .citations
+                    .iter()
+                    .zip(used)
+                    .map(|(c, used)| NewAskCitation {
+                        artifact_id: c.artifact_id.clone(),
+                        score: c.score,
+                        used,
+                    })
+                    .collect()
+            },
         };
         match self.store.record_ask(ask).await {
             Ok(id) => response.event_id = Some(id),
@@ -777,7 +928,7 @@ mod tests {
             gate: std::sync::Arc::clone(&core.gate),
             background_was_held: std::sync::atomic::AtomicBool::new(false),
         });
-        core.completer = probe.clone();
+        core.completer = Some(probe.clone());
         seed(&core, 3, 4).await;
 
         core.ask(
@@ -901,7 +1052,7 @@ mod tests {
     async fn follow_up_off_makes_no_extra_call() {
         let mut core = test_core().await;
         let model = Counting::saying("fake answer");
-        core.completer = model.clone();
+        core.completer = Some(model.clone());
         seed(&core, 3, 4).await;
         assert!(core.follow_up.is_none(), "the default wired a follow-up");
 
@@ -988,7 +1139,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::infer::Embedder for Keyed {
-        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             Ok(texts
                 .iter()
                 .map(|t| {
@@ -1001,6 +1152,11 @@ mod tests {
                     v
                 })
                 .collect())
+        }
+        fn templates(&self) -> &crate::config::EmbedTemplates {
+            static LEGACY: std::sync::LazyLock<crate::config::EmbedTemplates> =
+                std::sync::LazyLock::new(crate::config::EmbedTemplates::legacy);
+            &LEGACY
         }
         fn dim(&self) -> usize {
             crate::core::test_support::TEST_DIM
@@ -1186,7 +1342,9 @@ mod tests {
         // no answer. Caveats are not in the vector payload, so this asserts the
         // store lookup that puts them back.
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter { reply: None });
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: None,
+        }));
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
             .store
@@ -1296,7 +1454,7 @@ mod tests {
         for (context, max_output) in [(4096, 3072), (8192, 1024), (4096, 4096), (32768, 2048)] {
             let completer = std::sync::Arc::new(Ceilinged::new(context, max_output));
             let mut core = test_core().await;
-            core.completer = completer.clone();
+            core.completer = Some(completer.clone());
             // Excerpts sized against the window, so packing actually fills it
             // in every case — a prompt that leaves the window half empty tests
             // nothing about what happens when it does not.
@@ -1344,7 +1502,7 @@ mod tests {
     #[tokio::test]
     async fn a_ceiling_as_wide_as_its_window_still_answers() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(Ceilinged::new(4096, 4096));
+        core.completer = Some(std::sync::Arc::new(Ceilinged::new(4096, 4096)));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
@@ -1385,7 +1543,7 @@ mod tests {
         }
 
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(Truncating);
+        core.completer = Some(std::sync::Arc::new(Truncating));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
@@ -1815,7 +1973,7 @@ mod tests {
     #[tokio::test]
     async fn an_answer_that_opens_with_the_sentinel_is_flagged_abstained() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             // Carries a literal no excerpt does, so the abstention branch of
             // the check is what keeps `unsupported` empty below rather than the
             // reply happening to have nothing in it.
@@ -1823,7 +1981,7 @@ mod tests {
                 "Not in the knowledge base. The excerpts cover `chunk 0` only, not `wipefs --all /dev/sdX`."
                     .into(),
             ),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(out.abstained);
@@ -1841,9 +1999,9 @@ mod tests {
     #[tokio::test]
     async fn an_answer_that_invents_a_command_reports_it_as_unsupported() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("Run `wipefs --all /dev/sdX` first, then read chunk 0.".into()),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert_eq!(
@@ -1858,9 +2016,9 @@ mod tests {
         // The common case, and the one that must not badge every answer: the
         // seeded artifacts read "chunk 0 filler filler …".
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("The excerpt says `chunk 0 filler` and nothing else.".into()),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(out.unsupported.is_empty(), "{:?}", out.unsupported);
@@ -1917,7 +2075,7 @@ mod tests {
         let mut core = test_core().await;
         // Several deltas rather than one, so "before the first token" is a
         // claim about ordering and not about there being a single token.
-        core.completer = std::sync::Arc::new(Chatty { parts: 3 });
+        core.completer = Some(std::sync::Arc::new(Chatty { parts: 3 }));
         seed(&core, 3, 4).await;
 
         let mut order: Vec<&'static str> = vec![];
@@ -1993,7 +2151,7 @@ mod tests {
     async fn an_answer_longer_than_the_sink_can_hold_still_finishes() {
         let mut core = test_core().await;
         const PARTS: usize = 500;
-        core.completer = std::sync::Arc::new(Chatty { parts: PARTS });
+        core.completer = Some(std::sync::Arc::new(Chatty { parts: PARTS }));
         seed(&core, 3, 4).await;
 
         let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2065,9 +2223,9 @@ mod tests {
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut core = test_core().await;
         core.feedback.enabled = true;
-        core.completer = std::sync::Arc::new(Stalling {
+        core.completer = Some(std::sync::Arc::new(Stalling {
             release: release.clone(),
-        });
+        }));
         seed(&core, 3, 4).await;
 
         // Read as far as the first token, so the call is provably in flight
@@ -2148,5 +2306,181 @@ mod tests {
         fn max_output_tokens(&self) -> usize {
             1024
         }
+    }
+
+    #[tokio::test]
+    async fn consecutive_passages_are_stitched_into_one_excerpt_and_every_id_is_cited() {
+        let mut core = test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Off;
+        // One corpus, one segment, three abutting passages, all hits.
+        let src = core
+            .store
+            .insert_corpus("l1\nl2\nl3", "web", None)
+            .await
+            .unwrap();
+        let mk = |i: i64, text: &str, from: i64, to: i64| NewArtifact {
+            ordinal: i,
+            text: text.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: from,
+                end_line: to,
+            }),
+            title: Some("Recovery".into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let made = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    mk(0, "first part", 1, 1),
+                    mk(1, "second part", 2, 2),
+                    mk(2, "third part", 3, 3),
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        for c in &made {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        // A completer that keeps its prompts, so the test can read what the
+        // model was shown.
+        let probe = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            "See [1].".into(),
+        ]));
+        core.completer = Some(probe.clone());
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "Recovery\nfirst part".into(),
+                    limit: Some(8),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let prompt = probe.prompts().pop().expect("the model was called");
+        // One excerpt carries the stitched text in document order, once.
+        assert!(
+            prompt.contains("first part\nsecond part\nthird part"),
+            "{prompt}"
+        );
+        assert_eq!(
+            prompt.matches("Recovery").count(),
+            2,
+            "heading once in the excerpt, once in the question: {prompt}"
+        );
+        // Every constituent is still a citation.
+        let cited: std::collections::HashSet<String> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.clone())
+            .collect();
+        for c in &made {
+            assert!(cited.contains(&c.id), "{} missing from citations", c.text);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stitched_run_is_numbered_and_headed_by_where_it_starts() {
+        // The run's text, its heading, and the number the rail resolves to an
+        // artifact all have to name the same passage: the one the text opens
+        // with. Numbering the block after whichever member ranked highest put
+        // one artifact's heading over another artifact's rail row, and linked
+        // a claim to a page that does not hold the words.
+        //
+        // `stitch_passages` directly rather than through `ask`: what this is
+        // about is a run whose best hit is not its first line, and asking the
+        // retrieval to produce that ordering is asking it for something it does
+        // not promise. Handed in, it is the case every time.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        let mk = |i: i64, text: &str, title: &str, line: i64| NewArtifact {
+            ordinal: i,
+            text: text.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: line,
+                end_line: line,
+            }),
+            title: Some(title.into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let made = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    mk(0, "the tail of the section above", "Recovery", 1),
+                    mk(1, "rotate the offsite copy weekly", "Backups", 2),
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+
+        // The second passage ranked first: it is the anchor, and it keeps the
+        // block's number — but not the heading, which belongs to line 1.
+        let hit =
+            |c: &crate::store::artifacts::Chunk, score: f32| crate::core::search::SearchResult {
+                artifact_id: c.id.clone(),
+                corpus_id: c.corpus_id.clone().unwrap_or_default(),
+                title: c.title.clone(),
+                text: c.text.clone(),
+                category: None,
+                tags: vec![],
+                score,
+                status: None,
+                superseded_by: None,
+                last_verified_at: None,
+                weak: false,
+                primed: false,
+                past_cliff: false,
+                via: None,
+                reason: None,
+                model_written: false,
+                synthesized: false,
+                origin_count: 0,
+            };
+        let hits = vec![hit(&made[1], 0.9), hit(&made[0], 0.5)];
+        let mut blocks = vec![
+            crate::infer::prompt::ask_excerpt(1, "Backups", &made[1].text, &[]),
+            crate::infer::prompt::ask_excerpt(2, "Recovery", &made[0].text, &[]),
+        ];
+        core.stitch_passages(&hits, &mut blocks).await;
+
+        // The text goes under the number of the passage it starts with —
+        // `made[0]`, which retrieval placed second — heading and all.
+        assert!(
+            blocks[1].contains("the tail of the section above\nrotate the offsite copy weekly"),
+            "stitched in document order: {}",
+            blocks[1]
+        );
+        assert!(
+            blocks[1].starts_with("[2] Recovery\n"),
+            "the block is numbered and headed by where the text begins: {}",
+            blocks[1]
+        );
+        // And the other member keeps its slot, pointing at it. A claim drawn
+        // from `made[1]` can be cited as [1] and still resolve to `made[1]`.
+        assert_eq!(
+            blocks[0], "[1] (continues [2])",
+            "every constituent keeps a citable number: {}",
+            blocks[0]
+        );
     }
 }

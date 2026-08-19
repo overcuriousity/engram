@@ -68,25 +68,49 @@ impl ArtifactStatus {
 /// corpus lines for a span it does not have — so both branch on this rather
 /// than on `corpus_id.is_none()`. A null says a field is absent; this says what
 /// the row *is*, which is what a reader needs in order to know why.
+///
+/// `Passage` text is a verbatim slice of a segment, sized to the embedder —
+/// the retrieval unit at `synthesis = "off"` and `"earned"`; it has a corpus
+/// and a span like captured text, and no model ever touched it. `Synthesized`
+/// text was written from a pursuit; like a merge it has no corpus of its own
+/// and names its sources through `artifact_sources`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
+    Passage,
     Captured,
     Merged,
+    Synthesized,
 }
 
 impl Provenance {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Provenance::Passage => "passage",
             Provenance::Captured => "captured",
             Provenance::Merged => "merged",
+            Provenance::Synthesized => "synthesized",
         }
     }
     pub fn parse(s: &str) -> Provenance {
         match s {
+            "passage" => Provenance::Passage,
             "merged" => Provenance::Merged,
+            "synthesized" => Provenance::Synthesized,
             _ => Provenance::Captured,
         }
+    }
+    /// A model wrote this text. Such a row is never its own root: handing it
+    /// back as one is how a paraphrase of a paraphrase reaches a prompt as an
+    /// original. The test is "not source text" rather than "is merged", so the
+    /// next value added defaults to safe rather than to wrong.
+    pub fn is_model_written(&self) -> bool {
+        matches!(self, Provenance::Merged | Provenance::Synthesized)
+    }
+    /// The text is the document's own, verbatim (`Passage`) or as the one
+    /// synthesis rewrite of it (`Captured` — its own root by convention).
+    pub fn is_source_text(&self) -> bool {
+        !self.is_model_written()
     }
 }
 
@@ -142,6 +166,9 @@ pub struct Chunk {
     /// `created_at` at insert; this, not `created_at`, is what search ranking
     /// decays against.
     pub last_verified_at: Option<i64>,
+    /// For a synthesized artifact: the questions it was written for. Empty
+    /// everywhere else.
+    pub cues: Vec<String>,
 }
 
 impl Chunk {
@@ -168,6 +195,19 @@ pub struct NewMerged {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub caveats: Vec<String>,
+}
+
+/// An artifact written from a pursuit: what was asked, and what was engaged
+/// with. Inserted through `insert_synthesized_artifact`.
+#[derive(Debug, Clone)]
+pub struct NewSynthesized {
+    pub text: String,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub caveats: Vec<String>,
+    /// The pursuit's queries: why this was written, shown on its page.
+    pub cues: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +253,12 @@ pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .unwrap_or_default(),
         status: ArtifactStatus::parse(r.get::<String, _>("status").as_str()),
         last_verified_at: r.get("last_verified_at"),
+        cues: r
+            .try_get::<Option<String>, _>("cues")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -273,6 +319,7 @@ impl Store {
             caveats: new.caveats.clone(),
             status: ArtifactStatus::Active,
             last_verified_at: Some(created_at),
+            cues: vec![],
         };
         sqlx::query(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
@@ -314,10 +361,112 @@ impl Store {
         Ok(c)
     }
 
+    /// Write an artifact generated from a pursuit. Like a merge it has no
+    /// corpus of its own and names its sources through `artifact_sources`;
+    /// unlike a merge it supersedes nothing — its sources stay active and
+    /// keep ranking. `root_id` resolves through `roots_of`, so a generation
+    /// written from another generation still names source text, and `via_id`
+    /// keeps the chain reconstructible at any depth.
+    pub async fn insert_synthesized_artifact(
+        &self,
+        new: &NewSynthesized,
+        sources: &[String],
+    ) -> Result<Chunk> {
+        let resolved = self.roots_of(sources).await?;
+        let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
+        let mut tx = self.pool.begin().await?;
+        let created_at = now();
+        let c = Chunk {
+            id: new_id(),
+            corpus_id: None,
+            provenance: Provenance::Synthesized,
+            source_count: root_ids.len() as i64,
+            ordinal: 0,
+            text: new.text.clone(),
+            corpus_span: None,
+            title: new.title.clone(),
+            category: new.category.clone(),
+            tags: new.tags.clone(),
+            embed_state: EmbedState::Pending,
+            embed_model: None,
+            created_at,
+            embed_rev: 0,
+            segment_idx: None,
+            flags: vec![],
+            flag_detail: None,
+            superseded_by: None,
+            caveats: new.caveats.clone(),
+            status: ArtifactStatus::Active,
+            last_verified_at: Some(created_at),
+            cues: new.cues.clone(),
+        };
+        sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
+             VALUES (?, NULL, 'synthesized', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
+        )
+        .bind(&c.id)
+        .bind(c.source_count)
+        .bind(&c.text)
+        .bind(&c.title)
+        .bind(&c.category)
+        .bind(serde_json::to_string(&c.tags).unwrap())
+        .bind(c.embed_state.as_str())
+        .bind(c.created_at)
+        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
+        .bind(c.status.as_str())
+        .bind(c.last_verified_at)
+        .bind(c.created_at)
+        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
+        .execute(&mut *tx)
+        .await?;
+        for (via, roots) in &resolved {
+            for root in roots {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(&c.id)
+                .bind(root)
+                .bind(via)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(c)
+    }
+
+    /// Generated artifacts still in results, newest first. What Ops lists.
+    pub async fn synthesized_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
     pub async fn insert_artifacts(
         &self,
         corpus_id: &str,
         chunks: &[NewArtifact],
+    ) -> Result<Vec<Chunk>> {
+        self.insert_artifacts_with_provenance(corpus_id, chunks, Provenance::Captured)
+            .await
+    }
+
+    /// `insert_artifacts`, saying what kind of row is being written. Capture at
+    /// `off`/`earned` writes passages through this; everything else keeps the
+    /// captured default.
+    pub async fn insert_artifacts_with_provenance(
+        &self,
+        corpus_id: &str,
+        chunks: &[NewArtifact],
+        provenance: Provenance,
     ) -> Result<Vec<Chunk>> {
         let mut tx = self.pool.begin().await?;
         let mut out = Vec::with_capacity(chunks.len());
@@ -326,7 +475,7 @@ impl Store {
             let c = Chunk {
                 id: new_id(),
                 corpus_id: Some(corpus_id.to_string()),
-                provenance: Provenance::Captured,
+                provenance,
                 source_count: 0,
                 ordinal: nc.ordinal,
                 text: nc.text.clone(),
@@ -345,13 +494,15 @@ impl Store {
                 caveats: nc.caveats.clone(),
                 status: ArtifactStatus::Active,
                 last_verified_at: Some(created_at),
+                cues: vec![],
             };
             sqlx::query(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
-                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
+            .bind(provenance.as_str())
             .bind(c.ordinal)
             .bind(&c.text)
             .bind(c.corpus_span.as_ref().map(|s| serde_json::to_string(s).unwrap()))
@@ -380,6 +531,67 @@ impl Store {
             .await?
             .ok_or(Error::NotFound)?;
         Ok(row_to_artifact(&row))
+    }
+
+    /// Every row a window owns, whatever its status, in ordinal order. The
+    /// promotion path reads this to see what it is superseding and, on a
+    /// retry, what it already wrote.
+    pub async fn artifacts_for_segment(&self, corpus_id: &str, idx: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE corpus_id = ? AND segment_idx = ? ORDER BY ordinal",
+        )
+        .bind(corpus_id)
+        .bind(idx)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Set an artifact's activation outright, stamped `at`. Promotion uses it
+    /// to hand a new artifact the access its passages earned; everything else
+    /// goes through `bump_activation`, which adds.
+    pub async fn set_activation(&self, id: &str, value: f64, at: i64) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
+            .bind(value)
+            .bind(at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Has a person ever said this artifact was the answer? A `hit` verdict
+    /// naming it, on any recorded search.
+    pub async fn artifact_confirmed(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM search_events WHERE verdict = 'hit' AND expect_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?
+            > 0)
+    }
+
+    /// The rows for these ids, in no particular order; ids that name nothing
+    /// are simply absent. One query for a page of hits.
+    pub async fn artifacts_by_ids(&self, ids: &[String]) -> Result<Vec<Chunk>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM artifacts WHERE id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(row_to_artifact)
+            .collect())
     }
 
     /// The caveats of many artifacts in one query, keyed by id.
@@ -434,25 +646,41 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// The artifacts either side of `ordinal` in the same corpus.
+    /// The nearest *active* artifact either side of `ordinal` in the same
+    /// corpus — not the rows at `ordinal ± 1`.
     ///
     /// The answer to a question is often the paragraph after the one that
-    /// matched. `ordinal` is already a continuous per-corpus sequence, which is
-    /// what makes this a lookup instead of a search. An edge returns the one
-    /// side that exists; `status = 'active'` keeps deprecated and superseded
-    /// artifacts out, exactly as an ordinary search would.
+    /// matched, and `ordinal` is a continuous per-corpus sequence, which is
+    /// what makes this a lookup instead of a search. But after a promotion the
+    /// sequence interleaves superseded passages with what replaced them, and
+    /// "the row next door" is then often a hidden one; the reader wants the
+    /// next thing still in the document. An edge returns the one side that
+    /// exists; `status = 'active'` keeps deprecated and superseded artifacts
+    /// out, exactly as an ordinary search would.
     pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let before = sqlx::query(
             "SELECT * FROM artifacts
-             WHERE corpus_id = ? AND ordinal IN (?, ?) AND status = 'active'
-             ORDER BY ordinal",
+             WHERE corpus_id = ? AND ordinal < ? AND status = 'active'
+             ORDER BY ordinal DESC LIMIT 1",
         )
         .bind(corpus_id)
-        .bind(ordinal - 1)
-        .bind(ordinal + 1)
-        .fetch_all(&self.pool)
+        .bind(ordinal)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        let after = sqlx::query(
+            "SELECT * FROM artifacts
+             WHERE corpus_id = ? AND ordinal > ? AND status = 'active'
+             ORDER BY ordinal ASC LIMIT 1",
+        )
+        .bind(corpus_id)
+        .bind(ordinal)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(before
+            .iter()
+            .chain(after.iter())
+            .map(row_to_artifact)
+            .collect())
     }
 
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
@@ -837,6 +1065,7 @@ impl Store {
             "SELECT a.id FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
+                AND a.provenance <> 'passage'
                 AND NOT EXISTS (SELECT 1 FROM jobs j
                                  WHERE j.stage = 'relate' AND j.target_id = a.id)
               ORDER BY a.created_at
@@ -1389,5 +1618,215 @@ mod tests {
         .await
         .unwrap();
         assert!(leftovers.is_empty(), "fts leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn provenance_round_trips_all_four_values_and_unknown_reads_as_captured() {
+        for p in [
+            Provenance::Passage,
+            Provenance::Captured,
+            Provenance::Merged,
+            Provenance::Synthesized,
+        ] {
+            assert_eq!(Provenance::parse(p.as_str()), p);
+        }
+        assert_eq!(Provenance::parse("whatever"), Provenance::Captured);
+        assert!(Provenance::Merged.is_model_written());
+        assert!(Provenance::Synthesized.is_model_written());
+        assert!(Provenance::Passage.is_source_text());
+        assert!(Provenance::Captured.is_source_text());
+        assert!(!Provenance::Passage.is_model_written());
+    }
+
+    #[tokio::test]
+    async fn a_passage_is_inserted_as_one_and_read_back_as_one() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts_with_provenance(&src.id, &[nc(0, "verbatim")], Provenance::Passage)
+            .await
+            .unwrap();
+        assert_eq!(made[0].provenance, Provenance::Passage);
+        let read = s.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(read.provenance, Provenance::Passage);
+        // The old entry point still writes captured rows.
+        let cap = s
+            .insert_artifacts(&src.id, &[nc(1, "captured")])
+            .await
+            .unwrap();
+        assert_eq!(cap[0].provenance, Provenance::Captured);
+    }
+
+    #[tokio::test]
+    async fn artifacts_by_ids_returns_the_rows_asked_for_and_skips_the_missing() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b"), nc(2, "c")])
+            .await
+            .unwrap();
+        let got = s
+            .artifacts_by_ids(&[made[2].id.clone(), "gone".into(), made[0].id.clone()])
+            .await
+            .unwrap();
+        let mut texts: Vec<&str> = got.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, vec!["a", "c"]);
+    }
+
+    #[tokio::test]
+    async fn the_relate_backstop_never_lists_a_passage() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let p = s
+            .insert_artifacts_with_provenance(&src.id, &[nc(0, "p")], Provenance::Passage)
+            .await
+            .unwrap();
+        let c = s.insert_artifacts(&src.id, &[nc(1, "c")]).await.unwrap();
+        for id in [&p[0].id, &c[0].id] {
+            s.mark_embedded(id, "fake", 0).await.unwrap();
+        }
+        let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
+        assert_eq!(ids, vec![c[0].id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn adjacent_artifacts_steps_over_a_superseded_row_to_the_next_active_one() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b"), nc(2, "c"), nc(3, "d")])
+            .await
+            .unwrap();
+        // Hide b and c; a's next active neighbour is d.
+        s.set_superseded_by(&made[1].id, Some(&made[3].id))
+            .await
+            .unwrap();
+        s.set_superseded_by(&made[2].id, Some(&made[3].id))
+            .await
+            .unwrap();
+        let got = s.adjacent_artifacts(&src.id, 0).await.unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["d"]
+        );
+        let got = s.adjacent_artifacts(&src.id, 3).await.unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_activation_writes_value_and_stamp_and_artifacts_for_segment_reads_every_status() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let mut a = nc(0, "a");
+        a.segment_idx = Some(3);
+        let mut b = nc(1, "b");
+        b.segment_idx = Some(3);
+        let mut c = nc(2, "c");
+        c.segment_idx = Some(4);
+        let made = s.insert_artifacts(&src.id, &[a, b, c]).await.unwrap();
+        s.set_superseded_by(&made[1].id, Some(&made[0].id))
+            .await
+            .unwrap();
+        let seg = s.artifacts_for_segment(&src.id, 3).await.unwrap();
+        assert_eq!(
+            seg.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        s.set_activation(&made[0].id, 7.25, 99).await.unwrap();
+        let act = s
+            .activation_of(std::slice::from_ref(&made[0].id))
+            .await
+            .unwrap();
+        assert_eq!(act[&made[0].id], (7.25, 99));
+    }
+
+    #[tokio::test]
+    async fn artifact_confirmed_reads_a_hit_verdict_naming_it() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s.insert_artifacts(&src.id, &[nc(0, "a")]).await.unwrap();
+        assert!(!s.artifact_confirmed(&made[0].id).await.unwrap());
+        let ev = s
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "q".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        s.judge_hit(&ev, &made[0].id).await.unwrap();
+        assert!(s.artifact_confirmed(&made[0].id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_names_source_text_as_roots_at_any_depth() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        let gen1 = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "written from a and b".into(),
+                    title: Some("G1".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec!["how do I a and b".into()],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(gen1.provenance, Provenance::Synthesized);
+        assert!(gen1.corpus_id.is_none());
+        let read = s.get_artifact(&gen1.id).await.unwrap();
+        assert_eq!(read.cues, vec!["how do I a and b".to_string()]);
+        // Its sources stay active: a generation supersedes nothing.
+        assert!(s.get_artifact(&made[0].id).await.unwrap().in_results());
+        // A generation written from the generation: roots are still a and b,
+        // reached through G1.
+        let gen2 = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "written from G1".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                std::slice::from_ref(&gen1.id),
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&gen2.id)).await.unwrap();
+        let mut got = roots[&gen2.id].clone();
+        got.sort();
+        let mut want = vec![made[0].id.clone(), made[1].id.clone()];
+        want.sort();
+        assert_eq!(got, want, "roots must be captured text, never a generation");
+        let via = s.sources_with_via(&gen2.id).await.unwrap();
+        assert!(
+            via.iter()
+                .all(|(_, v)| v.as_deref() == Some(gen1.id.as_str())),
+            "{via:?}"
+        );
+        assert_eq!(s.synthesized_artifacts(10).await.unwrap().len(), 2);
     }
 }

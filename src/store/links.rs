@@ -105,6 +105,23 @@ pub fn normalize_query(q: &str) -> String {
         .to_lowercase()
 }
 
+/// Do two artifacts share no corpus? An artifact with no origins at all —
+/// lineage lost — is treated as its own document, which keeps such a link
+/// judgeable rather than silently shown-only.
+fn origins_disjoint(
+    origins: &std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>,
+    a: &str,
+    b: &str,
+) -> bool {
+    let of = |id: &str| -> std::collections::BTreeSet<&str> {
+        origins
+            .get(id)
+            .map(|o| o.iter().map(|x| x.corpus_id.as_str()).collect())
+            .unwrap_or_default()
+    };
+    of(a).is_disjoint(&of(b))
+}
+
 /// Strength now, from strength then. `half_life_days <= 0` turns decay off.
 ///
 /// A clock that moved backwards — a restored database, an NTP correction —
@@ -324,6 +341,115 @@ async fn bump_one(
 }
 
 impl Store {
+    /// Every link naming `id` at either end, in any state.
+    pub async fn links_touching(&self, id: &str) -> Result<Vec<Link>> {
+        let rows = sqlx::query("SELECT * FROM artifact_links WHERE a_id = ? OR b_id = ?")
+            .bind(id)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_link).collect())
+    }
+
+    /// Copy a link that touches `old` onto `new` and the same other endpoint,
+    /// leaving the original row where it is.
+    ///
+    /// Learned access carries forward; recorded history does not. Weight comes
+    /// across decayed to `at` and stamped `at`; `queries` and `cues` come
+    /// across as they are. On collision with a link `new` already has: the
+    /// larger decayed weight (max, not sum — one search returning three
+    /// passages of one section is one piece of evidence), the larger
+    /// `queries`, the cues merged and cut to three, `dismissed` if either side
+    /// was (the operator's "not related" is final), otherwise `learning` — a
+    /// verdict passed on the passage's text does not transfer to a rewrite —
+    /// and `judged_rev_*` cleared. A link whose other end *is* `new`, or that
+    /// would pair `new` with itself, is skipped.
+    pub async fn carry_link(
+        &self,
+        from: &Link,
+        old: &str,
+        new: &str,
+        half_life_days: f64,
+        at: i64,
+    ) -> Result<()> {
+        let other = if from.a_id == old {
+            &from.b_id
+        } else {
+            &from.a_id
+        };
+        if other == new || other == old {
+            return Ok(());
+        }
+        let (a, b) = canonical(new, other);
+        let incoming = decayed(from.weight, from.bumped_at, at, half_life_days);
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        let existing = sqlx::query("SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?")
+            .bind(a)
+            .bind(b)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| row_to_link(&r));
+        match existing {
+            None => {
+                let state = if from.state == LinkState::Dismissed {
+                    LinkState::Dismissed
+                } else {
+                    LinkState::Learning
+                };
+                sqlx::query(
+                    "INSERT INTO artifact_links
+                       (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(a)
+                .bind(b)
+                .bind(incoming)
+                .bind(at)
+                .bind(from.queries)
+                .bind(serde_json::to_string(&from.cues).unwrap_or_else(|_| "[]".into()))
+                .bind(state.as_str())
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+            }
+            Some(have) => {
+                let weight = decayed(have.weight, have.bumped_at, at, half_life_days).max(incoming);
+                let mut cues = have.cues.clone();
+                for c in &from.cues {
+                    match cues.iter_mut().find(|x| x.q == c.q) {
+                        Some(x) => x.n = x.n.max(c.n),
+                        None => cues.push(c.clone()),
+                    }
+                }
+                cues.sort_by_key(|x| std::cmp::Reverse(x.n));
+                cues.truncate(3);
+                let state =
+                    if have.state == LinkState::Dismissed || from.state == LinkState::Dismissed {
+                        LinkState::Dismissed
+                    } else {
+                        LinkState::Learning
+                    };
+                sqlx::query(
+                    "UPDATE artifact_links
+                        SET weight = ?, bumped_at = ?, queries = ?, cues = ?, state = ?,
+                            reason = NULL, judged_rev_a = NULL, judged_rev_b = NULL
+                      WHERE a_id = ? AND b_id = ?",
+                )
+                .bind(weight)
+                .bind(at)
+                .bind(have.queries.max(from.queries))
+                .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
+                .bind(state.as_str())
+                .bind(a)
+                .bind(b)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// One link, whichever way round it is named.
     pub async fn get_link(&self, a: &str, b: &str) -> Result<Option<Link>> {
         let (a, b) = canonical(a, b);
@@ -437,8 +563,9 @@ impl Store {
                     state,
                     reason: r.get("reason"),
                     cues: serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default(),
-                    // A merged artifact belongs to no corpus, so it can never be
-                    // "the same document" as anything.
+                    // Decided below through origins where either side is a
+                    // merge; here only the case both rows answer for
+                    // themselves.
                     cross_corpus: match (a_corpus, b_corpus) {
                         (Some(x), Some(y)) => x != y,
                         _ => true,
@@ -448,6 +575,19 @@ impl Store {
         }
         out.sort_by(|x, y| y.weight.total_cmp(&x.weight));
         out.truncate(limit.max(0) as usize);
+        // A merged or synthesized artifact belongs to every corpus it drew
+        // from, so "the same document" is "the two origin sets intersect" —
+        // read through lineage, one batched query for the page of links.
+        let mut ids: Vec<String> = out
+            .iter()
+            .flat_map(|l| [l.via.clone(), l.other.clone()])
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let origins = self.origins_of(&ids).await?;
+        for l in &mut out {
+            l.cross_corpus = origins_disjoint(&origins, &l.via, &l.other);
+        }
         Ok(out)
     }
 
@@ -456,7 +596,9 @@ impl Store {
     ///
     /// Same two-step as `links_from`: the raw weight narrows with the index and
     /// the decayed weight decides. Four times the caller's limit is fetched so
-    /// that rows failing the exact test do not eat the budget.
+    /// that rows failing the exact test do not eat the budget. Cross-corpus is
+    /// decided in Rust over origins rather than in SQL over `corpus_id`: a
+    /// merge has none of its own and belongs to every corpus it drew from.
     pub async fn links_to_judge(
         &self,
         min_weight: f64,
@@ -473,7 +615,6 @@ impl Store {
                 AND l.weight >= ? AND l.queries >= ?
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
-                AND (a.corpus_id IS NULL OR b.corpus_id IS NULL OR a.corpus_id <> b.corpus_id)
               ORDER BY l.weight DESC LIMIT ?",
         )
         .bind(min_weight)
@@ -485,10 +626,24 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
+        let strong: Vec<Link> = rows
             .iter()
             .map(row_to_link)
             .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
+            .collect();
+        // Two passages of one document being related is not information, so a
+        // same-document link is shown and never judged — "same document" read
+        // through origins, so a merge is the documents it drew from.
+        let mut ids: Vec<String> = strong
+            .iter()
+            .flat_map(|l| [l.a_id.clone(), l.b_id.clone()])
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let origins = self.origins_of(&ids).await?;
+        Ok(strong
+            .into_iter()
+            .filter(|l| origins_disjoint(&origins, &l.a_id, &l.b_id))
             .take(limit.max(0) as usize)
             .collect())
     }
@@ -1281,5 +1436,179 @@ mod tests {
         let store = Store::memory().await.unwrap();
         store.bump_activation(&[], 1.0, 14.0, 0).await.unwrap();
         assert!(store.activation_of(&[]).await.unwrap().is_empty());
+    }
+
+    /// An artifact in a corpus of its own, for a link to be carried onto.
+    async fn third(store: &Store) -> String {
+        let src = store.insert_corpus("raw2", "web", None).await.unwrap();
+        store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "the artifact".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn carrying_a_link_copies_it_and_leaves_the_original() {
+        let s = Store::memory().await.unwrap();
+        let (p, x) = two(&s).await; // passage p, some artifact x
+        let a = third(&s).await;
+        s.bump_links(
+            &[(p.as_str(), x.as_str())],
+            2.0,
+            Some("how to mount"),
+            14.0,
+            1_000,
+        )
+        .await
+        .unwrap();
+        let from = s.get_link(&p, &x).await.unwrap().unwrap();
+
+        s.carry_link(&from, &p, &a, 14.0, 1_000 + 14 * 86_400)
+            .await
+            .unwrap();
+
+        let copied = s.get_link(&a, &x).await.unwrap().expect("the copy exists");
+        // Decayed to the carry moment: one half-life later, half the weight.
+        assert!((copied.weight - 1.0).abs() < 1e-6, "{}", copied.weight);
+        assert_eq!(copied.bumped_at, 1_000 + 14 * 86_400);
+        assert_eq!(copied.queries, from.queries);
+        assert_eq!(copied.cues.len(), 1);
+        assert_eq!(copied.state, LinkState::Learning);
+        assert!(copied.judged_rev_a.is_none() && copied.judged_rev_b.is_none());
+        // The original is still there, untouched.
+        let orig = s.get_link(&p, &x).await.unwrap().unwrap();
+        assert_eq!(orig.weight, from.weight);
+    }
+
+    #[tokio::test]
+    async fn carrying_onto_an_existing_link_takes_the_max_not_the_sum_and_dismissed_wins() {
+        let s = Store::memory().await.unwrap();
+        let (p, x) = two(&s).await;
+        let a = third(&s).await;
+        let at = 5_000;
+        s.bump_links(&[(p.as_str(), x.as_str())], 3.0, Some("q one"), 14.0, at)
+            .await
+            .unwrap();
+        s.bump_links(&[(a.as_str(), x.as_str())], 2.0, Some("q two"), 14.0, at)
+            .await
+            .unwrap();
+        // The operator dismissed the artifact's own link.
+        s.set_link_state(&a, &x, LinkState::Dismissed, None, None)
+            .await
+            .unwrap();
+        let from = s.get_link(&p, &x).await.unwrap().unwrap();
+
+        s.carry_link(&from, &p, &a, 14.0, at).await.unwrap();
+
+        let merged = s.get_link(&a, &x).await.unwrap().unwrap();
+        assert!(
+            (merged.weight - 3.0).abs() < 1e-6,
+            "max, not 5.0: {}",
+            merged.weight
+        );
+        assert_eq!(merged.queries, 1, "max of 1 and 1");
+        assert_eq!(merged.cues.len(), 2, "cues merged");
+        assert_eq!(
+            merged.state,
+            LinkState::Dismissed,
+            "the operator's no is final"
+        );
+    }
+
+    #[tokio::test]
+    async fn links_touching_finds_a_link_from_either_end() {
+        let s = Store::memory().await.unwrap();
+        let (p, x) = two(&s).await;
+        s.bump_links(&[(p.as_str(), x.as_str())], 1.0, None, 14.0, 1)
+            .await
+            .unwrap();
+        assert_eq!(s.links_touching(&p).await.unwrap().len(), 1);
+        assert_eq!(s.links_touching(&x).await.unwrap().len(), 1);
+        assert!(s.links_touching("nobody").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_corpus_is_read_through_origins_for_a_merge() {
+        // A merge of two artifacts from corpus 1, linked to a third artifact of
+        // corpus 1: same document, however the merge's own `corpus_id` reads.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("one", "web", None).await.unwrap();
+        let na = |o: i64, t: &str| NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        let made = store
+            .insert_artifacts(&src.id, &[na(0, "a"), na(1, "b"), na(2, "c")])
+            .await
+            .unwrap();
+        let m = store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "a and b".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        let other_src = store.insert_corpus("two", "web", None).await.unwrap();
+        let far = store
+            .insert_artifacts(&other_src.id, &[na(0, "far")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        for q in ["one", "two", "three"] {
+            store
+                .bump_link(&m.id, &made[2].id, 2.0, Some(q), 30.0, 0)
+                .await
+                .unwrap();
+            store
+                .bump_link(&m.id, &far, 2.0, Some(q), 30.0, 0)
+                .await
+                .unwrap();
+        }
+        let out = store
+            .links_from(
+                std::slice::from_ref(&m.id),
+                &[LinkState::Learning],
+                30.0,
+                0,
+                0.0,
+                10,
+            )
+            .await
+            .unwrap();
+        let same = out.iter().find(|l| l.other == made[2].id).unwrap();
+        let cross = out.iter().find(|l| l.other == far).unwrap();
+        assert!(!same.cross_corpus, "a merge of corpus-1 roots is corpus 1");
+        assert!(cross.cross_corpus);
+        // And the judge is offered only the cross-corpus one.
+        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        assert_eq!(armed.len(), 1, "{armed:?}");
+        assert!(armed[0].a_id == far || armed[0].b_id == far);
     }
 }
