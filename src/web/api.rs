@@ -260,6 +260,16 @@ async fn ingest(
 
 const ORIGIN_UPLOAD: &str = "upload";
 
+/// Whether an upload's filename claims to be a PDF. Consulted on the same
+/// terms as `named_txt`: only when the part carried no `Content-Type`.
+fn named_pdf(filename: Option<&str>) -> bool {
+    filename.is_some_and(|n| {
+        std::path::Path::new(n)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    })
+}
+
 /// Whether an upload's filename claims to be a text file.
 ///
 /// Only consulted when the part carried no `Content-Type`. Case-insensitive,
@@ -340,9 +350,10 @@ async fn read_upload(
     Ok(out)
 }
 
-/// `.txt` and nothing else, for now. PDF is a `SourceView` implementation and
-/// a later plan; refusing everything else by name is what keeps this one from
-/// quietly ingesting the bytes of a format it cannot read.
+/// `.txt` and PDF, and nothing else. Refusing everything else by name is what
+/// keeps this one from quietly ingesting the bytes of a format it cannot read.
+///
+/// A PDF is stored and queued; the reading happens in `Stage::Extract`.
 async fn upload(
     State(st): State<AppState>,
     _id: Identity,
@@ -363,40 +374,88 @@ async fn upload(
     // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
     // An absent type is not a pass; it just moves the question to the
     // name, which is the only other thing the sender told us.
-    if declared.is_empty() {
-        if !named_txt(filename.as_deref()) {
+    let kind = if declared.is_empty() {
+        if named_txt(filename.as_deref()) {
+            Kind::Text
+        } else if named_pdf(filename.as_deref()) {
+            Kind::Pdf
+        } else {
             return Err(Error::Validation(
-                "that upload declares no type and is not named `.txt` — \
-                 only text/plain is accepted"
+                "that upload declares no type and is named neither `.txt` nor \
+                 `.pdf` — only text/plain and application/pdf are accepted"
                     .into(),
             ));
         }
-    } else if !declared.starts_with("text/plain") {
-        return Err(Error::Validation(format!(
-            "that file is `{declared}` — only text/plain is accepted"
-        )));
-    }
-    // Refused rather than lossily converted: a corpus is quoted back
-    // verbatim, so text that arrived mangled would be a fidelity loss
-    // nothing downstream could detect.
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
-    let size = bytes.len();
-
-    let out = st
-        .core
-        .ingest_capture(
-            crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
-                .with_note(note)
-                .with_file(filename.as_deref(), size, "text/plain"),
-        )
-        .await?;
-    let code = if out.duplicate {
-        StatusCode::OK
+    } else if declared.starts_with("text/plain") {
+        Kind::Text
+    } else if declared.starts_with("application/pdf") {
+        Kind::Pdf
     } else {
-        StatusCode::CREATED
+        return Err(Error::Validation(format!(
+            "that file is `{declared}` — only text/plain and application/pdf are accepted"
+        )));
     };
-    Ok((code, Json(out)))
+
+    match kind {
+        Kind::Text => {
+            // The route's ceiling is the PDF one, which is many times the
+            // global limit. Text does not get to ride on that: a paste is
+            // bounded by `MAX_BODY_BYTES` however it arrives, and widening the
+            // door for one format must not widen it for the other.
+            if bytes.len() > crate::web::MAX_BODY_BYTES {
+                return Err(Error::Validation(
+                    "that text file is over the 8 MB limit for a text capture".into(),
+                ));
+            }
+            // Refused rather than lossily converted: a corpus is quoted back
+            // verbatim, so text that arrived mangled would be a fidelity loss
+            // nothing downstream could detect.
+            let text = String::from_utf8(bytes.to_vec())
+                .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
+            let size = bytes.len();
+
+            let out = st
+                .core
+                .ingest_capture(
+                    crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
+                        .with_note(note)
+                        .with_file(filename.as_deref(), size, "text/plain"),
+                )
+                .await?;
+            let code = if out.duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            Ok((code, Json(out)))
+        }
+        Kind::Pdf => {
+            let out = st
+                .core
+                .ingest_pdf(crate::core::ingest::PdfCapture {
+                    bytes: bytes.to_vec(),
+                    filename,
+                    title_hint: None,
+                    note,
+                })
+                .await?;
+            // 202, not 201: stored, but the extraction — the part that makes it
+            // a corpus anyone can search — is still queued.
+            let code = if out.duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            };
+            Ok((code, Json(out)))
+        }
+    }
+}
+
+/// What the upload door decided a part is. Named rather than a bool: the two
+/// branches store different things and answer with different codes.
+enum Kind {
+    Text,
+    Pdf,
 }
 
 /// The image door. Parts: `image` (required), `title_hint`, `note`. The
@@ -430,6 +489,31 @@ async fn upload_image(
         StatusCode::ACCEPTED
     };
     Ok((code, Json(out)))
+}
+
+/// The bytes as uploaded, whatever they are. The image door's `?original=1`
+/// answers the same thing for a photo and stays where it is; this is the name
+/// that does not lie about a PDF.
+async fn get_file(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let Some((mime, bytes)) = st.core.store.attachment_original(&id).await? else {
+        return Err(Error::NotFound);
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, max-age=3600".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -855,10 +939,16 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
     }))
 }
 
-pub fn api_router(image_max_bytes: usize) -> Router<AppState> {
+pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
-        .route("/corpora/upload", post(upload))
+        // Its own ceiling, because this door now takes a PDF and a book is
+        // many times the global limit. The text branch re-imposes
+        // `MAX_BODY_BYTES` on itself inside the handler.
+        .route(
+            "/corpora/upload",
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(pdf_max_bytes)),
+        )
         // Its own ceiling: a phone photo is several times the global limit.
         .route(
             "/corpora/image",
@@ -866,6 +956,7 @@ pub fn api_router(image_max_bytes: usize) -> Router<AppState> {
         )
         .route("/corpora/{id}", get(get_corpus).delete(delete_corpus))
         .route("/corpora/{id}/image", get(get_image))
+        .route("/corpora/{id}/file", get(get_file))
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
@@ -1032,6 +1123,139 @@ pub(crate) mod tests {
                 },
             ],
         )
+    }
+
+    fn a_pdf() -> Vec<u8> {
+        include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
+    }
+
+    #[tokio::test]
+    async fn the_upload_door_takes_a_pdf_and_answers_accepted() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/upload",
+                &token,
+                &[("note", "the quarterly plan")],
+                "file",
+                "plan.pdf",
+                Some("application/pdf"),
+                &a_pdf(),
+            ))
+            .await
+            .unwrap();
+        // 202, not 201: stored, but the reading that makes it searchable is
+        // still queued — the same promise the image door makes.
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let j = json_of(res).await;
+        assert_eq!(j["status"], "extracting");
+
+        let src = core
+            .store
+            .get_corpus(j["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(src.origin, crate::core::ingest::ORIGIN_PDF);
+        assert_eq!(src.metadata["note"], "the quarterly plan");
+    }
+
+    /// A part may legally carry no `Content-Type`; the name is then the only
+    /// thing the sender told us, exactly as for `.txt`.
+    #[tokio::test]
+    async fn a_pdf_named_pdf_but_declaring_nothing_is_still_taken() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/upload",
+                &token,
+                &[],
+                "file",
+                "PLAN.PDF",
+                None,
+                &a_pdf(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED, "case must not matter");
+    }
+
+    /// The door widened by one format, not to anything binary.
+    #[tokio::test]
+    async fn a_zip_is_refused_by_type_and_by_name() {
+        let (app, token, core) = app_token_and_core().await;
+        for mime in [Some("application/zip"), None] {
+            let res = app
+                .clone()
+                .oneshot(post_file_with(
+                    "/api/v1/corpora/upload",
+                    &token,
+                    &[],
+                    "file",
+                    "a.zip",
+                    mime,
+                    b"PK\x03\x04",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{mime:?}");
+        }
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    /// Over the global 8 MB, under the PDF ceiling: the multipart parser gets
+    /// to see it, so the answer is the handler's and not the framework's 413.
+    #[tokio::test]
+    async fn the_upload_door_has_its_own_larger_body_limit_for_a_pdf() {
+        let (app, token) = app_and_token().await;
+        let mut big = a_pdf();
+        big.resize(crate::web::MAX_BODY_BYTES + 1024, b' ');
+        let res = app
+            .oneshot(post_file_with(
+                "/api/v1/corpora/upload",
+                &token,
+                &[],
+                "file",
+                "big.pdf",
+                Some("application/pdf"),
+                &big,
+            ))
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the global limit is still in force on this route"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_original_pdf_comes_back_from_the_file_route() {
+        let (app, token, core) = app_token_and_core().await;
+        let id = core
+            .ingest_pdf(crate::core::ingest::PdfCapture {
+                bytes: a_pdf(),
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let res = app
+            .oneshot(
+                Request::get(format!("/api/v1/corpora/{id}/file"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "application/pdf");
+        let got = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(got.to_vec(), a_pdf(), "byte for byte as uploaded");
     }
 
     #[tokio::test]
@@ -1483,14 +1707,18 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_upload_of_the_wrong_type_is_refused_with_the_reason() {
+        // This asserted a PDF until the PDF door opened. A CSV is the case it
+        // was really about: bytes that decode as UTF-8 and are still not a
+        // document anyone asked to capture. The reason has to name what the
+        // door does take, or the sender is left guessing.
         let (app, token) = app_and_token().await;
         let res = app
             .oneshot(post_file(
                 "/api/v1/corpora/upload",
                 &token,
-                "notes.pdf",
-                Some("application/pdf"),
-                b"%PDF-1.7",
+                "rows.csv",
+                Some("text/csv"),
+                b"a,b\n1,2\n",
             ))
             .await
             .unwrap();
@@ -1499,6 +1727,7 @@ pub(crate) mod tests {
             .as_str()
             .unwrap_or_default()
             .to_string();
+        assert!(msg.contains("text/csv"), "got {msg}");
         assert!(msg.contains("application/pdf"), "got {msg}");
     }
 
