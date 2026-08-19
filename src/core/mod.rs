@@ -133,6 +133,9 @@ pub struct Core {
     /// When a passage has earned its window a synthesis call. See
     /// `PromoteConfig`.
     pub promote: crate::config::PromoteConfig,
+    /// Whether and how a run of searches may be written up. See
+    /// `PursuitConfig`.
+    pub pursuit: crate::config::PursuitConfig,
     /// The pacer every inference call passes through. Shared by every clone,
     /// because a per-clone gate would pace nothing: the point is one queue of
     /// calls in front of one GPU.
@@ -211,6 +214,7 @@ impl Core {
             associate: cfg.associate.clone(),
             activation: cfg.activation.clone(),
             promote: cfg.promote.clone(),
+            pursuit: cfg.pursuit.clone(),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
             )),
@@ -371,6 +375,7 @@ pub mod test_support {
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
             promote: crate::config::PromoteConfig::default(),
+            pursuit: crate::config::PursuitConfig::default(),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(

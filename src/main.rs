@@ -369,6 +369,7 @@ mod startup_tests {
             associate: AssociateConfig::default(),
             activation: ActivationConfig::default(),
             promote: engram::config::PromoteConfig::default(),
+            pursuit: engram::config::PursuitConfig::default(),
         }
     }
 

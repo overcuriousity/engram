@@ -23,6 +23,8 @@ pub struct Config {
     pub activation: ActivationConfig,
     #[serde(default)]
     pub promote: PromoteConfig,
+    #[serde(default)]
+    pub pursuit: PursuitConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -202,6 +204,36 @@ impl Default for PromoteConfig {
         Self {
             activation_above: 4.0,
             resynthesize_after_unconfirmed: 0,
+        }
+    }
+}
+
+/// What a coherent run of searches — a pursuit — may earn: one generated
+/// artifact, written from what was engaged with, when the base did not answer
+/// or the answer was assembled by hand. Off until turned on: this writes
+/// model-written text into the index, and that is a step an operator takes.
+/// Needs `feedback.enabled`, since the events it reads are the ones recording
+/// writes. The grouping line is not a key: it is measured, like the gap
+/// clusters', by `core::gaps::link_threshold`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct PursuitConfig {
+    pub enabled: bool,
+    /// A pursuit is over when nothing has happened for this long.
+    pub idle_secs: u64,
+    /// Fewer engaged artifacts than this is a promotion case, not generation.
+    pub min_sources: usize,
+    /// Total engagement weight a pursuit needs before it is worth a call.
+    pub min_engagement: f64,
+}
+
+impl Default for PursuitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_secs: 900,
+            min_sources: 2,
+            min_engagement: 3.0,
         }
     }
 }
@@ -1353,6 +1385,13 @@ impl Config {
                  synthesizer",
                 self.infer.synthesis.as_str()
             )));
+        }
+        if self.pursuit.enabled && !self.feedback.enabled {
+            return Err(ConfigError::Invalid(
+                "pursuit.enabled = true needs feedback.enabled = true: the events it reads are \
+                 the ones recording writes"
+                    .into(),
+            ));
         }
         if let Some(v) = &self.infer.vision
             && v.base_url.is_none()
@@ -2681,5 +2720,22 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(cfg.promote.activation_above, 2.5);
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
         assert!(!cfg.feedback.enabled);
+    }
+
+    #[test]
+    fn pursuit_defaults_and_requires_feedback() {
+        let _guard = env_guard();
+        let roles = "[infer.synthesize]\ntier = \"efficient\"\noutput_ratio = 8.0\n[infer.ask]\ntier = \"efficient\"\n";
+        let cfg = load_infer(&format!("{BARE_PREAMBLE}\n{roles}")).unwrap();
+        assert!(!cfg.pursuit.enabled);
+        assert_eq!(cfg.pursuit.idle_secs, 900);
+        assert_eq!(cfg.pursuit.min_sources, 2);
+        assert_eq!(cfg.pursuit.min_engagement, 3.0);
+        let err = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[feedback]\nenabled = false\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pursuit.enabled"), "{err}");
     }
 }

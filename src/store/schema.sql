@@ -114,7 +114,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- weight. In SQLite rather than the vector payload because the query path
   -- already needs one SQLite read for links, and the same read returns this
   -- — one crossing.
-  activated_at     INTEGER NOT NULL DEFAULT 0
+  activated_at     INTEGER NOT NULL DEFAULT 0,
+  -- For a synthesized artifact: the questions it was written for, JSON list.
+  cues             TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -271,7 +273,10 @@ CREATE TABLE IF NOT EXISTS search_events (
   expect_id   TEXT,
   skips       INTEGER NOT NULL DEFAULT 0,
   -- Set when the operator says a `gap` search has since been covered.
-  dismissed_at INTEGER
+  dismissed_at INTEGER,
+  -- A synthesized artifact led the list above `weak_below`: the base
+  -- answered, and the pursuit this lands in closes satisfied.
+  answered    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -376,8 +381,42 @@ CREATE TABLE IF NOT EXISTS artifact_links (
 CREATE INDEX IF NOT EXISTS idx_links_b ON artifact_links(b_id);
 CREATE INDEX IF NOT EXISTS idx_links_state ON artifact_links(state, weight DESC);
 
--- Cursors that have no row to live on. Two keys so far:
--- `associate.events_after` and `associate.judged_after`.
+-- ── Pursuits ─────────────────────────────────────────────────────────────────
+-- What happened after a result list rendered. Joined to a pursuit through
+-- time and scope at analysis, never by a stored pursuit id: the clustering
+-- decides, and re-clustering never has to rewrite these.
+CREATE TABLE IF NOT EXISTS interaction_events (
+  id          INTEGER PRIMARY KEY,
+  artifact_id TEXT REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- 'opened' | 'pivoted'
+  kind        TEXT NOT NULL,
+  -- The artifact this was reached from, for 'pivoted'.
+  via         TEXT,
+  scope       TEXT,
+  at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interactions_at ON interaction_events(at);
+
+-- A coherent thing that was wanted: its queries, and what came of it.
+CREATE TABLE IF NOT EXISTS pursuits (
+  id           TEXT PRIMARY KEY,
+  opened_at    INTEGER NOT NULL,
+  closed_at    INTEGER,
+  -- open | satisfied | unsatisfied | generated | dismissed
+  state        TEXT NOT NULL DEFAULT 'open',
+  -- Why it closed, in one line. Read on Ops; never parsed.
+  reason       TEXT,
+  -- The clustered queries, JSON. Becomes the artifact's `cues` on generation.
+  queries      TEXT NOT NULL DEFAULT '[]',
+  -- The engaged artifact ids, JSON, in engagement order. What generation reads.
+  sources      TEXT NOT NULL DEFAULT '[]',
+  -- The generated artifact, once there is one.
+  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
+
+-- Cursors that have no row to live on. Three keys so far:
+-- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
