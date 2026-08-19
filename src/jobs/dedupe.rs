@@ -121,7 +121,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let mut context: Vec<Vec<Chunk>> = Vec::new();
     for c in &members {
         let mut v = Vec::new();
-        if c.provenance == crate::store::artifacts::Provenance::Merged {
+        if c.provenance.is_model_written() {
             for rid in &root_map[&c.id] {
                 match core.store.get_artifact(rid).await {
                     Ok(r) => v.push(r),

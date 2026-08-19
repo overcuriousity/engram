@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- corpus it did not come from would put the wrong lines beside it in the
   -- detail pane, which is the one dishonesty merging must not commit.
   corpus_id        TEXT REFERENCES corpora(id) ON DELETE CASCADE,
-  -- 'captured' | 'merged'. The discriminator every consumer branches on, rather
+  -- 'passage' | 'captured' | 'merged' | 'synthesized'. The discriminator every
+  -- consumer branches on, rather
   -- than `corpus_id IS NULL`: a null is an absence, and the failure modes
   -- merging can produce want to hang off an assertion.
   provenance       TEXT NOT NULL DEFAULT 'captured',
@@ -131,7 +132,9 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
 -- parent edges. `root_id` always names a `provenance = 'captured'` artifact, so
 -- a re-merge reads the leaves in one query and is never written from text a
 -- model produced — which is what keeps information loss one generation deep
--- however many times a group is merged.
+-- however many times a group is merged. That sentence is about *merging*: a
+-- `synthesized` artifact may be written from another synthesized one, and then
+-- `root_id` still names source text while `via_id` names the intermediate.
 --
 -- The closure duplicates what edges would imply. That is the trade: the fan-in
 -- cap bounds how much, and it buys a hot-path read with no recursive CTE.

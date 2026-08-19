@@ -68,25 +68,49 @@ impl ArtifactStatus {
 /// corpus lines for a span it does not have — so both branch on this rather
 /// than on `corpus_id.is_none()`. A null says a field is absent; this says what
 /// the row *is*, which is what a reader needs in order to know why.
+///
+/// `Passage` text is a verbatim slice of a segment, sized to the embedder —
+/// the retrieval unit at `synthesis = "off"` and `"earned"`; it has a corpus
+/// and a span like captured text, and no model ever touched it. `Synthesized`
+/// text was written from a pursuit; like a merge it has no corpus of its own
+/// and names its sources through `artifact_sources`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
+    Passage,
     Captured,
     Merged,
+    Synthesized,
 }
 
 impl Provenance {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Provenance::Passage => "passage",
             Provenance::Captured => "captured",
             Provenance::Merged => "merged",
+            Provenance::Synthesized => "synthesized",
         }
     }
     pub fn parse(s: &str) -> Provenance {
         match s {
+            "passage" => Provenance::Passage,
             "merged" => Provenance::Merged,
+            "synthesized" => Provenance::Synthesized,
             _ => Provenance::Captured,
         }
+    }
+    /// A model wrote this text. Such a row is never its own root: handing it
+    /// back as one is how a paraphrase of a paraphrase reaches a prompt as an
+    /// original. The test is "not source text" rather than "is merged", so the
+    /// next value added defaults to safe rather than to wrong.
+    pub fn is_model_written(&self) -> bool {
+        matches!(self, Provenance::Merged | Provenance::Synthesized)
+    }
+    /// The text is the document's own, verbatim (`Passage`) or as the one
+    /// synthesis rewrite of it (`Captured` — its own root by convention).
+    pub fn is_source_text(&self) -> bool {
+        !self.is_model_written()
     }
 }
 
@@ -319,6 +343,19 @@ impl Store {
         corpus_id: &str,
         chunks: &[NewArtifact],
     ) -> Result<Vec<Chunk>> {
+        self.insert_artifacts_with_provenance(corpus_id, chunks, Provenance::Captured)
+            .await
+    }
+
+    /// `insert_artifacts`, saying what kind of row is being written. Capture at
+    /// `off`/`earned` writes passages through this; everything else keeps the
+    /// captured default.
+    pub async fn insert_artifacts_with_provenance(
+        &self,
+        corpus_id: &str,
+        chunks: &[NewArtifact],
+        provenance: Provenance,
+    ) -> Result<Vec<Chunk>> {
         let mut tx = self.pool.begin().await?;
         let mut out = Vec::with_capacity(chunks.len());
         for nc in chunks {
@@ -326,7 +363,7 @@ impl Store {
             let c = Chunk {
                 id: new_id(),
                 corpus_id: Some(corpus_id.to_string()),
-                provenance: Provenance::Captured,
+                provenance,
                 source_count: 0,
                 ordinal: nc.ordinal,
                 text: nc.text.clone(),
@@ -348,10 +385,11 @@ impl Store {
             };
             sqlx::query(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
-                 VALUES (?, ?, 'captured', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
             )
             .bind(&c.id)
             .bind(&c.corpus_id)
+            .bind(provenance.as_str())
             .bind(c.ordinal)
             .bind(&c.text)
             .bind(c.corpus_span.as_ref().map(|s| serde_json::to_string(s).unwrap()))
@@ -380,6 +418,28 @@ impl Store {
             .await?
             .ok_or(Error::NotFound)?;
         Ok(row_to_artifact(&row))
+    }
+
+    /// The rows for these ids, in no particular order; ids that name nothing
+    /// are simply absent. One query for a page of hits.
+    pub async fn artifacts_by_ids(&self, ids: &[String]) -> Result<Vec<Chunk>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM artifacts WHERE id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(row_to_artifact)
+            .collect())
     }
 
     /// The caveats of many artifacts in one query, keyed by id.
@@ -837,6 +897,7 @@ impl Store {
             "SELECT a.id FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
+                AND a.provenance <> 'passage'
                 AND NOT EXISTS (SELECT 1 FROM jobs j
                                  WHERE j.stage = 'relate' AND j.target_id = a.id)
               ORDER BY a.created_at
@@ -1389,5 +1450,75 @@ mod tests {
         .await
         .unwrap();
         assert!(leftovers.is_empty(), "fts leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn provenance_round_trips_all_four_values_and_unknown_reads_as_captured() {
+        for p in [
+            Provenance::Passage,
+            Provenance::Captured,
+            Provenance::Merged,
+            Provenance::Synthesized,
+        ] {
+            assert_eq!(Provenance::parse(p.as_str()), p);
+        }
+        assert_eq!(Provenance::parse("whatever"), Provenance::Captured);
+        assert!(Provenance::Merged.is_model_written());
+        assert!(Provenance::Synthesized.is_model_written());
+        assert!(Provenance::Passage.is_source_text());
+        assert!(Provenance::Captured.is_source_text());
+        assert!(!Provenance::Passage.is_model_written());
+    }
+
+    #[tokio::test]
+    async fn a_passage_is_inserted_as_one_and_read_back_as_one() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts_with_provenance(&src.id, &[nc(0, "verbatim")], Provenance::Passage)
+            .await
+            .unwrap();
+        assert_eq!(made[0].provenance, Provenance::Passage);
+        let read = s.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(read.provenance, Provenance::Passage);
+        // The old entry point still writes captured rows.
+        let cap = s
+            .insert_artifacts(&src.id, &[nc(1, "captured")])
+            .await
+            .unwrap();
+        assert_eq!(cap[0].provenance, Provenance::Captured);
+    }
+
+    #[tokio::test]
+    async fn artifacts_by_ids_returns_the_rows_asked_for_and_skips_the_missing() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b"), nc(2, "c")])
+            .await
+            .unwrap();
+        let got = s
+            .artifacts_by_ids(&[made[2].id.clone(), "gone".into(), made[0].id.clone()])
+            .await
+            .unwrap();
+        let mut texts: Vec<&str> = got.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, vec!["a", "c"]);
+    }
+
+    #[tokio::test]
+    async fn the_relate_backstop_never_lists_a_passage() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let p = s
+            .insert_artifacts_with_provenance(&src.id, &[nc(0, "p")], Provenance::Passage)
+            .await
+            .unwrap();
+        let c = s.insert_artifacts(&src.id, &[nc(1, "c")]).await.unwrap();
+        for id in [&p[0].id, &c[0].id] {
+            s.mark_embedded(id, "fake", 0).await.unwrap();
+        }
+        let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
+        assert_eq!(ids, vec![c[0].id.clone()]);
     }
 }

@@ -31,8 +31,8 @@ impl Store {
     /// A merged artifact resolves through `artifact_sources`, which already
     /// holds the closure, so this is one query per id and not a traversal.
     ///
-    /// A merged artifact with no lineage rows — every root deleted out from
-    /// under it — resolves to the *empty* list, never to itself. Its text is a
+    /// A merged or synthesized artifact with no lineage rows — every root
+    /// deleted out from under it — resolves to the *empty* list, never to itself. Its text is a
     /// synthesis, and handing it back as a root is how a paraphrase of a
     /// paraphrase ends up in a prompt as an original, or recorded as another
     /// merge's `root_id`. The empty answer makes that state visible to the
@@ -53,7 +53,9 @@ impl Store {
                         .bind(id)
                         .fetch_optional(&self.pool)
                         .await?;
-                if provenance.as_deref() == Some("merged") {
+                if provenance.as_deref().is_some_and(|p| {
+                    crate::store::artifacts::Provenance::parse(p).is_model_written()
+                }) {
                     vec![]
                 } else {
                     vec![id.clone()]
@@ -635,5 +637,44 @@ mod tests {
         let found = s.pairs_among(&[a.clone(), b.clone()]).await.unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].a_id == a || found[0].b_id == a);
+    }
+
+    #[tokio::test]
+    async fn roots_of_a_model_written_artifact_with_no_lineage_is_empty_not_itself() {
+        // The §9 hazard: a synthesized artifact read as captured would hand its
+        // own model-written text to a merge prompt as an original.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let na = |ordinal: i64, text: &str| crate::store::artifacts::NewArtifact {
+            ordinal,
+            text: text.into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        let made = s
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(0, "written from a pursuit")],
+                crate::store::artifacts::Provenance::Synthesized,
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&made[0].id)).await.unwrap();
+        assert!(roots[&made[0].id].is_empty(), "{roots:?}");
+        // A passage is its own root, like a captured artifact.
+        let p = s
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na(1, "verbatim")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&p[0].id)).await.unwrap();
+        assert_eq!(roots[&p[0].id], vec![p[0].id.clone()]);
     }
 }
