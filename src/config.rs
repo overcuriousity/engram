@@ -2177,15 +2177,21 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 
     #[test]
     fn a_template_without_its_placeholder_is_rejected() {
-        let mut t = EmbedTemplates::default();
-        assert!(t.validate().is_ok());
-        t.query_template = "task: search result | query: ".into();
+        assert!(EmbedTemplates::default().validate().is_ok());
+        let t = EmbedTemplates {
+            query_template: "task: search result | query: ".into(),
+            ..EmbedTemplates::default()
+        };
         assert!(t.validate().unwrap_err().contains("query_template"));
-        let mut t = EmbedTemplates::default();
-        t.document_template = "text: {text}".into();
+        let t = EmbedTemplates {
+            document_template: "text: {text}".into(),
+            ..EmbedTemplates::default()
+        };
         assert!(t.validate().unwrap_err().contains("{title}"));
-        let mut t = EmbedTemplates::default();
-        t.document_template_untitled = "title: none | text: ".into();
+        let t = EmbedTemplates {
+            document_template_untitled: "title: none | text: ".into(),
+            ..EmbedTemplates::default()
+        };
         assert!(
             t.validate()
                 .unwrap_err()
