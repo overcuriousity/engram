@@ -184,9 +184,30 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
     }
 
+    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?;
     let written =
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
     flag_unverified(core, &written, &text).await?;
+    if keep {
+        // A promotion: what the window's artifacts cover, they supersede, and
+        // the passages' access comes with them. Under the corpus lock as a
+        // second locked step — `write_segment_artifacts` took and released it.
+        let _corpus = core.corpus_lock(corpus_id).await;
+        let n = crate::jobs::promote::supersede_covered(
+            core,
+            corpus_id,
+            idx,
+            &written,
+            crate::store::now(),
+        )
+        .await?;
+        tracing::info!(
+            corpus_id,
+            window = idx,
+            superseded = n,
+            "promotion superseded its covered passages"
+        );
+    }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;
@@ -340,6 +361,34 @@ pub(crate) async fn write_segment_artifacts(
         .store
         .segment_keeps_artifacts(corpus_id, segment_idx)
         .await?;
+    if keep {
+        // A promotion re-run: the process died between the insert and `done`.
+        // Under `keep_artifacts` the write appends, so writing again would put
+        // the window's artifacts in twice. A window holding passages is a
+        // promotion (an operator's re-read has none); rows in it that are not
+        // passages are the earlier write — return them and insert none.
+        let rows = core
+            .store
+            .artifacts_for_segment(corpus_id, segment_idx)
+            .await?;
+        let is_promotion = rows
+            .iter()
+            .any(|c| c.provenance == crate::store::artifacts::Provenance::Passage);
+        let have: Vec<_> = rows
+            .into_iter()
+            .filter(|c| {
+                c.provenance != crate::store::artifacts::Provenance::Passage && c.in_results()
+            })
+            .collect();
+        if is_promotion && !have.is_empty() {
+            tracing::info!(
+                corpus_id,
+                window = segment_idx,
+                "window already written under keep_artifacts; not writing again"
+            );
+            return Ok(have);
+        }
+    }
     if !keep {
         let old = core
             .store

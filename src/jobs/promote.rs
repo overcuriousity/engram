@@ -2,7 +2,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::store::artifacts::Provenance;
+use crate::store::artifacts::{Chunk, CorpusSpan, Provenance};
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
 
@@ -67,6 +67,121 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         armed += 1;
     }
     Ok(armed)
+}
+
+fn overlap(a: &CorpusSpan, b: &CorpusSpan) -> i64 {
+    (a.end_line.min(b.end_line) - a.start_line.max(b.start_line) + 1).max(0)
+}
+
+/// Which artifact, if any, supersedes each passage: the one whose span covers
+/// a **majority** of the passage's lines — per artifact, not cumulative,
+/// because `supersede` names one winner and a passage hidden behind an
+/// artifact holding a third of it sends the reader to the wrong text. Best
+/// overlap wins; a tie goes to the lowest ordinal. Everything else stays
+/// active, verbatim, in results: promotion can only ever improve coverage.
+pub fn covered_by<'a>(
+    passages: &'a [(String, CorpusSpan)],
+    artifacts: &'a [(String, i64, CorpusSpan)],
+) -> Vec<(&'a str, &'a str)> {
+    let mut out = Vec::new();
+    for (pid, ps) in passages {
+        let len = ps.end_line - ps.start_line + 1;
+        let best = artifacts
+            .iter()
+            .map(|(aid, ord, asp)| (overlap(ps, asp), *ord, aid.as_str()))
+            .filter(|(ov, _, _)| 2 * ov > len)
+            .max_by(|x, y| x.0.cmp(&y.0).then(y.1.cmp(&x.1)));
+        if let Some((_, _, aid)) = best {
+            out.push((pid.as_str(), aid));
+        }
+    }
+    out
+}
+
+/// After a promoted window's artifacts are written: supersede the passages
+/// they cover and carry the passages' access forward.
+///
+/// Activation first, links second, the supersede last — `supersede` refuses a
+/// side that is no longer active, and everything before it needs the passage
+/// readable. Returns how many passages were superseded.
+pub async fn supersede_covered(
+    core: &Core,
+    corpus_id: &str,
+    idx: i64,
+    written: &[Chunk],
+    at: i64,
+) -> Result<usize> {
+    let rows = core.store.artifacts_for_segment(corpus_id, idx).await?;
+    let passages: Vec<(String, CorpusSpan)> = rows
+        .iter()
+        .filter(|c| c.provenance == Provenance::Passage && c.in_results())
+        .filter_map(|c| Some((c.id.clone(), c.corpus_span.clone()?)))
+        .collect();
+    let artifacts: Vec<(String, i64, CorpusSpan)> = written
+        .iter()
+        .filter_map(|c| Some((c.id.clone(), c.ordinal, c.corpus_span.clone()?)))
+        .collect();
+    let pairs = covered_by(&passages, &artifacts);
+    if pairs.is_empty() {
+        return Ok(0);
+    }
+    let half_life = core.activation.half_life_days;
+    let link_half_life = core.associate.half_life_days;
+
+    // Group by winner: one artifact may supersede several passages, and its
+    // activation is the max over all of them.
+    let mut by_winner: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (p, a) in &pairs {
+        by_winner.entry(a).or_default().push(p);
+    }
+    let all_superseded: std::collections::HashSet<&str> = pairs.iter().map(|(p, _)| *p).collect();
+    let mut n = 0;
+    for (winner, losers) in by_winner {
+        let ids: Vec<String> = losers.iter().map(|s| s.to_string()).collect();
+        let act = core.store.activation_of(&ids).await?;
+        let carried = act
+            .values()
+            .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
+            .fold(f64::MIN, f64::max);
+        if carried > f64::MIN {
+            let own = core
+                .store
+                .activation_of(std::slice::from_ref(&winner.to_string()))
+                .await?
+                .get(winner)
+                .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
+                .unwrap_or(1.0);
+            core.store
+                .set_activation(winner, carried.max(own), at)
+                .await?;
+        }
+        for loser in &losers {
+            for link in core.store.links_touching(loser).await? {
+                let other = if link.a_id == *loser {
+                    &link.b_id
+                } else {
+                    &link.a_id
+                };
+                // A link between two passages of this same promotion would
+                // become the artifact linked to itself — or to a passage about
+                // to go dark. Neither carries anything.
+                if all_superseded.contains(other.as_str()) {
+                    continue;
+                }
+                core.store
+                    .carry_link(&link, loser, winner, link_half_life, at)
+                    .await?;
+            }
+        }
+        for loser in &losers {
+            if crate::jobs::try_supersede(core, loser, winner, "a passage its promotion covers")
+                .await
+            {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -206,6 +321,258 @@ mod tests {
         assert_eq!(
             core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Pending)
+        );
+    }
+
+    use crate::store::artifacts::CorpusSpan;
+
+    fn sp(a: i64, b: i64) -> CorpusSpan {
+        CorpusSpan {
+            start_line: a,
+            end_line: b,
+        }
+    }
+
+    #[test]
+    fn the_majority_rule_is_per_artifact_best_overlap_ties_to_the_lowest_ordinal() {
+        // passage 1–20; A claims 1–11 (11 lines, majority), B claims 12–20 (9).
+        let passages = vec![("p".to_string(), sp(1, 20))];
+        let arts = vec![
+            ("b".to_string(), 1, sp(12, 20)),
+            ("a".to_string(), 0, sp(1, 11)),
+        ];
+        assert_eq!(covered_by(&passages, &arts), vec![("p", "a")]);
+        // 30% + 30% is not a majority: nobody claims it.
+        let arts = vec![
+            ("a".to_string(), 0, sp(1, 6)),
+            ("b".to_string(), 1, sp(7, 12)),
+        ];
+        assert!(covered_by(&passages, &arts).is_empty());
+        // Exactly half is not a majority either.
+        let arts = vec![("a".to_string(), 0, sp(1, 10))];
+        assert!(covered_by(&passages, &arts).is_empty());
+        // A tie on overlap goes to the lowest ordinal.
+        let arts = vec![
+            ("z".to_string(), 5, sp(1, 20)),
+            ("y".to_string(), 2, sp(1, 20)),
+        ];
+        assert_eq!(covered_by(&passages, &arts), vec![("p", "y")]);
+    }
+
+    /// A verbatim corpus of three passages (lines 1–2, 3–4, 5–6 of one
+    /// window) with activation and a link on the middle one; then a
+    /// promotion whose artifact A claims lines 1–4 and B claims line 6.
+    async fn promoted_fixture() -> (
+        crate::core::Core,
+        String,
+        Vec<crate::store::artifacts::Chunk>,
+        Vec<crate::store::artifacts::Chunk>,
+    ) {
+        let mut core = test_core().await;
+        core.synthesis = SynthesisMode::Earned;
+        core.feedback.enabled = true;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2\nl3\nl4\nl5\nl6", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[crate::store::segments::NewSegment {
+                    start_line: 1,
+                    end_line: 6,
+                    text: "l1\nl2\nl3\nl4\nl5\nl6",
+                    carry_lines: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        core.store.mark_segments_verbatim(&src.id).await.unwrap();
+        let na = |o: i64, t: &str, a: i64, b: i64| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(sp(a, b)),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let passages = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    na(0, "l1 l2", 1, 2),
+                    na(1, "l3 l4", 3, 4),
+                    na(2, "l5 l6", 5, 6),
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        // Another corpus to link to.
+        let other = core
+            .store
+            .insert_corpus("other", "web", None)
+            .await
+            .unwrap();
+        let x = core
+            .store
+            .insert_artifacts(&other.id, &[na(0, "x", 1, 1)])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .bump_activation(std::slice::from_ref(&passages[1].id), 4.0, 14.0, 1_000)
+            .await
+            .unwrap();
+        core.store
+            .bump_links(
+                &[(passages[1].id.as_str(), x.as_str())],
+                2.0,
+                Some("mid"),
+                14.0,
+                1_000,
+            )
+            .await
+            .unwrap();
+        // The promotion's artifacts, as `write_segment_artifacts` would write them.
+        core.store.reset_segment(&src.id, 0, true).await.unwrap();
+        let written = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    na(0, "A covers one to four", 1, 4),
+                    na(1, "B covers six", 6, 6),
+                ],
+            )
+            .await
+            .unwrap();
+        (core, src.id, passages, written)
+    }
+
+    #[tokio::test]
+    async fn covered_passages_are_superseded_and_the_rest_stay_verbatim() {
+        let (core, corpus, passages, written) = promoted_fixture().await;
+        let n = supersede_covered(&core, &corpus, 0, &written, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "passages 1 and 2 are majority-covered by A; passage 3 is half-covered by B"
+        );
+        let p0 = core.store.get_artifact(&passages[0].id).await.unwrap();
+        let p1 = core.store.get_artifact(&passages[1].id).await.unwrap();
+        let p2 = core.store.get_artifact(&passages[2].id).await.unwrap();
+        assert_eq!(p0.superseded_by.as_deref(), Some(written[0].id.as_str()));
+        assert_eq!(p1.superseded_by.as_deref(), Some(written[0].id.as_str()));
+        assert!(
+            p2.in_results(),
+            "lines 5–6: B claims one of two, not a majority"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_artifact_takes_the_max_decayed_activation_not_one_point_zero() {
+        let (core, corpus, passages, written) = promoted_fixture().await;
+        supersede_covered(&core, &corpus, 0, &written, 1_000)
+            .await
+            .unwrap();
+        let act = core
+            .store
+            .activation_of(&[written[0].id.clone(), passages[1].id.clone()])
+            .await
+            .unwrap();
+        let (a_val, a_at) = act[&written[0].id];
+        let (p_val, p_at) = act[&passages[1].id];
+        let expect = crate::store::links::decayed(p_val, p_at, 1_000, 14.0);
+        assert!((a_val - expect).abs() < 1e-6, "got {a_val}, want {expect}");
+        assert_eq!(a_at, 1_000);
+        assert!(a_val > 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_link_from_a_superseded_passage_resolves_on_the_artifact_and_the_dead_row_stays() {
+        let (core, corpus, passages, written) = promoted_fixture().await;
+        supersede_covered(&core, &corpus, 0, &written, 1_000)
+            .await
+            .unwrap();
+        let out = core
+            .store
+            .links_from(
+                &[written[0].id.clone()],
+                &[crate::store::links::LinkState::Learning],
+                14.0,
+                1_000,
+                0.0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!((out[0].weight - 2.0).abs() < 1e-6);
+        // The passage's own row is still there — dark, because its endpoint
+        // is superseded.
+        assert_eq!(
+            core.store
+                .links_touching(&passages[1].id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let from_passage = core
+            .store
+            .links_from(
+                &[passages[1].id.clone()],
+                &[crate::store::links::LinkState::Learning],
+                14.0,
+                1_000,
+                0.0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(from_passage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_re_run_under_keep_artifacts_writes_nothing_twice() {
+        let (core, corpus, _passages, written) = promoted_fixture().await;
+        // `write_segment_artifacts` with keep set and non-passage rows already
+        // present returns those rows and inserts none.
+        let again = crate::jobs::window::write_segment_artifacts(
+            &core,
+            &corpus,
+            0,
+            vec![crate::store::artifacts::NewArtifact {
+                ordinal: 0,
+                text: "dup".into(),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: Some(0),
+                caveats: vec![],
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            again.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            written.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            core.store
+                .artifacts_for_segment(&corpus, 0)
+                .await
+                .unwrap()
+                .len(),
+            5
         );
     }
 }
