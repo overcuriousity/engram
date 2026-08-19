@@ -46,6 +46,11 @@ impl Reading {
         status: CorpusStatus::Describing,
         stage: Stage::Describe,
     };
+    /// A PDF, read by the local extractor. No model, so no role gates it.
+    pub const EXTRACTION: Reading = Reading {
+        status: CorpusStatus::Extracting,
+        stage: Stage::Extract,
+    };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -53,6 +58,8 @@ impl Reading {
 pub enum CorpusStatus {
     /// An image whose text has not been read yet. Only image corpora hold it.
     Describing,
+    /// A PDF whose text has not been extracted yet. Only PDF corpora hold it.
+    Extracting,
     Raw,
     /// Captured, stored, and deliberately not queued for synthesis: something
     /// near-identical is already in the base, and segmenting it would pay a
@@ -71,6 +78,7 @@ impl CorpusStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             CorpusStatus::Describing => "describing",
+            CorpusStatus::Extracting => "extracting",
             CorpusStatus::Raw => "raw",
             CorpusStatus::NeedsReview => "needs_review",
             CorpusStatus::Segmenting => "segmenting",
@@ -84,6 +92,7 @@ impl CorpusStatus {
     pub fn parse(s: &str) -> CorpusStatus {
         match s {
             "describing" => CorpusStatus::Describing,
+            "extracting" => CorpusStatus::Extracting,
             "needs_review" => CorpusStatus::NeedsReview,
             "segmenting" => CorpusStatus::Segmenting,
             "segmented" => CorpusStatus::Segmented,

@@ -51,6 +51,11 @@ pub struct CaptureConfig {
     /// Longest edge, in pixels, of the preview the vision model is shown and
     /// the UI displays. The original is stored untouched regardless.
     pub image_preview_edge: u32,
+    /// Bytes an uploaded PDF may weigh. A book is tens of megabytes; this is
+    /// the per-route ceiling for the upload door, the global body limit stays.
+    /// Nothing else bounds a PDF — no page cap: feeding a book to engram is a
+    /// deliberate act, and the queue behind it is already throttled.
+    pub pdf_max_bytes: usize,
 }
 
 impl Default for CaptureConfig {
@@ -61,6 +66,7 @@ impl Default for CaptureConfig {
             min_extracted_chars: 200,
             image_max_bytes: 25 * 1024 * 1024,
             image_preview_edge: 2048,
+            pdf_max_bytes: 50 * 1024 * 1024,
         }
     }
 }
@@ -1878,6 +1884,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "vision must default to disabled"
         );
         assert_eq!(cfg.capture.image_max_bytes, 25 * 1024 * 1024);
+        assert_eq!(cfg.capture.pdf_max_bytes, 50 * 1024 * 1024);
         assert_eq!(cfg.capture.image_preview_edge, 2048);
     }
 
@@ -2015,6 +2022,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "example config must show the vision block"
         );
         assert!(text.contains("image_max_bytes"));
+        assert!(text.contains("pdf_max_bytes"));
     }
 
     #[test]

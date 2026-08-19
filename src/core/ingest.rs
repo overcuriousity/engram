@@ -10,6 +10,10 @@ use crate::store::now;
 /// The channel an image arrives through. Its own value, like `upload`, so
 /// the queue and the detail page can tell a photo from a paste.
 pub const ORIGIN_IMAGE: &str = "image";
+/// The channel a PDF arrives through. Its own value for the same reason a
+/// photo has one: the queue and the detail page have to tell a document that
+/// was extracted from one that was typed.
+pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
 /// An answer the operator chose to keep. Its own value because a corpus whose
@@ -69,6 +73,15 @@ pub enum NearDupeAction {
     KeepBoth,
     /// The new capture adds nothing. Delete it.
     Discard,
+}
+
+/// One PDF, whichever door it arrived through.
+#[derive(Debug, Clone)]
+pub struct PdfCapture {
+    pub bytes: Vec<u8>,
+    pub filename: Option<String>,
+    pub title_hint: Option<String>,
+    pub note: Option<String>,
 }
 
 /// One image, whichever door it arrived through.
@@ -286,6 +299,72 @@ impl Core {
     /// Store the image and queue the vision stage. Like `ingest_capture`, this
     /// makes no inference call: the phone gets its answer the moment the bytes
     /// are safe, and a dead vision endpoint costs a wait, not a photo.
+    /// Store the bytes and queue the reading. No gate: extraction is local, so
+    /// unlike the image door this one is open whatever `[infer]` holds.
+    ///
+    /// No decode permit either — there is no pixel work to bound — and no
+    /// preview, because rendering a first page needs pdfium and that is the ML
+    /// build's dependency, not this one's.
+    pub async fn ingest_pdf(&self, c: PdfCapture) -> Result<IngestOutcome> {
+        let PdfCapture {
+            bytes,
+            filename,
+            title_hint,
+            note,
+        } = c;
+        // Hashed before anything else touches it: the same PDF sent twice
+        // costs one SHA-256 the second time, not an extraction.
+        let hash = content_hash(&bytes);
+        if let Some(existing) = self.store.find_by_hash(&hash).await? {
+            tracing::info!(corpus_id = %existing.id, "duplicate PDF, returning existing source");
+            return Ok(IngestOutcome::existing(&existing));
+        }
+
+        // The same `file` namespace the image door writes, so the corpus page
+        // reads both through one path. No width or height: a PDF has pages,
+        // and this build does not count them.
+        let mut file = serde_json::json!({
+            "size": bytes.len(),
+            "mime": "application/pdf",
+        });
+        if let Some(n) = filename.as_deref() {
+            file["name"] = serde_json::Value::String(n.to_string());
+        }
+        let mut metadata = serde_json::json!({ "file": file });
+        if let Some(n) = clean_note(note) {
+            metadata["note"] = serde_json::json!(n);
+        }
+
+        let inserted = self
+            .store
+            .insert_attached_corpus(
+                &hash,
+                ORIGIN_PDF,
+                title_hint.as_deref(),
+                &metadata,
+                crate::store::corpora::Reading::EXTRACTION,
+                &crate::store::attachments::NewFile {
+                    kind: "pdf",
+                    mime: "application/pdf",
+                    filename: filename.as_deref(),
+                    bytes: &bytes,
+                    preview: &[],
+                    width: None,
+                    height: None,
+                },
+            )
+            .await?;
+        Ok(match inserted {
+            Insertion::Existing(c) => IngestOutcome::existing(&c),
+            Insertion::Created(c) => IngestOutcome {
+                id: c.id,
+                status: c.status,
+                duplicate: false,
+                near_duplicate: None,
+            },
+        })
+    }
+
     pub async fn ingest_image(&self, c: ImageCapture) -> Result<IngestOutcome> {
         if self.describer.is_none() {
             return Err(Error::Validation(
@@ -931,6 +1010,16 @@ impl Core {
                         "this image has not been read yet — re-read it instead".into(),
                     ));
                 }
+                // Same situation, same answer: re-segmenting starts from
+                // `raw_text`, and a PDF whose extraction has not landed has
+                // none.
+                if src.status == CorpusStatus::Extracting
+                    || (src.origin == ORIGIN_PDF && src.raw_text.trim().is_empty())
+                {
+                    return Err(Error::Validation(
+                        "this PDF has not been extracted yet — re-extract it instead".into(),
+                    ));
+                }
                 self.forget_derived_work(&src.id).await?;
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
@@ -981,6 +1070,31 @@ impl Core {
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
+            // A stored PDF can always be read again — with the ML build, or
+            // after a docling upgrade. The extraction and everything derived
+            // from it are replaced wholesale, because an artifact of the old
+            // reading has no span in the new one.
+            Stage::Extract => {
+                if src.origin != ORIGIN_PDF || !self.store.has_attachment(&src.id).await? {
+                    return Err(Error::Validation(
+                        "only a captured PDF can be re-extracted".into(),
+                    ));
+                }
+                self.forget_derived_work(&src.id).await?;
+                self.store.clear_read_text(&src.id).await?;
+                let mut meta = src.metadata.clone();
+                if let Some(m) = meta.as_object_mut() {
+                    m.remove("extract");
+                }
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store
+                    .set_corpus_status(&src.id, CorpusStatus::Extracting)
+                    .await?;
+                self.heal_dangling_supersessions().await?;
+                self.store
+                    .enqueue(Stage::Extract, "corpus", &src.id)
+                    .await?;
+            }
             // A stored image can always be read again — with a better model, or
             // after the endpoint that refused it is fixed. The reading and
             // everything derived from it are replaced wholesale, because a
@@ -1018,13 +1132,74 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE,
+        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
     };
     use crate::core::test_support::test_core;
     use crate::error::Error;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    fn a_pdf_fixture() -> Vec<u8> {
+        include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
+    }
+
+    fn a_pdf_capture() -> PdfCapture {
+        PdfCapture {
+            bytes: a_pdf_fixture(),
+            filename: Some("plan.pdf".into()),
+            title_hint: None,
+            note: Some("the quarterly plan".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pdf_is_stored_whole_and_queued_to_be_extracted() {
+        let core = test_core().await;
+        let out = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(src.status, CorpusStatus::Extracting);
+        assert_eq!(src.origin, ORIGIN_PDF);
+        assert_eq!(
+            src.raw_text, "",
+            "the text arrives from the stage, not here"
+        );
+        assert_eq!(src.metadata["note"], "the quarterly plan");
+        assert_eq!(src.metadata["file"]["name"], "plan.pdf");
+        assert_eq!(src.metadata["file"]["mime"], "application/pdf");
+
+        let (mime, bytes) = core
+            .store
+            .attachment_original(&out.id)
+            .await
+            .unwrap()
+            .expect("the PDF itself is kept");
+        assert_eq!(mime, "application/pdf");
+        assert_eq!(bytes, a_pdf_fixture(), "stored byte for byte");
+
+        let job = core.store.claim_job().await.unwrap().expect("a job");
+        assert_eq!(job.stage, Stage::Extract);
+        assert_eq!(job.target_id, out.id);
+    }
+
+    #[tokio::test]
+    async fn the_same_pdf_twice_is_one_corpus() {
+        let core = test_core().await;
+        let first = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        let again = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+    }
+
+    #[tokio::test]
+    async fn the_pdf_door_is_open_without_any_model_configured() {
+        // Unlike the image door, which refuses without `[infer.vision]`:
+        // extraction is local, so nothing gates it.
+        let core = crate::core::test_support::test_core_without_vision().await;
+        assert!(core.ingest_pdf(a_pdf_capture()).await.is_ok());
+    }
 
     fn a_seeded_png(seed: u8) -> Vec<u8> {
         use image::{ImageBuffer, Rgb};

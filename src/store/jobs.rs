@@ -38,6 +38,10 @@ pub enum Stage {
     /// One image, one vision call: reads a captured image into the markdown
     /// that becomes its `raw_text`, then hands off to `Synthesize`.
     Describe,
+    /// One captured PDF, read into the markdown that becomes its `raw_text`,
+    /// then handed off to `Synthesize`. Local work: no inference call, so no
+    /// role gates it and no budget is spent on it.
+    Extract,
     /// The periodic association sweep. Its target is the collection rather than
     /// any one artifact, so the `UNIQUE(stage, target_id)` on `jobs` guarantees
     /// at most one queued sweep however often the ticker fires. Local work: it
@@ -64,6 +68,7 @@ impl Stage {
             Stage::Dedupe => "dedupe",
             Stage::Relate => "relate",
             Stage::Describe => "describe",
+            Stage::Extract => "extract",
             Stage::Associate => "associate",
             Stage::LinkJudge => "link_judge",
             Stage::Pursuit => "pursuit",
@@ -81,6 +86,7 @@ impl Stage {
             "dedupe" => Some(Stage::Dedupe),
             "relate" => Some(Stage::Relate),
             "describe" => Some(Stage::Describe),
+            "extract" => Some(Stage::Extract),
             "associate" => Some(Stage::Associate),
             "link_judge" => Some(Stage::LinkJudge),
             "pursuit" => Some(Stage::Pursuit),

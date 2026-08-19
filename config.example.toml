@@ -508,6 +508,12 @@ min_extracted_chars = 200
 # Bytes an uploaded image may weigh. The image door has its own ceiling
 # because a phone photo is several times the 8 MB the rest of the API allows.
 image_max_bytes = 26214400
+
+# Bytes an uploaded PDF may weigh. The upload door has its own ceiling for a
+# PDF, well above the 8 MB request-body limit, because a book is tens of
+# megabytes. Nothing else bounds one: there is no page cap, and a long document
+# simply becomes a long queue.
+pdf_max_bytes = 52428800
 # Longest edge of the preview shown to the vision model and in the UI. The
 # original is stored untouched either way.
 image_preview_edge = 2048
