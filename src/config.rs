@@ -660,6 +660,128 @@ pub struct EmbedRole {
     pub timeout_secs: u64,
 }
 
+/// The three strings that, with `model`, fix what a stored vector means.
+///
+/// EmbeddingGemma is asymmetric: a query and a document are embedded through
+/// different prompts, and a document without a title substitutes the literal
+/// `none` rather than an empty field. Changing any of these invalidates every
+/// stored vector as thoroughly as changing `model` does; there is no fingerprint
+/// or rebuild path because there is no base to look after yet — the answer is
+/// to drop the collection and re-capture.
+///
+/// Kept in config rather than code so that a symmetric embedder — `bge-m3`,
+/// which engram shipped with — stays one TOML block away: see `legacy()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbedTemplates {
+    /// `{text}` is the query.
+    pub query_template: String,
+    /// `{title}` and `{text}`.
+    pub document_template: String,
+    /// `{text}` only; used when the document has no title.
+    pub document_template_untitled: String,
+}
+
+pub(crate) fn default_query_template() -> String {
+    "task: search result | query: {text}".into()
+}
+pub(crate) fn default_document_template() -> String {
+    "title: {title} | text: {text}".into()
+}
+pub(crate) fn default_document_template_untitled() -> String {
+    "title: none | text: {text}".into()
+}
+
+impl Default for EmbedTemplates {
+    fn default() -> Self {
+        Self {
+            query_template: default_query_template(),
+            document_template: default_document_template(),
+            document_template_untitled: default_document_template_untitled(),
+        }
+    }
+}
+
+impl EmbedTemplates {
+    /// What `embed_text` produced before templates existed: the title on its
+    /// own line above the body, the query as typed. The right block for a
+    /// symmetric embedder, and what every test double renders with, so a test
+    /// that queries with `"title\ntext"` lands on the document it seeded.
+    pub fn legacy() -> Self {
+        Self {
+            query_template: "{text}".into(),
+            document_template: "{title}\n{text}".into(),
+            document_template_untitled: "{text}".into(),
+        }
+    }
+
+    pub fn render_query(&self, query: &str) -> String {
+        substitute(&self.query_template, &[("text", query)])
+    }
+
+    pub fn render_document(&self, title: Option<&str>, text: &str) -> String {
+        match title {
+            Some(t) => substitute(&self.document_template, &[("title", t), ("text", text)]),
+            None => substitute(&self.document_template_untitled, &[("text", text)]),
+        }
+    }
+
+    /// Every template must be able to carry what it is for. Checked at config
+    /// load; a template that drops `{text}` would embed the same string for
+    /// every document and nothing downstream would notice.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.query_template.contains("{text}") {
+            return Err("infer.embed.query_template must contain {text}".into());
+        }
+        if !self.document_template.contains("{text}") {
+            return Err("infer.embed.document_template must contain {text}".into());
+        }
+        if !self.document_template.contains("{title}") {
+            return Err("infer.embed.document_template must contain {title}; \
+                        use document_template_untitled for the case with no title"
+                .into());
+        }
+        if !self.document_template_untitled.contains("{text}") {
+            return Err("infer.embed.document_template_untitled must contain {text}".into());
+        }
+        Ok(())
+    }
+}
+
+/// Fill `{name}` placeholders in one left-to-right pass.
+///
+/// One pass rather than chained `replace` calls: a value that itself contains
+/// a placeholder — a heading that reads "about {text}" — must land verbatim,
+/// not have the next value spliced into it. A `{name}` that matches no
+/// variable is left as written.
+pub(crate) fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let name = &after[..close];
+                match vars.iter().find(|(k, _)| *k == name) {
+                    Some((_, v)) => out.push_str(v),
+                    None => {
+                        out.push('{');
+                        out.push_str(name);
+                        out.push('}');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AskRole {
     pub base_url: String,
@@ -1973,5 +2095,77 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "the error must name the typo: {err}"
         );
         assert!(err.contains("efficient"), "and what was available: {err}");
+    }
+
+    #[test]
+    fn query_and_document_render_differently_for_the_same_text() {
+        let t = EmbedTemplates::default();
+        let q = t.render_query("how do I recover deleted entries");
+        let d = t.render_document(None, "how do I recover deleted entries");
+        assert_ne!(q, d);
+        assert_eq!(
+            q,
+            "task: search result | query: how do I recover deleted entries"
+        );
+        assert_eq!(d, "title: none | text: how do I recover deleted entries");
+    }
+
+    #[test]
+    fn a_titled_and_an_untitled_document_take_different_templates() {
+        let t = EmbedTemplates::default();
+        assert_eq!(
+            t.render_document(Some("Recovering deleted entries"), "run fsck first"),
+            "title: Recovering deleted entries | text: run fsck first"
+        );
+        assert_eq!(
+            t.render_document(None, "run fsck first"),
+            "title: none | text: run fsck first"
+        );
+    }
+
+    #[test]
+    fn the_legacy_templates_reproduce_the_old_join() {
+        // What `embed_text` produced before templates existed, and what a
+        // bge-m3 operator configures. The test doubles default to it so every
+        // retrieval test that queries with "title\ntext" keeps matching.
+        let t = EmbedTemplates::legacy();
+        assert_eq!(t.render_query("t0\nalpha"), "t0\nalpha");
+        assert_eq!(t.render_document(Some("t0"), "alpha"), "t0\nalpha");
+        assert_eq!(t.render_document(None, "alpha"), "alpha");
+    }
+
+    #[test]
+    fn substitution_is_one_pass_so_a_value_cannot_be_substituted_again() {
+        // A title that happens to contain the text placeholder must not have
+        // the body spliced into it. Two chained `replace` calls would.
+        let t = EmbedTemplates::default();
+        assert_eq!(
+            t.render_document(Some("about {text}"), "body"),
+            "title: about {text} | text: body"
+        );
+        assert_eq!(
+            substitute("a {x} b {y} c {x}", &[("x", "1"), ("y", "2")]),
+            "a 1 b 2 c 1"
+        );
+        // An unknown placeholder is left as written rather than eaten.
+        assert_eq!(substitute("{nope} {x}", &[("x", "1")]), "{nope} 1");
+    }
+
+    #[test]
+    fn a_template_without_its_placeholder_is_rejected() {
+        let mut t = EmbedTemplates::default();
+        assert!(t.validate().is_ok());
+        t.query_template = "task: search result | query: ".into();
+        assert!(t.validate().unwrap_err().contains("query_template"));
+        let mut t = EmbedTemplates::default();
+        t.document_template = "text: {text}".into();
+        assert!(t.validate().unwrap_err().contains("{title}"));
+        let mut t = EmbedTemplates::default();
+        t.document_template_untitled = "title: none | text: ".into();
+        assert!(
+            t.validate()
+                .unwrap_err()
+                .contains("document_template_untitled")
+        );
     }
 }
