@@ -497,8 +497,13 @@ struct CorpusTemplate {
     /// An image corpus: the page shows the photo, and the lines below are the
     /// model's reading of it rather than the source itself.
     image: bool,
-    /// An image whose reading has not landed — still `describing`, or parked
-    /// before any text was read. Nothing to re-segment; only re-read.
+    /// A PDF corpus: the lines below are docling's extraction of it rather
+    /// than the document as it was laid out, and the original is one click
+    /// away.
+    pdf: bool,
+    /// A capture whose reading has not landed — still `describing` or
+    /// `extracting`, or parked before any text was read. Nothing to
+    /// re-segment; only read it again.
     unread: bool,
     /// Rows of what the door recorded about the capture, already formatted.
     meta_rows: Vec<(String, String)>,
@@ -1480,7 +1485,9 @@ async fn corpus_detail(
     // explains itself rather than on a page with nothing marked.
     let coverage = s.coverage.map(|c| format!("{:.0}%", c * 100.0));
     let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
-    let unread = image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty());
+    let pdf = s.origin == crate::core::ingest::ORIGIN_PDF;
+    let unread = (image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty()))
+        || (pdf && (s.status == CorpusStatus::Extracting || s.raw_text.trim().is_empty()));
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     let exif_rows = exif_tag_rows(&s.metadata);
@@ -1519,6 +1526,7 @@ async fn corpus_detail(
         restored,
         source_url: s.source_url.clone(),
         image,
+        pdf,
         unread,
         meta_rows,
         exif_rows,
@@ -1573,6 +1581,9 @@ fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     }
     if let Some(e) = m["describe"]["error"].as_str() {
         rows.push(("Reading".into(), e.into()));
+    }
+    if let Some(e) = m["extract"]["error"].as_str() {
+        rows.push(("Extraction".into(), e.into()));
     }
     rows
 }
@@ -1668,7 +1679,8 @@ struct ReprocessForm {
     stage: Option<String>,
 }
 
-/// Re-segment by default; `stage=describe` re-reads a captured image.
+/// Re-segment by default; `stage=describe` re-reads a captured image and
+/// `stage=extract` re-reads a captured PDF.
 async fn reprocess_ui(
     State(st): State<AppState>,
     _id: Identity,
@@ -3396,7 +3408,56 @@ mod tests {
             app_for(crate::core::test_support::test_core_without_vision().await).await;
         let html = get(&app, "/ui/capture", &cookie).await;
         assert!(!html.contains("image/*"));
-        assert!(html.contains("accept=\".txt,text/plain\""));
+        assert!(html.contains("accept=\".txt,text/plain,.pdf,application/pdf\""));
+    }
+
+    #[tokio::test]
+    async fn a_pdf_corpus_page_offers_re_extract_and_names_the_failure() {
+        let core = crate::core::test_support::test_core().await;
+        let id = core
+            .ingest_pdf(crate::core::ingest::PdfCapture {
+                bytes: include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec(),
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        crate::jobs::extract::park_failed(&core, &id, "that PDF holds no extractable text")
+            .await
+            .unwrap();
+
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, &format!("/ui/corpora/{id}"), &cookie).await;
+        assert!(
+            html.contains("no extractable text"),
+            "the reason is what the page is for: {html}"
+        );
+        assert!(
+            html.contains(r#"value="extract""#),
+            "no Re-extract on a PDF that failed: {html}"
+        );
+        assert!(
+            html.contains(&format!("/api/v1/corpora/{id}/file")),
+            "the original is not reachable: {html}"
+        );
+        assert!(
+            !html.contains("Re-segment"),
+            "nothing was extracted; there is nothing to re-segment: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capture_page_takes_a_pdf_whether_or_not_vision_is_configured() {
+        for core in [
+            crate::core::test_support::test_core().await,
+            crate::core::test_support::test_core_without_vision().await,
+        ] {
+            let (app, cookie) = app_for(core).await;
+            let html = get(&app, "/ui/capture", &cookie).await;
+            assert!(html.contains("application/pdf"), "picker accepts PDFs");
+        }
     }
 
     #[tokio::test]
