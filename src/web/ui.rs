@@ -143,6 +143,10 @@ pub struct ArtifactDetail {
     /// highlighted" label over an empty link and an empty line table — on
     /// exactly the artifact whose orphan notice matters most.
     pub merged: bool,
+    /// Written from a pursuit: shows the questions it was written for.
+    pub synthesized: bool,
+    /// Those questions.
+    pub cues: Vec<String>,
     /// True when one of those sources has since been deleted. The text still
     /// carries what it said, so this is a missing link rather than missing
     /// knowledge — and saying so beats listing one source fewer in silence.
@@ -612,6 +616,12 @@ struct OpsTemplate {
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
+    /// Artifacts written from pursuits, newest first, each one click from
+    /// deprecated.
+    generated: Vec<GeneratedRow>,
+    /// Recent pursuits, only when the feature is on.
+    pursuit_enabled: bool,
+    pursuits: Vec<PursuitRow>,
 }
 
 #[derive(Template)]
@@ -630,6 +640,24 @@ struct SettingsTemplate {
     /// only the searches let an operator clear their query log without knowing
     /// the judged questions went with it.
     asks: Option<crate::store::asks::AskStats>,
+}
+
+/// One generated artifact on Ops.
+struct GeneratedRow {
+    id: String,
+    title: String,
+    subtitle: String,
+    cues: Vec<String>,
+    sources: Vec<SourceRow>,
+}
+
+/// One pursuit on Ops: what was wanted, what came of it.
+struct PursuitRow {
+    when: String,
+    state: String,
+    reason: String,
+    queries: Vec<String>,
+    artifact_id: Option<String>,
 }
 
 struct MergedRow {
@@ -1912,6 +1940,44 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     let more_merged = merged.len() > TABLE_CAP as usize;
     merged.truncate(TABLE_CAP as usize);
+
+    let mut generated = Vec::new();
+    let gen_chunks = st.core.store.synthesized_artifacts(TABLE_CAP).await?;
+    let gen_ids: Vec<String> = gen_chunks.iter().map(|c| c.id.clone()).collect();
+    let gen_roots = st.core.store.roots_of(&gen_ids).await.unwrap_or_default();
+    for c in gen_chunks {
+        let sources = source_rows(
+            &st.core.store,
+            &c.id,
+            gen_roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
+        )
+        .await;
+        generated.push(GeneratedRow {
+            title: title_of(&c),
+            subtitle: row_subtitle(&c),
+            cues: c.cues.clone(),
+            id: c.id,
+            sources,
+        });
+    }
+    let pursuit_enabled = st.core.pursuit.enabled;
+    let pursuits: Vec<PursuitRow> = if pursuit_enabled {
+        st.core
+            .store
+            .recent_pursuits(50)
+            .await?
+            .into_iter()
+            .map(|p| PursuitRow {
+                when: fmt_time(p.opened_at),
+                state: p.state,
+                reason: p.reason.unwrap_or_default(),
+                queries: p.queries,
+                artifact_id: p.artifact_id,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
 
@@ -1969,6 +2035,9 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             true => Some(st.core.store.link_counts().await?),
             false => None,
         },
+        generated,
+        pursuit_enabled,
+        pursuits,
     })
     .into_response())
 }
@@ -2691,7 +2760,9 @@ pub(crate) async fn build_artifact_detail(
         status: c.status,
         last_verified_at: c.last_verified_at,
         caveats: c.caveats,
-        merged: c.provenance == crate::store::artifacts::Provenance::Merged,
+        merged: c.provenance.is_model_written(),
+        synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
+        cues: c.cues,
         corpus_id: c.corpus_id,
         // A merged artifact has no corpus and so cannot have a restored one.
         corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
@@ -7316,5 +7387,87 @@ mod tests {
         assert_eq!(got[1].kind, "pivoted");
         assert_eq!(got[1].via.as_deref(), Some(made[0].id.as_str()));
         assert_eq!(got[1].scope.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.pursuit.enabled = true;
+        core.feedback.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let s = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "source text".into(),
+                    corpus_span: None,
+                    title: Some("S".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let g = handle
+            .store
+            .insert_synthesized_artifact(
+                &crate::store::artifacts::NewSynthesized {
+                    text: "generated from S".into(),
+                    title: Some("Generated title".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec!["why was this asked".into()],
+                },
+                &[s[0].id.clone()],
+            )
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&handle, &g.id).await.unwrap();
+        handle
+            .store
+            .insert_pursuit(1, &["why was this asked".into()], &[s[0].id.clone()])
+            .await
+            .unwrap();
+
+        let detail = get_body(&app, &cookie, &format!("/ui/artifacts/{}", g.id)).await;
+        assert!(
+            detail.contains("Written because these were asked"),
+            "{detail}"
+        );
+        assert!(detail.contains("why was this asked"), "{detail}");
+
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(ops.contains("Generated"), "{ops}");
+        assert!(
+            ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
+            "{ops}"
+        );
+        assert!(ops.contains("Pursuits"), "{ops}");
+
+        let rail = get_body(
+            &app,
+            &cookie,
+            "/ui/search/results?q=Generated%20title%0Agenerated%20from%20S",
+        )
+        .await;
+        assert!(rail.contains("model-written"), "{rail}");
+    }
+
+    #[tokio::test]
+    async fn the_pursuit_section_is_not_there_when_pursuits_are_off() {
+        let (app, cookie) = app_with_session().await;
+        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(!ops.contains("<h3>Pursuits</h3>"), "{ops}");
     }
 }

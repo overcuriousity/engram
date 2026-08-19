@@ -18,6 +18,15 @@
 </div>
 {% endif %}
 
+{% if d.synthesized && !d.cues.is_empty() %}
+{# Not "a model guessed you would want this" but "this was written because
+   these things were asked and the base had no answer". #}
+<div class="pane-label">Written because these were asked</div>
+<ul class="cues">
+  {% for q in d.cues %}<li>{{ q }}</li>{% endfor %}
+</ul>
+{% endif %}
+
 {% if d.merged && d.lineage.roots.is_empty() %}
 <p class="muted">
   Every artifact this was written from has since been deleted. Its content is

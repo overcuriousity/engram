@@ -44,6 +44,10 @@
         {% if r.primed %}
         <span class="badge" title="Moved up: you reach this one often">primed</span>
         {% endif %}
+        {% if r.model_written %}
+        {# Never silently indistinguishable from captured text. #}
+        <span class="badge" title="A model wrote this, from {{ r.origin_count }} source corpus/corpora">model-written · {{ r.origin_count }}</span>
+        {% endif %}
         <span class="rail-title">{{ r.title }}</span>
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in
