@@ -98,6 +98,10 @@ pub fn spawn_consolidation_ticker(
             tracing::info!("consolidation sweep disabled");
             return;
         }
+        if !core.synthesizes() {
+            tracing::info!("no synthesizer; consolidation judging disabled");
+            return;
+        }
         let period = std::time::Duration::from_secs(core.consolidate.interval_hours.max(1) * 3600);
         let mut tick = tokio::time::interval(period);
         loop {
@@ -326,6 +330,10 @@ pub fn spawn_dedupe_ticker(
     tokio::spawn(async move {
         if !core.consolidate.enabled || core.consolidate.max_dedupe_per_tick == 0 {
             tracing::info!("dedupe pass disabled");
+            return;
+        }
+        if !core.synthesizes() {
+            tracing::info!("no synthesizer; dedupe pass disabled");
             return;
         }
         let period =

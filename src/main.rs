@@ -92,12 +92,13 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         }
     });
 
-    engram::infer::openai::probe(
-        "chunk",
-        &cfg.infer.synthesize.base_url,
-        cfg.infer.synthesize.api_key.as_deref(),
-    )
-    .await;
+    if let Some(s) = &cfg.infer.synthesize {
+        engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
+    } else {
+        tracing::info!(
+            "synthesize not configured; capture embeds verbatim and nothing is synthesized"
+        );
+    }
     engram::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
@@ -110,7 +111,7 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         tracing::info!("rerank not configured; search returns vector order");
     }
     if let Some(v) = &cfg.infer.vision {
-        let (base_url, api_key) = v.resolve(&cfg.infer.synthesize);
+        let (base_url, api_key) = v.resolve(cfg.infer.synthesize.as_ref());
         engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
     } else {
         tracing::info!("vision not configured; the image door is closed");
@@ -308,7 +309,9 @@ mod startup_tests {
                 weak_below: 0.35,
             },
             infer: InferConfig {
-                synthesize: SynthesizeRole {
+                synthesis: engram::config::SynthesisMode::Eager,
+                segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
+                synthesize: Some(SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -321,7 +324,7 @@ mod startup_tests {
                     structured_output: true,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
-                },
+                }),
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "e".into(),
@@ -335,7 +338,7 @@ mod startup_tests {
                         .document_template_untitled,
                     chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
                 },
-                ask: AskRole {
+                ask: Some(AskRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -347,7 +350,7 @@ mod startup_tests {
                     follow_up: false,
                     structured_output: true,
                     follow_up_endpoint: None,
-                },
+                }),
                 rerank: None,
                 vision: None,
             },

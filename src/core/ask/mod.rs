@@ -107,6 +107,16 @@ impl Core {
             if req.q.trim().is_empty() {
                 Err(Error::Validation("question is empty".into()))?;
             }
+            // No ask model: the door is not offered anywhere, and a caller that
+            // found the route anyway is told why rather than served an answer
+            // from nothing.
+            if core.completer.is_none() {
+                Err(Error::Validation("[infer.ask] is not configured".into()))?;
+            }
+            let completer = core
+                .completer
+                .clone()
+                .expect("checked just above");
 
             // Held for the whole answer rather than around the completion, because
             // a search embeds the query and that is a model call too. A gap between
@@ -303,9 +313,9 @@ impl Core {
             // being an estimate.
             let spent = core.counter.count(ASK_SYSTEM) + core.counter.count(&user);
             let ceiling = crate::infer::budget::ceiling_for_prompt(
-                core.completer.context_tokens(),
+                completer.context_tokens(),
                 spent,
-                core.completer.max_output_tokens(),
+                completer.max_output_tokens(),
             );
 
             // The excerpts go out before the first token, so the rail beside the
@@ -321,7 +331,6 @@ impl Core {
             // longer than the channel — which is every answer worth reading — and
             // would still pass any test whose fake reply fits in 64 deltas.
             let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::infer::Delta>(64);
-            let completer = core.completer.clone();
             let prompt = user.clone();
             let held = std::sync::Arc::clone(&lane);
             let call = tokio::spawn(async move {
@@ -493,7 +502,13 @@ impl Core {
     /// How many tokens of excerpt one answer may be built from: the rule
     /// `excerpt_budget` states, for the answer model under the ask prompt.
     fn excerpt_budget(&self, question: &str) -> usize {
-        excerpt_budget(&*self.completer, &self.counter, ASK_SYSTEM, question)
+        // Only reached from `ask_events`, which returned before here without a
+        // completer; a caller that gets past that has one.
+        let completer = self
+            .completer
+            .as_deref()
+            .expect("ask_events refuses before budgeting without [infer.ask]");
+        excerpt_budget(completer, &self.counter, ASK_SYSTEM, question)
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent
@@ -777,7 +792,7 @@ mod tests {
             gate: std::sync::Arc::clone(&core.gate),
             background_was_held: std::sync::atomic::AtomicBool::new(false),
         });
-        core.completer = probe.clone();
+        core.completer = Some(probe.clone());
         seed(&core, 3, 4).await;
 
         core.ask(
@@ -901,7 +916,7 @@ mod tests {
     async fn follow_up_off_makes_no_extra_call() {
         let mut core = test_core().await;
         let model = Counting::saying("fake answer");
-        core.completer = model.clone();
+        core.completer = Some(model.clone());
         seed(&core, 3, 4).await;
         assert!(core.follow_up.is_none(), "the default wired a follow-up");
 
@@ -1191,7 +1206,9 @@ mod tests {
         // no answer. Caveats are not in the vector payload, so this asserts the
         // store lookup that puts them back.
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter { reply: None });
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: None,
+        }));
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
             .store
@@ -1301,7 +1318,7 @@ mod tests {
         for (context, max_output) in [(4096, 3072), (8192, 1024), (4096, 4096), (32768, 2048)] {
             let completer = std::sync::Arc::new(Ceilinged::new(context, max_output));
             let mut core = test_core().await;
-            core.completer = completer.clone();
+            core.completer = Some(completer.clone());
             // Excerpts sized against the window, so packing actually fills it
             // in every case — a prompt that leaves the window half empty tests
             // nothing about what happens when it does not.
@@ -1349,7 +1366,7 @@ mod tests {
     #[tokio::test]
     async fn a_ceiling_as_wide_as_its_window_still_answers() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(Ceilinged::new(4096, 4096));
+        core.completer = Some(std::sync::Arc::new(Ceilinged::new(4096, 4096)));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
@@ -1390,7 +1407,7 @@ mod tests {
         }
 
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(Truncating);
+        core.completer = Some(std::sync::Arc::new(Truncating));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(
@@ -1820,7 +1837,7 @@ mod tests {
     #[tokio::test]
     async fn an_answer_that_opens_with_the_sentinel_is_flagged_abstained() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             // Carries a literal no excerpt does, so the abstention branch of
             // the check is what keeps `unsupported` empty below rather than the
             // reply happening to have nothing in it.
@@ -1828,7 +1845,7 @@ mod tests {
                 "Not in the knowledge base. The excerpts cover `chunk 0` only, not `wipefs --all /dev/sdX`."
                     .into(),
             ),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(out.abstained);
@@ -1846,9 +1863,9 @@ mod tests {
     #[tokio::test]
     async fn an_answer_that_invents_a_command_reports_it_as_unsupported() {
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("Run `wipefs --all /dev/sdX` first, then read chunk 0.".into()),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert_eq!(
@@ -1863,9 +1880,9 @@ mod tests {
         // The common case, and the one that must not badge every answer: the
         // seeded artifacts read "chunk 0 filler filler …".
         let mut core = test_core().await;
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("The excerpt says `chunk 0 filler` and nothing else.".into()),
-        });
+        }));
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         assert!(out.unsupported.is_empty(), "{:?}", out.unsupported);
@@ -1922,7 +1939,7 @@ mod tests {
         let mut core = test_core().await;
         // Several deltas rather than one, so "before the first token" is a
         // claim about ordering and not about there being a single token.
-        core.completer = std::sync::Arc::new(Chatty { parts: 3 });
+        core.completer = Some(std::sync::Arc::new(Chatty { parts: 3 }));
         seed(&core, 3, 4).await;
 
         let mut order: Vec<&'static str> = vec![];
@@ -1998,7 +2015,7 @@ mod tests {
     async fn an_answer_longer_than_the_sink_can_hold_still_finishes() {
         let mut core = test_core().await;
         const PARTS: usize = 500;
-        core.completer = std::sync::Arc::new(Chatty { parts: PARTS });
+        core.completer = Some(std::sync::Arc::new(Chatty { parts: PARTS }));
         seed(&core, 3, 4).await;
 
         let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2070,9 +2087,9 @@ mod tests {
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut core = test_core().await;
         core.feedback.enabled = true;
-        core.completer = std::sync::Arc::new(Stalling {
+        core.completer = Some(std::sync::Arc::new(Stalling {
             release: release.clone(),
-        });
+        }));
         seed(&core, 3, 4).await;
 
         // Read as far as the first token, so the call is provably in flight

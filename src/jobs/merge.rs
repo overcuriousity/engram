@@ -857,12 +857,14 @@ mod tests {
         // literally the same bug as
         // reactivating_a_superseded_artifact_survives_the_next_sweep.
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"relation":"duplicate","detail":"same claim",
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
                           "tags":[],"caveats":[]}}"#
-                .into(),
-        ]));
+                    .into(),
+            ]),
+        ));
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
             &[

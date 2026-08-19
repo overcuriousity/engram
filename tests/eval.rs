@@ -186,8 +186,12 @@ async fn evaluate_ask() {
     let translated = index(&core, &artifacts).await;
 
     let check_claims = std::env::var("ENGRAM_EVAL_CLAIMS").is_ok_and(|v| v == "1");
-    let claim_checker =
-        engram::infer::openai::HttpCompleter::for_claim_checking(&cfg.infer.synthesize);
+    let claim_checker = engram::infer::openai::HttpCompleter::for_claim_checking(
+        cfg.infer
+            .synthesize
+            .as_ref()
+            .expect("the eval harness needs [infer.synthesize]"),
+    );
 
     let mut recall: Vec<f64> = Vec::new();
     let mut all_cited = (0usize, 0usize);
@@ -288,7 +292,11 @@ async fn evaluate_ask() {
         "\n{} questions over {} artifacts   (ask {}, embed {}, claims {})",
         questions.len(),
         artifacts.len(),
-        cfg.infer.ask.model,
+        cfg.infer
+            .ask
+            .as_ref()
+            .expect("the eval harness needs [infer.ask]")
+            .model,
         cfg.infer.embed.model,
         if check_claims { "on" } else { "off" }
     );
@@ -512,16 +520,18 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
     let core = Core {
         store: Store::memory().await.unwrap(),
         vectors: Arc::new(engram::vector::memory::MemoryVectors::new()),
-        synthesizer: Arc::new(engram::infer::fake::FakeSynthesizer::default()),
+        synthesizer: Some(Arc::new(engram::infer::fake::FakeSynthesizer::default())),
         embedder: Arc::new(engram::infer::fake::FakeEmbedder::new(8)),
         reranker: None,
-        completer: Arc::new(engram::infer::fake::FakeCompleter::default()),
-        judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
-        link_judge: Arc::new(engram::infer::fake::FakeCompleter::default()),
-        gap_namer: Arc::new(engram::infer::fake::FakeCompleter::default()),
+        completer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        link_judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        gap_namer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         // The harness measures the shipped default, which is one round.
         follow_up: None,
         describer: None,
+        synthesis: engram::config::SynthesisMode::Eager,
+        segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
         counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(

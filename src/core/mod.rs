@@ -68,23 +68,30 @@ pub type CorpusLocks =
 pub struct Core {
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    pub synthesizer: Arc<dyn Synthesizer>,
+    /// `None` when `[infer.synthesize]` is not configured — `synthesis = "off"`
+    /// with no synthesizer. Every stage that would call it checks before
+    /// arming, and `run_claimed` closes a unit that slipped through.
+    pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
-    pub completer: Arc<dyn Completer>,
+    /// `None` when `[infer.ask]` is not configured: no ask page, no ask tool.
+    pub completer: Option<Arc<dyn Completer>>,
     /// The model that rules on duplicate pairs. Separate from `completer`
     /// because judging is background work on the synthesize endpoint, not an
     /// interactive answer: sharing one endpoint put sweep traffic in front of
     /// the user's question and tuned one model for two unrelated tasks.
-    pub judge: Arc<dyn Completer>,
+    /// `None` with no synthesize role.
+    pub judge: Option<Arc<dyn Completer>>,
     /// The model that rules on associative links. Same endpoint and same
     /// settings as `judge`, separate because the response format each judge
     /// sends is part of the completer: a link asked under the duplicate
-    /// grammar can only answer with a duplicate verdict.
-    pub link_judge: Arc<dyn Completer>,
+    /// grammar can only answer with a duplicate verdict. `None` with no
+    /// synthesize role.
+    pub link_judge: Option<Arc<dyn Completer>>,
     /// The model that names a knowledge gap from the questions in it. Same
     /// endpoint as the judges, its own response shape, background only.
-    pub gap_namer: Arc<dyn Completer>,
+    /// `None` with no synthesize role; gaps are then named by their terms.
+    pub gap_namer: Option<Arc<dyn Completer>>,
     /// The model that says, once, what one answer still needs — and with it,
     /// whether an ask gets a second retrieval round at all.
     ///
@@ -95,6 +102,10 @@ pub struct Core {
     pub follow_up: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
+    /// How much inference capture spends. See `SynthesisMode`.
+    pub synthesis: crate::config::SynthesisMode,
+    /// The window budget when there is no synthesizer to derive one from.
+    pub segment_tokens: usize,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
     /// so draining one drains them all.
@@ -148,30 +159,42 @@ impl Core {
         // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
+        let synth = cfg.infer.synthesize.as_ref();
         Core {
             store,
             vectors,
-            synthesizer: Arc::new(
-                HttpSynthesizer::new(&cfg.infer.synthesize)
-                    .with_max_artifact_tokens(max_artifact_tokens),
-            ),
+            synthesizer: synth.map(|s| {
+                Arc::new(HttpSynthesizer::new(s).with_max_artifact_tokens(max_artifact_tokens))
+                    as Arc<dyn Synthesizer>
+            }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
                 .infer
                 .rerank
                 .as_ref()
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
-            completer: Arc::new(HttpCompleter::new(&cfg.infer.ask)),
-            judge: Arc::new(HttpCompleter::for_judging(&cfg.infer.synthesize)),
-            link_judge: Arc::new(HttpCompleter::for_link_judging(&cfg.infer.synthesize)),
-            gap_namer: Arc::new(HttpCompleter::for_gap_naming(&cfg.infer.synthesize)),
-            follow_up: cfg.infer.ask.follow_up.then(|| {
-                Arc::new(HttpCompleter::for_follow_up(&cfg.infer.ask.follow_up_on()))
-                    as Arc<dyn Completer>
+            completer: cfg
+                .infer
+                .ask
+                .as_ref()
+                .map(|a| Arc::new(HttpCompleter::new(a)) as Arc<dyn Completer>),
+            judge: synth.map(|s| Arc::new(HttpCompleter::for_judging(s)) as Arc<dyn Completer>),
+            link_judge: synth
+                .map(|s| Arc::new(HttpCompleter::for_link_judging(s)) as Arc<dyn Completer>),
+            gap_namer: synth
+                .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
+            follow_up: cfg.infer.ask.as_ref().and_then(|a| {
+                a.follow_up.then(|| {
+                    Arc::new(HttpCompleter::for_follow_up(&a.follow_up_on())) as Arc<dyn Completer>
+                })
             }),
-            describer: cfg.infer.vision.as_ref().map(|v| {
-                Arc::new(HttpDescriber::new(v, &cfg.infer.synthesize)) as Arc<dyn Describer>
-            }),
+            describer: cfg
+                .infer
+                .vision
+                .as_ref()
+                .map(|v| Arc::new(HttpDescriber::new(v, synth)) as Arc<dyn Describer>),
+            synthesis: cfg.infer.synthesis,
+            segment_tokens: cfg.infer.segment_tokens,
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
@@ -239,6 +262,18 @@ impl Core {
     pub fn associating(&self) -> bool {
         self.associate.enabled && self.feedback.enabled
     }
+
+    /// Is there a synthesizer to call? `false` means no `[infer.synthesize]`:
+    /// nothing that needs one is armed, offered, or run.
+    pub fn synthesizes(&self) -> bool {
+        self.synthesizer.is_some()
+    }
+
+    /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask
+    /// page, no nav entry, no MCP tool, no `/api/ask`.
+    pub fn asks(&self) -> bool {
+        self.completer.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -292,19 +327,21 @@ pub mod test_support {
         Core {
             store,
             vectors: Arc::new(MemoryVectors::new()),
-            synthesizer,
+            synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
-            completer: Arc::new(FakeCompleter::default()),
-            judge: Arc::new(FakeCompleter::default()),
-            link_judge: Arc::new(FakeCompleter::default()),
-            gap_namer: Arc::new(FakeCompleter {
+            completer: Some(Arc::new(FakeCompleter::default())),
+            judge: Some(Arc::new(FakeCompleter::default())),
+            link_judge: Some(Arc::new(FakeCompleter::default())),
+            gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
-            }),
+            })),
             // Off, like the shipped default. The follow-up tests switch it on
             // by putting a completer here, which is the only thing that does.
             follow_up: None,
             describer: Some(Arc::new(FakeDescriber::default())),
+            synthesis: crate::config::SynthesisMode::Eager,
+            segment_tokens: crate::config::DEFAULT_SEGMENT_TOKENS,
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
@@ -435,7 +472,7 @@ mod tests {
         let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
 
         assert!(
-            !cfg.infer.ask.follow_up,
+            !cfg.infer.ask.as_ref().unwrap().follow_up,
             "the shipped config asks for a second retrieval round"
         );
         let core = Core::from_config(&cfg, vectors.clone(), store.clone());
@@ -444,7 +481,7 @@ mod tests {
             "there is a completer to call with the feature off"
         );
 
-        cfg.infer.ask.follow_up = true;
+        cfg.infer.ask.as_mut().unwrap().follow_up = true;
         let core = Core::from_config(&cfg, vectors, store);
         assert!(core.follow_up.is_some());
     }
@@ -474,5 +511,45 @@ mod tests {
         });
         let core = Core::from_config(&cfg, vectors, store);
         assert!(core.reranker.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_core_without_roles_says_so() {
+        let cfg_toml = r#"
+        [server]
+        bind = "127.0.0.1:8080"
+        [store]
+        path = "x.db"
+        [vector]
+        url = "http://localhost:6333"
+        collection = "engram"
+        [infer]
+        synthesis = "off"
+        [infer.embed]
+        base_url = "http://localhost:8000/v1"
+        model = "embeddinggemma"
+        dim = 768
+        max_input_tokens = 2048
+        [auth]
+        mode = "local"
+        [auth.local]
+        username = "dev"
+        password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, cfg_toml).unwrap();
+        let cfg = crate::config::Config::load(Some(&path)).unwrap();
+        let store = Store::memory().await.unwrap();
+        let core = Core::from_config(
+            &cfg,
+            Arc::new(crate::vector::memory::MemoryVectors::new()),
+            store,
+        );
+        assert!(!core.synthesizes());
+        assert!(!core.asks());
+        assert!(core.synthesizer.is_none() && core.completer.is_none());
+        assert!(core.judge.is_none() && core.link_judge.is_none() && core.gap_namer.is_none());
+        assert_eq!(core.synthesis, crate::config::SynthesisMode::Off);
     }
 }

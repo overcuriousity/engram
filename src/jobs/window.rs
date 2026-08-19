@@ -42,12 +42,20 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     if w.state == SegmentState::Done {
         return Ok(());
     }
+    // No synthesizer: the unit cannot run, and `run_claimed` closes it before
+    // it gets here. Said again at the call so a direct caller gets an answer
+    // and not a panic.
+    let Some(synth) = core.synthesizer.clone() else {
+        return Err(Error::Validation(
+            "[infer.synthesize] is not configured; this window cannot be synthesized".into(),
+        ));
+    };
 
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
     let ctx = crate::infer::context::WindowContext::build(
         &all_texts,
         idx as usize,
-        core.synthesizer.budget().context,
+        synth.budget().context,
         &core.counter,
     );
     // The stored text, not a re-derivation from the line range: line numbers
@@ -70,10 +78,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // `text_with_no_structure_still_splits_by_line_cap` has always asserted.
     // What must never happen is unbounded — the corpus that came back fifteen
     // times its budget.
-    let window_budget = crate::infer::budget::segment_tokens(
-        core.synthesizer.budget(),
-        super::synthesize::prompt_overhead(core),
-    );
+    let window_budget = super::synthesize::segment_budget(core);
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,
@@ -90,8 +95,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     }
 
     let permit = core.gate.background().await;
-    let first = core
-        .synthesizer
+    let first = synth
         .segment(crate::infer::SegmentInput {
             core: &text,
             context: &ctx,
@@ -128,8 +132,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             "literals missing; re-segmenting once"
         );
         let permit = core.gate.background().await;
-        let second = core
-            .synthesizer
+        let second = synth
             .segment(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
@@ -610,8 +613,9 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"));
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
+        ));
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");

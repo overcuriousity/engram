@@ -818,7 +818,7 @@ pub(crate) mod tests {
         // posts a contradiction about something nobody can see.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         // Queue the pair with the judge off, so the only call this test can
         // count is the one the second sweep would make.
         let ids = disagreeing(&core).await;
@@ -870,7 +870,7 @@ pub(crate) mod tests {
         // only, which a deprecation never sets.
         let mut core = test_core().await;
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
 
@@ -1372,7 +1372,7 @@ pub(crate) mod tests {
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         seed_related(
             &core,
             &[
@@ -1582,7 +1582,7 @@ pub(crate) mod tests {
         let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        core.judge = completer.clone();
+        core.judge = Some(completer.clone());
         disagreeing(&core).await;
 
         let out = run(&core).await.unwrap();
@@ -1609,10 +1609,12 @@ pub(crate) mod tests {
         // sweep's budget forever and the rest would never be judged at all.
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
-        core.judge = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            "not json".into(),
-            r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
-        ]));
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                "not json".into(),
+                r#"{"relation":"conflict","detail":"30 versus 90"}"#.into(),
+            ]),
+        ));
         seed_related(
             &core,
             &[

@@ -6267,9 +6267,9 @@ mod tests {
             .await
             .unwrap();
         // Swapped in after indexing, so only the answer comes from it.
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("First run `wipefs --all /dev/sdX`, then read alpha.".into()),
-        });
+        }));
         let (app, cookie) = app_with_cookie(core).await;
         let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
         assert!(html.contains("unsupported literal(s)"), "no badge: {html}");
@@ -6654,9 +6654,9 @@ mod tests {
             .unwrap();
         // Swapped in after indexing, so the citations in the answer are this
         // reply's and not something retrieval happened to produce.
-        core.completer = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("alpha [1], bravo [2], and alpha again [01].".into()),
-        });
+        }));
         let (app, cookie) = app_with_cookie(core).await;
 
         let body = ask_over_sse(&app, &cookie, "what+is+alpha").await;

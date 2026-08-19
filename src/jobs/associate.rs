@@ -101,18 +101,23 @@ pub async fn run(core: &Core) -> Result<()> {
         .reopen_stale_judged_links(PRUNE_SCAN_LIMIT)
         .await?;
 
+    // No judge, no units: a link stays `learning` and visible, and nothing is
+    // queued that could never be claimed.
+    let to_judge = if core.link_judge.is_some() {
+        core.store
+            .links_to_judge(
+                core.associate.judge_min,
+                core.associate.judge_min_queries,
+                core.associate.half_life_days,
+                at,
+                core.associate.judge_per_sweep,
+            )
+            .await?
+    } else {
+        Vec::new()
+    };
     let mut armed = 0;
-    for l in core
-        .store
-        .links_to_judge(
-            core.associate.judge_min,
-            core.associate.judge_min_queries,
-            core.associate.half_life_days,
-            at,
-            core.associate.judge_per_sweep,
-        )
-        .await?
-    {
+    for l in to_judge {
         let target = link_target(&l.a_id, &l.b_id);
         // A link whose judgement is already queued is already going to be
         // judged; arming it again is a no-op that costs another link its turn.
@@ -385,10 +390,12 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
         return Ok(());
     }
 
+    let Some(judge) = core.link_judge.clone() else {
+        return Ok(());
+    };
     let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
     let permit = core.gate.background().await;
-    let reply = core
-        .link_judge
+    let reply = judge
         .complete(
             crate::infer::prompt::LINK_SYSTEM,
             &crate::infer::prompt::link_prompt(
@@ -1113,7 +1120,7 @@ mod tests {
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"related","reason":"should never be read"}"#.into(),
         ]));
-        core.link_judge = scripted.clone();
+        core.link_judge = Some(scripted.clone());
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1161,9 +1168,9 @@ mod tests {
     async fn a_related_verdict_names_the_relation_and_stops_the_decay() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"related","reason":"the config and its errors"}"#.into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1191,9 +1198,9 @@ mod tests {
         // reach the row.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"related"}"#.into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1216,9 +1223,9 @@ mod tests {
     async fn an_unrelated_verdict_is_stored_so_it_is_not_asked_again() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"unrelated","reason":"a coincidence of retrieval"}"#.into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1256,9 +1263,9 @@ mod tests {
         // connection while dedupe decides what to do about it.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"duplicate","reason":"the same procedure twice"}"#.into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1288,9 +1295,9 @@ mod tests {
     async fn three_unreadable_replies_shelve_the_link_rather_than_asking_forever() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("no idea, sorry".into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1364,7 +1371,7 @@ mod tests {
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"relation":"related","reason":"should never be read"}"#.into(),
         ]));
-        core.link_judge = scripted.clone();
+        core.link_judge = Some(scripted.clone());
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1467,9 +1474,9 @@ mod tests {
         // assert a handover that did not happen.
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some(r#"{"relation":"duplicate","reason":"same thing"}"#.into()),
-        });
+        }));
         let ids = seed(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
