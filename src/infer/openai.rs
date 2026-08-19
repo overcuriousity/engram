@@ -1252,7 +1252,7 @@ impl HttpDescriber {
     /// synthesize endpoint: it borrows that endpoint's address, key and — since
     /// it is the same server reading the request — the name it takes the output
     /// ceiling under.
-    pub fn new(cfg: &crate::config::VisionRole, synth: &SynthesizeRole) -> Self {
+    pub fn new(cfg: &crate::config::VisionRole, synth: Option<&SynthesizeRole>) -> Self {
         let (base_url, api_key) = cfg.resolve(synth);
         Self {
             ep: Endpoint::new(
@@ -1433,6 +1433,7 @@ mod tests {
             query_template: t.query_template,
             document_template: t.document_template,
             document_template_untitled: t.document_template_untitled,
+            chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
         }
     }
 
@@ -2391,7 +2392,7 @@ mod tests {
             .await;
         let cfg = vision_cfg(Some(format!("{}/v1", server.uri())));
         let model = cfg.model.clone();
-        let d = HttpDescriber::new(&cfg, &synthesize_cfg("http://unused".into()));
+        let d = HttpDescriber::new(&cfg, Some(&synthesize_cfg("http://unused".into())));
         let out = d
             .describe(b"\xFF\xD8jpegbytes", "Photo taken 2026-08-09")
             .await
@@ -2432,7 +2433,7 @@ mod tests {
         synth.reasoning_effort = Some("high".into());
         assert!(synth.ceiling_param.is_none(), "nothing explicit to inherit");
 
-        HttpDescriber::new(&vision_cfg(None), &synth)
+        HttpDescriber::new(&vision_cfg(None), Some(&synth))
             .describe(b"x", "")
             .await
             .unwrap();
@@ -2454,7 +2455,7 @@ mod tests {
         let mut synth = synthesize_cfg("http://unused".into());
         synth.reasoning_effort = Some("high".into());
 
-        HttpDescriber::new(&vision_cfg(Some(server.uri())), &synth)
+        HttpDescriber::new(&vision_cfg(Some(server.uri())), Some(&synth))
             .describe(b"x", "")
             .await
             .unwrap();
@@ -2473,7 +2474,7 @@ mod tests {
             .await;
         let mut cfg = vision_cfg(Some(server.uri()));
         cfg.api_key = None;
-        let d = HttpDescriber::new(&cfg, &synthesize_cfg("http://unused".into()));
+        let d = HttpDescriber::new(&cfg, Some(&synthesize_cfg("http://unused".into())));
         let e = d.describe(b"x", "").await.unwrap_err();
         assert!(matches!(e, Error::Inference { role: "vision", .. }), "{e}");
         assert!(e.retryable());

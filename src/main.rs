@@ -333,6 +333,7 @@ mod startup_tests {
                     document_template: engram::config::EmbedTemplates::default().document_template,
                     document_template_untitled: engram::config::EmbedTemplates::default()
                         .document_template_untitled,
+                    chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
                 },
                 ask: AskRole {
                     base_url: "http://localhost:8000/v1".into(),
