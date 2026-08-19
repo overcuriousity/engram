@@ -268,6 +268,7 @@ async fn embed_batch(core: &Core, chunks: &[Chunk]) -> Result<()> {
     }
     let docs: Vec<EmbedDoc> = chunks.iter().map(doc_of).collect();
     let vectors = core.embedder.embed_documents(&docs).await?;
+    let origins = origins_for(core, chunks).await?;
     if vectors.len() != chunks.len() {
         return Err(Error::Inference {
             role: "embed",
@@ -289,7 +290,7 @@ async fn embed_batch(core: &Core, chunks: &[Chunk]) -> Result<()> {
             // so the lexical and the semantic half of a hit describe the same
             // document.
             sparse: crate::vector::sparse::encode_document(&lexical_text(c)),
-            payload: payload_of(c),
+            payload: with_origins(payload_of(c), &origins),
         })
         .collect();
     upsert_with_current_lifecycle(core, points).await?;
@@ -464,12 +465,13 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         }
         Err(e) => return Err(e),
     };
+    let origins = origins_for(core, std::slice::from_ref(chunk)).await?;
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
             vector: vectors.into_iter().next().unwrap(),
             sparse: crate::vector::sparse::encode_document(&lexical_text(chunk)),
-            payload: payload_of(chunk),
+            payload: with_origins(payload_of(chunk), &origins),
         }],
     )
     .await?;
@@ -540,6 +542,7 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
     permit.finished();
     let vectors = embedded?;
 
+    let origins = origins_for(core, std::slice::from_ref(chunk)).await?;
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
@@ -548,7 +551,7 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
             // no length limit to respect, so there is no reason to lose the
             // tail on both halves of the query at once.
             sparse: crate::vector::sparse::encode_document(&lexical_text(chunk)),
-            payload: payload_of(chunk),
+            payload: with_origins(payload_of(chunk), &origins),
         }],
     )
     .await?;
@@ -709,6 +712,30 @@ async fn replace_with_siblings(core: &Core, chunk: &Chunk, parts: Vec<String>) -
     Ok(())
 }
 
+/// Every corpus each chunk draws from, through its lineage. One query for the
+/// batch; a passage or captured row answers with its own corpus.
+async fn origins_for(
+    core: &Core,
+    chunks: &[Chunk],
+) -> Result<std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>> {
+    let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+    core.store.origins_of(&ids).await
+}
+
+/// The payload's `origin_corpora`: the distinct corpora of the chunk's
+/// origins, sorted, so `cap_per_corpus` can count a merge against each.
+fn with_origins(
+    mut payload: VectorPayload,
+    origins: &std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>,
+) -> VectorPayload {
+    let set: std::collections::BTreeSet<String> = origins
+        .get(&payload.artifact_id)
+        .map(|o| o.iter().map(|x| x.corpus_id.clone()).collect())
+        .unwrap_or_default();
+    payload.origin_corpora = set.into_iter().collect();
+    payload
+}
+
 fn payload_of(chunk: &Chunk) -> VectorPayload {
     VectorPayload {
         artifact_id: chunk.id.clone(),
@@ -739,6 +766,7 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // The same rule as `status`: a point that says superseded while naming
         // no winner is a hidden artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
+        origin_corpora: vec![],
     }
 }
 

@@ -511,6 +511,9 @@ struct CorpusTemplate {
     /// here, as is anything written before spans were recorded — and the page
     /// showed none of them once it rendered bands alone.
     unplaced: Vec<ArtifactView>,
+    /// Merged and synthesized artifacts with a root in this capture. A merge
+    /// belongs to every corpus it drew from, and this is where that shows.
+    written_from: Vec<ArtifactView>,
     /// Nothing was captured here at all, so the flat fallback has nothing to
     /// show either.
     lines_empty: bool,
@@ -1428,6 +1431,15 @@ async fn corpus_detail(
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     let exif_rows = exif_tag_rows(&s.metadata);
+    let written_from: Vec<ArtifactView> = st
+        .core
+        .store
+        .artifacts_originating_in(&cid)
+        .await?
+        .iter()
+        .filter(|c| c.in_results())
+        .map(artifact_view)
+        .collect();
     // A promoted window: `done`, and owning at least one superseded passage.
     let promoted: Vec<PromotedWindow> = segments
         .iter()
@@ -1461,6 +1473,7 @@ async fn corpus_detail(
         bands,
         promoted,
         unplaced,
+        written_from,
         lines_empty: s.raw_text.trim().is_empty(),
         raw_text: s.raw_text.clone(),
         coverage,
@@ -7166,5 +7179,62 @@ mod tests {
         );
         let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
         assert!(!page.contains(&action), "undo still offered after undoing");
+    }
+
+    #[tokio::test]
+    async fn a_merge_is_listed_under_each_corpus_it_drew_from() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let c1 = core.store.insert_corpus("one", "web", None).await.unwrap();
+        let c2 = core.store.insert_corpus("two", "web", None).await.unwrap();
+        let na = |t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: t.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: 1,
+                end_line: 1,
+            }),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let r1 = core
+            .store
+            .insert_artifacts(&c1.id, &[na("root one")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let r2 = core
+            .store
+            .insert_artifacts(&c2.id, &[na("root two")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "the merge of one and two".into(),
+                    title: Some("Merged title".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[r1, r2],
+            )
+            .await
+            .unwrap();
+        for c in [&c1, &c2] {
+            core.store
+                .set_corpus_status(&c.id, CorpusStatus::Ready)
+                .await
+                .unwrap();
+            let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", c.id)).await;
+            assert!(page.contains("Written from this corpus"), "{page}");
+            assert!(page.contains(&m.id), "{page}");
+        }
     }
 }

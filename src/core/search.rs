@@ -149,9 +149,22 @@ fn cap_per_corpus(
     let mut kept = Vec::with_capacity(hits.len());
     let mut displaced = Vec::new();
     for h in hits {
-        let n = seen.entry(h.payload.corpus_id.clone()).or_insert(0);
-        *n += 1;
-        if *n <= max {
+        // A merge counts against every corpus it drew from; a passage or a
+        // captured artifact against its one. The payload carries the
+        // projection; a point written before it existed falls back to
+        // `corpus_id`.
+        let keys: Vec<String> = if h.payload.origin_corpora.is_empty() {
+            vec![h.payload.corpus_id.clone()]
+        } else {
+            h.payload.origin_corpora.clone()
+        };
+        let over = keys
+            .iter()
+            .any(|k| seen.get(k).copied().unwrap_or(0) >= max);
+        for k in &keys {
+            *seen.entry(k.clone()).or_insert(0) += 1;
+        }
+        if !over {
             kept.push(h);
         } else {
             displaced.push(h);
@@ -1531,6 +1544,7 @@ mod tests {
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
+                origin_corpora: vec![],
             },
             score,
             similarity: Some(score),
@@ -1554,6 +1568,20 @@ mod tests {
             ids(cap_per_corpus(ranked(), 2, 4)),
             vec!["a1", "a2", "b1", "a3"],
             "a displaced hit must refill an otherwise short list"
+        );
+        // A merge of `a` and `b` counts against both: with `a` already full it
+        // is displaced even though `b` has room.
+        let mut m = hit("m", "", 0.85);
+        m.payload.origin_corpora = vec!["a".into(), "b".into()];
+        let with_merge = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            m,
+            hit("b1", "b", 0.7),
+        ];
+        assert_eq!(
+            ids(cap_per_corpus(with_merge, 2, 3)),
+            vec!["a1", "a2", "b1"]
         );
     }
 

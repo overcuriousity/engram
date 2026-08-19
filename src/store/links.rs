@@ -105,6 +105,23 @@ pub fn normalize_query(q: &str) -> String {
         .to_lowercase()
 }
 
+/// Do two artifacts share no corpus? An artifact with no origins at all —
+/// lineage lost — is treated as its own document, which keeps such a link
+/// judgeable rather than silently shown-only.
+fn origins_disjoint(
+    origins: &std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>,
+    a: &str,
+    b: &str,
+) -> bool {
+    let of = |id: &str| -> std::collections::BTreeSet<&str> {
+        origins
+            .get(id)
+            .map(|o| o.iter().map(|x| x.corpus_id.as_str()).collect())
+            .unwrap_or_default()
+    };
+    of(a).is_disjoint(&of(b))
+}
+
 /// Strength now, from strength then. `half_life_days <= 0` turns decay off.
 ///
 /// A clock that moved backwards — a restored database, an NTP correction —
@@ -546,8 +563,9 @@ impl Store {
                     state,
                     reason: r.get("reason"),
                     cues: serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default(),
-                    // A merged artifact belongs to no corpus, so it can never be
-                    // "the same document" as anything.
+                    // Decided below through origins where either side is a
+                    // merge; here only the case both rows answer for
+                    // themselves.
                     cross_corpus: match (a_corpus, b_corpus) {
                         (Some(x), Some(y)) => x != y,
                         _ => true,
@@ -557,6 +575,19 @@ impl Store {
         }
         out.sort_by(|x, y| y.weight.total_cmp(&x.weight));
         out.truncate(limit.max(0) as usize);
+        // A merged or synthesized artifact belongs to every corpus it drew
+        // from, so "the same document" is "the two origin sets intersect" —
+        // read through lineage, one batched query for the page of links.
+        let mut ids: Vec<String> = out
+            .iter()
+            .flat_map(|l| [l.via.clone(), l.other.clone()])
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let origins = self.origins_of(&ids).await?;
+        for l in &mut out {
+            l.cross_corpus = origins_disjoint(&origins, &l.via, &l.other);
+        }
         Ok(out)
     }
 
@@ -565,7 +596,9 @@ impl Store {
     ///
     /// Same two-step as `links_from`: the raw weight narrows with the index and
     /// the decayed weight decides. Four times the caller's limit is fetched so
-    /// that rows failing the exact test do not eat the budget.
+    /// that rows failing the exact test do not eat the budget. Cross-corpus is
+    /// decided in Rust over origins rather than in SQL over `corpus_id`: a
+    /// merge has none of its own and belongs to every corpus it drew from.
     pub async fn links_to_judge(
         &self,
         min_weight: f64,
@@ -582,7 +615,6 @@ impl Store {
                 AND l.weight >= ? AND l.queries >= ?
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
-                AND (a.corpus_id IS NULL OR b.corpus_id IS NULL OR a.corpus_id <> b.corpus_id)
               ORDER BY l.weight DESC LIMIT ?",
         )
         .bind(min_weight)
@@ -594,10 +626,24 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
+        let strong: Vec<Link> = rows
             .iter()
             .map(row_to_link)
             .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
+            .collect();
+        // Two passages of one document being related is not information, so a
+        // same-document link is shown and never judged — "same document" read
+        // through origins, so a merge is the documents it drew from.
+        let mut ids: Vec<String> = strong
+            .iter()
+            .flat_map(|l| [l.a_id.clone(), l.b_id.clone()])
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let origins = self.origins_of(&ids).await?;
+        Ok(strong
+            .into_iter()
+            .filter(|l| origins_disjoint(&origins, &l.a_id, &l.b_id))
             .take(limit.max(0) as usize)
             .collect())
     }
@@ -1493,5 +1539,76 @@ mod tests {
         assert_eq!(s.links_touching(&p).await.unwrap().len(), 1);
         assert_eq!(s.links_touching(&x).await.unwrap().len(), 1);
         assert!(s.links_touching("nobody").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_corpus_is_read_through_origins_for_a_merge() {
+        // A merge of two artifacts from corpus 1, linked to a third artifact of
+        // corpus 1: same document, however the merge's own `corpus_id` reads.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("one", "web", None).await.unwrap();
+        let na = |o: i64, t: &str| NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        let made = store
+            .insert_artifacts(&src.id, &[na(0, "a"), na(1, "b"), na(2, "c")])
+            .await
+            .unwrap();
+        let m = store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "a and b".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        let other_src = store.insert_corpus("two", "web", None).await.unwrap();
+        let far = store
+            .insert_artifacts(&other_src.id, &[na(0, "far")])
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        for q in ["one", "two", "three"] {
+            store
+                .bump_link(&m.id, &made[2].id, 2.0, Some(q), 30.0, 0)
+                .await
+                .unwrap();
+            store
+                .bump_link(&m.id, &far, 2.0, Some(q), 30.0, 0)
+                .await
+                .unwrap();
+        }
+        let out = store
+            .links_from(
+                std::slice::from_ref(&m.id),
+                &[LinkState::Learning],
+                30.0,
+                0,
+                0.0,
+                10,
+            )
+            .await
+            .unwrap();
+        let same = out.iter().find(|l| l.other == made[2].id).unwrap();
+        let cross = out.iter().find(|l| l.other == far).unwrap();
+        assert!(!same.cross_corpus, "a merge of corpus-1 roots is corpus 1");
+        assert!(cross.cross_corpus);
+        // And the judge is offered only the cross-corpus one.
+        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        assert_eq!(armed.len(), 1, "{armed:?}");
+        assert!(armed[0].a_id == far || armed[0].b_id == far);
     }
 }

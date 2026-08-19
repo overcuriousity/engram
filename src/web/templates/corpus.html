@@ -159,4 +159,18 @@
   {% for c in unplaced %}{% include "_artifact.html" %}{% endfor %}
 </div>
 {% endif %}
+
+{% if !written_from.is_empty() %}
+{# A merged or synthesized artifact belongs to every corpus it drew from — its
+   origins are its roots' corpora, derived from lineage, never stored — and
+   this capture is one of them. #}
+<h3>Written from this corpus</h3>
+<p class="muted">
+  Model-written artifacts with a source here. Each lists what it was written
+  from on its own page.
+</p>
+<div class="unplaced">
+  {% for c in written_from %}{% include "_artifact.html" %}{% endfor %}
+</div>
+{% endif %}
 {% endblock %}
