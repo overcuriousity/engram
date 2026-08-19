@@ -200,6 +200,26 @@ own.
   library and a model download; a scan is refused with that reason until it is
   switched on. Making it the default waits on someone wanting it enough to pay
   for it.
+- **What comes out of a PDF is not clean text yet.** A real document read
+  through `pdf-text` arrives with runs of blank lines between every paragraph
+  and, where the source had a bullet list, a line holding one unrenderable
+  glyph followed by the item's text on a later line — the bullet character of a
+  symbol font, kept as the private-use codepoint no font on the reading side
+  maps. Both survive into the corpus, the passages and every window the
+  splitter cuts, and blank-line runs are exactly what the splitter falls back
+  to for boundaries once headings are missing. The fix is a normalisation pass
+  in `core::pdf::to_markdown` after `export_to_markdown` — fold private-use
+  bullet glyphs into a markdown list marker, collapse runs of blank lines —
+  pinned by a fixture generated from a document with a bullet list, the way
+  `tests/fixtures/one-heading.pdf` was.
+- **Images in a source, shown where the source is read.** A PDF's figures are
+  dropped by extraction, and the corpus page has no place for them anyway: it
+  shows the photo of an image capture and the text of everything else. Showing
+  a document's figures inline — on the raw corpus and on the passages that
+  claim their lines — needs three things that do not exist: the images pulled
+  out of the PDF and stored (attachments are one row per corpus today, and this
+  is many), a span or anchor tying each to the place in the markdown it came
+  from, and a renderer for it. Worth doing after the text itself is clean.
 - **DOCX, EPUB, XLSX and the rest.** `docling` is in the tree and already reads
   them; only a door and a `kind` are missing. Deliberately out of PDF capture.
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored
