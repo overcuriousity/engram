@@ -214,7 +214,7 @@ the file — the loader warns if it finds one.
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
 | `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
-| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
+| `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`, and the three prompt templates `query_template`, `document_template`, `document_template_untitled`. Defaults are EmbeddingGemma's; a symmetric model sets the three to `{text}` / `{title}\n{text}` / `{text}`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
 | `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
@@ -244,6 +244,10 @@ Eight worth knowing:
 - **`infer.embed.max_input_tokens`** must be the *server's* ceiling, not the
   model's nominal one. llama.cpp refuses input above its physical batch size —
   often 1024 — with a 500 no retry can fix.
+- **`infer.embed.*_template`** and `model` together are one identity: a
+  vector's meaning is fixed by the model *and* by the text handed to it.
+  Editing a template later silently mixes embedding spaces. There is no
+  rebuild path; drop the collection and re-capture.
 - **`infer.ask.max_output_tokens`** defaults to 4096 and comes out of
   `context_tokens`. The endpoint measures the prompt and this ceiling against
   one window, so `ask` reserves it and packs excerpts into the remainder:

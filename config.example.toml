@@ -169,18 +169,43 @@ output_ratio = 8.0
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
-model = "bge-m3"
+# EmbeddingGemma. 308M parameters, 768 dimensions, a 2048-token window, and an
+# asymmetric interface: queries and documents are embedded through different
+# prompts, which the three templates below are. The model card's exact strings
+# are the defaults, so nothing below `max_input_tokens` needs setting for it.
+model = "embeddinggemma"
 # Embedding is fast even locally; a shorter ceiling surfaces a wedged endpoint
 # instead of holding a worker for a quarter of an hour.
 timeout_secs = 120
 # MUST match the vector dimension of the Qdrant collection. Changing this
-# against an existing collection is refused at startup.
-dim = 1024
+# against an existing collection is refused at startup. The full Matryoshka
+# width: truncating to 512/256/128 buys memory at a recall cost, and recall is
+# the point.
+dim = 768
 # The server's real ceiling, not the model's nominal one. llama.cpp refuses any
-# input above its physical batch size (often 1024) with a 500, and no retry can
-# fix that — engram splits the artifact instead, but it splits sooner and cheaper
-# if this number is honest. Many embedding models cap at 512; check yours.
-max_input_tokens = 1024
+# input above its physical batch size with a 500, and no retry can fix that —
+# engram splits the artifact instead, but it splits sooner and cheaper if this
+# number is honest. 2048 is the model's window; use the server's if lower.
+max_input_tokens = 2048
+# The recipe. `{text}` is the query or the body; `{title}` is the artifact's
+# title. A document with no title takes the `_untitled` template — the model
+# card substitutes the literal word `none`, so it is a second template and not
+# an empty field. Changing any of these invalidates every stored vector as
+# surely as changing `model` does: drop the collection and re-capture. Check
+# once that your serving stack does not prepend a prompt of its own, or the
+# prefix is sent twice and every vector carries it.
+# query_template             = "task: search result | query: {text}"
+# document_template          = "title: {title} | text: {text}"
+# document_template_untitled = "title: none | text: {text}"
+#
+# A symmetric embedder — bge-m3, which engram shipped with — wants the text as
+# it is. That is these three lines, with `dim = 1024` and the server's ceiling:
+# model = "bge-m3"
+# dim = 1024
+# max_input_tokens = 1024
+# query_template             = "{text}"
+# document_template          = "{title}\n{text}"
+# document_template_untitled = "{text}"
 
 [infer.ask]
 tier = "deep"
