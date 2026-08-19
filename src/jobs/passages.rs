@@ -84,9 +84,7 @@ pub fn split_passages(
     for p in inner {
         let pc = p.carry_lines.max(0) as usize;
         let mut plines = p.text.lines();
-        let carried: Option<String> = (pc > 0)
-            .then(|| carried_heading(&mut plines, pc))
-            .flatten();
+        let carried: Option<String> = (pc > 0).then(|| carried_heading(&mut plines, pc)).flatten();
         let own: Vec<&str> = plines.collect();
         let inside: Option<String> = own.iter().find(|l| is_heading(l)).map(|l| heading_title(l));
         let title = carried

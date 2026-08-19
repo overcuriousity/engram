@@ -105,16 +105,19 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
 /// Is the whole of one artifact inside the other, whitespace aside?
 ///
 /// Not a similarity — containment. A score says two texts are alike; this says
-/// one of them adds nothing, which is the only ground on which a pair below
-/// `auto_supersede` is hidden without asking anyone.
+/// one of them adds nothing, which is now the only ground on which any pair is
+/// hidden without asking anyone: the `auto_supersede` band settles nothing on
+/// the score alone any more (see `classify_pair`).
 fn contains_normalized(long: &str, short: &str) -> bool {
     let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     !short.trim().is_empty() && n(long).contains(&n(short))
 }
 
 /// Turn one scored pair into one decision. Nothing here calls a model: every
-/// rule is local, and the two that settle a pair outright — containment, and
-/// the `auto_supersede` band — are why most near pairs cost nothing at all.
+/// rule is local, and the ones that settle a pair outright — an exhausted
+/// side, two rows from one window, containment — are why most near pairs cost
+/// nothing at all. `auto_supersede` is not among them: it orders
+/// `pairs_to_judge` and no longer hides anything by itself.
 ///
 /// Returns whether `a` itself was hidden by the decision, which is the caller's
 /// signal that the artifact it is scanning neighbours for is no longer live.
@@ -644,8 +647,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .any(|p| (p.a_id == a.id && p.b_id == b.id)
-                    || (p.a_id == b.id && p.b_id == a.id)),
+                .any(|p| (p.a_id == a.id && p.b_id == b.id) || (p.a_id == b.id && p.b_id == a.id)),
             "a duplicate inside one window was not settled"
         );
         let after = core.store.get_artifact(&short.id).await.unwrap();

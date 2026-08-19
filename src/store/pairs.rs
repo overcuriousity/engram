@@ -51,10 +51,12 @@ pub enum PairState {
     Superseded,
     /// An operator looked and decided there is nothing here.
     Dismissed,
-    /// Scored at or above `auto_supersede`. Settled by the sweep's free
-    /// clustering pass, and never armed for a model call: that band is answered
-    /// correctly by a rule that costs nothing, and spending a call there is the
-    /// free path quietly becoming a paid one.
+    /// Scored at or above `auto_supersede`, and settled by the sweep's free
+    /// clustering pass rather than by a model call.
+    ///
+    /// Nothing files this any more — a pair in that band now goes to the judge
+    /// like every other, first in line. The variant and the pass that closes it
+    /// stay for the rows an older base filed.
     ///
     /// Filed rather than acted on where it is found, because resolving pairs one
     /// at a time leaves A pointing at a B that is itself hidden — which is what

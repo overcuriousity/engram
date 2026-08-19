@@ -189,30 +189,83 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
     flag_unverified(core, &written, &text).await?;
     if keep {
-        // A promotion: what the window's artifacts cover, they supersede, and
-        // the passages' access comes with them. Under the corpus lock as a
-        // second locked step — `write_segment_artifacts` took and released it.
-        let _corpus = core.corpus_lock(corpus_id).await;
-        let n = crate::jobs::promote::supersede_covered(
-            core,
-            corpus_id,
-            idx,
-            &written,
-            crate::store::now(),
-        )
-        .await?;
-        tracing::info!(
-            corpus_id,
-            window = idx,
-            superseded = n,
-            "promotion superseded its covered passages"
-        );
+        // The replacements have to be searchable before the originals stop
+        // being. `supersede_covered` takes the passages out of results, and the
+        // artifacts standing in for them are still `pending` until the corpus
+        // embed job settling arms below gets its turn — under a backed-up queue
+        // and `[pacing] cooldown_secs` that is however long the queue takes,
+        // and for all of it this window's lines are reachable from neither
+        // side. Embedded here, inline, so the swap is a swap.
+        //
+        // A refusal leaves the passages standing and the artifacts queued: the
+        // window is captured either way, the corpus embed job below will pick
+        // the artifacts up, and the next settle re-runs this. Hiding readable
+        // text behind text nothing can find is the one outcome not worth
+        // risking, so it is the direction this fails in.
+        let embedded = embed_written(core, &written).await;
+        if let Err(e) = &embedded {
+            tracing::warn!(
+                corpus_id,
+                window = idx,
+                error = %e,
+                "the promoted window's artifacts could not be embedded; \
+                 leaving its passages in results"
+            );
+        }
+        if let Ok(written) = &embedded {
+            // A promotion: what the window's artifacts cover, they supersede,
+            // and the passages' access comes with them. Under the corpus lock
+            // as a second locked step — `write_segment_artifacts` took and
+            // released it.
+            let _corpus = core.corpus_lock(corpus_id).await;
+            let n = crate::jobs::promote::supersede_covered(
+                core,
+                corpus_id,
+                idx,
+                written,
+                crate::store::now(),
+            )
+            .await?;
+            tracing::info!(
+                corpus_id,
+                window = idx,
+                superseded = n,
+                "promotion superseded its covered passages"
+            );
+        }
     }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;
 
     settle(core, corpus_id).await
+}
+
+/// Embed one promoted window's artifacts now, rather than leaving them to the
+/// corpus batch. Only a promotion needs this: it is the one path that hides
+/// existing text on the strength of text it has just written.
+///
+/// Returns the artifacts that are actually there afterwards. An oversize one is
+/// replaced by siblings and its own row goes away, so what was written is not
+/// always what is now searchable — and superseding a passage behind an id that
+/// no longer exists is the failure this whole step is here to avoid. The
+/// siblings cover the same lines and could be traced to the same passages, but
+/// working that out is `resolve_span`'s job on a re-run; dropping them leaves
+/// the passages standing, which is the direction promotion may fail in.
+async fn embed_written(
+    core: &Core,
+    written: &[crate::store::artifacts::Chunk],
+) -> Result<Vec<crate::store::artifacts::Chunk>> {
+    for c in written {
+        crate::jobs::embed::run(core, &c.id).await?;
+    }
+    let ids: Vec<String> = written.iter().map(|c| c.id.clone()).collect();
+    let live = core.store.artifacts_by_ids(&ids).await?;
+    Ok(written
+        .iter()
+        .filter(|c| live.iter().any(|l| l.id == c.id))
+        .cloned()
+        .collect())
 }
 
 /// Everything that can only be decided once every window has resolved.
@@ -645,6 +698,51 @@ mod tests {
                 .unwrap(),
             "and reaching `done` spends it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_embeds_what_it_wrote_before_it_hides_anything() {
+        // The window that promotes is the one window whose artifacts cannot
+        // wait for the corpus batch: `supersede_covered` takes the passages out
+        // of results, and until the replacements are indexed the lines are
+        // reachable from neither side. Under a backed-up queue that gap is as
+        // long as the queue.
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let before = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+
+        // The keep mark is what makes the re-read a promotion.
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let after = core
+            .store
+            .artifact_ids_for_segment(&out.id, 0)
+            .await
+            .unwrap();
+        let written: Vec<String> = after
+            .into_iter()
+            .filter(|id| !before.contains(id))
+            .collect();
+        assert!(!written.is_empty(), "the fixture must promote something");
+        for c in core.store.artifacts_by_ids(&written).await.unwrap() {
+            assert_eq!(
+                c.embed_state,
+                crate::store::artifacts::EmbedState::Embedded,
+                "the promotion superseded while {} was still {:?}",
+                c.id,
+                c.embed_state
+            );
+        }
     }
 
     #[tokio::test]

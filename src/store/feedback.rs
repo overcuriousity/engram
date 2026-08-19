@@ -752,10 +752,16 @@ impl Store {
     /// the search, so every interaction still to come arrives with no search of
     /// its own left in range, finds no owner, and is dropped. The long read is
     /// scored as an abandonment, which is the one reading it least resembles.
+    ///
+    /// The judge door is excluded for the same reason `events_between` excludes
+    /// it: a benchmark run is not a session. Counting it kept the base looking
+    /// busy for as long as a harness was pointed at it, and the sweep that
+    /// waits for quiet then never ran at all.
     pub async fn newest_event_at(&self) -> Result<Option<i64>> {
-        let s: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM search_events")
-            .fetch_one(&self.pool)
-            .await?;
+        let s: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(created_at) FROM search_events WHERE door <> 'judge'")
+                .fetch_one(&self.pool)
+                .await?;
         let a: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM ask_events")
             .fetch_one(&self.pool)
             .await?;
@@ -1363,7 +1369,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.events_between(0, now + 1).await.unwrap().len(), 1);
-        assert!(store.newest_event_at().await.unwrap().is_some());
+        // Nor is it a session: a harness pointed at the base kept `idle` from
+        // ever elapsing, and the sweep that waits for quiet never ran at all.
+        assert_eq!(store.newest_event_at().await.unwrap(), Some(now));
         // The forget button takes the pursuits along.
         store.insert_pursuit(now, &["q".into()], &[]).await.unwrap();
         store.purge_feedback().await.unwrap();

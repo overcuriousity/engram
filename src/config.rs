@@ -807,8 +807,17 @@ pub struct EmbedRole {
 
 impl EmbedRole {
     /// `chunk_tokens`, never above the embed path's own ceiling
-    /// (`max_input_tokens * 0.8`), so the passage splitter can never emit a
-    /// passage `split_oversize` then has to cut apart again.
+    /// (`max_input_tokens * 0.8`).
+    ///
+    /// A ceiling on the passage, not a promise about the rendered document.
+    /// What `embed` measures is `render(chunk)` — the title and the template
+    /// around it as well as the text — against that same number, so a config
+    /// that sets `chunk_tokens` at or near the ceiling still produces passages
+    /// that measure oversize once rendered. That costs one split round-trip,
+    /// not a loop: `split_oversize` cuts against `limit - envelope_cost`, so
+    /// the pieces it makes fit with the envelope on. The envelope is a title
+    /// and a template this type has neither of, which is why the allowance is
+    /// left where it can be measured rather than guessed at here.
     pub fn effective_chunk_tokens(&self) -> usize {
         let ceiling = (self.max_input_tokens as f32 * 0.8) as usize;
         self.chunk_tokens.min(ceiling).max(1)
@@ -1365,17 +1374,20 @@ impl Config {
 
     /// Rules that a config can satisfy syntactically and still be wrong.
     ///
-    /// The thresholds are the only ones so far, and they are worth refusing to
-    /// start over: `auto_supersede` at or below `review_min` means every pair
-    /// the sweep finds is hidden without asking, with no review band left at
-    /// all. That destroys knowledge quietly, and the operator who typed one
-    /// number would find out from search results going missing weeks later.
+    /// The thresholds are the only ones so far. `auto_supersede` no longer
+    /// hides anything on the score alone — it marks the band the sweep asks
+    /// about *first*, ordering `pairs_to_judge` — but it is still refused at or
+    /// below `review_min`, because a fast lane that starts below the floor for
+    /// looking at a pair at all is a number that cannot mean anything. The
+    /// operator who typed it means one of the two, and neither is what they
+    /// would get.
     fn validate(&self) -> Result<(), ConfigError> {
         let c = &self.consolidate;
         if c.auto_supersede <= c.review_min {
             return Err(ConfigError::Invalid(format!(
-                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}), \
-                 or every pair found is hidden without review",
+                "consolidate.auto_supersede ({}) must be above consolidate.review_min ({}): \
+                 it marks the pairs asked about first, and cannot sit below the score at \
+                 which a pair is worth asking about",
                 c.auto_supersede, c.review_min
             )));
         }
@@ -1795,9 +1807,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 
     #[test]
     fn thresholds_that_leave_no_review_band_are_refused() {
-        // `auto_supersede` at or below `review_min` hides every pair the sweep
-        // finds without asking anyone. The operator would find out from search
-        // results going missing, weeks later.
+        // `auto_supersede` marks the pairs the sweep asks about first. Below
+        // `review_min` — the score at which a pair is worth asking about at
+        // all — it names a lane no pair can be in, which is a number that
+        // means neither of the two things the operator could have intended.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(

@@ -564,11 +564,18 @@ impl Core {
             if run.len() < 2 {
                 continue;
             }
-            // The earliest in list order keeps its number and its title line;
-            // the rest contribute their text, in document order, and go dark.
+            // The earliest in list order keeps its number; the rest contribute
+            // their text, in document order, and go dark.
             let anchor = *run.iter().min_by_key(|&&m| members[m].3).unwrap();
             let anchor_pos = members[anchor].3;
-            let head = hits[anchor_pos].title.as_deref().unwrap_or_default();
+            // The heading belongs to where the block *starts*, and the anchor
+            // is whichever member ranked highest, not the first one down the
+            // page. Where a heading falls inside the second passage of a run,
+            // taking the anchor's title labelled text that opens above it with
+            // the section below. `run` is in document order by construction —
+            // that is what it was built by — so its first member is the one
+            // whose heading the reader is actually under.
+            let head = hits[members[run[0]].3].title.as_deref().unwrap_or_default();
             let text: Vec<&str> = run
                 .iter()
                 .map(|&m| hits[members[m].3].text.as_str())
@@ -591,12 +598,8 @@ impl Core {
                     }
                 }
             }
-            blocks[anchor_pos] = crate::infer::prompt::ask_excerpt(
-                anchor_pos + 1,
-                head,
-                &text.join("\n"),
-                &caveats,
-            );
+            blocks[anchor_pos] =
+                crate::infer::prompt::ask_excerpt(anchor_pos + 1, head, &text.join("\n"), &caveats);
             for &m in &run {
                 if m != anchor {
                     blocks[members[m].3].clear();
@@ -2360,5 +2363,91 @@ mod tests {
         for c in &made {
             assert!(cited.contains(&c.id), "{} missing from citations", c.text);
         }
+    }
+
+    #[tokio::test]
+    async fn a_stitched_run_is_headed_by_where_it_starts_not_by_its_best_hit() {
+        // The anchor is whichever member ranked highest, which is not the same
+        // as the one the block opens with. Where a heading falls inside the
+        // second passage of a run, taking the anchor's title labelled text
+        // beginning above that heading with the section below it.
+        //
+        // `stitch_passages` directly rather than through `ask`: what this is
+        // about is a run whose best hit is not its first line, and asking the
+        // retrieval to produce that ordering is asking it for something it does
+        // not promise. Handed in, it is the case every time.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        let mk = |i: i64, text: &str, title: &str, line: i64| NewArtifact {
+            ordinal: i,
+            text: text.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: line,
+                end_line: line,
+            }),
+            title: Some(title.into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let made = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    mk(0, "the tail of the section above", "Recovery", 1),
+                    mk(1, "rotate the offsite copy weekly", "Backups", 2),
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+
+        // The second passage ranked first: it is the anchor, and it keeps the
+        // block's number — but not the heading, which belongs to line 1.
+        let hit =
+            |c: &crate::store::artifacts::Chunk, score: f32| crate::core::search::SearchResult {
+                artifact_id: c.id.clone(),
+                corpus_id: c.corpus_id.clone().unwrap_or_default(),
+                title: c.title.clone(),
+                text: c.text.clone(),
+                category: None,
+                tags: vec![],
+                score,
+                status: None,
+                superseded_by: None,
+                last_verified_at: None,
+                weak: false,
+                primed: false,
+                past_cliff: false,
+                via: None,
+                reason: None,
+                model_written: false,
+                synthesized: false,
+                origin_count: 0,
+            };
+        let hits = vec![hit(&made[1], 0.9), hit(&made[0], 0.5)];
+        let mut blocks = vec![
+            crate::infer::prompt::ask_excerpt(1, "Backups", &made[1].text, &[]),
+            crate::infer::prompt::ask_excerpt(2, "Recovery", &made[0].text, &[]),
+        ];
+        core.stitch_passages(&hits, &mut blocks).await;
+
+        assert!(blocks[1].is_empty(), "the run's other member goes dark");
+        assert!(
+            blocks[0].contains("the tail of the section above\nrotate the offsite copy weekly"),
+            "stitched in document order: {}",
+            blocks[0]
+        );
+        assert!(
+            blocks[0].starts_with("[1] Recovery\n"),
+            "the anchor keeps its number, the opening line keeps its heading: {}",
+            blocks[0]
+        );
     }
 }

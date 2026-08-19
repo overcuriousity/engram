@@ -183,10 +183,14 @@ fn cap_per_corpus(
         let over = keys
             .iter()
             .any(|k| seen.get(k).copied().unwrap_or(0) >= max);
-        for k in &keys {
-            *seen.entry(k.clone()).or_insert(0) += 1;
-        }
         if !over {
+            // Only a hit that took a place counts against one. A displaced hit
+            // is over its cap in *one* of its corpora, and charging it to the
+            // others as well let a five-corpus merge that never made the list
+            // evict unrelated hits from the four that had room for it.
+            for k in &keys {
+                *seen.entry(k.clone()).or_insert(0) += 1;
+            }
             kept.push(h);
         } else {
             displaced.push(h);
@@ -1657,6 +1661,24 @@ mod tests {
         assert_eq!(
             ids(cap_per_corpus(with_merge, 2, 3)),
             vec!["a1", "a2", "b1"]
+        );
+        // And a merge that was displaced took no place in the corpora it never
+        // made the list for. Charging it to all of them let one merge spanning
+        // `a` and `b` — dropped because `a` was full — evict `b2` from a corpus
+        // with room to spare.
+        let mut m = hit("m", "", 0.85);
+        m.payload.origin_corpora = vec!["a".into(), "b".into()];
+        let with_merge = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            m,
+            hit("b1", "b", 0.7),
+            hit("b2", "b", 0.6),
+        ];
+        assert_eq!(
+            ids(cap_per_corpus(with_merge, 2, 4)),
+            vec!["a1", "a2", "b1", "b2"],
+            "a displaced hit must not spend a slot in a corpus it did not enter"
         );
     }
 

@@ -136,6 +136,21 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
 /// Cursor: the moment everything up to which has been grouped into pursuits.
 pub const PURSUIT_AFTER: &str = "pursuit.events_after";
 
+/// How far back one sweep may look, whatever the cursor says.
+///
+/// A ceiling rather than a budget: pursuits are swept every time the operator
+/// goes quiet, so nothing in ordinary use comes near it. What it stops is the
+/// first sweep after `pursuit.enabled` is turned on, where there is no cursor
+/// and the window would otherwise open at the epoch. Recording is on by
+/// default, so that window holds every search the base has taken since it was
+/// installed — and the clustering below is quadratic in *memory* as well as
+/// time, so reading it is not a slow sweep, it is one `Vec` the size of the
+/// square of the log.
+///
+/// A day is chosen because a pursuit is a sitting, and the sweep after an
+/// idle stretch has already seen everything older than the last one.
+const MAX_LOOKBACK_SECS: i64 = 24 * 60 * 60;
+
 /// One clustered pursuit before a decision: what was asked, and what was done
 /// with the results.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -236,6 +251,7 @@ pub async fn run(core: &Core) -> Result<usize> {
         .await?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let after = after.max(now - MAX_LOOKBACK_SECS);
     if let Some(newest) = core.store.newest_event_at().await?
         && newest > after
         && now - newest < idle
@@ -300,10 +316,30 @@ pub async fn run(core: &Core) -> Result<usize> {
     let refs: Vec<&[f32]> = vecs.iter().map(Vec::as_slice).collect();
     let clusters = crate::core::gaps::cluster(&refs, line);
 
+    // `cluster` groups on the words alone, and the words do not say when. Two
+    // sittings a week apart on one subject come back as one group, and every
+    // count taken over it is then taken across the gap: `opened_at`/`last_at`
+    // span the week, and `refined`/`abandoned` are read from events that were
+    // never consecutive. Splitting on the same idle gap that decides when the
+    // sweep runs is what makes each piece a pursuit — something that ended —
+    // rather than a topic.
+    let clusters: Vec<Vec<usize>> = clusters
+        .into_iter()
+        .flat_map(|mut members| {
+            members.sort_by_key(|&m| evs[m].at);
+            let mut sittings: Vec<Vec<usize>> = Vec::new();
+            for m in members {
+                match sittings.last_mut() {
+                    Some(run) if evs[m].at - evs[*run.last().unwrap()].at <= idle => run.push(m),
+                    _ => sittings.push(vec![m]),
+                }
+            }
+            sittings
+        })
+        .collect();
+
     let mut written = 0;
     for members in clusters {
-        let mut members = members;
-        members.sort_by_key(|&m| evs[m].at);
         let need = need_of(core, &evs, &members, &attached, &interactions);
         // Sources in the order they go to the model: engagement first, dwell
         // breaking ties. Dwell moves an artifact up the list and nothing else.
@@ -351,7 +387,21 @@ pub async fn run(core: &Core) -> Result<usize> {
                 crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&id), now).await?;
             }
             Decision::Generate => {
-                if let Some(covering) = covered_by_existing(core, &sources).await? {
+                // Nothing to arm without a generator. `run_claimed` would drop
+                // the unit with a warning and the pursuit would stay `open`
+                // with no reason — one more row on Ops after every sweep,
+                // saying a call is coming that never is. Pursuits still earn
+                // their keep at `synthesis = "off"`: `Promote` needs no model.
+                if !core.synthesizes() {
+                    core.store
+                        .close_pursuit(
+                            &pid,
+                            "unsatisfied",
+                            "earned an artifact, but there is no [infer.synthesize] to write it",
+                            now,
+                        )
+                        .await?;
+                } else if let Some(covering) = covered_by_existing(core, &sources).await? {
                     core.store
                         .close_pursuit(&pid, "satisfied", &format!("covered by {covering}"), now)
                         .await?;
@@ -777,6 +827,116 @@ mod tests {
         assert_eq!(lone.state, "unsatisfied", "{lone:?}");
         // The watermark moved; a second sweep finds nothing new.
         assert_eq!(run(&core).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn two_sittings_on_one_subject_are_two_pursuits() {
+        // `cluster` groups on the words, and the words do not say when. Without
+        // the split these two come back as one pursuit whose `opened_at` and
+        // `last_at` span the gap between them and whose engagement is summed
+        // across a session boundary.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 10_000;
+        let gap = core.pursuit.idle_secs as i64 * 10;
+        search_event(&core, "read the journal", vec![1.0, 0.0], &[&ids[0]], t0).await;
+        search_event(
+            &core,
+            "read the journal again",
+            vec![1.0, 0.0],
+            &[&ids[0]],
+            t0 + gap,
+        )
+        .await;
+
+        assert_eq!(run(&core).await.unwrap(), 2, "one sitting each");
+        let ps = core.store.recent_pursuits(10).await.unwrap();
+        assert!(
+            ps.iter().all(|p| p.queries.len() == 1),
+            "a pursuit spans one sitting: {ps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_never_reaches_further_back_than_its_lookback() {
+        // With no cursor the window would open at the epoch, and on a base that
+        // has been recording since it was installed that is every search ever
+        // taken — clustered quadratically, in one allocation.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        search_event(
+            &core,
+            "from another era",
+            vec![1.0, 0.0],
+            &[&ids[0]],
+            now - MAX_LOOKBACK_SECS - 60,
+        )
+        .await;
+        search_event(&core, "from today", vec![0.0, 1.0], &[&ids[0]], now - 100).await;
+
+        assert!(
+            core.store.meta_get(PURSUIT_AFTER).await.unwrap().is_none(),
+            "the fixture must start without a cursor"
+        );
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let ps = core.store.recent_pursuits(10).await.unwrap();
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].queries, vec!["from today".to_string()], "{ps:?}");
+    }
+
+    #[tokio::test]
+    async fn a_pursuit_that_earns_a_write_up_with_no_generator_is_closed_not_left_open() {
+        // `run_claimed` drops a `Generate` unit it cannot run, with a warning.
+        // Nothing then closes the pursuit, so it sits `open` with no reason on
+        // Ops, one more of it after every sweep, promising a call that is never
+        // coming.
+        let mut core = pursuing_core().await;
+        core.synthesizer = None;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 100;
+        search_event(
+            &core,
+            "read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            t0,
+        )
+        .await;
+        search_event(
+            &core,
+            "journal location",
+            vec![0.99, 0.1],
+            &[&ids[1], &ids[0]],
+            t0 + 2,
+        )
+        .await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), t0 + 3)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 4)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+        let ps = core.store.recent_pursuits(10).await.unwrap();
+        let p = ps
+            .iter()
+            .find(|p| p.queries.iter().any(|q| q == "read the journal"))
+            .expect("the journal pursuit");
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert!(
+            !core.store.live_job(Stage::Generate, &p.id).await.unwrap(),
+            "nothing to arm without a generator"
+        );
     }
 
     #[tokio::test]
