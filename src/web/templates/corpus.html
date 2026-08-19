@@ -98,8 +98,10 @@
   </table>
   {% endif %}
 </div>
-{% else if let Some(n) = note %}
-<p><b>Note:</b> {{ n }}</p>
+{% else if !image %}
+{# Neither card is on the page: a pasted or fetched source carries its note
+   nowhere else. Guarded on `image` too, or the photo card's note prints twice. #}
+{% if let Some(n) = note %}<p><b>Note:</b> {{ n }}</p>{% endif %}
 {% endif %}
 
 {% if restored %}

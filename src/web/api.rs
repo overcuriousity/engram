@@ -1258,6 +1258,29 @@ pub(crate) mod tests {
         assert_eq!(got.to_vec(), a_pdf(), "byte for byte as uploaded");
     }
 
+    /// The image route answers for images. A PDF is stored without a preview,
+    /// and a caller walking every corpus for a thumbnail must be told there is
+    /// none rather than handed zero bytes under `image/jpeg`.
+    #[tokio::test]
+    async fn the_image_route_has_nothing_to_show_for_a_pdf() {
+        let (app, token, core) = app_token_and_core().await;
+        let id = core
+            .ingest_pdf(crate::core::ingest::PdfCapture {
+                bytes: a_pdf(),
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let res = app
+            .oneshot(get(&format!("/api/v1/corpora/{id}/image"), Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn an_upload_with_two_file_parts_is_refused() {
         let (app, token, core) = app_token_and_core().await;

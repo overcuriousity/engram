@@ -130,13 +130,20 @@ impl Store {
 
     /// The preview alone. Separate from `attachment_for_corpus` so serving a
     /// thumbnail does not read the original's megabytes off disk.
+    ///
+    /// An empty blob is no preview rather than a zero-byte JPEG — a PDF is
+    /// stored without one, and answering `Some` for it hands the caller a
+    /// broken image under an `image/jpeg` header instead of a plain no.
     pub async fn attachment_preview(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
         let row =
             sqlx::query("SELECT preview FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1")
                 .bind(corpus_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.map(|r| (PREVIEW_MIME.to_string(), r.get("preview"))))
+        Ok(row
+            .map(|r| r.get::<Vec<u8>, _>("preview"))
+            .filter(|p| !p.is_empty())
+            .map(|p| (PREVIEW_MIME.to_string(), p)))
     }
 
     pub async fn attachment_original(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
@@ -211,5 +218,33 @@ mod tests {
 
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.attachment_for_corpus(&src.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_attachment_stored_without_a_preview_reads_as_having_none() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "pdf", None).await.unwrap();
+        s.insert_attachment(&NewAttachment {
+            corpus_id: &src.id,
+            kind: "pdf",
+            mime: "application/pdf",
+            filename: Some("plan.pdf"),
+            bytes: b"%PDF-",
+            preview: &[],
+            width: None,
+            height: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(s.has_attachment(&src.id).await.unwrap());
+        assert!(
+            s.attachment_preview(&src.id).await.unwrap().is_none(),
+            "no preview is no preview, not a zero-byte JPEG"
+        );
+        assert_eq!(
+            s.attachment_original(&src.id).await.unwrap().unwrap(),
+            ("application/pdf".to_string(), b"%PDF-".to_vec())
+        );
     }
 }

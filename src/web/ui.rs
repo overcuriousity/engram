@@ -1189,8 +1189,13 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // is what says the name is still coming; the label itself is not
             // the place to say it.
             label: s.title_hint.clone().unwrap_or_else(|| {
-                if s.origin == crate::core::ingest::ORIGIN_IMAGE && s.raw_text.is_empty() {
+                if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
                     "photo".into()
+                } else if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_PDF {
+                    // A PDF has no opening words until the extraction lands.
+                    // Without this the row renders an empty anchor: nothing to
+                    // read and nothing to click through to the corpus.
+                    "document".into()
                 } else {
                     markdown::snippet(&s.raw_text, 60)
                 }
@@ -3537,7 +3542,11 @@ mod tests {
             html.contains(&format!("/api/v1/corpora/{}/image", src.id)),
             "img src"
         );
-        assert!(html.contains("front porch"));
+        assert_eq!(
+            html.matches("front porch").count(),
+            1,
+            "the note belongs to the photo card and is printed there once: {html}"
+        );
         assert!(html.contains("2026-08-09T14:12:03"));
         assert!(html.contains("1.5"));
         // Everything else the camera wrote is on the page too, folded away and
@@ -3554,6 +3563,29 @@ mod tests {
             "the text is labelled as derived, not 'Raw corpus'"
         );
         assert!(html.contains("blue door"));
+    }
+
+    /// Nothing knows what a PDF says until the extraction lands, so the row has
+    /// no opening words to be called by — and an empty label is an anchor with
+    /// nothing to read and nothing to click.
+    #[tokio::test]
+    async fn a_pdf_waiting_to_be_extracted_is_called_a_document_in_the_queue() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest_pdf(crate::core::ingest::PdfCapture {
+            bytes: include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec(),
+            filename: Some("plan.pdf".into()),
+            title_hint: None,
+            note: None,
+        })
+        .await
+        .unwrap();
+
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, "/ui/queue", &cookie).await;
+        assert!(
+            html.contains(">document</a>"),
+            "the row has no title to click: {html}"
+        );
     }
 
     async fn an_unread_image(core: &crate::core::Core) -> String {

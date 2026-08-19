@@ -1100,7 +1100,10 @@ impl Core {
             // everything derived from it are replaced wholesale, because a
             // chunk of the old reading has no span in the new one.
             Stage::Describe => {
-                if !self.store.has_attachment(&src.id).await? {
+                // Origin, not just "has an attachment": a PDF has one too, and
+                // sending one through here would wipe its extraction and hand
+                // the vision model a preview it does not have.
+                if src.origin != ORIGIN_IMAGE || !self.store.has_attachment(&src.id).await? {
                     return Err(Error::Validation(
                         "only a captured image can be re-read".into(),
                     ));
@@ -1409,6 +1412,32 @@ mod tests {
             core.reprocess(&src.id, Stage::Describe).await,
             Err(Error::Validation(_))
         ));
+    }
+
+    /// `describe` is guarded by origin, not by "has an attachment": a PDF has
+    /// one too, and letting it through would clear the extraction and every
+    /// artifact behind it before handing the vision model a preview a PDF is
+    /// stored without.
+    #[tokio::test]
+    async fn a_pdf_cannot_be_re_read_through_the_vision_stage() {
+        let core = test_core().await;
+        let out = core.ingest_pdf(a_pdf_capture()).await.unwrap();
+        core.store
+            .set_read_text(&out.id, "# Plan\n\nthe text docling found", vec![])
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            core.reprocess(&out.id, Stage::Describe).await,
+            Err(Error::Validation(_))
+        ));
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(
+            src.raw_text, "# Plan\n\nthe text docling found",
+            "the extraction survived the refusal"
+        );
+        assert_ne!(src.status, CorpusStatus::Describing);
     }
 
     #[tokio::test]
