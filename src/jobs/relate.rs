@@ -129,16 +129,24 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
-    // The free band. Filed, not acted on: resolving pairs one at a time leaves A
-    // pointing at a B that is itself hidden, and following that chain is
-    // something no page and no reader can do. The sweep's union-find groups
-    // these rows first and then picks one survivor per cluster.
-    if score >= core.consolidate.auto_supersede {
-        core.store
-            .record_settled_pair(&a.id, &b.id, score, PairState::NearIdentical)
-            .await?;
+    // Two rows from one window are not a pair. Neighbours under one heading
+    // are similar for how they were built, not for what they say; and a
+    // promoted artifact beside the passage it left standing is the window
+    // job's decision — the majority rule — already made. Sending that pair to
+    // the judge would spend a call to merge, and so hide behind model text,
+    // exactly the verbatim passage promotion just decided to keep.
+    if a.corpus_id.is_some()
+        && a.corpus_id == b.corpus_id
+        && a.segment_idx.is_some()
+        && a.segment_idx == b.segment_idx
+    {
         return Ok(false);
     }
+
+    // No free band any more. A pair at or above `auto_supersede` used to be
+    // filed as near-identical and hidden by the sweep on the score alone; it
+    // now falls through to `record_pair` like everything else, where
+    // `pairs_to_judge` orders by score and so asks about it first.
 
     // One synthesis call emitting the same passage twice: the shorter text is
     // wholly inside the longer, and both came out of the same document. That is
@@ -300,36 +308,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_near_identical_neighbour_never_costs_a_model_call() {
-        // At or above `auto_supersede` the pair is settled for free by
-        // clustering. Filing it as an ordinary pending pair would arm a dedupe
-        // unit and spend a call on the one case where the cheap rule is already
-        // right — the free path quietly becoming a paid one.
-        let core = test_core().await;
-        seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
-        let ids = core
-            .store
-            .all_active_artifacts()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| c.id)
-            .collect::<Vec<_>>();
-
-        run(&core, &ids[1]).await.unwrap();
-
-        assert!(core.store.pairs_to_judge(10).await.unwrap().is_empty());
-        assert_eq!(
-            core.store
-                .pairs_by_state(PairState::NearIdentical, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
     async fn an_unrelated_neighbour_is_left_entirely_alone() {
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
@@ -437,31 +415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_at_auto_supersede_is_filed_for_the_cluster_pass() {
-        // It must not reach the dedupe queue: that band is answered by a rule
-        // that costs nothing. It must also not be superseded here — pairwise
-        // resolution is what `Clusters` exists to avoid, because A loses to B
-        // and B then loses to C, leaving A pointing at something hidden.
-        let core = test_core().await;
-        let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.9999, 0.01])]).await;
-        let (a, b) = pair_of(&core, &ids).await;
-
-        classify_pair(&core, &a, &b, 0.999).await.unwrap();
-        for id in &ids {
-            assert!(
-                core.store
-                    .get_artifact(id)
-                    .await
-                    .unwrap()
-                    .superseded_by
-                    .is_none(),
-                "the pair was resolved pairwise instead of being filed"
-            );
-        }
-        assert!(core.store.pairs_to_judge(10).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn a_pair_naming_a_hidden_artifact_is_skipped() {
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
@@ -546,6 +499,101 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn two_rows_from_one_window_are_never_a_pair() {
+        // A promoted artifact and the passage it left standing in the same
+        // window look like a duplicate pair and are not one: overlap inside a
+        // window is the window job's decision, already made.
+        let core = test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let na = |o: i64, t: &str, seg: i64| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: None,
+            title: Some("same heading".into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(seg),
+            caveats: vec![],
+        };
+        let same = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    na(0, "mount the disk first", 0),
+                    na(1, "mount the disk first", 0),
+                ],
+            )
+            .await
+            .unwrap();
+        let other = core
+            .store
+            .insert_artifacts(&src.id, &[na(2, "mount the disk first", 1)])
+            .await
+            .unwrap();
+        for c in same.iter().chain(other.iter()) {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        // Relate the same-window pair only: identical text under one title
+        // embeds identically, so without the exclusion this is a 1.0 pair.
+        run(&core, &same[0].id).await.unwrap();
+        let pending = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert!(
+            !pending.iter().any(|p| {
+                (p.a_id == same[0].id && p.b_id == same[1].id)
+                    || (p.a_id == same[1].id && p.b_id == same[0].id)
+            }),
+            "same-window pair was filed: {pending:?}"
+        );
+        // Across windows of the same corpus a pair is still a question —
+        // unless containment settles it, which identical text does; so the
+        // cross-window pair is settled or pending, never nothing.
+        let settled = core
+            .store
+            .pairs_by_state(PairState::NoConflict, 10)
+            .await
+            .unwrap();
+        assert!(
+            pending
+                .iter()
+                .chain(settled.iter())
+                .any(|p| p.a_id == other[0].id || p.b_id == other[0].id),
+            "cross-window pair not filed: {pending:?} {settled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_above_auto_supersede_is_filed_for_the_judge_not_hidden() {
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the first wording", [1.0, 0.0]),
+                ("the second wording", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        run(&core, &ids[1]).await.unwrap();
+        // Nobody is hidden…
+        assert!(core.store.get_artifact(&ids[0]).await.unwrap().in_results());
+        assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
+        // …and the pair is pending, first in line by score.
+        let to_judge = core.store.pairs_to_judge(10).await.unwrap();
+        assert_eq!(to_judge.len(), 1, "{to_judge:?}");
+        assert!(
+            core.store
+                .pairs_by_state(PairState::NearIdentical, 10)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

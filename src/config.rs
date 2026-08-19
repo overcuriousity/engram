@@ -245,10 +245,12 @@ pub struct ConsolidateConfig {
     pub near_dupe_min: f64,
     /// Cosine at or above which a pair is worth an operator's attention.
     pub review_min: f32,
-    /// Cosine at or above which the older artifact is superseded without
-    /// asking. Deliberately far above `review_min`: two genuinely distinct
-    /// artifacts about one subsystem sit around 0.88 routinely, and superseding
-    /// at that score destroys knowledge rather than duplication.
+    /// Cosine at or above which a pair is judged *first* — a fast lane to the
+    /// dedupe judge, no longer a hide. It used to supersede the older artifact
+    /// on the score alone; embeddings barely distinguish negation, and "runs
+    /// on ext4" / "does not run on ext4" sit far above any realistic
+    /// threshold, so the judge's `losses` check now stands behind every hide.
+    /// Still validated above `review_min`.
     pub auto_supersede: f32,
     /// Neighbours considered per artifact when it looks for duplicates.
     pub per_point: usize,
