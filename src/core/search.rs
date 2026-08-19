@@ -913,6 +913,8 @@ impl Core {
                 query_vec: vector.clone(),
                 embed_model: self.embedder.model().to_string(),
                 candidates,
+                // Set for real in the next task, once the list is final.
+                answered: false,
             };
             let store = self.store.clone();
             let window = self.feedback.coalesce_secs;

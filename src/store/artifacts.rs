@@ -166,6 +166,9 @@ pub struct Chunk {
     /// `created_at` at insert; this, not `created_at`, is what search ranking
     /// decays against.
     pub last_verified_at: Option<i64>,
+    /// For a synthesized artifact: the questions it was written for. Empty
+    /// everywhere else.
+    pub cues: Vec<String>,
 }
 
 impl Chunk {
@@ -192,6 +195,19 @@ pub struct NewMerged {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub caveats: Vec<String>,
+}
+
+/// An artifact written from a pursuit: what was asked, and what was engaged
+/// with. Inserted through `insert_synthesized_artifact`.
+#[derive(Debug, Clone)]
+pub struct NewSynthesized {
+    pub text: String,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub caveats: Vec<String>,
+    /// The pursuit's queries: why this was written, shown on its page.
+    pub cues: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +253,12 @@ pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .unwrap_or_default(),
         status: ArtifactStatus::parse(r.get::<String, _>("status").as_str()),
         last_verified_at: r.get("last_verified_at"),
+        cues: r
+            .try_get::<Option<String>, _>("cues")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -297,6 +319,7 @@ impl Store {
             caveats: new.caveats.clone(),
             status: ArtifactStatus::Active,
             last_verified_at: Some(created_at),
+            cues: vec![],
         };
         sqlx::query(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
@@ -336,6 +359,95 @@ impl Store {
         }
         tx.commit().await?;
         Ok(c)
+    }
+
+    /// Write an artifact generated from a pursuit. Like a merge it has no
+    /// corpus of its own and names its sources through `artifact_sources`;
+    /// unlike a merge it supersedes nothing — its sources stay active and
+    /// keep ranking. `root_id` resolves through `roots_of`, so a generation
+    /// written from another generation still names source text, and `via_id`
+    /// keeps the chain reconstructible at any depth.
+    pub async fn insert_synthesized_artifact(
+        &self,
+        new: &NewSynthesized,
+        sources: &[String],
+    ) -> Result<Chunk> {
+        let resolved = self.roots_of(sources).await?;
+        let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
+        let mut tx = self.pool.begin().await?;
+        let created_at = now();
+        let c = Chunk {
+            id: new_id(),
+            corpus_id: None,
+            provenance: Provenance::Synthesized,
+            source_count: root_ids.len() as i64,
+            ordinal: 0,
+            text: new.text.clone(),
+            corpus_span: None,
+            title: new.title.clone(),
+            category: new.category.clone(),
+            tags: new.tags.clone(),
+            embed_state: EmbedState::Pending,
+            embed_model: None,
+            created_at,
+            embed_rev: 0,
+            segment_idx: None,
+            flags: vec![],
+            flag_detail: None,
+            superseded_by: None,
+            caveats: new.caveats.clone(),
+            status: ArtifactStatus::Active,
+            last_verified_at: Some(created_at),
+            cues: new.cues.clone(),
+        };
+        sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
+             VALUES (?, NULL, 'synthesized', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
+        )
+        .bind(&c.id)
+        .bind(c.source_count)
+        .bind(&c.text)
+        .bind(&c.title)
+        .bind(&c.category)
+        .bind(serde_json::to_string(&c.tags).unwrap())
+        .bind(c.embed_state.as_str())
+        .bind(c.created_at)
+        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
+        .bind(c.status.as_str())
+        .bind(c.last_verified_at)
+        .bind(c.created_at)
+        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
+        .execute(&mut *tx)
+        .await?;
+        for (via, roots) in &resolved {
+            for root in roots {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(&c.id)
+                .bind(root)
+                .bind(via)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(c)
+    }
+
+    /// Generated artifacts still in results, newest first. What Ops lists.
+    pub async fn synthesized_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL
+              ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
     }
 
     pub async fn insert_artifacts(
@@ -382,6 +494,7 @@ impl Store {
                 caveats: nc.caveats.clone(),
                 status: ArtifactStatus::Active,
                 last_verified_at: Some(created_at),
+                cues: vec![],
             };
             sqlx::query(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
@@ -1648,6 +1761,7 @@ mod tests {
                     query_vec: vec![1.0, 0.0],
                     embed_model: "fake".into(),
                     candidates: vec![],
+                    answered: false,
                 },
                 0,
             )
@@ -1655,5 +1769,64 @@ mod tests {
             .unwrap();
         s.judge_hit(&ev, &made[0].id).await.unwrap();
         assert!(s.artifact_confirmed(&made[0].id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_names_source_text_as_roots_at_any_depth() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        let gen1 = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "written from a and b".into(),
+                    title: Some("G1".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec!["how do I a and b".into()],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(gen1.provenance, Provenance::Synthesized);
+        assert!(gen1.corpus_id.is_none());
+        let read = s.get_artifact(&gen1.id).await.unwrap();
+        assert_eq!(read.cues, vec!["how do I a and b".to_string()]);
+        // Its sources stay active: a generation supersedes nothing.
+        assert!(s.get_artifact(&made[0].id).await.unwrap().in_results());
+        // A generation written from the generation: roots are still a and b,
+        // reached through G1.
+        let gen2 = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "written from G1".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                std::slice::from_ref(&gen1.id),
+            )
+            .await
+            .unwrap();
+        let roots = s.roots_of(std::slice::from_ref(&gen2.id)).await.unwrap();
+        let mut got = roots[&gen2.id].clone();
+        got.sort();
+        let mut want = vec![made[0].id.clone(), made[1].id.clone()];
+        want.sort();
+        assert_eq!(got, want, "roots must be captured text, never a generation");
+        let via = s.sources_with_via(&gen2.id).await.unwrap();
+        assert!(
+            via.iter()
+                .all(|(_, v)| v.as_deref() == Some(gen1.id.as_str())),
+            "{via:?}"
+        );
+        assert_eq!(s.synthesized_artifacts(10).await.unwrap().len(), 2);
     }
 }

@@ -608,6 +608,7 @@ mod tests {
                                 shown: i < 10,
                             })
                             .collect(),
+                        answered: false,
                     },
                     0,
                 )
@@ -1012,6 +1013,7 @@ mod tests {
                     query_vec: vec![0.1, 0.2],
                     embed_model: "fake".into(),
                     candidates: vec![],
+                    answered: false,
                 },
                 0,
             )

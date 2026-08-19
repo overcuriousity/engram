@@ -409,6 +409,7 @@ mod tests {
             caveats: vec![],
             status: ArtifactStatus::Active,
             last_verified_at: None,
+            cues: vec![],
         }
     }
 

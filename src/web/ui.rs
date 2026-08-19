@@ -3430,6 +3430,7 @@ mod tests {
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
                         candidates: vec![],
+                        answered: false,
                     },
                     // No folding: these stand for separate searches, not one
                     // being typed.

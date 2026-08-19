@@ -36,6 +36,19 @@ pub struct NewAsk {
     pub citations: Vec<NewAskCitation>,
 }
 
+/// One recorded question as the pursuit sweep reads it.
+#[derive(Debug, Clone)]
+pub struct RecordedAsk {
+    pub id: String,
+    pub question: String,
+    pub query_vec: Vec<f32>,
+    pub created_at: i64,
+    pub abstained: bool,
+    /// The excerpts the model was shown, in order: what the question engaged.
+    pub cited: Vec<String>,
+    pub scope: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskVerdict {
     /// The answer is correct as stated.
@@ -280,6 +293,39 @@ impl Store {
         )
     }
 
+    /// Recorded questions with `from < created_at <= to`, oldest first, with
+    /// the excerpts they cited — the sources a question engaged.
+    pub async fn asks_between(&self, from: i64, to: i64) -> Result<Vec<RecordedAsk>> {
+        let rows = sqlx::query(
+            "SELECT id, question, query_vec, created_at, abstained, scope FROM ask_events
+              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let id: String = r.get("id");
+            let cited: Vec<String> = sqlx::query_scalar(
+                "SELECT artifact_id FROM ask_citations WHERE event_id = ? ORDER BY n",
+            )
+            .bind(&id)
+            .fetch_all(&self.pool)
+            .await?;
+            out.push(RecordedAsk {
+                id,
+                question: r.get("question"),
+                query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                created_at: r.get("created_at"),
+                abstained: r.get::<i64, _>("abstained") != 0,
+                cited,
+                scope: r.get("scope"),
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn purge_asks(&self) -> Result<u64> {
         Ok(sqlx::query("DELETE FROM ask_events")
             .execute(&self.pool)
@@ -464,5 +510,23 @@ mod tests {
         store.judge_ask(&a, AskVerdict::Right).await.unwrap();
         assert_eq!(store.purge_asks().await.unwrap(), 2);
         assert_eq!(store.ask_stats().await.unwrap().asked, 0);
+    }
+
+    #[tokio::test]
+    async fn asks_between_carries_what_was_cited_and_whether_it_abstained() {
+        let store = Store::memory().await.unwrap();
+        let id = store.record_ask(ask("how", 2)).await.unwrap();
+        let mut abst = ask("nothing", 0);
+        abst.abstained = true;
+        store.record_ask(abst).await.unwrap();
+        let now = crate::store::now();
+        let got = store.asks_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 2);
+        let first = got.iter().find(|a| a.id == id).unwrap();
+        assert_eq!(first.cited, vec!["art-0".to_string(), "art-1".to_string()]);
+        assert!(!first.abstained);
+        assert_eq!(first.scope.as_deref(), Some("me"));
+        assert!(got.iter().any(|a| a.abstained && a.cited.is_empty()));
+        assert!(got.iter().all(|a| a.query_vec == vec![0.1, 0.2, 0.3]));
     }
 }

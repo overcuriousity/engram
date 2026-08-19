@@ -173,6 +173,7 @@ mod tests {
                         similarity: Some(0.7),
                         shown: true,
                     }],
+                    answered: false,
                 },
                 0,
             )

@@ -121,6 +121,25 @@ pub struct NewEvent {
     /// Vectors are only comparable under the model that produced them.
     pub embed_model: String,
     pub candidates: Vec<NewCandidate>,
+    /// A synthesized artifact led the list above `weak_below`: the base
+    /// answered, and the pursuit this lands in closes satisfied.
+    pub answered: bool,
+}
+
+/// One recorded search as the pursuit sweep reads it.
+#[derive(Debug, Clone)]
+pub struct RecordedEvent {
+    pub id: String,
+    pub query: String,
+    pub query_vec: Vec<f32>,
+    pub created_at: i64,
+    pub answered: bool,
+    /// `expect_id` when the verdict is `hit`: a person said this artifact was
+    /// the answer.
+    pub confirmed: Option<String>,
+    pub scope: Option<String>,
+    /// The shown candidates: `(artifact_id, similarity)`, rank order.
+    pub shown: Vec<(String, Option<f32>)>,
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -245,7 +264,7 @@ impl Store {
                 sqlx::query(
                     "UPDATE search_events
                      SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,
-                         embed_model = ?, created_at = ?
+                         embed_model = ?, created_at = ?, answered = ?
                      WHERE id = ?",
                 )
                 .bind(&ev.query)
@@ -254,6 +273,7 @@ impl Store {
                 .bind(ev.query_vec.len() as i64)
                 .bind(&ev.embed_model)
                 .bind(at)
+                .bind(ev.answered as i64)
                 .bind(&id)
                 .execute(&mut *tx)
                 .await?;
@@ -268,8 +288,8 @@ impl Store {
                 sqlx::query(
                     "INSERT INTO search_events
                        (id, query, door, scope, filters, query_vec, vec_dim, embed_model,
-                        created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        created_at, answered)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&id)
                 .bind(&ev.query)
@@ -280,6 +300,7 @@ impl Store {
                 .bind(ev.query_vec.len() as i64)
                 .bind(&ev.embed_model)
                 .bind(at)
+                .bind(ev.answered as i64)
                 .execute(&mut *tx)
                 .await?;
                 id
@@ -664,7 +685,75 @@ impl Store {
             .execute(&self.pool)
             .await?
             .rows_affected();
-        Ok(searches + self.purge_asks().await?)
+        // Pursuits and what was opened are the same kind of record — what a
+        // person did — and go with one press.
+        Ok(searches + self.purge_asks().await? + self.purge_pursuits().await?)
+    }
+
+    /// Recorded searches with `from < created_at <= to`, oldest first, with
+    /// what the sweep needs and nothing else. The judge door is excluded: a
+    /// benchmark query is not a need.
+    pub async fn events_between(&self, from: i64, to: i64) -> Result<Vec<RecordedEvent>> {
+        let rows = sqlx::query(
+            "SELECT id, query, query_vec, created_at, answered, verdict, expect_id, scope
+               FROM search_events
+              WHERE created_at > ? AND created_at <= ? AND door <> 'judge'
+              ORDER BY created_at, id",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let id: String = r.get("id");
+            let shown: Vec<(String, Option<f32>)> = sqlx::query(
+                "SELECT artifact_id, similarity FROM search_candidates
+                  WHERE event_id = ? AND shown = 1 ORDER BY rank",
+            )
+            .bind(&id)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|c| {
+                (
+                    c.get::<String, _>("artifact_id"),
+                    c.get::<Option<f32>, _>("similarity"),
+                )
+            })
+            .collect();
+            let verdict: Option<String> = r.get("verdict");
+            out.push(RecordedEvent {
+                id,
+                query: r.get("query"),
+                query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                created_at: r.get("created_at"),
+                answered: r.get::<i64, _>("answered") != 0,
+                confirmed: if verdict.as_deref() == Some("hit") {
+                    r.get("expect_id")
+                } else {
+                    None
+                },
+                scope: r.get("scope"),
+                shown,
+            });
+        }
+        Ok(out)
+    }
+
+    /// When the most recent search or question was recorded, if any.
+    pub async fn newest_event_at(&self) -> Result<Option<i64>> {
+        let s: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM search_events")
+            .fetch_one(&self.pool)
+            .await?;
+        let a: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM ask_events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(match (s, a) {
+            (Some(x), Some(y)) => Some(x.max(y)),
+            (x, None) => x,
+            (None, y) => y,
+        })
     }
 }
 
@@ -710,6 +799,7 @@ mod tests {
                 similarity: Some(0.8),
                 shown: true,
             }],
+            answered: false,
         }
     }
 
@@ -1242,5 +1332,32 @@ mod tests {
             blob_to_vec(&row.get::<Vec<u8>, _>("query_vec")),
             vec![0.5, -0.25]
         );
+    }
+
+    #[tokio::test]
+    async fn events_between_reads_answered_confirmed_and_what_was_shown() {
+        let store = Store::memory().await.unwrap();
+        let mut e = ev("a question", Door::Ui);
+        e.answered = true;
+        let id = store.record_search(e, 0).await.unwrap();
+        store.judge_hit(&id, "a1").await.unwrap();
+        let now = now();
+        let got = store.events_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].answered);
+        assert_eq!(got[0].confirmed.as_deref(), Some("a1"));
+        assert_eq!(got[0].shown, vec![("a1".to_string(), Some(0.8))]);
+        assert_eq!(got[0].query_vec, vec![0.5, -0.25]);
+        // The judge door is not a need.
+        store
+            .record_search(ev("bench", Door::Judge), 0)
+            .await
+            .unwrap();
+        assert_eq!(store.events_between(0, now + 1).await.unwrap().len(), 1);
+        assert!(store.newest_event_at().await.unwrap().is_some());
+        // The forget button takes the pursuits along.
+        store.insert_pursuit(now, &["q".into()], &[]).await.unwrap();
+        store.purge_feedback().await.unwrap();
+        assert!(store.recent_pursuits(10).await.unwrap().is_empty());
     }
 }
