@@ -106,6 +106,8 @@ pub struct Core {
     pub synthesis: crate::config::SynthesisMode,
     /// The window budget when there is no synthesizer to derive one from.
     pub segment_tokens: usize,
+    /// Passage size at `off`/`earned`, already clamped to the embedder.
+    pub chunk_tokens: usize,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
     /// so draining one drains them all.
@@ -195,6 +197,7 @@ impl Core {
                 .map(|v| Arc::new(HttpDescriber::new(v, synth)) as Arc<dyn Describer>),
             synthesis: cfg.infer.synthesis,
             segment_tokens: cfg.infer.segment_tokens,
+            chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
@@ -342,6 +345,7 @@ pub mod test_support {
             describer: Some(Arc::new(FakeDescriber::default())),
             synthesis: crate::config::SynthesisMode::Eager,
             segment_tokens: crate::config::DEFAULT_SEGMENT_TOKENS,
+            chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),

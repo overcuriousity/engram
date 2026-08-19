@@ -36,6 +36,11 @@ pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let me = core.store.get_artifact(artifact_id).await?;
+    // A passage is not anchored: see `embed::mark_indexed`. Said here too, so a
+    // unit armed some other way files nothing.
+    if me.provenance == crate::store::artifacts::Provenance::Passage {
+        return Ok(());
+    }
     // A retired artifact has no duplicates worth recording. Every pair naming
     // it would be skipped by `classify_pair` anyway, so this saves the query
     // rather than changing the outcome.

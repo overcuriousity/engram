@@ -1,8 +1,12 @@
 //! Capture without synthesis: a window becomes verbatim passages sized to the
 //! embedder, each under the heading the document gave it.
 
+use crate::core::Core;
+use crate::error::Result;
 use crate::infer::budget::TokenCounter;
 use crate::infer::split::{Window, split_into_segments};
+use crate::store::artifacts::{CorpusSpan, NewArtifact, Provenance};
+use crate::store::corpora::CorpusStatus;
 
 /// A document's name, derived locally: longer than this is a paragraph.
 pub const TITLE_MAX: usize = 80;
@@ -106,6 +110,89 @@ pub fn split_passages(
         });
     }
     out
+}
+
+/// The whole of capture at `off` and `earned`: split into windows, write them
+/// `verbatim`, split each window into passages, write those, name the document
+/// without a model, and finish the corpus the way a synthesized one finishes.
+/// No inference call anywhere on this path.
+///
+/// Idempotent per segment: a process that dies between two segments' inserts
+/// re-runs this, and a segment that already owns rows is left alone.
+pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
+    let src = core.store.get_corpus(corpus_id).await?;
+    let windows = split_into_segments(
+        &src.raw_text,
+        &core.counter,
+        super::synthesize::segment_budget(core),
+    );
+    if windows.is_empty() {
+        tracing::warn!(corpus_id, "source has no usable text");
+        core.store
+            .set_corpus_status(corpus_id, CorpusStatus::Failed)
+            .await?;
+        return Ok(());
+    }
+
+    let rows: Vec<crate::store::segments::NewSegment<'_>> = windows
+        .iter()
+        .map(|w| crate::store::segments::NewSegment {
+            start_line: w.start_line,
+            end_line: w.end_line,
+            text: w.text.as_str(),
+            carry_lines: w.carry_lines,
+        })
+        .collect();
+    core.store.upsert_segments(corpus_id, &rows).await?;
+    core.store.mark_segments_verbatim(corpus_id).await?;
+
+    // Under the document lock like every other local rearrangement of a
+    // corpus's rows, held through `finish` the way `settle` holds it: a
+    // promotion's write must not interleave with the renumbering.
+    let _corpus = core.corpus_lock(corpus_id).await;
+    for (idx, w) in windows.iter().enumerate() {
+        let idx = idx as i64;
+        if !core
+            .store
+            .artifact_ids_for_segment(corpus_id, idx)
+            .await?
+            .is_empty()
+        {
+            continue;
+        }
+        let new: Vec<NewArtifact> = split_passages(w, &core.counter, core.chunk_tokens)
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| NewArtifact {
+                ordinal: i as i64,
+                text: p.text,
+                corpus_span: Some(CorpusSpan {
+                    start_line: p.start_line,
+                    end_line: p.end_line,
+                }),
+                title: p.title,
+                category: None,
+                tags: vec![],
+                segment_idx: Some(idx),
+                caveats: vec![],
+            })
+            .collect();
+        core.store
+            .insert_artifacts_with_provenance(corpus_id, &new, Provenance::Passage)
+            .await?;
+    }
+
+    if src.title_hint.is_none()
+        && let Some(t) = derive_title(&src.raw_text)
+    {
+        core.store.set_title_hint(corpus_id, &t).await?;
+    }
+
+    tracing::info!(corpus_id, windows = windows.len(), "captured verbatim");
+    // Renumbers, measures coverage (green: the passages partition the
+    // document), arms the embed and moves the corpus on. The same function a
+    // synthesized corpus reaches through its last window's settle.
+    super::synthesize::finish(core, corpus_id).await
 }
 
 /// A corpus title with no model: the first heading, else the first non-empty
@@ -239,5 +326,118 @@ mod tests {
         assert_eq!(derive_title(&long).unwrap().chars().count(), TITLE_MAX);
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
+    }
+
+    #[tokio::test]
+    async fn capture_at_off_writes_passages_marks_segments_verbatim_and_finishes() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Off;
+        core.synthesizer = None;
+        let text = format!(
+            "# Manual\n\n## Install\n{}\n\n## Recover\n{}",
+            "install words ".repeat(40),
+            "recover words ".repeat(40)
+        );
+        let out = core.ingest(&text, "web", None).await.unwrap();
+        // The Synthesize job is what capture queued; run it.
+        assert!(crate::jobs::run_one(&core).await.unwrap());
+
+        let s = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(
+            s.status,
+            crate::store::corpora::CorpusStatus::Embedding,
+            "{:?}",
+            s.status
+        );
+        assert_eq!(s.title_hint.as_deref(), Some("Manual"));
+        let segs = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(!segs.is_empty());
+        assert!(
+            segs.iter()
+                .all(|w| w.state == crate::store::segments::SegmentState::Verbatim)
+        );
+        let rows = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
+        );
+        assert!(rows.iter().all(|c| c.corpus_span.is_some()));
+        // Green by construction: every line is claimed.
+        assert_eq!(s.coverage.map(|c| (c * 100.0).round() as i64), Some(100));
+        assert!(
+            core.store
+                .live_job(crate::store::jobs::Stage::Embed, &out.id)
+                .await
+                .unwrap()
+        );
+        // No model unit was armed.
+        for w in &segs {
+            assert!(
+                !core
+                    .store
+                    .live_job(
+                        crate::store::jobs::Stage::SegmentWindow,
+                        &crate::jobs::window::unit_target(&out.id, w.idx)
+                    )
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            !core
+                .store
+                .has_job(crate::store::jobs::Stage::Title, &out.id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_at_off_is_idempotent_per_segment() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Off;
+        let out = core
+            .ingest("one line\n\nanother line", "web", None)
+            .await
+            .unwrap();
+        capture_verbatim(&core, &out.id).await.unwrap();
+        let n = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .len();
+        capture_verbatim(&core, &out.id).await.unwrap();
+        assert_eq!(
+            core.store
+                .artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
+            n
+        );
+    }
+
+    #[tokio::test]
+    async fn a_passage_never_gets_a_relate_unit() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Off;
+        let out = core
+            .ingest("some verbatim text", "web", None)
+            .await
+            .unwrap();
+        capture_verbatim(&core, &out.id).await.unwrap();
+        let id = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        crate::jobs::embed::run(&core, &id).await.unwrap();
+        assert!(
+            !core
+                .store
+                .live_job(crate::store::jobs::Stage::Relate, &id)
+                .await
+                .unwrap()
+        );
     }
 }

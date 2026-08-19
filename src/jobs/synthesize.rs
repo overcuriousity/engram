@@ -17,7 +17,13 @@ pub(super) fn prompt_overhead(core: &Core) -> usize {
 /// This is the whole of the `Synthesize` stage now: deciding what the units of
 /// work are, which is local arithmetic over the text. The calls belong to the
 /// units it arms.
+///
+/// At `off` and `earned` this is the verbatim capture instead — same job, same
+/// queue row, no model.
 pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
+    if core.synthesis != crate::config::SynthesisMode::Eager {
+        return crate::jobs::passages::capture_verbatim(core, corpus_id).await;
+    }
     let src = core.store.get_corpus(corpus_id).await?;
     let windows = split_into_segments(&src.raw_text, &core.counter, segment_budget(core));
 
@@ -1313,6 +1319,42 @@ Then run sync.";
         assert!(
             span.start_line > 1,
             "later chunks must not all claim to start at line 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_at_eager_still_arms_windows_and_at_off_writes_passages() {
+        let mut core = crate::core::test_support::test_core().await;
+        let out = core.ingest("eager text", "web", None).await.unwrap();
+        plan(&core, &out.id).await.unwrap();
+        assert!(
+            core.store
+                .live_job(
+                    Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&out.id, 0)
+                )
+                .await
+                .unwrap()
+        );
+
+        core.synthesis = crate::config::SynthesisMode::Off;
+        let out2 = core.ingest("off text", "web", None).await.unwrap();
+        plan(&core, &out2.id).await.unwrap();
+        assert!(
+            !core
+                .store
+                .live_job(
+                    Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&out2.id, 0)
+                )
+                .await
+                .unwrap()
+        );
+        let rows = core.store.artifacts_for_corpus(&out2.id).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].provenance,
+            crate::store::artifacts::Provenance::Passage
         );
     }
 }

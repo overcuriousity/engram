@@ -328,7 +328,13 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // nothing. Both have a backstop in the sweep: an artifact with no relate
     // row is armed there, and an unfinished merge is found through
     // `merged_with_active_roots`.
-    if let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await {
+    //
+    // A passage is never a relate anchor: neighbours under one heading are
+    // similar for structural reasons, and duplicate detection over verbatim
+    // text waits until use promotes it (spec §6).
+    if chunk.provenance != crate::store::artifacts::Provenance::Passage
+        && let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await
+    {
         tracing::warn!(
             artifact_id = %chunk.id,
             error = %e,
