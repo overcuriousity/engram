@@ -174,7 +174,27 @@ pub async fn supersede_covered(
         .iter()
         .filter_map(|c| Some((c.id.clone(), c.ordinal, c.corpus_span.clone()?)))
         .collect();
-    let pairs = covered_by(&passages, &artifacts);
+    // A span is a claim the splitter can verify for a passage and only guess
+    // for a rewrite: `resolve_span` falls back to the model's hint or the
+    // whole window when nothing in the artifact locates verbatim, and a
+    // heavily paraphrasing model then hands every artifact the same span. So
+    // a majority by span is necessary, not sufficient: the artifact must also
+    // be *traceable* to the passage — at least one of its lines found in the
+    // passage's text. Whatever is not traceable leaves the passage standing,
+    // which is the direction promotion is allowed to fail in.
+    let text_of = |id: &str| rows.iter().find(|c| c.id == id).map(|c| c.text.as_str());
+    let pairs: Vec<(&str, &str)> = covered_by(&passages, &artifacts)
+        .into_iter()
+        .filter(|(p, a)| {
+            let (Some(pt), Some(at)) = (
+                text_of(p),
+                written.iter().find(|c| c.id == *a).map(|c| c.text.as_str()),
+            ) else {
+                return false;
+            };
+            crate::infer::verify::locate_span(at, pt, 1).is_some()
+        })
+        .collect();
     if pairs.is_empty() {
         return Ok(0);
     }
@@ -457,9 +477,9 @@ mod tests {
             .insert_artifacts_with_provenance(
                 &src.id,
                 &[
-                    na(0, "l1 l2", 1, 2),
-                    na(1, "l3 l4", 3, 4),
-                    na(2, "l5 l6", 5, 6),
+                    na(0, "lines one and two of the text", 1, 2),
+                    na(1, "lines three and four of the text", 3, 4),
+                    na(2, "lines five and six of the text", 5, 6),
                 ],
                 crate::store::artifacts::Provenance::Passage,
             )
@@ -499,8 +519,14 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[
-                    na(0, "A covers one to four", 1, 4),
-                    na(1, "B covers six", 6, 6),
+                    // A's lines are traceable to passages 1 and 2; B's to 3.
+                    na(
+                        0,
+                        "lines one and two of the text\nlines three and four of the text",
+                        1,
+                        4,
+                    ),
+                    na(1, "lines five and six of the text", 6, 6),
                 ],
             )
             .await
@@ -712,5 +738,44 @@ mod tests {
             maybe_resynthesize(&core, &[(a.clone(), 99)]).await.unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn a_majority_span_without_a_traceable_line_does_not_supersede() {
+        // `resolve_span` can only guess a paraphrase's span — the model's hint,
+        // or the whole window — and a guess must not hide verbatim text. The
+        // artifact here claims the passage's lines by span but shares no line
+        // of text with it: the passage stays.
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        let na = |o: i64, t: &str, a: i64, b: i64| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(sp(a, b)),
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let paraphrase = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[na(
+                    9,
+                    "an entirely different sentence about nothing here",
+                    1,
+                    6,
+                )],
+            )
+            .await
+            .unwrap();
+        let n = supersede_covered(&core, &corpus, 0, &paraphrase, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        for p in &passages {
+            assert!(core.store.get_artifact(&p.id).await.unwrap().in_results());
+        }
     }
 }
