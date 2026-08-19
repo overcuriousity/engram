@@ -1502,7 +1502,6 @@ mod tests {
                 created_at: 0,
                 last_seen_at: None,
                 hit_count: None,
-                superseded: None,
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
@@ -1609,9 +1608,8 @@ mod tests {
 
     #[tokio::test]
     async fn include_deprecated_surfaces_a_deprecated_artifact() {
-        // The opt-in exists to let an operator look at what was retired. It has
-        // to reach past the legacy `superseded` flag, which a deprecation must
-        // therefore leave alone — see `lifecycle_payload`.
+        // The opt-in exists to let an operator look at what was retired, so it
+        // must reach a deprecation without also reaching a supersession.
         let core = test_core().await;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;

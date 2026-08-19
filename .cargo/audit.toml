@@ -33,3 +33,20 @@ ignore = [
 # currently flagged unmaintained; that is worth seeing, not worth failing on,
 # and it is not silenced here.
 informational_warnings = ["unmaintained", "unsound", "notice"]
+
+# Advisories that name a platform this application does not run on.
+#
+# A standing filter rather than a list of ids, which the policy above otherwise
+# rules out — so the argument for it, once, here. `Cargo.lock` resolves every
+# target cargo can build for, not the one we deploy: `windows-sys`, `schannel`
+# and their kin are in it because `tokio`, `clap` and `reqwest` declare them
+# under `cfg(windows)`. Nothing downloads or compiles them here, and every
+# runner in ci.yml is ubuntu-latest. An advisory against one of them would fail
+# this check over code that cannot execute.
+#
+# This is the same reachability argument the entry above makes, made once for a
+# platform instead of once per id, and it is the only form of it allowed here.
+# It filters narrowly: only advisories that declare an affected OS are dropped,
+# and most declare none — those still fail, as they should.
+[target]
+os = ["linux"]

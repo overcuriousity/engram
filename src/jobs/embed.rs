@@ -698,7 +698,6 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // was in flight, since the row is read before it. A row that says
         // retired is a fact; a row that says active cannot tell "still active"
         // from "stale read", so it defers to the stored value.
-        superseded: (chunk.superseded_by.is_some()).then_some(true),
         status: (chunk.status != ArtifactStatus::Active).then_some(chunk.status),
         // Written, not deferred: a new point has no stored stamp, and the
         // scoring formula reads a missing stamp as epoch — maximally stale.
@@ -755,7 +754,6 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
                 Ok(fresh) => {
                     p.payload.status =
                         (fresh.status != ArtifactStatus::Active).then_some(fresh.status);
-                    p.payload.superseded = fresh.superseded_by.is_some().then_some(true);
                     p.payload.superseded_by = fresh.superseded_by.clone();
                     if !fresh.in_results() {
                         core.store.mark_lifecycle_dirty(&id).await?;

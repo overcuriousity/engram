@@ -24,11 +24,6 @@ struct Args {
     /// generation in place.
     #[arg(long)]
     reindex: bool,
-    /// With --reindex, permit deleting a pre-alias collection once its points
-    /// have been copied and counted. Needed only for a collection created
-    /// before engram addressed vectors through an alias.
-    #[arg(long)]
-    replace_legacy: bool,
     /// Write artifacts.json and pairs.json for the evaluation harness into DIR,
     /// then exit. Reads only SQLite: no inference, no vector store. The pairs
     /// are the searches you judged; the artifacts keep their production ids, so
@@ -41,15 +36,6 @@ struct Args {
     /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
-    /// Push every artifact's SQLite-side lifecycle state (status,
-    /// last_verified_at, superseded_by) into Qdrant, then exit. Rarely needed:
-    /// startup runs the same pass in the background whenever it finds points
-    /// without the fields. This is the way to run it in the foreground and see
-    /// it finish. It also reconciles which artifacts the two stores hold,
-    /// restoring whichever side is missing one, which is what lets the startup
-    /// check ever consider the base fully stamped.
-    #[arg(long)]
-    backfill_lifecycle: bool,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
@@ -94,52 +80,17 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         tracing::info!(purged, "removed expired sessions");
     }
 
-    // Points written before the lifecycle migration carry no `status` or
-    // `last_verified_at`. Every filter treats that as active, and ranking
-    // treats a missing stamp as neutral, so nothing is broken in the meantime —
-    // but until the backfill runs, no deprecation is filterable and no decay
-    // applies, and an operator who never reads the release notes never learns
-    // that. So it runs itself, once, when there is anything to do.
-    //
-    // In the background: it is a write over every artifact, and a base large
-    // enough for that to take a while is exactly the one that must not have its
-    // startup blocked by it. Two processes starting together may both run it;
-    // the writes are idempotent and both compute the same values.
-    //
-    // "Once" depends on the pass being able to stamp everything this count sees.
-    // It is driven by SQLite and the count is not, so a point whose row is gone
-    // would keep the number above zero forever and rerun the whole rewrite on
-    // every single start — which is why the backfill finishes by healing the
-    // drift, and why the count ignores points that name no artifact at all.
-    match core.vectors.unstamped_count().await {
-        Ok(0) => {
-            // No backfill to run, so nothing else would look at the two stores.
-            // They can still disagree — a crash between the two writes, a
-            // restore of one from a backup taken at a different moment — and
-            // until something notices, one side's artifacts are simply missing.
-            let worker = core.clone();
-            core.background.spawn(async move {
-                if let Err(e) = worker.heal_store_drift().await {
-                    tracing::warn!(error = %e, "could not reconcile the two stores; the next sweep retries");
-                }
-            });
+    // The two stores hold complementary halves of the same artifact and are
+    // written separately, so either can end up with an entry the other lacks: a
+    // crash between the two writes, a restore of one from a backup taken at a
+    // different moment. Until something notices, one side's artifacts are simply
+    // missing.
+    let worker = core.clone();
+    core.background.spawn(async move {
+        if let Err(e) = worker.heal_store_drift().await {
+            tracing::warn!(error = %e, "could not reconcile the two stores; the next sweep retries");
         }
-        Ok(n) => {
-            tracing::info!(
-                unstamped = n,
-                "backfilling lifecycle fields in the background"
-            );
-            let worker = core.clone();
-            core.background.spawn(async move {
-                if let Err(e) = worker.backfill_lifecycle().await {
-                    tracing::warn!(error = %e, "lifecycle backfill did not finish; it will be retried at the next start");
-                }
-            });
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not tell whether the lifecycle backfill is needed")
-        }
-    }
+    });
 
     engram::infer::openai::probe(
         "chunk",
@@ -191,20 +142,8 @@ async fn main() -> anyhow::Result<()> {
 
     if args.reindex {
         let vectors = engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?;
-        let target = vectors
-            .reindex(cfg.infer.embed.dim, args.replace_legacy)
-            .await?;
+        let target = vectors.reindex(cfg.infer.embed.dim).await?;
         println!("{} now serves `{}`", cfg.vector.collection, target);
-        return Ok(());
-    }
-
-    if args.backfill_lifecycle {
-        let store = engram::store::Store::connect(&cfg.store).await?;
-        let vectors: Arc<dyn engram::vector::VectorStore> =
-            Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
-        let core = Core::from_config(&cfg, vectors, store);
-        let n = core.backfill_lifecycle().await?;
-        println!("backfilled lifecycle fields for {n} artifacts");
         return Ok(());
     }
 
@@ -376,14 +315,12 @@ mod startup_tests {
                     context_tokens: 32768,
                     max_output_tokens: 8192,
                     output_ratio: 1.4,
-                    tokenizer_path: None,
                     timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     ceiling_param: None,
                     structured_output: true,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
-                    cooldown_secs: None,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
@@ -408,7 +345,6 @@ mod startup_tests {
                 },
                 rerank: None,
                 vision: None,
-                legacy_warnings: Vec::new(),
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,

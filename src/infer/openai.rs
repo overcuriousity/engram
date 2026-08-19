@@ -1383,14 +1383,12 @@ mod tests {
             context_tokens: 8192,
             max_output_tokens: 2048,
             output_ratio: 1.4,
-            tokenizer_path: None,
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
             structured_output: true,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
-            cooldown_secs: None,
         }
     }
     fn ask_cfg(base: String) -> AskRole {

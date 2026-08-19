@@ -159,11 +159,9 @@ pub fn spawn_repair_ticker(
     tokio::spawn(async move {
         let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
         let mut tick = tokio::time::interval(period);
-        // Not from now: start already reconciles the two stores, on both of its
-        // branches — directly when there is no backfill to run, and as the last
-        // step of the backfill when there is. An interval that fired
-        // immediately would scroll the whole collection a second time for an
-        // answer the process just computed.
+        // Not from now: start already reconciles the two stores. An interval
+        // that fired immediately would scroll the whole collection a second
+        // time for an answer the process just computed.
         let drift_period = std::time::Duration::from_secs(STORE_DRIFT_INTERVAL_HOURS * 3600);
         let mut drift_tick =
             tokio::time::interval_at(tokio::time::Instant::now() + drift_period, drift_period);
@@ -201,15 +199,6 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
         tracing::warn!(
             error = %e,
             "could not finish interrupted lifecycle writes; retrying on the next pass"
-        );
-    }
-    // Empties itself: it is bounded by how many rows the category fold changed,
-    // and each is stamped as it is rewritten. On a base that has already drained
-    // it is one query that returns nothing.
-    if let Err(e) = crate::jobs::consolidate::repair_category_payloads(core).await {
-        tracing::warn!(
-            error = %e,
-            "could not bring every folded category payload back in step; retrying on the next pass"
         );
     }
     // Duplicate detection is the per-artifact `Relate` unit, armed when an

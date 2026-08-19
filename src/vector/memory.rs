@@ -27,15 +27,10 @@ impl Default for MemoryVectors {
     }
 }
 
-/// A payload's effective lifecycle status. Falls back to the legacy
-/// `superseded` boolean when `status` is unset, matching the Qdrant backend's
-/// dual-check `build_filter` so both implementations agree on points written
-/// before `status` existed.
+/// A payload's effective lifecycle status. An unset `status` reads as active,
+/// matching the Qdrant backend's `build_filter`.
 fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
-    payload.status.unwrap_or(match payload.superseded {
-        Some(true) => ArtifactStatus::Superseded,
-        _ => ArtifactStatus::Active,
-    })
+    payload.status.unwrap_or(ArtifactStatus::Active)
 }
 
 /// Counts into chips, most frequent first. Ties break on the value so a
@@ -70,18 +65,14 @@ impl VectorStore for MemoryVectors {
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.last_seen_at);
             }
-            // Same rule, same reason: an unset flag means "whatever is already
-            // stored", so a re-embed cannot revive an artifact the sweep hid.
-            if p.payload.superseded.is_none() {
-                p.payload.superseded = w
-                    .get(&p.payload.artifact_id)
-                    .and_then(|old| old.payload.superseded);
-            }
             if p.payload.hit_count.is_none() {
                 p.payload.hit_count = w
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.hit_count);
             }
+            // Same rule, same reason: an unset status means "whatever is
+            // already stored", so a re-embed cannot revive an artifact the
+            // sweep hid.
             if p.payload.status.is_none() {
                 p.payload.status = w
                     .get(&p.payload.artifact_id)
@@ -109,7 +100,6 @@ impl VectorStore for MemoryVectors {
             // a tag edit must not erase when the chunk was last shown.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
             let hits = payload.hit_count.or(p.payload.hit_count);
-            let sup = payload.superseded.or(p.payload.superseded);
             let status = payload.status.or(p.payload.status);
             let verified = payload.last_verified_at.or(p.payload.last_verified_at);
             let superseded_by = payload
@@ -119,18 +109,9 @@ impl VectorStore for MemoryVectors {
             p.payload = payload.clone();
             p.payload.last_seen_at = seen;
             p.payload.hit_count = hits;
-            p.payload.superseded = sup;
             p.payload.status = status;
             p.payload.last_verified_at = verified;
             p.payload.superseded_by = superseded_by;
-        }
-        Ok(())
-    }
-
-    async fn set_superseded(&self, artifact_id: &str, superseded: bool) -> Result<()> {
-        let mut w = self.points.write().unwrap();
-        if let Some(p) = w.get_mut(artifact_id) {
-            p.payload.superseded = Some(superseded);
         }
         Ok(())
     }
@@ -144,12 +125,6 @@ impl VectorStore for MemoryVectors {
         let mut w = self.points.write().unwrap();
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.status = Some(status);
-            // Tracks `Superseded` specifically, matching the Qdrant backend:
-            // the legacy flag feeds a `must_not superseded == true` net that is
-            // active whenever superseded results are excluded, so setting it
-            // for a deprecated artifact would make `include_deprecated`
-            // unable to surface anything.
-            p.payload.superseded = Some(status == ArtifactStatus::Superseded);
             p.payload.superseded_by = superseded_by.map(str::to_string);
         }
         Ok(())
@@ -176,19 +151,11 @@ impl VectorStore for MemoryVectors {
         for r in rows {
             if let Some(p) = w.get_mut(&r.artifact_id) {
                 p.payload.status = Some(r.status);
-                p.payload.superseded = Some(r.status == ArtifactStatus::Superseded);
                 p.payload.superseded_by = r.superseded_by.clone();
                 p.payload.last_verified_at = Some(r.last_verified_at);
             }
         }
         Ok(())
-    }
-
-    async fn unstamped_count(&self) -> Result<u64> {
-        let r = self.points.read().unwrap();
-        Ok(r.values()
-            .filter(|p| p.payload.last_verified_at.is_none())
-            .count() as u64)
     }
 
     async fn lifecycle_of(
@@ -239,7 +206,7 @@ impl VectorStore for MemoryVectors {
             .map(|p| &p.payload)
             .filter(|p| {
                 status_of(p) == ArtifactStatus::Active
-                    // Present and old. An unstamped point is unbackfilled, not
+                    // Present and old. An unstamped point is unknown, not
                     // stale — see the trait doc. A missing `hit_count` is the
                     // other way round: never retrieved is what it means.
                     && p.last_verified_at.is_some_and(|v| v < older_than)
@@ -447,7 +414,6 @@ mod tests {
                 created_at: 0,
                 last_seen_at: None,
                 hit_count: None,
-                superseded: None,
                 status: None,
                 last_verified_at: None,
                 superseded_by: None,
