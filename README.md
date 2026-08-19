@@ -3,14 +3,24 @@
 **A trace of everything worth keeping.**
 
 A self-hosted knowledge base you search by meaning. Paste text and engram
-rewrites it into self-contained markdown artifacts, embeds them, and answers
-queries with ranked excerpts — no generation step in the way. Asking a question
-across several artifacts is a separate endpoint you call explicitly.
+splits it into passages, embeds them, and answers queries with ranked excerpts —
+your words, not a rewrite of them, and no generation step in the way. Asking a
+question across several artifacts is a separate endpoint you call explicitly.
 
-Everything after the paste happens on its own: splitting, synthesis, embedding,
-duplicate hygiene, and the sweeps that repair whatever was interrupted. Every
-artifact stays anchored to the lines of the source it came from, so a rewritten
-passage can always be read beside the original wording.
+Rewriting is *earned*. Capture cannot know which of ten thousand paragraphs
+will ever be asked about, so engram does not spend a model call on each of them
+up front. A window is rewritten into a self-contained artifact once reading has
+shown it is worth rewriting — a passage opened and confirmed often enough, or a
+run of searches that assembled an answer the base did not hold. Every
+synthesized artifact can therefore name the use that earned it, and the rest of
+your text stays exactly as you wrote it. That is `infer.synthesis = "earned"`,
+the default; `"eager"` rewrites everything at capture, and `"off"` never
+rewrites anything and needs no chat model at all.
+
+Everything after the paste happens on its own: splitting, embedding, whatever
+synthesis was earned, duplicate hygiene, and the sweeps that repair whatever was
+interrupted. Every artifact stays anchored to the lines of the source it came
+from, so a rewritten passage can always be read beside the original wording.
 
 Three front doors over one backend: a web UI, a REST API, and an MCP server, so
 Claude Code or Claude Desktop can read and write it mid-session.
@@ -42,13 +52,17 @@ split is local and mechanical — a heading, then a blank line, then wherever th
 budget runs out. It stores line numbers rather than a copy, and doubles as the
 memory that lets a failed run resume instead of restarting.
 
-An **artifact** is what the model makes from a segment: a passage rewritten to
-stand on its own, with a title, a category and tags. Artifacts are what gets
-embedded, ranked, read and edited. One call turns one segment into several
-artifacts; no artifact spans two segments.
+An **artifact** is a unit of retrieval: a piece of text with a title, a
+category and tags, embedded, ranked, read and edited on its own. At the default
+`earned` most artifacts are *passages* — a slice of a segment, split on the
+document's own headings and paragraphs and stored verbatim. A *synthesized*
+artifact is one the model wrote, from a window whose reading earned it or from a
+pursuit; it is badged as such wherever it is shown, and one click retires it. No
+artifact spans two segments.
 
-Most artifacts are *captured* — written from one segment of one corpus, with the
-lines they came from shown beside them. A few are *merged*: written by
+At `eager` a synthesis call turns each segment into several *captured*
+artifacts at capture time instead — written from one segment of one corpus, with
+the lines they came from shown beside them. A few are *merged*: written by
 consolidation out of two or more captured artifacts that said the same thing,
 and listing what they were written from instead of corpus lines. The originals
 are hidden rather than deleted, one button restores them, and no merge is
@@ -162,8 +176,8 @@ cp config.example.toml config.toml
 ```
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
-through `raw → synthesizing → embedding → ready` (at `infer.synthesis = "off"`:
-`raw → embedding → ready`) on Browse. `partial` means part
+through `raw → embedding → ready` on Browse (at `infer.synthesis = "eager"`,
+`raw → synthesizing → embedding → ready`). `partial` means part
 of it has not come through yet; Ops says what is retrying and when, and nothing
 there needs you.
 
@@ -215,7 +229,7 @@ the file — the loader warns if it finds one.
 | `vector.weak_below` | Cosine under which a result is labelled "loose" rather than presented as an answer. Default 0.35; `0.0` turns it off. |
 | `infer.tiers.<name>.*` | A named endpoint the chat roles point at: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. Name them what you like; `efficient` and `deep` are the convention. |
 | `infer.synthesize.*` | Synthesis: `tier`, plus `output_ratio`, `context_opening_tokens`, `context_overlap_tokens`. Any tier field may be overridden here. Also carries the dedupe judge, the link judge, the gap namer and the claim check. |
-| `infer.synthesis` | `"off"`, `"earned"` or `"eager"` (default). `off` embeds the source text verbatim and calls no model at capture; `[infer.synthesize]` and `[infer.ask]` may then be omitted, and the doors that need them are not offered. |
+| `infer.synthesis` | `"earned"` (default), `"off"` or `"eager"`. `earned` embeds the source text verbatim at capture and synthesizes a window later, once reading has shown it is worth it. `off` is the same capture with no synthesis at all: `[infer.synthesize]` and `[infer.ask]` may then be omitted, and the doors that need them are not offered. `eager` spends one synthesis call per segment at capture. |
 | `infer.segment_tokens` | Window size when no synthesizer is configured. Default 4096. |
 | `infer.embed.chunk_tokens` | Passage size at `off`/`earned`. Default 384, clamped to the embedder. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`, and the three prompt templates `query_template`, `document_template`, `document_template_untitled`. Defaults are EmbeddingGemma's; a symmetric model sets the three to `{text}` / `{title}\n{text}` / `{text}`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |

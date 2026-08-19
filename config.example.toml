@@ -61,9 +61,16 @@ pinned_boost = 0.15
 #   "off"    — split the text into verbatim passages, embed them, call nothing.
 #              [infer.synthesize] and [infer.ask] may be left out entirely.
 #   "earned" — the same capture; synthesis runs later where use has shown it
-#              is worth it. Needs [infer.synthesize].
-#   "eager"  — one synthesis call per segment at capture. The default.
-synthesis = "eager"
+#              is worth it. Needs [infer.synthesize]. The default.
+#   "eager"  — one synthesis call per segment at capture.
+#
+# "earned" is the default because capture cannot know which paragraph will be
+# asked about. Your text goes in as you wrote it; a window is rewritten once
+# reading has shown the rewrite is worth making, and every synthesized artifact
+# in the base can name the use that earned it. Choose "eager" when you want
+# everything pre-written and are willing to pay a model call per segment for
+# text most of which is never retrieved.
+synthesis = "earned"
 # Window size when there is no [infer.synthesize] to derive one from, in
 # engram's estimator tokens. Ignored when a synthesizer is configured.
 # segment_tokens = 4096
@@ -208,7 +215,9 @@ max_input_tokens = 2048
 # title. A document with no title takes the `_untitled` template — the model
 # card substitutes the literal word `none`, so it is a second template and not
 # an empty field. Changing any of these invalidates every stored vector as
-# surely as changing `model` does: drop the collection and re-capture. Check
+# surely as changing `model` does: drop the collection and re-capture. engram
+# records the recipe — model, dim and the three templates — and says so at boot
+# when it no longer matches what the stored vectors were embedded under. Check
 # once that your serving stack does not prepend a prompt of its own, or the
 # prefix is sent twice and every vector carries it.
 # query_template             = "task: search result | query: {text}"

@@ -45,7 +45,7 @@ anywhere.
 
 ```toml
 [infer]
-synthesis = "eager"        # "off" | "earned" | "eager"
+synthesis = "earned"       # "off" | "earned" | "eager"
 ```
 
 **`off`** — capture splits, embeds, and stops. Passages are the index. Zero
@@ -56,9 +56,19 @@ shown it is worth it, and always supersedes what it was written from.
 
 **`eager`** — today. One synthesis call per segment at capture.
 
-`eager` is the default so that setting nothing changes nothing. `off` with no
-`[infer.ask]` configured is a complete and coherent product state: a semantic
-search engine over verbatim text with no inference at all.
+`off` with no `[infer.ask]` configured is a complete and coherent product
+state: a semantic search engine over verbatim text with no inference at all.
+
+`eager` was the default while the other two were being built, so that setting
+nothing changed nothing. **Since 2026-08-19 the default is `earned`.** It is
+the mode the rest of this design is for: capture cannot know which paragraph
+will be asked about, so `eager` spends a call per segment rewriting text most
+of which is never retrieved, and it replaces the operator's own words before
+anyone has asked it to. At `earned` the source is the index until reading says
+otherwise, and every synthesized artifact in the base can name the use that
+earned it. An existing `eager` base is unaffected — the mode is written in its
+config — and `eager` stays supported for a base that wants everything
+pre-written.
 
 | | `off` | `earned` | `eager` |
 |---|---|---|---|

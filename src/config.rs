@@ -420,14 +420,23 @@ pub struct TierConfig {
 /// How much inference capture spends. `Off` embeds the source text verbatim
 /// and calls nothing; `Earned` does the same at capture and synthesizes later
 /// where use has shown it is worth it; `Eager` is one synthesis call per
-/// segment at capture — what engram did before the other two existed, and the
-/// default so that setting nothing changes nothing.
+/// segment at capture — what engram did before the other two existed.
+///
+/// `Earned` is the default. What a base is for is answering, and capture
+/// cannot know which of ten thousand paragraphs will ever be asked about — so
+/// synthesising all of them spends a model call per segment on text most of
+/// which is never retrieved, and replaces the operator's own words with a
+/// rewrite before anyone has asked for one. At `earned` the source goes in as
+/// it was written and stays that way; a window is rewritten when reading has
+/// shown it is worth rewriting, and every artifact in the base can name the
+/// use that earned it. `eager` remains supported for a base that wants
+/// everything pre-written and is willing to pay for it up front.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SynthesisMode {
     Off,
-    Earned,
     #[default]
+    Earned,
     Eager,
 }
 
@@ -806,6 +815,30 @@ pub struct EmbedRole {
 }
 
 impl EmbedRole {
+    /// What a stored vector means, in one string: the model, the dimension,
+    /// and the three templates the text is rendered through before the call.
+    ///
+    /// All five are one identity. A vector embedded under `task: search
+    /// result | {title}\n{text}` is not comparable with one embedded under
+    /// bare `{text}`, and nothing in the vector says which it was — the
+    /// collection keeps its name, the model field is unchanged, and the only
+    /// symptom is retrieval quietly getting worse. Recorded at boot so a
+    /// change can at least be *said*; the answer to it is a re-capture.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(
+            format!(
+                "{}\n{}\n{}\n{}\n{}",
+                self.model,
+                self.dim,
+                self.query_template,
+                self.document_template,
+                self.document_template_untitled,
+            )
+            .as_bytes(),
+        ))
+    }
+
     /// `chunk_tokens`, never above the embed path's own ceiling
     /// (`max_input_tokens * 0.8`).
     ///
@@ -2584,7 +2617,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     "#;
 
     #[test]
-    fn synthesis_defaults_to_eager_and_parses_the_three_modes() {
+    fn synthesis_defaults_to_earned_and_parses_the_three_modes() {
         let _guard = env_guard();
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
@@ -2596,7 +2629,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "
         ))
         .unwrap();
-        assert_eq!(cfg.infer.synthesis, SynthesisMode::Eager);
+        assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);
         assert_eq!(cfg.infer.segment_tokens, DEFAULT_SEGMENT_TOKENS);
         for (word, mode) in [
             ("off", SynthesisMode::Off),
