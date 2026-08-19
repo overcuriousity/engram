@@ -485,10 +485,19 @@ impl Core {
     }
 
     /// Put a promoted window back: its passages active, the artifacts the
-    /// promotion wrote deprecated, the segment `verbatim` again so it may
-    /// promote afresh. The links copied onto the artifacts and the activation
-    /// they were handed stay where they are — both sides describe the same
-    /// corpus lines, and the asymmetry is accepted rather than fixed.
+    /// promotion wrote deprecated, the segment `verbatim` again — and marked
+    /// `no_promote`, so it stays that way. The links copied onto the artifacts
+    /// and the activation they were handed stay where they are — both sides
+    /// describe the same corpus lines, and the asymmetry is accepted rather
+    /// than fixed.
+    ///
+    /// The mark is what makes this an undo rather than a pause. The passages
+    /// keep the activation that armed the promotion, and `maybe_promote` reads
+    /// activation at the bump: restoring `verbatim` alone would let the next
+    /// open of any restored passage promote the window again, immediately,
+    /// leaving the operator with the same promotion and a set of deprecated
+    /// artifacts beside it. Only a re-split clears the mark — a window whose
+    /// text changed is a different window.
     pub async fn undo_promotion(&self, corpus_id: &str, idx: i64) -> Result<()> {
         use crate::store::artifacts::Provenance;
         let rows = self.store.artifacts_for_segment(corpus_id, idx).await?;
@@ -512,6 +521,7 @@ impl Core {
                 None,
             )
             .await?;
+        self.store.set_segment_no_promote(corpus_id, idx).await?;
         tracing::info!(corpus_id, window = idx, "promotion undone");
         Ok(())
     }

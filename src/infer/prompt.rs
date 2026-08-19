@@ -391,7 +391,9 @@ If the excerpts cover only part of the question, answer that part and say plainl
 cover — do not withhold a partial answer, and do not stretch an excerpt to cover what it does not. \
 If no excerpt mentions the subject of the question, begin your reply with the exact words \
 `Not in the knowledge base.` and say what is missing rather than guessing. \
-Cite excerpts by their number. \
+Cite excerpts by their number, and cite the excerpt the words you used came from. \
+An excerpt reading `(continues [n])` is the rest of excerpt n: its text is printed there, and a \
+claim drawn from that part of the text is cited by whichever of the two numbers holds it. \
 An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
 Repeat any caveat that bears on your answer rather than dropping it.";
 
@@ -467,10 +469,23 @@ pub fn ask_excerpt(number: usize, title: &str, text: &str, caveats: &[String]) -
     block
 }
 
+/// A passage whose text was printed under an earlier number, because the two
+/// abut and are one piece of continuous text (`Core::stitch_passages`).
+///
+/// It keeps its own number rather than vanishing from the prompt: the number
+/// is what the rail links to the artifact, so a run of three passages printed
+/// under one number leaves the model no way to cite the two it did not print
+/// without pointing the reader at a page that does not hold the words.
+pub fn ask_continues(number: usize, printed_under: usize) -> String {
+    format!("[{number}] (continues [{printed_under}])")
+}
+
 /// The question and whatever excerpts survived the context budget.
 pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
-    // An empty block is a passage that was stitched into the one before it
-    // (`Core::stitch_passages`): its text is in the prompt, its slot is not.
+    // Empty blocks are dropped. Stitching no longer makes any — a stitched
+    // passage keeps its slot and points at the block its text went into — but
+    // an excerpt with neither title nor text still has nothing to say, and a
+    // bare `[7]` in the prompt is worse than one number unused.
     let shown: Vec<&str> = excerpts
         .iter()
         .map(String::as_str)

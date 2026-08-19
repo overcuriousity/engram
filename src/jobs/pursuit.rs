@@ -229,6 +229,8 @@ struct Ev {
     /// Ask only.
     is_ask: bool,
     abstained: bool,
+    /// The excerpts the *answer* referenced — never everything the ask packed
+    /// into its prompt. See `RecordedAsk::cited`.
     cited: Vec<String>,
 }
 
@@ -363,6 +365,16 @@ pub async fn run(core: &Core) -> Result<usize> {
             .store
             .insert_pursuit(need.opened_at, &need.queries, &sources)
             .await?;
+        // `insert_pursuit` is keyed on the cluster, so a sitting the previous
+        // sweep already reached comes back with the row it wrote. Only a
+        // pursuit still `open` is undecided — either brand new, or written by
+        // a sweep that failed between the insert and the decision. Anything
+        // closed, generated or dismissed has had its answer and must not be
+        // decided a second time: that is what would arm a second generation
+        // for one need, or re-open a pursuit the operator dismissed.
+        if core.store.get_pursuit(&pid).await?.state != "open" {
+            continue;
+        }
         written += 1;
         match decision {
             Decision::Satisfied(why) => {
@@ -450,6 +462,11 @@ fn need_of(
         n.answered |= e.answered;
         n.abstained |= e.abstained;
         if e.is_ask {
+            // A question that drew on an artifact engaged it as surely as
+            // opening it does. A question the model declined to answer drew on
+            // nothing and arrives here with an empty list — which is what
+            // keeps an abstention from being both the evidence that a need
+            // exists and the engagement that says it was pursued.
             for id in &e.cited {
                 bump(id, 1.0);
                 n.strong_engaged = true;
@@ -827,6 +844,165 @@ mod tests {
         assert_eq!(lone.state, "unsatisfied", "{lone:?}");
         // The watermark moved; a second sweep finds nothing new.
         assert_eq!(run(&core).await.unwrap(), 0);
+    }
+
+    /// Record a question at `at`, with `cited` naming each excerpt the model
+    /// was shown and whether the answer referenced it.
+    async fn ask_event(
+        core: &crate::core::Core,
+        q: &str,
+        vec: Vec<f32>,
+        cited: &[(&str, bool)],
+        abstained: bool,
+        at: i64,
+    ) -> String {
+        let id = core
+            .store
+            .record_ask(crate::store::asks::NewAsk {
+                question: q.into(),
+                scope: Some("me".into()),
+                filters: "{}".into(),
+                query_vec: vec,
+                embed_model: "fake".into(),
+                answer: "an answer".into(),
+                abstained,
+                dropped: 0,
+                truncated: false,
+                citations: cited
+                    .iter()
+                    .map(|(a, used)| crate::store::asks::NewAskCitation {
+                        artifact_id: a.to_string(),
+                        score: 0.9,
+                        used: *used,
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE ask_events SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_question_the_model_declined_does_not_pay_for_a_generation() {
+        // An ask packs whatever fits its window, so a question that retrieved
+        // three excerpts and then abstained was *shown* three artifacts. Score
+        // those as engagement and the abstention is both the evidence that a
+        // need exists and the engagement that says it was pursued: the base
+        // spends a call writing an artifact out of the very excerpts it has
+        // just declared insufficient.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let shown: Vec<(&str, bool)> = vec![(ids[0].as_str(), false), (ids[1].as_str(), false)];
+        ask_event(
+            &core,
+            "how do I read the journal",
+            vec![1.0, 0.0],
+            &shown,
+            true,
+            now - 100,
+        )
+        .await;
+
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert!(
+            !core.store.live_job(Stage::Generate, &p.id).await.unwrap(),
+            "an unanswered question is a need, not an engagement"
+        );
+
+        // The same question, answered out of the same two excerpts: the
+        // engagement is real and the pursuit is worth a call.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let used: Vec<(&str, bool)> = vec![(ids[0].as_str(), true), (ids[1].as_str(), true)];
+        ask_event(
+            &core,
+            "how do I read it",
+            vec![1.0, 0.0],
+            &used,
+            false,
+            now - 100,
+        )
+        .await;
+        search_event(
+            &core,
+            "journal location",
+            vec![0.99, 0.1],
+            &[&ids[0]],
+            now - 98,
+        )
+        .await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), now - 97)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), now - 96)
+            .await
+            .unwrap();
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "open", "{p:?}");
+        assert!(core.store.live_job(Stage::Generate, &p.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_failed_before_its_cursor_moved_writes_no_second_copy() {
+        // The cursor advances once, after the loop. Anything that fails inside
+        // it — a locked database on the fourth cluster — leaves the pursuits
+        // already written under a cursor that never moved, and the retry reads
+        // the same events and clusters them the same way. The pursuit's
+        // identity is the sitting, so the second pass finds its own rows.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 100;
+        search_event(&core, "read the journal", vec![1.0, 0.0], &[&ids[0]], t0).await;
+        search_event(
+            &core,
+            "journal location",
+            vec![0.99, 0.1],
+            &[&ids[1]],
+            t0 + 2,
+        )
+        .await;
+        search_event(&core, "something else", vec![0.0, 1.0], &[&ids[0]], t0 + 50).await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t0 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), t0 + 3)
+            .await
+            .unwrap();
+
+        let first = run(&core).await.unwrap();
+        let before = core.store.recent_pursuits(50).await.unwrap();
+        assert_eq!(before.len(), first);
+
+        // The cursor back where the failed sweep left it.
+        core.store.meta_set(PURSUIT_AFTER, "0").await.unwrap();
+        run(&core).await.unwrap();
+
+        let after = core.store.recent_pursuits(50).await.unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the same sitting was written twice: {after:?}"
+        );
+        let mut ids_before: Vec<&str> = before.iter().map(|p| p.id.as_str()).collect();
+        let mut ids_after: Vec<&str> = after.iter().map(|p| p.id.as_str()).collect();
+        ids_before.sort_unstable();
+        ids_after.sort_unstable();
+        assert_eq!(ids_before, ids_after);
     }
 
     #[tokio::test]

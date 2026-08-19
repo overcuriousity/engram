@@ -46,6 +46,16 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         if core.store.segment_state(corpus_id, idx).await? != Some(SegmentState::Verbatim) {
             continue;
         }
+        // And the second guard, for the one window that is `verbatim` *because*
+        // it was promoted: `undo_promotion` puts the state back so the window
+        // can be read again, but leaves the passages the activation they
+        // earned — which is the very number that armed the promotion. Without
+        // this the next open of any of those passages re-promotes the window
+        // and the operator's undo is undone, with the deprecated artifacts
+        // still lying behind it.
+        if core.store.segment_no_promote(corpus_id, idx).await? {
+            continue;
+        }
         // `keep_artifacts`: the window job appends rather than replaces, so the
         // passages survive to be superseded by what covers them.
         core.store.reset_segment(corpus_id, idx, true).await?;
@@ -322,6 +332,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, 0);
+    }
+
+    #[tokio::test]
+    async fn an_undone_promotion_is_not_re_promoted_by_the_next_open() {
+        // Undo puts the window back to `verbatim` so it can be read again, and
+        // leaves the passage the activation it earned — which is the number
+        // that armed the promotion in the first place. Without the mark the
+        // next bump promotes it straight back and the operator's undo is
+        // undone, with the deprecated artifacts still lying behind it.
+        let (core, corpus, p) = earned_with_one_passage().await;
+        core.store
+            .bump_activation(std::slice::from_ref(&p), 3.0, 14.0, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), 1_000)
+                .await
+                .unwrap(),
+            1
+        );
+
+        core.undo_promotion(&corpus, 0).await.unwrap();
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "the window is readable again"
+        );
+        // The passage still sits well over the line: nothing was decayed.
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), 1_000)
+                .await
+                .unwrap(),
+            0,
+            "the undo holds"
+        );
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim)
+        );
     }
 
     #[tokio::test]

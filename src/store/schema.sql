@@ -182,6 +182,11 @@ CREATE TABLE IF NOT EXISTS segments (
   -- `window::write_segment_artifacts` to append rather than replace: see there
   -- for why the two reasons to re-run a window want opposite answers.
   keep_artifacts INTEGER NOT NULL DEFAULT 0,
+  -- Set when an operator undid this window's promotion. The passages keep the
+  -- activation that earned the promotion in the first place, so `verbatim`
+  -- alone would let the very next open promote it again and undo the undo.
+  -- Cleared when the window is re-split: that is a different window.
+  no_promote INTEGER NOT NULL DEFAULT 0,
   -- Dead since 2026-08-13. A window is its own queue unit now, so `jobs.attempts`
   -- is the count that governs its backoff and its settling, and two counters for
   -- one thing is exactly what made the incident behind that change so hard to
@@ -332,6 +337,10 @@ CREATE TABLE IF NOT EXISTS ask_citations (
   score       REAL NOT NULL,
   -- The operator said this excerpt carried the answer.
   carried     INTEGER NOT NULL DEFAULT 0,
+  -- The answer actually referenced this [n]. Being shown to the model is not
+  -- engagement: the pursuit sweep scores what the answer drew on, and an
+  -- abstention draws on nothing.
+  used        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, n)
 );
 

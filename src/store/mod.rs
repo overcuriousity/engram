@@ -261,6 +261,7 @@ mod tests {
                 "carry_lines",
                 "state",
                 "keep_artifacts",
+                "no_promote",
                 "attempts",
                 "last_error",
             ],

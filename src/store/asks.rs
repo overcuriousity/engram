@@ -14,6 +14,10 @@ use sqlx::Row;
 pub struct NewAskCitation {
     pub artifact_id: String,
     pub score: f32,
+    /// The answer referenced this `[n]`. What the model was *shown* is not
+    /// what it used, and only what it used is engagement — see
+    /// `RecordedAsk::cited`.
+    pub used: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +48,10 @@ pub struct RecordedAsk {
     pub query_vec: Vec<f32>,
     pub created_at: i64,
     pub abstained: bool,
-    /// The excerpts the model was shown, in order: what the question engaged.
+    /// The excerpts the answer actually referenced, in the order they were
+    /// shown. Not everything the model saw: an ask packs whatever fits, so
+    /// "was in the prompt" says nothing about whether it helped, and an
+    /// abstention leaves this empty however much it was given.
     pub cited: Vec<String>,
     pub scope: Option<String>,
 }
@@ -143,12 +150,14 @@ impl Store {
         .await?;
         for (i, c) in ask.citations.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO ask_citations (event_id, n, artifact_id, score) VALUES (?, ?, ?, ?)",
+                "INSERT INTO ask_citations (event_id, n, artifact_id, score, used)
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(i as i64 + 1)
             .bind(&c.artifact_id)
             .bind(c.score)
+            .bind(c.used as i64)
             .execute(&mut *tx)
             .await?;
         }
@@ -294,7 +303,7 @@ impl Store {
     }
 
     /// Recorded questions with `from < created_at <= to`, oldest first, with
-    /// the excerpts they cited — the sources a question engaged.
+    /// the excerpts their answers referenced — the sources a question engaged.
     pub async fn asks_between(&self, from: i64, to: i64) -> Result<Vec<RecordedAsk>> {
         let rows = sqlx::query(
             "SELECT id, question, query_vec, created_at, abstained, scope FROM ask_events
@@ -308,7 +317,8 @@ impl Store {
         for r in &rows {
             let id: String = r.get("id");
             let cited: Vec<String> = sqlx::query_scalar(
-                "SELECT artifact_id FROM ask_citations WHERE event_id = ? ORDER BY n",
+                "SELECT artifact_id FROM ask_citations
+                  WHERE event_id = ? AND used = 1 ORDER BY n",
             )
             .bind(&id)
             .fetch_all(&self.pool)
@@ -353,6 +363,7 @@ mod tests {
                 .map(|i| NewAskCitation {
                     artifact_id: format!("art-{i}"),
                     score: 1.0 - i as f32 * 0.1,
+                    used: true,
                 })
                 .collect(),
         }

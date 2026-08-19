@@ -512,12 +512,29 @@ impl Core {
     /// the carried heading, hides the continuity from the model, and cuts the
     /// sentence running across the boundary. Here — after packing, over the
     /// kept prefix only — runs of abutting passages from one `(corpus,
-    /// segment)` are merged into the block of the run's earliest member, in
-    /// document order, and the other members' blocks are emptied. A stitched
-    /// excerpt is a presentation, not a new unit: `hits` is untouched, every
-    /// constituent stays a citation, and the literal check reads the same
-    /// text the model did. Passages only — two adjacent *artifacts* are two
-    /// rewrites, not continuous text.
+    /// segment)` are merged into the block of the run's *first* member, in
+    /// document order, and every other member keeps its own numbered block
+    /// carrying a pointer to it.
+    ///
+    /// The pointer, rather than an emptied block, is what keeps a citation
+    /// honest. The rail beside the answer links `[n]` to the artifact at
+    /// position `n` of `hits`, so a run rendered under one number offers the
+    /// model exactly one number for text drawn from three artifacts, and a
+    /// claim taken from the second passage of a run is then linked to a page
+    /// that does not contain it. With a block each, whichever number the model
+    /// cites resolves to a passage of the run it actually read.
+    ///
+    /// The text goes to the run's first member and not to its best-ranked one
+    /// for the same reason: the block's heading is the heading the text opens
+    /// under, the rail row for that number is the artifact where the text
+    /// begins, and the reader who follows the link lands where they were
+    /// reading. Numbering the block after the best-ranked member instead put a
+    /// heading from one artifact over a rail row naming another.
+    ///
+    /// A stitched excerpt is a presentation, not a new unit: `hits` is
+    /// untouched, every constituent stays a citation, and the literal check
+    /// reads the same text the model did. Passages only — two adjacent
+    /// *artifacts* are two rewrites, not continuous text.
     async fn stitch_passages(&self, hits: &[SearchResult], blocks: &mut [String]) {
         use crate::store::artifacts::{CorpusSpan, Provenance};
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
@@ -564,18 +581,11 @@ impl Core {
             if run.len() < 2 {
                 continue;
             }
-            // The earliest in list order keeps its number; the rest contribute
-            // their text, in document order, and go dark.
-            let anchor = *run.iter().min_by_key(|&&m| members[m].3).unwrap();
-            let anchor_pos = members[anchor].3;
-            // The heading belongs to where the block *starts*, and the anchor
-            // is whichever member ranked highest, not the first one down the
-            // page. Where a heading falls inside the second passage of a run,
-            // taking the anchor's title labelled text that opens above it with
-            // the section below. `run` is in document order by construction —
-            // that is what it was built by — so its first member is the one
-            // whose heading the reader is actually under.
-            let head = hits[members[run[0]].3].title.as_deref().unwrap_or_default();
+            // `run` is in document order by construction — that is what it
+            // was built by — so its first member is where the text begins, and
+            // the heading the reader is under is that member's.
+            let head_pos = members[run[0]].3;
+            let head = hits[head_pos].title.as_deref().unwrap_or_default();
             let text: Vec<&str> = run
                 .iter()
                 .map(|&m| hits[members[m].3].text.as_str())
@@ -598,11 +608,16 @@ impl Core {
                     }
                 }
             }
-            blocks[anchor_pos] =
-                crate::infer::prompt::ask_excerpt(anchor_pos + 1, head, &text.join("\n"), &caveats);
+            blocks[head_pos] =
+                crate::infer::prompt::ask_excerpt(head_pos + 1, head, &text.join("\n"), &caveats);
+            // Every other member keeps its slot and points at the block its
+            // text went into. Cheap — one line each — and it is what lets the
+            // model cite the passage it drew on rather than the one that
+            // happened to rank highest.
             for &m in &run {
-                if m != anchor {
-                    blocks[members[m].3].clear();
+                let p = members[m].3;
+                if p != head_pos {
+                    blocks[p] = crate::infer::prompt::ask_continues(p + 1, head_pos + 1);
                 }
             }
         }
@@ -796,14 +811,23 @@ impl Core {
             abstained: response.abstained,
             dropped: response.dropped,
             truncated: response.truncated,
-            citations: response
-                .citations
-                .iter()
-                .map(|c| NewAskCitation {
-                    artifact_id: c.artifact_id.clone(),
-                    score: c.score,
-                })
-                .collect(),
+            // What the answer referenced, not what it was shown. The sweep
+            // reads these as engagement, and every excerpt that fit the window
+            // would otherwise count as one — enough, on its own, to arm a
+            // generation off a question the model declined to answer.
+            citations: {
+                let used = check::referenced(&response.answer, response.citations.len());
+                response
+                    .citations
+                    .iter()
+                    .zip(used)
+                    .map(|(c, used)| NewAskCitation {
+                        artifact_id: c.artifact_id.clone(),
+                        score: c.score,
+                        used,
+                    })
+                    .collect()
+            },
         };
         match self.store.record_ask(ask).await {
             Ok(id) => response.event_id = Some(id),
@@ -2366,11 +2390,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stitched_run_is_headed_by_where_it_starts_not_by_its_best_hit() {
-        // The anchor is whichever member ranked highest, which is not the same
-        // as the one the block opens with. Where a heading falls inside the
-        // second passage of a run, taking the anchor's title labelled text
-        // beginning above that heading with the section below it.
+    async fn a_stitched_run_is_numbered_and_headed_by_where_it_starts() {
+        // The run's text, its heading, and the number the rail resolves to an
+        // artifact all have to name the same passage: the one the text opens
+        // with. Numbering the block after whichever member ranked highest put
+        // one artifact's heading over another artifact's rail row, and linked
+        // a claim to a page that does not hold the words.
         //
         // `stitch_passages` directly rather than through `ask`: what this is
         // about is a run whose best hit is not its first line, and asking the
@@ -2438,15 +2463,23 @@ mod tests {
         ];
         core.stitch_passages(&hits, &mut blocks).await;
 
-        assert!(blocks[1].is_empty(), "the run's other member goes dark");
+        // The text goes under the number of the passage it starts with —
+        // `made[0]`, which retrieval placed second — heading and all.
         assert!(
-            blocks[0].contains("the tail of the section above\nrotate the offsite copy weekly"),
+            blocks[1].contains("the tail of the section above\nrotate the offsite copy weekly"),
             "stitched in document order: {}",
-            blocks[0]
+            blocks[1]
         );
         assert!(
-            blocks[0].starts_with("[1] Recovery\n"),
-            "the anchor keeps its number, the opening line keeps its heading: {}",
+            blocks[1].starts_with("[2] Recovery\n"),
+            "the block is numbered and headed by where the text begins: {}",
+            blocks[1]
+        );
+        // And the other member keeps its slot, pointing at it. A claim drawn
+        // from `made[1]` can be cited as [1] and still resolve to `made[1]`.
+        assert_eq!(
+            blocks[0], "[1] (continues [2])",
+            "every constituent keeps a citable number: {}",
             blocks[0]
         );
     }

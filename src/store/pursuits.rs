@@ -9,6 +9,22 @@ use super::Store;
 use crate::error::{Error, Result};
 use sqlx::Row;
 
+/// The identity of a pursuit: when the sitting opened and what was asked in
+/// it. Queries are normalised and sorted first, so the same sitting re-read
+/// after a crash hashes the same however the clusterer happened to order it.
+fn pursuit_id(opened_at: i64, queries: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut keys: Vec<String> = queries
+        .iter()
+        .map(|q| format!("{}\n", super::links::normalize_query(q)))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    hex::encode(Sha256::digest(
+        format!("{opened_at}\n{}", keys.concat()).as_bytes(),
+    ))
+}
+
 /// One thing done with a result: opened, or reached from another artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Interaction {
@@ -124,15 +140,25 @@ impl Store {
     }
 
     /// A new pursuit, `open`. Returns its id.
+    ///
+    /// Idempotent by identity rather than by insertion order: the id is the
+    /// cluster itself — when it opened and what was asked — so the same
+    /// sitting swept twice is the same row twice. The sweep needs that. It
+    /// writes a pursuit per cluster and advances its cursor once at the end,
+    /// so a failure in the middle of the loop leaves rows written under a
+    /// cursor that never moved, and the retry re-reads the same events and
+    /// re-clusters them identically. Without this the operator would find the
+    /// sitting listed once per crash on Ops, each copy able to arm its own
+    /// generation.
     pub async fn insert_pursuit(
         &self,
         opened_at: i64,
         queries: &[String],
         sources: &[String],
     ) -> Result<String> {
-        let id = super::new_id();
+        let id = pursuit_id(opened_at, queries);
         sqlx::query(
-            "INSERT INTO pursuits (id, opened_at, state, queries, sources)
+            "INSERT OR IGNORE INTO pursuits (id, opened_at, state, queries, sources)
              VALUES (?, ?, 'open', ?, ?)",
         )
         .bind(&id)

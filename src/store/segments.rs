@@ -130,7 +130,8 @@ impl Store {
                    start_line = excluded.start_line,
                    end_line = excluded.end_line,
                    text = excluded.text,
-                   carry_lines = excluded.carry_lines",
+                   carry_lines = excluded.carry_lines,
+                   no_promote = 0",
             )
             .bind(corpus_id)
             .bind(idx as i64)
@@ -225,6 +226,29 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .map(|s| SegmentState::parse(&s)))
+    }
+
+    /// Whether this window may be promoted at all: an operator who undid its
+    /// promotion said no, and nothing but a re-split says otherwise.
+    pub async fn segment_no_promote(&self, corpus_id: &str, idx: i64) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT no_promote FROM segments WHERE corpus_id = ? AND idx = ?",
+        )
+        .bind(corpus_id)
+        .bind(idx)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some_and(|v| v != 0))
+    }
+
+    /// Refuse this window to promotion, for good. Set by `undo_promotion`.
+    pub async fn set_segment_no_promote(&self, corpus_id: &str, idx: i64) -> Result<()> {
+        sqlx::query("UPDATE segments SET no_promote = 1 WHERE corpus_id = ? AND idx = ?")
+            .bind(corpus_id)
+            .bind(idx)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Mark every window of a corpus that was never synthesized — and is not
