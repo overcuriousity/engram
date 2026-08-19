@@ -693,6 +693,10 @@ async fn ask(
     _id: Identity,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     Ok(Json(
         st.core.ask(&req, crate::store::feedback::Door::Api).await?,
     ))
@@ -1968,6 +1972,18 @@ pub(crate) mod tests {
         assert!(v["jobs"].is_array());
         assert!(v["sources"].is_array());
         assert!(v["failed"].is_array());
+    }
+
+    #[tokio::test]
+    async fn api_ask_is_not_found_without_an_ask_model() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.completer = None;
+        let (app, token) = app_with_token(core).await;
+        let res = app
+            .oneshot(post_json("/ask", &token, serde_json::json!({"q": "x"})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
 

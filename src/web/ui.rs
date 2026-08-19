@@ -360,6 +360,8 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 struct CaptureTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
     pairs: Vec<PairRow>,
@@ -428,6 +430,8 @@ struct CapturedTemplate {
 struct SearchTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// Kept so a reload or a deep link restores the box with its results.
     q: String,
     /// What this collection can actually be narrowed by. Rendered as chips, so
@@ -466,6 +470,8 @@ struct QueueTemplate {
 struct CorpusTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     id: String,
     status: String,
     badge: &'static str,
@@ -551,6 +557,8 @@ struct ArtifactDetailFragment {
 struct ArtifactDetailPage {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     d: ArtifactDetail,
 }
 
@@ -559,6 +567,8 @@ struct ArtifactDetailPage {
 struct OpsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -591,6 +601,8 @@ struct OpsTemplate {
 struct SettingsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -677,6 +689,8 @@ struct TokenCreatedTemplate {
 struct AskTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     /// A question to prefill the box with — a gap's "ask again".
     q: String,
 }
@@ -787,6 +801,7 @@ async fn capture_page(
     };
     Ok(HtmlTemplate(CaptureTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         pairs,
         more_pairs,
         vision_enabled: st.core.describer.is_some(),
@@ -900,6 +915,7 @@ async fn search_page(
     ensure_facet(&mut facets.categories, &category);
     Ok(HtmlTemplate(SearchTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         q: p.q,
         facets,
         category,
@@ -1393,6 +1409,7 @@ async fn corpus_detail(
     let exif_rows = exif_tag_rows(&s.metadata);
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -1723,6 +1740,7 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
 async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
         feedback: match st.core.feedback.enabled {
             true => Some(st.core.store.feedback_stats().await?),
@@ -1872,6 +1890,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 
     Ok(HtmlTemplate(OpsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         retrying,
         parked,
         superseded,
@@ -2128,11 +2147,17 @@ async fn ask_page(
     State(st): State<AppState>,
     _id: Identity,
     Query(p): Query<AskPrefill>,
-) -> impl IntoResponse {
-    HtmlTemplate(AskTemplate {
+) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
+    Ok(HtmlTemplate(AskTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         q: p.q,
     })
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -2151,6 +2176,10 @@ async fn ask_submit(
     id: Identity,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     // Refused before anything is parked, so an empty box costs no entry in the
     // map and no second round trip to find out.
     if f.q.trim().is_empty() {
@@ -2182,6 +2211,10 @@ async fn ask_stream(
     id: Identity,
     Path(handoff): Path<String>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     use tokio_stream::StreamExt as _;
 
     // Unknown, already spent, expired, or somebody else's — all one answer.
@@ -2411,6 +2444,10 @@ async fn ask_verdict(
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     match f.verdict.as_str() {
         "none" => st.core.store.unjudge_ask(&id).await?,
         v => {
@@ -2433,6 +2470,10 @@ async fn ask_carried(
     Path(id): Path<String>,
     Form(f): Form<CarriedForm>,
 ) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
     let carried = st.core.store.toggle_carried(&id, f.n).await?;
     let bar = ask_verdict_bar(&st, &id, true).await?;
     Ok(HtmlTemplate(AskCarriedTemplate {
@@ -2625,6 +2666,7 @@ async fn artifact_detail(
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
         d,
     })
     .into_response())
@@ -6970,5 +7012,38 @@ mod tests {
             out, r##"<a href="/x?q=[1]"><a class="cite" href="#cite-1">[1]</a></a>"##,
             "{out}"
         );
+    }
+
+    #[tokio::test]
+    async fn without_an_ask_model_there_is_no_ask_page_and_no_ask_link() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.completer = None;
+        let (app, cookie) = app_with_cookie(core).await;
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(!page.contains("href=\"/ui/ask\""), "{page}");
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ask")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = app
+            .oneshot(form("/ui/ask", &cookie, "q=anything"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn with_an_ask_model_the_link_is_there() {
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(page.contains("href=\"/ui/ask\""), "{page}");
     }
 }

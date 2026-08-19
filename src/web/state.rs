@@ -94,6 +94,12 @@ impl AppState {
 /// door you pass rather than a page you remember. The count is one indexed
 /// `count(*)`; a failure returns `None`, since a broken badge is not a reason to
 /// fail the page it sits on.
+/// Whether the ask door is open: `[infer.ask]` is configured. The nav reads
+/// it through every page's template, the same way it reads `judge_pending`.
+pub fn ask_enabled(st: &AppState) -> bool {
+    st.core.asks()
+}
+
 pub async fn judge_pending(st: &AppState) -> Option<i64> {
     if !st.core.feedback.enabled {
         return None;

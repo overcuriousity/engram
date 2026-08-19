@@ -11,7 +11,7 @@
       {% for m in g.members %}
       <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
         <span>{{ m.text }}</span>
-        <a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>
+        {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
         <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
                 hx-target="closest li" hx-swap="outerHTML">covered</button>
       </li>
@@ -26,7 +26,7 @@
       {% for m in loose %}
       <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
         <span>{{ m.text }}</span>
-        <a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>
+        {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
         <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
                 hx-target="closest li" hx-swap="outerHTML">covered</button>
       </li>

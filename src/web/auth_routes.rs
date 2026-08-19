@@ -33,6 +33,8 @@ struct LoginTemplate {
     /// Always `None`: the sign-in page has no nav, and a count of what is
     /// waiting inside is not something to tell someone who is still outside.
     judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
     oidc: bool,
     error: Option<String>,
 }
@@ -58,6 +60,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
             }
             Ok(HtmlTemplate(LoginTemplate {
                 judge_pending: None,
+                ask_enabled: false,
                 oidc: true,
                 error: None,
             })
@@ -65,6 +68,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
         }
         AuthMode::Local => Ok(HtmlTemplate(LoginTemplate {
             judge_pending: None,
+            ask_enabled: false,
             oidc: false,
             error: None,
         })
@@ -92,6 +96,7 @@ async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> R
             StatusCode::UNAUTHORIZED,
             HtmlTemplate(LoginTemplate {
                 judge_pending: None,
+                ask_enabled: false,
                 oidc: false,
                 error: Some("Incorrect username or password.".into()),
             }),
