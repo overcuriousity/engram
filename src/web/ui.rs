@@ -51,6 +51,11 @@ pub struct RenderedResult {
     /// The title of the ranked hit that recalled this one. Set only on an
     /// associated hit, and it is what the row names.
     pub via_title: Option<String>,
+    /// A model wrote this — merged, or generated from a pursuit. Badged, so
+    /// it is never silently indistinguishable from captured text.
+    pub model_written: bool,
+    /// How many corpora it draws from, for the badge.
+    pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
 }
@@ -1101,6 +1106,8 @@ fn render_hit(
         past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
+        model_written: h.model_written,
+        origin_count: h.origin_count,
     }
 }
 
@@ -2699,13 +2706,17 @@ pub(crate) async fn build_artifact_detail(
 struct ArtifactViewParams {
     #[serde(default)]
     terms: String,
+    /// The artifact this one was reached from — a neighbour, an association,
+    /// a continuation — when the link came from another artifact's page.
+    #[serde(default)]
+    via: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
 async fn artifact_detail(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     headers: axum::http::HeaderMap,
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
@@ -2713,6 +2724,9 @@ async fn artifact_detail(
     let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     st.core.mark_artifact_seen(&cid);
+    // And the act the pursuit sweep reads: opened, or pivoted through.
+    st.core
+        .record_interaction(&cid, p.via.as_deref(), Some(&id.subject));
     if headers.contains_key("hx-request") {
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
@@ -4071,6 +4085,9 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
         };
 
         let loose = render_hit(0, result(true), &Default::default());
@@ -4104,6 +4121,8 @@ mod tests {
             past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
+            model_written: false,
+            origin_count: 0,
         }
     }
 
@@ -4216,6 +4235,8 @@ mod tests {
             past_cliff: false,
             via_title: None,
             reason: None,
+            model_written: false,
+            origin_count: 0,
         }
     }
 
@@ -7237,5 +7258,63 @@ mod tests {
             assert!(page.contains("Written from this corpus"), "{page}");
             assert!(page.contains(&m.id), "{page}");
         }
+    }
+
+    #[tokio::test]
+    async fn opening_from_another_artifacts_page_records_a_pivot() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let made = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "a".into(),
+                        corpus_span: None,
+                        title: Some("A".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "b".into(),
+                        corpus_span: None,
+                        title: Some("B".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        get_body(&app, &cookie, &format!("/ui/artifacts/{}", made[0].id)).await;
+        get_body(
+            &app,
+            &cookie,
+            &format!("/ui/artifacts/{}?via={}", made[1].id, made[0].id),
+        )
+        .await;
+        handle.background.wait_idle().await;
+        let now = crate::store::now();
+        let got = handle.store.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].kind, "opened");
+        assert_eq!(got[1].kind, "pivoted");
+        assert_eq!(got[1].via.as_deref(), Some(made[0].id.as_str()));
+        assert_eq!(got[1].scope.as_deref(), Some("user-1"));
     }
 }

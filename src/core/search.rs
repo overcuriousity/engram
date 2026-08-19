@@ -79,6 +79,16 @@ pub struct SearchResult {
     /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
+    /// A model wrote this text (merged, or synthesized from a pursuit). Never
+    /// silently indistinguishable from captured text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_written: bool,
+    /// Written from a pursuit. What the stopping rule reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub synthesized: bool,
+    /// How many corpora it draws from — the badge's source count.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub origin_count: usize,
     /// This hit moved up because it is more accessible than the ones it passed
     /// — recently and often reached. Bounded by `associate.prime_lift`, never
     /// past rank 1, and said out loud wherever it happened: nothing about the
@@ -100,9 +110,21 @@ pub struct SearchResult {
     pub reason: Option<String>,
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 impl From<SearchHit> for SearchResult {
     fn from(h: SearchHit) -> Self {
+        let provenance = h
+            .payload
+            .provenance
+            .as_deref()
+            .map(crate::store::artifacts::Provenance::parse);
         SearchResult {
+            model_written: provenance.is_some_and(|p| p.is_model_written()),
+            synthesized: provenance == Some(crate::store::artifacts::Provenance::Synthesized),
+            origin_count: h.payload.origin_corpora.len(),
             artifact_id: h.payload.artifact_id,
             corpus_id: h.payload.corpus_id,
             title: h.payload.title,
@@ -479,6 +501,33 @@ impl Core {
         }
     }
 
+    /// What happened after the list rendered: this artifact was opened, or
+    /// reached from `via` — a neighbour, an association, a continuation. The
+    /// pursuit sweep attaches it to a search by time and scope; nothing here
+    /// names one. Off the request path, and a no-op unless pursuits are on
+    /// and searches are being recorded.
+    pub fn record_interaction(&self, artifact_id: &str, via: Option<&str>, scope: Option<&str>) {
+        if !self.pursuit.enabled || !self.feedback.enabled {
+            return;
+        }
+        let store = self.store.clone();
+        let (id, via, scope) = (
+            artifact_id.to_string(),
+            via.map(str::to_string),
+            scope.map(str::to_string),
+        );
+        let at = now_secs();
+        self.background.spawn(async move {
+            let kind = if via.is_some() { "pivoted" } else { "opened" };
+            if let Err(e) = store
+                .record_interaction(&id, kind, via.as_deref(), scope.as_deref(), at)
+                .await
+            {
+                tracing::warn!(error = %e, "could not record that an artifact was opened");
+            }
+        });
+    }
+
     /// Each artifact's activation, already decayed to now.
     ///
     /// The one SQLite read the query path takes. It can only add: a failure is
@@ -622,6 +671,9 @@ impl Core {
                 past_cliff: false,
                 via: Some(l.via),
                 reason: l.reason,
+                model_written: false,
+                synthesized: false,
+                origin_count: 0,
             });
         }
         out
@@ -913,8 +965,11 @@ impl Core {
                 query_vec: vector.clone(),
                 embed_model: self.embedder.model().to_string(),
                 candidates,
-                // Set for real in the next task, once the list is final.
-                answered: false,
+                // The stopping rule for pursuits: a synthesized artifact at
+                // final rank 1, at or above `weak_below`, means the base
+                // answered. A fused rank says where a hit placed and not how
+                // good it was, which is why `weak` is read beside it.
+                answered: results.first().is_some_and(|r| r.synthesized && !r.weak),
             };
             let store = self.store.clone();
             let window = self.feedback.coalesce_secs;
@@ -1547,6 +1602,7 @@ mod tests {
                 last_verified_at: None,
                 superseded_by: None,
                 origin_corpora: vec![],
+                provenance: None,
             },
             score,
             similarity: Some(score),
@@ -1796,6 +1852,9 @@ mod tests {
                 past_cliff: false,
                 via: None,
                 reason: None,
+                model_written: false,
+                synthesized: false,
+                origin_count: 0,
             })
             .collect()
     }
@@ -2607,6 +2666,9 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
         };
         let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
 
@@ -2709,6 +2771,9 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
         };
         let mut results = vec![
             dummy("a", 0.95),
@@ -2733,5 +2798,117 @@ mod tests {
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
         mark_past_cliff(&mut flat);
         assert!(flat.iter().all(|r| !r.past_cliff));
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_leading_the_list_marks_the_search_answered() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let captured = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "captured text".into(),
+                    corpus_span: None,
+                    title: Some("c".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let made_gen = core
+            .store
+            .insert_synthesized_artifact(
+                &crate::store::artifacts::NewSynthesized {
+                    text: "generated text".into(),
+                    title: Some("g".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                &[captured[0].id.clone()],
+            )
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &captured[0].id)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &made_gen.id).await.unwrap();
+
+        // The fake embedder is symmetric: the query that is the generated
+        // artifact's rendered text lands it first.
+        core.search(&q("g\ngenerated text"), Door::Ui)
+            .await
+            .unwrap();
+        core.search(&q("c\ncaptured text"), Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+        let now = crate::store::now();
+        let events = core.store.events_between(0, now + 1).await.unwrap();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let by_q: std::collections::HashMap<&str, bool> = events
+            .iter()
+            .map(|e| (e.query.as_str(), e.answered))
+            .collect();
+        assert!(by_q["g\ngenerated text"], "{events:?}");
+        assert!(!by_q["c\ncaptured text"], "{events:?}");
+        // And the rail knows what a model wrote.
+        let hits = core
+            .search(&q("g\ngenerated text"), Door::Ui)
+            .await
+            .unwrap();
+        assert!(hits[0].synthesized && hits[0].model_written);
+        assert_eq!(hits[0].origin_count, 1);
+    }
+
+    #[tokio::test]
+    async fn an_interaction_is_recorded_only_with_pursuits_on() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.record_interaction(&a, None, Some("me"));
+        core.background.wait_idle().await;
+        let now = crate::store::now();
+        assert!(
+            core.store
+                .interactions_between(0, now + 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        core.pursuit.enabled = true;
+        core.record_interaction(&a, None, Some("me"));
+        core.record_interaction(&a, Some("other"), Some("me"));
+        core.background.wait_idle().await;
+        let got = core.store.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].kind, "opened");
+        assert_eq!(got[1].kind, "pivoted");
+        assert_eq!(got[1].via.as_deref(), Some("other"));
     }
 }

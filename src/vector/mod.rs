@@ -49,6 +49,11 @@ pub struct VectorPayload {
     /// corpora instead of all merges landing under one empty key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origin_corpora: Vec<String>,
+    /// `passage` | `captured` | `merged` | `synthesized` — mirrors the row so a
+    /// result can say a model wrote it without a second lookup, and so the
+    /// search path can see a synthesized artifact lead the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
 }
 
 #[derive(Debug, Clone)]

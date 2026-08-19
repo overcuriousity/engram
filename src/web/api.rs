@@ -812,6 +812,7 @@ async fn patch_artifact(
                 last_verified_at: None,
                 superseded_by: None,
                 origin_corpora: vec![],
+                provenance: None,
             })
             .await?;
     }

@@ -767,6 +767,7 @@ fn payload_of(chunk: &Chunk) -> VectorPayload {
         // no winner is a hidden artifact whose replacement the UI cannot show.
         superseded_by: chunk.superseded_by.clone(),
         origin_corpora: vec![],
+        provenance: Some(chunk.provenance.as_str().to_string()),
     }
 }
 

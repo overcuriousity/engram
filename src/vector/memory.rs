@@ -418,6 +418,7 @@ mod tests {
                 last_verified_at: None,
                 superseded_by: None,
                 origin_corpora: vec![],
+                provenance: None,
             },
         }
     }

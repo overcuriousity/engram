@@ -721,6 +721,9 @@ impl Core {
                 status: Some(c.status),
                 superseded_by: c.superseded_by,
                 last_verified_at: c.last_verified_at,
+                model_written: c.provenance.is_model_written(),
+                synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
+                origin_count: 0,
                 // Weakness is read from a similarity to the query, and there is
                 // no similarity here to read. It has to be demonstrated, never
                 // assumed — in either direction.
