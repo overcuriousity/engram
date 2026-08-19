@@ -469,9 +469,16 @@ pub fn ask_excerpt(number: usize, title: &str, text: &str, caveats: &[String]) -
 
 /// The question and whatever excerpts survived the context budget.
 pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
+    // An empty block is a passage that was stitched into the one before it
+    // (`Core::stitch_passages`): its text is in the prompt, its slot is not.
+    let shown: Vec<&str> = excerpts
+        .iter()
+        .map(String::as_str)
+        .filter(|e| !e.is_empty())
+        .collect();
     format!(
         "Question: {question}\n\nExcerpts:\n\n{}",
-        excerpts.join("\n\n---\n\n")
+        shown.join("\n\n---\n\n")
     )
 }
 
@@ -2170,5 +2177,11 @@ mod tests {
             !p.contains(&long),
             "no question reaches the prompt at full length"
         );
+    }
+
+    #[test]
+    fn ask_prompt_skips_an_empty_excerpt() {
+        let p = ask_prompt("q", &["[1] t\na".into(), String::new(), "[3] t\nc".into()]);
+        assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
     }
 }

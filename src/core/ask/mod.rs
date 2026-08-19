@@ -171,6 +171,7 @@ impl Core {
 
             // Highest score first, so what gets cut is what mattered least.
             let mut kept = pack_by_budget(&blocks, &core.counter, budget);
+            core.stitch_passages(&hits[..kept], &mut blocks[..kept]).await;
             let mut ranked = first.ranked;
             let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
             if dropped > 0 {
@@ -234,9 +235,14 @@ impl Core {
                         // appended to what round one packed: the second round's
                         // excerpts have to fit the same window as the first, and
                         // the only honest way to know what fits is to pack it.
-                        let merged_blocks = core.excerpts(&merged.hits).await;
+                        let mut merged_blocks = core.excerpts(&merged.hits).await;
                         let merged_kept =
                             pack_by_budget(&merged_blocks, &core.counter, budget);
+                        core.stitch_passages(
+                            &merged.hits[..merged_kept],
+                            &mut merged_blocks[..merged_kept],
+                        )
+                        .await;
 
                         // A re-pack that fits nothing leaves round one standing.
                         // The prompt cannot be empty because the follow-up found
@@ -497,6 +503,84 @@ impl Core {
                 )
             })
             .collect()
+    }
+
+    /// Put consecutive passages back together as the text they are.
+    ///
+    /// Passages are verbatim slices whose spans tile a segment; two that abut
+    /// are literally continuous text, and showing them as two excerpts repeats
+    /// the carried heading, hides the continuity from the model, and cuts the
+    /// sentence running across the boundary. Here — after packing, over the
+    /// kept prefix only — runs of abutting passages from one `(corpus,
+    /// segment)` are merged into the block of the run's earliest member, in
+    /// document order, and the other members' blocks are emptied. A stitched
+    /// excerpt is a presentation, not a new unit: `hits` is untouched, every
+    /// constituent stays a citation, and the literal check reads the same
+    /// text the model did. Passages only — two adjacent *artifacts* are two
+    /// rewrites, not continuous text.
+    async fn stitch_passages(&self, hits: &[SearchResult], blocks: &mut [String]) {
+        use crate::store::artifacts::{CorpusSpan, Provenance};
+        let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
+        let rows = match self.store.artifacts_by_ids(&ids).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "ask: could not read spans; excerpts stay unstitched");
+                return;
+            }
+        };
+        let mut pos: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, h) in hits.iter().enumerate() {
+            pos.insert(h.artifact_id.as_str(), i);
+        }
+        // (corpus, segment, span, position in hits), for passages with a span.
+        let mut members: Vec<(String, i64, CorpusSpan, usize)> = rows
+            .iter()
+            .filter(|c| c.provenance == Provenance::Passage)
+            .filter_map(|c| {
+                Some((
+                    c.corpus_id.clone()?,
+                    c.segment_idx?,
+                    c.corpus_span.clone()?,
+                    *pos.get(c.id.as_str())?,
+                ))
+            })
+            .collect();
+        members.sort_by(|a, b| {
+            (a.0.as_str(), a.1, a.2.start_line).cmp(&(b.0.as_str(), b.1, b.2.start_line))
+        });
+
+        let mut i = 0;
+        while i < members.len() {
+            let mut run = vec![i];
+            while i + 1 < members.len()
+                && members[i + 1].0 == members[i].0
+                && members[i + 1].1 == members[i].1
+                && members[i + 1].2.start_line == members[i].2.end_line + 1
+            {
+                i += 1;
+                run.push(i);
+            }
+            i += 1;
+            if run.len() < 2 {
+                continue;
+            }
+            // The earliest in list order keeps its number and its title line;
+            // the rest contribute their text, in document order, and go dark.
+            let anchor = *run.iter().min_by_key(|&&m| members[m].3).unwrap();
+            let anchor_pos = members[anchor].3;
+            let head = hits[anchor_pos].title.as_deref().unwrap_or_default();
+            let text: Vec<&str> = run
+                .iter()
+                .map(|&m| hits[members[m].3].text.as_str())
+                .collect();
+            blocks[anchor_pos] =
+                crate::infer::prompt::ask_excerpt(anchor_pos + 1, head, &text.join("\n"), &[]);
+            for &m in &run {
+                if m != anchor {
+                    blocks[members[m].3].clear();
+                }
+            }
+        }
     }
 
     /// How many tokens of excerpt one answer may be built from: the rule
@@ -2169,6 +2253,87 @@ mod tests {
         }
         fn max_output_tokens(&self) -> usize {
             1024
+        }
+    }
+
+    #[tokio::test]
+    async fn consecutive_passages_are_stitched_into_one_excerpt_and_every_id_is_cited() {
+        let mut core = test_core().await;
+        core.synthesis = crate::config::SynthesisMode::Off;
+        // One corpus, one segment, three abutting passages, all hits.
+        let src = core
+            .store
+            .insert_corpus("l1\nl2\nl3", "web", None)
+            .await
+            .unwrap();
+        let mk = |i: i64, text: &str, from: i64, to: i64| NewArtifact {
+            ordinal: i,
+            text: text.into(),
+            corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                start_line: from,
+                end_line: to,
+            }),
+            title: Some("Recovery".into()),
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let made = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    mk(0, "first part", 1, 1),
+                    mk(1, "second part", 2, 2),
+                    mk(2, "third part", 3, 3),
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        for c in &made {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        // A completer that keeps its prompts, so the test can read what the
+        // model was shown.
+        let probe = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            "See [1].".into(),
+        ]));
+        core.completer = Some(probe.clone());
+
+        let out = core
+            .ask(
+                &AskRequest {
+                    q: "Recovery\nfirst part".into(),
+                    limit: Some(8),
+                    tags: vec![],
+                    category: None,
+                },
+                Door::Api,
+            )
+            .await
+            .unwrap();
+
+        let prompt = probe.prompts().pop().expect("the model was called");
+        // One excerpt carries the stitched text in document order, once.
+        assert!(
+            prompt.contains("first part\nsecond part\nthird part"),
+            "{prompt}"
+        );
+        assert_eq!(
+            prompt.matches("Recovery").count(),
+            2,
+            "heading once in the excerpt, once in the question: {prompt}"
+        );
+        // Every constituent is still a citation.
+        let cited: std::collections::HashSet<String> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.clone())
+            .collect();
+        for c in &made {
+            assert!(cited.contains(&c.id), "{} missing from citations", c.text);
         }
     }
 }

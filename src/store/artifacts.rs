@@ -494,25 +494,41 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
-    /// The artifacts either side of `ordinal` in the same corpus.
+    /// The nearest *active* artifact either side of `ordinal` in the same
+    /// corpus — not the rows at `ordinal ± 1`.
     ///
     /// The answer to a question is often the paragraph after the one that
-    /// matched. `ordinal` is already a continuous per-corpus sequence, which is
-    /// what makes this a lookup instead of a search. An edge returns the one
-    /// side that exists; `status = 'active'` keeps deprecated and superseded
-    /// artifacts out, exactly as an ordinary search would.
+    /// matched, and `ordinal` is a continuous per-corpus sequence, which is
+    /// what makes this a lookup instead of a search. But after a promotion the
+    /// sequence interleaves superseded passages with what replaced them, and
+    /// "the row next door" is then often a hidden one; the reader wants the
+    /// next thing still in the document. An edge returns the one side that
+    /// exists; `status = 'active'` keeps deprecated and superseded artifacts
+    /// out, exactly as an ordinary search would.
     pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let before = sqlx::query(
             "SELECT * FROM artifacts
-             WHERE corpus_id = ? AND ordinal IN (?, ?) AND status = 'active'
-             ORDER BY ordinal",
+             WHERE corpus_id = ? AND ordinal < ? AND status = 'active'
+             ORDER BY ordinal DESC LIMIT 1",
         )
         .bind(corpus_id)
-        .bind(ordinal - 1)
-        .bind(ordinal + 1)
-        .fetch_all(&self.pool)
+        .bind(ordinal)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        let after = sqlx::query(
+            "SELECT * FROM artifacts
+             WHERE corpus_id = ? AND ordinal > ? AND status = 'active'
+             ORDER BY ordinal ASC LIMIT 1",
+        )
+        .bind(corpus_id)
+        .bind(ordinal)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(before
+            .iter()
+            .chain(after.iter())
+            .map(row_to_artifact)
+            .collect())
     }
 
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
@@ -1520,5 +1536,32 @@ mod tests {
         }
         let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
         assert_eq!(ids, vec![c[0].id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn adjacent_artifacts_steps_over_a_superseded_row_to_the_next_active_one() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b"), nc(2, "c"), nc(3, "d")])
+            .await
+            .unwrap();
+        // Hide b and c; a's next active neighbour is d.
+        s.set_superseded_by(&made[1].id, Some(&made[3].id))
+            .await
+            .unwrap();
+        s.set_superseded_by(&made[2].id, Some(&made[3].id))
+            .await
+            .unwrap();
+        let got = s.adjacent_artifacts(&src.id, 0).await.unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["d"]
+        );
+        let got = s.adjacent_artifacts(&src.id, 3).await.unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
     }
 }
