@@ -744,9 +744,16 @@ CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 `search_event_id`; the clustering decides which pursuit that is, so the events
 carry no pursuit id of their own and re-clustering never has to rewrite them.
 
-`dwell` is not recorded by the first implementation — the UI has no timing —
-and the `opened`/`pivoted` rows are attached to search events by time and
-scope at analysis, never by a stored id; `returned` is derived there too.
+`dwell` is measured by the page — the detail root names its artifact, a timer
+starts on every swap, and the seconds are sent as a beacon when the reader
+leaves (next swap, tab hidden, page gone); under three seconds is a glance and
+is not sent, over ten minutes is a tab left open and is capped. The sweep
+turns it into ≤ 0.5 per artifact (a tenth per minute) and uses it for one
+thing: the order the sources go into the prompt. It never counts toward
+`min_engagement`, and a search whose only trace is dwell is a search nothing
+was opened on. The `opened`/`pivoted`/`dwell` rows are attached to search
+events by time and scope at analysis, never by a stored id; `returned` is
+derived there too.
 
 **Dwell is deliberately the weakest.** Long dwell means *this was useful* or
 *this was confusing and hard to read*; a tab left open means *engaged* or *went
@@ -1059,7 +1066,10 @@ pool reliably and the cap has nothing left to redistribute.
 
 **Server-side grouping (`query/groups` in Qdrant) is therefore part of this
 spec**, with `cap_per_corpus` as the in-memory fallback. It is already a roadmap
-item; `off` promotes it from a nice-to-have to a prerequisite.
+item; `off` promotes it from a nice-to-have to a prerequisite. *Status:* the
+fallback landed (`cap_per_corpus` over `origin_corpora`); the `query/groups`
+call is on the roadmap as a prerequisite with its own measurement, and is not
+built yet.
 
 ---
 

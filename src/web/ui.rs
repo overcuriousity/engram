@@ -1327,6 +1327,24 @@ async fn reread_uncovered_ui(
     Ok(back)
 }
 
+#[derive(serde::Deserialize)]
+struct DwellForm {
+    #[serde(default)]
+    secs: i64,
+}
+
+/// The page saying how long an artifact was open, sent as the reader leaves
+/// it. `sendBeacon` lands here; nothing is rendered back.
+async fn artifact_dwell(
+    State(st): State<AppState>,
+    id: Identity,
+    Path(aid): Path<String>,
+    Form(f): Form<DwellForm>,
+) -> Result<Response> {
+    st.core.record_dwell(&aid, f.secs, Some(&id.subject));
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
 /// Undo a promotion: the window's passages back in results, what the
 /// promotion wrote retired, the window `verbatim` again.
 async fn unpromote_ui(
@@ -2873,6 +2891,7 @@ pub fn ui_router() -> Router<AppState> {
             post(dismiss_link),
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
+        .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/ui/ask", get(ask_page).post(ask_submit))
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
@@ -7469,5 +7488,57 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let ops = get_body(&app, &cookie, "/ui/ops").await;
         assert!(!ops.contains("<h3>Pursuits</h3>"), "{ops}");
+    }
+
+    #[tokio::test]
+    async fn the_page_reports_how_long_an_artifact_was_open() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                "secs=42",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        handle.background.wait_idle().await;
+        let now = crate::store::now();
+        let got = handle.store.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, "dwell");
+        assert_eq!(got[0].detail.as_deref(), Some("42"));
+        // The detail root names the artifact, which is what the page's timer reads.
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+        assert!(page.contains(&format!("data-artifact=\"{a}\"")), "{page}");
     }
 }

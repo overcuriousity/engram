@@ -131,6 +131,9 @@ pub struct Need {
     pub abstained: bool,
     /// Engagement weight per artifact, in first-engagement order.
     pub engagement: Vec<(String, f64)>,
+    /// Dwell weight per artifact, ≤ 0.5 each. A tiebreak for the order the
+    /// sources go into the prompt; never part of what decides.
+    pub dwell: Vec<(String, f64)>,
     pub pivots: usize,
     pub returns: usize,
     /// Something opened or confirmed was a strong hit — at or above
@@ -284,7 +287,23 @@ pub async fn run(core: &Core) -> Result<usize> {
         let mut members = members;
         members.sort_by_key(|&m| evs[m].at);
         let need = need_of(core, &evs, &members, &attached, &interactions);
-        let sources: Vec<String> = need.engagement.iter().map(|(id, _)| id.clone()).collect();
+        // Sources in the order they go to the model: engagement first, dwell
+        // breaking ties. Dwell moves an artifact up the list and nothing else.
+        let mut ranked: Vec<(String, f64)> = need
+            .engagement
+            .iter()
+            .map(|(id, w)| {
+                let d = need
+                    .dwell
+                    .iter()
+                    .find(|(x, _)| x == id)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.0);
+                (id.clone(), w + d)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let sources: Vec<String> = ranked.into_iter().map(|(id, _)| id).collect();
         let decision = decide(&need, core.pursuit.min_sources, core.pursuit.min_engagement);
         let pid = core
             .store
@@ -377,6 +396,21 @@ fn need_of(
             attached[m].iter().map(|&k| &interactions[k]).collect();
         if !e.answered {
             for i in &mine {
+                if i.kind == "dwell" {
+                    // ≤ 0.5 per artifact: a tenth per minute, capped. Tiebreak
+                    // only — see `Need::dwell`.
+                    let secs: f64 = i
+                        .detail
+                        .as_deref()
+                        .and_then(|d| d.parse().ok())
+                        .unwrap_or(0.0);
+                    let w = (secs / 600.0).min(0.5);
+                    match n.dwell.iter_mut().find(|(x, _)| x == &i.artifact_id) {
+                        Some(d) => d.1 = (d.1 + w).min(0.5),
+                        None => n.dwell.push((i.artifact_id.clone(), w)),
+                    }
+                    continue;
+                }
                 let w = if i.kind == "pivoted" {
                     n.pivots += 1;
                     1.5
@@ -401,7 +435,10 @@ fn need_of(
             }
         }
         let followed = pos + 1 < members.len();
-        if mine.is_empty() && e.confirmed.is_none() && !e.answered {
+        // Dwell alone is not engagement: a search whose only trace is time
+        // spent is still a search nothing was opened on.
+        let engaged = mine.iter().any(|i| i.kind != "dwell");
+        if !engaged && e.confirmed.is_none() && !e.answered {
             if followed {
                 n.refined += 1;
             } else {
@@ -812,5 +849,71 @@ mod tests {
             Some(crate::store::segments::SegmentState::Pending),
             "the window was not promoted"
         );
+    }
+
+    #[tokio::test]
+    async fn dwell_alone_never_crosses_min_engagement_but_orders_the_sources() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 100;
+        // Nothing opened; long dwell on both. A search with only dwell is a
+        // search nothing was opened on: unsatisfied, not generated.
+        search_event(
+            &core,
+            "only looked",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            t0,
+        )
+        .await;
+        core.store
+            .record_dwell(&ids[0], 600, Some("me"), t0 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_dwell(&ids[1], 600, Some("me"), t0 + 2)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+
+        // Opened both equally, dwelt on the second: the second leads. A fresh
+        // core — the first sweep moved the watermark past these timestamps.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let t1 = now - 50;
+        search_event(&core, "read both", vec![0.0, 1.0], &[&ids[0], &ids[1]], t1).await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t1 + 1)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "opened", None, Some("me"), t1 + 2)
+            .await
+            .unwrap();
+        core.store
+            .record_dwell(&ids[1], 300, Some("me"), t1 + 3)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), t1 + 4)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "opened", None, Some("me"), t1 + 5)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        let p = core
+            .store
+            .recent_pursuits(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.queries.iter().any(|q| q == "read both"))
+            .unwrap();
+        assert_eq!(p.sources[0], ids[1], "{p:?}");
     }
 }

@@ -528,6 +528,23 @@ impl Core {
         });
     }
 
+    /// How long an artifact stayed open. Capped — a tab left open overnight is
+    /// not a day of reading — and a no-op unless pursuits are on.
+    pub fn record_dwell(&self, artifact_id: &str, secs: i64, scope: Option<&str>) {
+        if !self.pursuit.enabled || !self.feedback.enabled || secs <= 0 {
+            return;
+        }
+        let secs = secs.min(600);
+        let store = self.store.clone();
+        let (id, scope) = (artifact_id.to_string(), scope.map(str::to_string));
+        let at = now_secs();
+        self.background.spawn(async move {
+            if let Err(e) = store.record_dwell(&id, secs, scope.as_deref(), at).await {
+                tracing::warn!(error = %e, "could not record how long an artifact was open");
+            }
+        });
+    }
+
     /// Each artifact's activation, already decayed to now.
     ///
     /// The one SQLite read the query path takes. It can only add: a failure is

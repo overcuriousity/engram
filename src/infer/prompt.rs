@@ -600,7 +600,7 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
 
 /// The generation behind a pursuit: one self-contained artifact written from
 /// the excerpts the operator engaged with, to answer the questions they asked.
-pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
 pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
     let qs = questions

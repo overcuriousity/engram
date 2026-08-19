@@ -18,6 +18,8 @@ pub struct Interaction {
     pub kind: String,
     /// The artifact this was reached from, for `pivoted`.
     pub via: Option<String>,
+    /// Seconds, for `dwell`.
+    pub detail: Option<String>,
     pub scope: Option<String>,
     pub at: i64,
 }
@@ -73,10 +75,34 @@ impl Store {
         Ok(())
     }
 
+    /// How long an artifact stayed open, in seconds. The weakest signal there
+    /// is — long means useful or means confusing, a tab left open means
+    /// engaged or means lunch — so it is a tiebreak in the sweep and never
+    /// decisive.
+    pub async fn record_dwell(
+        &self,
+        artifact_id: &str,
+        secs: i64,
+        scope: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
+             VALUES (?, 'dwell', ?, ?, ?)",
+        )
+        .bind(artifact_id)
+        .bind(secs.to_string())
+        .bind(scope)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Interactions with `from < at <= to`, oldest first.
     pub async fn interactions_between(&self, from: i64, to: i64) -> Result<Vec<Interaction>> {
         let rows = sqlx::query(
-            "SELECT id, artifact_id, kind, via, scope, at FROM interaction_events
+            "SELECT id, artifact_id, kind, via, detail, scope, at FROM interaction_events
               WHERE at > ? AND at <= ? ORDER BY at, id",
         )
         .bind(from)
@@ -90,6 +116,7 @@ impl Store {
                 artifact_id: r.get("artifact_id"),
                 kind: r.get("kind"),
                 via: r.get("via"),
+                detail: r.get("detail"),
                 scope: r.get("scope"),
                 at: r.get("at"),
             })
@@ -214,6 +241,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[1].via.as_deref(), Some("other"));
         assert_eq!(got[1].scope.as_deref(), Some("u1"));
+        s.record_dwell(&a, 45, Some("u1"), 30).await.unwrap();
+        let got = s.interactions_between(0, 100).await.unwrap();
+        assert_eq!(got[2].kind, "dwell");
+        assert_eq!(got[2].detail.as_deref(), Some("45"));
     }
 
     #[tokio::test]

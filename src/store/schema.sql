@@ -388,10 +388,12 @@ CREATE INDEX IF NOT EXISTS idx_links_state ON artifact_links(state, weight DESC)
 CREATE TABLE IF NOT EXISTS interaction_events (
   id          INTEGER PRIMARY KEY,
   artifact_id TEXT REFERENCES artifacts(id) ON DELETE CASCADE,
-  -- 'opened' | 'pivoted'
+  -- 'opened' | 'pivoted' | 'dwell'
   kind        TEXT NOT NULL,
   -- The artifact this was reached from, for 'pivoted'.
   via         TEXT,
+  -- Seconds, for 'dwell'. Read on Ops; the sweep parses it.
+  detail      TEXT,
   scope       TEXT,
   at          INTEGER NOT NULL
 );
