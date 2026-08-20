@@ -380,22 +380,39 @@ pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
 /// what is covered, then what is not — fixed the near miss and left the
 /// no-match case looping at the ceiling. Only the lexical test passes both.
 ///
+/// What the lexical test does not settle on its own is which rule applies when
+/// the subject is *compound*. "macOS artifacts worth reading on a ransomware
+/// offender's machine" is two subjects, and excerpts that carry one and not the
+/// other answer the abstention test and the partial-coverage rule at the same
+/// time. Both conditions read as true, neither is stated to win, and the model
+/// recomputes the same undecidable question until something else stops it —
+/// observed on nine excerpts: fifteen restarts, five of them re-running the
+/// abstention test and reaching the same answer every time. So the two are
+/// ordered outright. Any part of the subject that appears is a partial answer;
+/// abstention is what is left when no part appears at all.
+///
+/// Everything else is stated once and briefly, because a rule the model can
+/// rehearse is a rule it does rehearse: the same transcript closes by walking
+/// the citation rule and the caveat rule one at a time with the answer already
+/// drafted.
+///
 /// [`ABSTAIN_PREFIX`] still has to reach the reply verbatim: [`abstained`] reads
 /// it, and a gap cluster is recorded on the strength of it. Narrowing when it is
 /// asked for narrows what gets recorded — a question half-covered is now an
 /// answer naming its own gap rather than a gap event — which is the more honest
 /// of the two records, and the one the reader of the answer is better served by.
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
-Quote commands, paths and code exactly as they appear. \
-If the excerpts cover only part of the question, answer that part and say plainly what they do not \
-cover — do not withhold a partial answer, and do not stretch an excerpt to cover what it does not. \
-If no excerpt mentions the subject of the question, begin your reply with the exact words \
-`Not in the knowledge base.` and say what is missing rather than guessing. \
-Cite excerpts by their number, and cite the excerpt the words you used came from. \
-An excerpt reading `(continues [n])` is the rest of excerpt n: its text is printed there, and a \
-claim drawn from that part of the text is cited by whichever of the two numbers holds it. \
-An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
-Repeat any caveat that bears on your answer rather than dropping it.";
+Quote commands, paths and code exactly as they appear, and cite each claim by the number of the \
+excerpt it came from. \
+Answer whatever the excerpts cover and say plainly what they do not, without stretching an excerpt \
+to cover what it does not. \
+Abstain only when no excerpt mentions any part of the subject: then begin your reply with the exact \
+words `Not in the knowledge base.` and say what is missing rather than guessing. \
+A subject the excerpts carry in part is answered in part and never abstained on. \
+`(continues [n])` marks an excerpt whose text is printed under excerpt n; cite whichever of the two \
+numbers holds the words you used. \
+Lines beginning `Caveat:` give the conditions under which an excerpt does not apply — repeat any \
+that bears on your answer.";
 
 /// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
 /// emphasis, heading and list marks, and opening quotes are skipped, because
