@@ -168,7 +168,11 @@ which regions each page claims.
 
 ## 5. Copy and empty states
 
-- Housekeeping's counts are one run-on sentence; they become a stat row.
+- Housekeeping's counts read as a run-on sentence. Reviewed as a finding and
+  withdrawn: the page argues for it — "the counts as a sentence rather than as
+  `done: 17`-style badges: this is a page you open to reassure yourself, and a
+  row of key-value chips reads as a debug dump of something going wrong" — and
+  every number in it says what it counts, which the chips would not.
 - `TOOK` reads `now` for every sweep (`ops.html:60`). The cause is a reused
   helper: `fmt_duration` (`ui.rs:331`) is future-tense — `"now"`, `"in 5m"` —
   written for when a job runs next, and Ops spends it on elapsed time. Elapsed

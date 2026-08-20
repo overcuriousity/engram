@@ -356,6 +356,38 @@ pub fn fmt_duration(secs: i64) -> String {
     }
 }
 
+/// A sweep in words, for a page a person reads.
+///
+/// Housekeeping printed the queue's own identifiers — `arm_dedupe`,
+/// `link_judge`, `segment_window` — in a column headed "Sweep". They are the
+/// right names in the code and in a log, and they are the wrong ones on a page
+/// somebody opens to see whether the base is well.
+///
+/// An identifier with no wording yet returns unchanged rather than blank: a
+/// stage added later must show up as *something*. `every_stage_the_queue_can_run_has_a_word_for_it`
+/// is what makes sure that fallback stays theoretical.
+fn sweep_label(stage: &str) -> &str {
+    match stage {
+        "synthesize" => "Writing artifacts",
+        "enrich" => "Enriching",
+        "segment_window" => "Segmenting",
+        "title" => "Naming captures",
+        "embed" => "Embedding",
+        "consolidate" => "Consolidating",
+        "dedupe" => "Judging duplicates",
+        "relate" => "Finding near-identicals",
+        "describe" => "Describing images",
+        "extract" => "Reading documents",
+        "associate" => "Associating",
+        "link_judge" => "Judging links",
+        "pursuit" => "Following up questions",
+        "generate" => "Answering gaps",
+        "retention" => "Retention",
+        "arm_dedupe" => "Arming dedupe",
+        other => other,
+    }
+}
+
 /// How long something took, past tense.
 ///
 /// `fmt_duration` above answers a different question — when does this run next
@@ -762,7 +794,11 @@ struct SweepCount {
 /// One recorded run, as the history renders it.
 struct SweepRunRow {
     when: String,
+    /// The stage in words. The identifier it was worded from is on the cell as
+    /// a `title`, because the log and the config still call it that and a
+    /// reader who greps for `arm_dedupe` should find it here too.
     stage: String,
+    stage_id: String,
     /// Empty unless it failed, in which case it is why.
     error: String,
     took: String,
@@ -2052,9 +2088,14 @@ async fn reprocess_ui(
 /// `markdown::stand_in_title` — so the sitting, the pair cards and the judge
 /// cannot drift apart again.
 pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
-    c.title
-        .clone()
-        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))
+    // The stored title goes through the same rule, because synthesis writes it
+    // and nothing stopped it writing markup into one: Housekeeping listed a
+    // merged artifact as "**Was nicht abgedeckt ist:** * Es werden keine". A
+    // title is a name, and a name is never marked up.
+    match &c.title {
+        Some(t) => crate::web::markdown::stand_in_title(t, 80),
+        None => crate::web::markdown::stand_in_title(&c.text, 60),
+    }
 }
 
 /// How many decisions Capture offers at once, and the order it looks for them
@@ -2483,7 +2524,8 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                     false => String::new(),
                 },
                 took: fmt_elapsed(r.ended_at - r.started_at),
-                stage: r.stage,
+                stage: sweep_label(&r.stage).to_string(),
+                stage_id: r.stage,
                 counts: counts
                     .into_iter()
                     .map(|(what, n)| SweepCount { n, what })
@@ -3598,6 +3640,56 @@ mod tests {
             verdict_bar: String::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_sweep_stage_reads_as_words_and_keeps_its_identifier() {
+        // Housekeeping listed `arm_dedupe`, `link_judge` and `segment_window`
+        // — the identifiers the queue keys on, on a page a person reads.
+        assert_eq!(sweep_label("arm_dedupe"), "Arming dedupe");
+        assert_eq!(sweep_label("consolidate"), "Consolidating");
+        assert_eq!(sweep_label("retention"), "Retention");
+        assert_eq!(sweep_label("link_judge"), "Judging links");
+        // An identifier nobody has worded yet is shown, never swallowed: a new
+        // sweep must not render as a blank cell.
+        assert_eq!(sweep_label("some_new_sweep"), "some_new_sweep");
+    }
+
+    #[test]
+    fn every_stage_the_queue_can_run_has_a_word_for_it() {
+        // The list above is a map, and a map goes stale silently. This is what
+        // notices when a stage is added and nothing on Housekeeping names it.
+        for stage in crate::store::jobs::Stage::ALL {
+            let id = stage.as_str();
+            assert_ne!(
+                sweep_label(id),
+                id,
+                "no wording for the {id} stage — add one to `sweep_label`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_title_that_carries_markup_is_shown_without_it() {
+        // Housekeeping listed a merged artifact as "**Was nicht abgedeckt
+        // ist:** * Es werden keine". Synthesis writes the title, and nothing
+        // stopped it writing markup into one — a title is a name, and a name
+        // is never marked up.
+        let t = title_of(&chunk_fixture(
+            Some("**Was nicht abgedeckt ist:** * Es werden keine"),
+            "body",
+        ));
+        assert!(t.starts_with("Was nicht abgedeckt ist:"), "{t:?}");
+        assert!(!t.contains("**"), "{t:?}");
+        assert_eq!(
+            title_of(&chunk_fixture(Some("# 3.4.2 FESTE MFT RECORDS"), "body")),
+            "3.4.2 FESTE MFT RECORDS"
+        );
+        // An ordinary title passes through untouched.
+        assert_eq!(
+            title_of(&chunk_fixture(Some("LevelDB: Funktionsweise"), "body")),
+            "LevelDB: Funktionsweise"
+        );
     }
 
     #[test]

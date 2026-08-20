@@ -46,7 +46,7 @@
   {% for r in sweep_history %}
     <tr>
       <td>{{ r.when }}</td>
-      <td>{{ r.stage }}</td>
+      <td title="{{ r.stage_id }}">{{ r.stage }}</td>
       <td>
         {% if !r.error.is_empty() %}
         <span class="flag">failed</span>
