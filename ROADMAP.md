@@ -78,12 +78,14 @@ in config. The items below are the mechanisms that come after it, in order.
   replay, activation decay, pruning, relate/dedupe, retention. It becomes phases
   of one scheduled cycle with one Ops report: last sleep, what changed. Framing
   over what exists, and the home every later mechanism slots into. The part
-  that is more than framing is the order — replay, then decay, then prune, then
-  promote, then consolidate. Today each of those is its own ticker with its own
-  interval and its own gate (`spawn_consolidation_ticker` and its five
-  siblings), so the sequence any given night runs in is whichever one fired
-  first, and promotion routinely reads an activation the decay pass has not
-  reached yet.
+  that is more than framing is the order, and the account. Each of those is its
+  own ticker with its own interval and its own gate
+  (`spawn_consolidation_ticker` and its five siblings), so what runs before
+  what is whichever interval elapsed first — `Relate` arms the pairs that
+  `Dedupe` and the consolidation sweep both read, and nothing sequences the
+  three. Inside one ticker the order is already right; it is the orderings that
+  cross a ticker boundary that were never written down. And each ticker's
+  account of itself is one `info` line in a log.
 - **Working memory.** Within a session, what you just opened primes its
   neighbours and links for the next query. Session-scoped, expires with it,
   never written to activation. The sitting this needs already exists — but only
