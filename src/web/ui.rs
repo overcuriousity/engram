@@ -88,6 +88,11 @@ pub struct QueueRow {
     /// cannot be attributed to anything. The warning stays; the link to
     /// `#uncovered` does not, because that section renders nothing for it.
     pub locatable: bool,
+    /// The open questions this capture answered, in the operator's words. What
+    /// a capture did beyond being stored — said on the row that reported it
+    /// arriving, because that is where somebody is looking. Empty for almost
+    /// every capture, and silent when empty.
+    pub covered: Vec<String>,
     /// Still on its way through the pipeline. Only these announce themselves;
     /// a finished capture is a title and a count.
     pub in_flight: bool,
@@ -433,10 +438,14 @@ struct CaptureTemplate {
     prefill_ask: String,
 }
 
-/// One unanswered question or gap search, as the capture page lists it.
+/// One hole in the base, as the capture page lists it.
 pub struct GapMember {
-    /// `ask` or `search`, for the dismiss route.
+    /// The `GapKind`, for the dismiss route.
     pub kind: String,
+    /// What asked it, in the operator's words: *judged*, *asked*, *nothing
+    /// near*, *pursued*. Four ways of saying the base did not answer, on one
+    /// list, each still able to say which one it was.
+    pub badge: &'static str,
     pub id: String,
     pub text: String,
 }
@@ -447,8 +456,15 @@ pub struct GapGroup {
 }
 
 fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
+    use crate::store::gaps::GapKind;
     GapMember {
         kind: g.kind.as_str().into(),
+        badge: match g.kind {
+            GapKind::Search => "judged",
+            GapKind::Ask => "asked",
+            GapKind::Unmatched => "nothing near",
+            GapKind::Pursuit => "pursued",
+        },
         id: g.id,
         text: g.text,
     }
@@ -715,9 +731,14 @@ struct OpsTemplate {
     /// Artifacts written from pursuits, newest first, each one click from
     /// deprecated.
     generated: Vec<GeneratedRow>,
-    /// Recent pursuits, only when the feature is on.
+    /// Recent pursuits, only when the feature is on. A count and not a table:
+    /// a pursuit that ended unsatisfied is a hole in the base and belongs on
+    /// the one list of those, not on a second list of its own; one that ended
+    /// satisfied needs nobody; and one that was written up is in `generated`
+    /// above.
     pursuit_enabled: bool,
-    pursuits: Vec<PursuitRow>,
+    pursuit_recent: usize,
+    pursuit_unsatisfied: usize,
     /// What the sweeps did in the last twenty-four hours, added up. Not "last
     /// night": units that reschedule themselves on their own periods do not
     /// line up into one cycle, and there is no cycle identity to group them by.
@@ -756,15 +777,6 @@ struct GeneratedRow {
     subtitle: String,
     cues: Vec<String>,
     sources: Vec<SourceRow>,
-}
-
-/// One pursuit on Ops: what was wanted, what came of it.
-struct PursuitRow {
-    when: String,
-    state: String,
-    reason: String,
-    queries: Vec<String>,
-    artifact_id: Option<String>,
 }
 
 struct MergedRow {
@@ -1343,6 +1355,15 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             status: s.status.as_str().to_string(),
             artifact_count: st.core.store.count_artifacts_for_corpus(&s.id).await?,
             created: fmt_time(s.created_at),
+            covered: st
+                .core
+                .store
+                .gaps_covered_by(&s.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|g| g.text)
+                .collect(),
             id: s.id,
         });
     }
@@ -2142,23 +2163,12 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         });
     }
     let pursuit_enabled = st.core.pursuit.enabled;
-    let pursuits: Vec<PursuitRow> = if pursuit_enabled {
-        st.core
-            .store
-            .recent_pursuits(50)
-            .await?
-            .into_iter()
-            .map(|p| PursuitRow {
-                when: fmt_time(p.opened_at),
-                state: p.state,
-                reason: p.reason.unwrap_or_default(),
-                queries: p.queries,
-                artifact_id: p.artifact_id,
-            })
-            .collect()
-    } else {
-        Vec::new()
+    let recent = match pursuit_enabled {
+        true => st.core.store.recent_pursuits(50).await?,
+        false => Vec::new(),
     };
+    let pursuit_recent = recent.len();
+    let pursuit_unsatisfied = recent.iter().filter(|p| p.state == "unsatisfied").count();
     // What the memory did while nobody was looking. The last day as one
     // sentence, and under it the runs themselves — which is the half a single
     // overwritten summary could never give.
@@ -2265,7 +2275,8 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         },
         generated,
         pursuit_enabled,
-        pursuits,
+        pursuit_recent,
+        pursuit_unsatisfied,
         last_day,
         last_day_failures,
         sweep_history,
@@ -6657,6 +6668,159 @@ mod tests {
             !page.contains("Knowledge gaps"),
             "a covered gap must leave the page: {page}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_answered_something_says_so_on_its_row() {
+        // Coverage is closed silently — nothing asked the operator to confirm
+        // it — so the queue row is the only place it is said.
+        let mut c = crate::core::test_support::test_core().await;
+        c.feedback.enabled = true;
+        let core = c.clone();
+        let (app, cookie) = app_with_cookie(c).await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "mounting an E01".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let gap = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "how do I mount an E01".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; crate::core::test_support::TEST_DIM],
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store
+            .judge(&gap, crate::store::feedback::Verdict::Gap)
+            .await
+            .unwrap();
+        core.store
+            .cover_gap(crate::store::gaps::GapKind::Search, &gap, &src.id, &a, 0.71)
+            .await
+            .unwrap();
+
+        // The queue is its own fragment: the capture page fetches it on load.
+        let queue = get_body(&app, &cookie, "/ui/queue").await;
+        assert!(
+            queue.contains("how do I mount an E01"),
+            "the row does not say what this capture answered: {queue}"
+        );
+        // And the gap itself is gone from the list it was on.
+        let page = get_body(&app, &cookie, "/ui/capture").await;
+        assert!(
+            !page.contains(&format!("gap-search-{gap}")),
+            "a covered gap is still open: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_kind_of_gap_says_which_kind_it_is() {
+        // Four ways of saying the base did not answer, on one list. They are
+        // not the same claim, and an operator reading the list can tell them
+        // apart.
+        let mut c = crate::core::test_support::test_core().await;
+        c.feedback.enabled = true;
+        // The fake embedder's vectors are not a semantic space, so the shipped
+        // threshold would call everything weak. A line above what the
+        // candidate below scores and below nothing else.
+        c.weak_below = 0.5;
+        let core = c.clone();
+        let (app, cookie) = app_with_cookie(c).await;
+        // Judged a gap.
+        let judged = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "judged one".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; crate::core::test_support::TEST_DIM],
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store
+            .judge(&judged, crate::store::feedback::Verdict::Gap)
+            .await
+            .unwrap();
+        // Nothing came close.
+        core.store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "nothing near one".into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; crate::core::test_support::TEST_DIM],
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: "a-1".into(),
+                        score: 0.01,
+                        similarity: Some(0.01),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        // A run of searches that ended unanswered.
+        let p = core
+            .store
+            .insert_pursuit(
+                1,
+                &["pursued one".into()],
+                &[],
+                Some((
+                    &[1.0; crate::core::test_support::TEST_DIM],
+                    core.embedder.model(),
+                )),
+            )
+            .await
+            .unwrap();
+        core.store
+            .close_pursuit(&p, "unsatisfied", "nothing strong was engaged", 2)
+            .await
+            .unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/capture").await;
+        for badge in ["judged", "nothing near", "pursued"] {
+            assert!(
+                html.contains(badge),
+                "no `{badge}` badge on the list: {html}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,8 +1,14 @@
 {# The holes, where capturing happens. A group is a name over the questions
    in it; a question not yet grouped is shown under itself until the sweep
-   runs. "covered" is the operator's word, never the system's. #}
+   runs. "covered" is the operator's word, never the system's.
+
+   Four ways of saying the base did not answer, on one list: a search judged a
+   gap, a question answered "nothing here", a search nothing came close to, and
+   a run of searches that ended unsatisfied. The badge says which, because they
+   are not the same claim and an operator reading the list can tell them
+   apart. #}
 {% if !gaps.is_empty() || !loose.is_empty() %}
-<h3>Knowledge gaps</h3>
+<h3 id="gaps">Knowledge gaps</h3>
 <div class="gaps">
   {% for g in gaps %}
   <details class="gap">
@@ -11,6 +17,7 @@
       {% for m in g.members %}
       <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
         <span>{{ m.text }}</span>
+        <span class="badge">{{ m.badge }}</span>
         {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
         <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
                 hx-target="closest li" hx-swap="outerHTML">covered</button>
@@ -26,6 +33,7 @@
       {% for m in loose %}
       <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
         <span>{{ m.text }}</span>
+        <span class="badge">{{ m.badge }}</span>
         {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
         <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
                 hx-target="closest li" hx-swap="outerHTML">covered</button>

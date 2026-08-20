@@ -151,25 +151,19 @@
 
 {% if pursuit_enabled %}
 <h3>Pursuits</h3>
-{% if pursuits.is_empty() %}
+{# No table here any more. A pursuit that ended unsatisfied is a hole in the
+   base, and holes have one list — on the capture page, where capturing
+   happens, beside the searches and questions that said the same thing another
+   way. One that ended satisfied needs nobody, and one that was written up is
+   under Generated above. #}
+{% if pursuit_recent == 0 %}
 <p class="muted">No run of searches has gone quiet yet.</p>
 {% else %}
-<table class="grid">
-  <thead><tr><th>When</th><th>Asked</th><th>Outcome</th></tr></thead>
-  <tbody>
-  {% for p in pursuits %}
-    <tr>
-      <td>{{ p.when }}</td>
-      <td>{% for q in p.queries %}<div>{{ q }}</div>{% endfor %}</td>
-      <td>
-        {{ p.state }}
-        {% if let Some(a) = p.artifact_id %} · <a href="/ui/artifacts/{{ a }}">the artifact</a>{% endif %}
-        {% if !p.reason.is_empty() %}<div class="muted row-sub">{{ p.reason }}</div>{% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<p class="muted">
+  {{ pursuit_recent }} recent{% if pursuit_unsatisfied > 0 %},
+  of which {{ pursuit_unsatisfied }} went unanswered and
+  <a href="/ui/capture#gaps">are on the gap list</a>{% endif %}.
+</p>
 {% endif %}
 {% endif %}
 

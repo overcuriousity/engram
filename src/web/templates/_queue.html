@@ -52,6 +52,15 @@
       {% endif %}
       <span class="qtime">{{ r.created }}</span>
     </span>
+    {# What this capture did beyond being stored. Closed silently — nothing
+       asked the operator to confirm it — so this is the only place it is
+       said, and it says nothing at all on the captures that answered
+       nothing, which is nearly all of them. #}
+    {% if !r.covered.is_empty() %}
+    <div class="qmeta muted">
+      answers {% for q in r.covered %}&ldquo;{{ q }}&rdquo;{% if !loop.last %}, {% endif %}{% endfor %}
+    </div>
+    {% endif %}
   </div>
   {% endfor %}
   {% if rows.is_empty() %}<p class="muted">Nothing captured yet.</p>{% endif %}
