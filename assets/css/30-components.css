@@ -196,9 +196,15 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   background: linear-gradient(to bottom, transparent, var(--color-bg-elevated));
 }
 
-.codewrap { position: relative; }
+/* Room above the block for the button, rather than the button on top of the
+   block. A fenced code sample is short and its first line usually is too, so
+   sitting over its top-right corner cost nothing — but a passage kept as the
+   document wrote it is one `<pre>` from end to end, and there the button
+   landed squarely on the first sentence of the artifact. Reserved space
+   overlaps nothing, whichever of the two it is. */
+.codewrap { position: relative; padding-top: 1.6rem; }
 .copy {
-  position: absolute; top: 6px; right: 6px;
+  position: absolute; top: 0; right: 0;
   font-family: var(--font-mono); font-size: 0.6875rem; cursor: pointer;
   padding: 3px 7px; border-radius: var(--radius-sm);
   background: var(--color-bg-elevated); color: var(--color-fg-secondary);

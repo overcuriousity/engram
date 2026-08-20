@@ -3543,6 +3543,19 @@ mod tests {
     }
 
     #[test]
+    fn the_copy_control_does_not_sit_on_top_of_the_passage() {
+        // A fenced code sample is short and the button over its top-right
+        // corner cost nothing. A passage kept as the document wrote it is one
+        // `<pre>` from end to end, and there the button landed on the first
+        // sentence of the artifact — at both widths.
+        let css = include_str!("../../assets/css/30-components.css");
+        assert!(
+            css.contains(".codewrap { position: relative; padding-top:"),
+            "no room is reserved for the copy control"
+        );
+    }
+
+    #[test]
     fn the_judges_own_answers_stay_with_the_question() {
         // The three ways out sat below every candidate — twenty at
         // `feedback.candidates`' default — so answering "None of these" meant

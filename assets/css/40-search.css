@@ -252,6 +252,16 @@ body { overflow-x: hidden; }
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--color-border-subtle);
 }
+
+/* The name of what is being read stays while it is read. The pane scrolls a
+   long artifact past its own heading, and three screens down there was
+   nothing on the page saying which artifact this was. Its own background, or
+   the text scrolls through it. */
+.pane .card-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--color-bg-elevated);
+  padding-top: 0.25rem;
+}
 .actions > form + form:last-of-type { margin-left: auto; }
 
 /* The open card keeps one line of itself. The pane beside it holds the text in

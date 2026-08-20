@@ -156,9 +156,13 @@ which regions each page claims.
   (`_judge_card.html:78-89`) sit below twenty-three candidate cards. They
   become a sticky footer.
 - **The artifact pane**: the title becomes sticky, `copy` moves out of the text
-  flow it currently overlaps, `Delete` separates from `Verified`/`Hide`, and a
-  segment cut mid-sentence links to its continuation — the source pane beside
-  it already shows the rest.
+  flow it currently overlaps, and a segment cut mid-sentence links to its
+  continuation — the source pane beside it already shows the rest. `Delete` was
+  a finding here too and is withdrawn: it already carries `btn-icon-danger`, a
+  confirmation naming the undoable alternative, and
+  `.actions > form + form:last-of-type { margin-left: auto }`
+  (`40-search.css:255`), which is what sets it apart from `Verified` and
+  `Hide`.
 - **Ops** already uses `regions-table`. Judge and Settings are left at their
   reading measure — see the tension below.
 
