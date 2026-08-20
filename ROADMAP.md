@@ -57,6 +57,15 @@ a layer crossing without a measured retrieval gain does not go in. The harness
 is the only figure comparable across months; a default that changes ranking
 moves only after it has been run.
 
+Most of what is left is not a mechanism but a seam. The mechanisms are mostly
+built and mostly work alone: six background tickers on six intervals with no
+order between them (`src/core/background.rs`), four front doors with nothing
+carried between them, and four separate ways of saying *the base did not
+answer*, each ending somewhere else. The list is grouped by subject, as it
+always was, but read end to end it is one project — and roughly in the order it
+would be built, because a seam that only joins two surfaces ships when it is
+written, while a seam that moves ranking waits for the harness.
+
 ## [Associative Memory]
 
 Spec: `docs/superpowers/specs/2026-08-16-associative-memory-design.md` — built:
@@ -68,15 +77,38 @@ in config. The items below are the mechanisms that come after it, in order.
 - **Sleep as an explicit cycle.** The background work already exists — link
   replay, activation decay, pruning, relate/dedupe, retention. It becomes phases
   of one scheduled cycle with one Ops report: last sleep, what changed. Framing
-  over what exists, and the home every later mechanism slots into.
+  over what exists, and the home every later mechanism slots into. The part
+  that is more than framing is the order — replay, then decay, then prune, then
+  promote, then consolidate. Today each of those is its own ticker with its own
+  interval and its own gate (`spawn_consolidation_ticker` and its five
+  siblings), so the sequence any given night runs in is whichever one fired
+  first, and promotion routinely reads an activation the decay pass has not
+  reached yet.
 - **Working memory.** Within a session, what you just opened primes its
   neighbours and links for the next query. Session-scoped, expires with it,
-  never written to activation.
+  never written to activation. The sitting this needs already exists — but only
+  afterwards, reconstructed from idle gaps in the search log by the pursuit
+  sweep (`jobs/pursuit.rs`), which is to say the base can name what you were
+  working on last week and not what you are working on now. Making it live is
+  also what joins the doors: the query carries from search into ask, the answer
+  into capture, and a sitting can say what it has touched.
+  `Core::record_interaction` already writes the events and nothing reads them
+  until the sweep.
+- **Every door counts as engagement.** Retrieval is recorded at every door —
+  `core.search` bumps activation whether the query came from the rail, the API
+  or `/mcp`. Engagement is not: `mark_artifact_seen` and `record_interaction`
+  have exactly one production caller between them, the dwell route at
+  `src/web/ui.rs:2909`. So an artifact a Claude Code session read all afternoon
+  is never opened, never promoted and never part of a pursuit, and the base's
+  picture of what is used is a picture of the web UI only. A sitting is a
+  sitting whichever door it came through.
 - **Access reconsolidation.** A judged hit says "for this query, that artifact".
   The query becomes an additional access cue for the artifact — a second
   vector or a stored cue list — so the next similar situation finds it
-  directly. Text untouched; changes what vectors are built from, so it waits
-  for the harness to say it helps.
+  directly. Ask verdicts are the second source and the better one: a carried
+  excerpt says the same thing about a question a person asked in earnest. Text
+  untouched; changes what vectors are built from, so it waits for the harness
+  to say it helps.
 - **Error-driven re-synthesis.** An artifact shown often and never confirmed,
   or judged noise, is misleading — a title that over-claims, a passage that
   lost its context. It is re-synthesised **from its source segment**, never from
@@ -136,6 +168,24 @@ configured. A search's own fused scores are smooth enough that a cliff may
 rarely form without one — the rail has always lived with that, and ask now
 inherits it. Both are harness questions, not design ones.
 
+What ask learns about retrieval it still mostly keeps. Three edges are missing,
+and none of them costs a call:
+
+- **Co-citation is a stronger link than co-display.** `associate` learns its
+  Hebbian links by replaying the search log: two artifacts shown in one result
+  list are drawn together. Two artifacts the model *cited in one answer* were
+  used together, which is the same claim with the noise taken out. The
+  citations are already stored with the ask.
+- **A citation is an engagement.** It bumps nothing. This is the same hole the
+  pursuit sweep's promotion call papers over under **Core Platform** below,
+  seen from the other end — and giving the citation its own bump is the fix
+  that entry names, which retires the sweep's call as a side effect.
+- **The plan's uncovered subjects are gap candidates.** When `[infer.ask] plan`
+  names the subjects the excerpts miss, it has said out loud what the base does
+  not hold, one bounded round per question, in the model's own words. Today
+  each becomes a search and is then thrown away. A subject whose fan-out search
+  came back with nothing is a knowledge gap that cost nothing to find.
+
 <!-- CUT: situation vectors — at ingest, the model writing the three to five
      situations an artifact answers, each embedded as an extra named vector, so
      a typed situation matches a question rather than a passage. Cut on the
@@ -182,14 +232,65 @@ own.
   result list.
 - **Reranking on by default**, once there is a default endpoint worth assuming.
   A cross-encoder, not a model call; the harness — both of them — decides.
+- **Why this hit is where it is, as one object.** A rank is now the product of
+  hybrid fusion, the recency stage, the pinned boost, the reranker,
+  `cap_per_corpus`, `prime`, the cliff and the one-hop reach — eight stages
+  layered in the order they were built, each saying what it did in its own way
+  or not at all. The rail badges some of it, MCP's meta line badges a different
+  some of it, the API a third. One explanation carried on the hit — lifted two
+  places on activation, recalled through this link, past the cliff — is what
+  lets all three doors say the same thing, and it is the only honest way to
+  keep adding stages to a ranking the operator is asked to trust.
 
 <!-- CUT: late-interaction reranking (ColBERT-style multivectors). A vector per
      token per artifact wrecks storage and memory in Qdrant and adds a model
      dependency, to beat a baseline that atomic, LLM-synthesised artifacts and
      hybrid search already make strong. -->
 
+## [What the base says about itself]
+
+The opening of this file says nothing here is a screen to look at, and that
+holds for the mechanisms. It does not hold for their results. Three things the
+base already knows are currently spread across four pages in four vocabularies,
+and a mechanism the operator cannot see the effect of is one they cannot decide
+to trust.
+
+- **One queue for "the base did not answer".** There are four ways to say it
+  today and each ends somewhere else: a search judged `gap` becomes a knowledge
+  gap, an ask verdict of *nothing here* becomes a knowledge gap by a second
+  path, a quiet run of engaged searches becomes a pursuit on Ops, and a search
+  abandoned with nothing opened — the most telling of all, and the reason the
+  feedback log records it — becomes nothing at all. They are one statement
+  about one hole. One queue, closable three ways: by a paste, by a pursuit that
+  earned itself, or by dismissal. And the capture page saying *this closes two
+  open gaps* is the loop shutting where the operator can see it, which is the
+  part the app currently does all the work for and never shows.
+- **Ops as the state of the memory, not the housekeeping table.** It lists
+  merges, deprecations, hidden near-duplicates, retries. What it does not say
+  is what the memory is *like*: how much is held and how densely, what is
+  activated and what is fading, recall@10 and MRR over months rather than as
+  today's number on the judge page, when it last slept and what changed. Four
+  figures in four places, and the one page named for the answer has none of
+  them.
+- **Where an artifact came from, end to end.** Corpus lines, passage, the
+  window whose reading earned a synthesis, the merge, the pursuit, the answer
+  it was cited in. `store/lineage.rs` and `web/lineage_view.rs` hold the middle
+  of this. The thesis of the whole application is that rewriting is *earned* —
+  and an artifact cannot currently tell the operator what earned it, or what it
+  has ever answered. Last of the three, and the one that makes the other two
+  worth reading.
+
 ## [Core Platform & Tooling]
 
+- **One dial instead of eight gates.** `feedback.enabled`, `[associate]`,
+  `[activation]`, `[pursuit]`, `[promote]` and `[consolidate]` are separate
+  switches over one faculty, and they depend on each other in ways only the
+  config comments admit: a pursuit needs feedback, promotion reads an
+  activation that only moves while searches are recorded, priming exists only
+  to be fed by activation. An operator who switches one off silently switches
+  off two more. A named mode — off, learning, full — setting a coherent bundle,
+  with the individual keys still there for whoever wants them, is an afternoon,
+  and it is what makes the rest of this list configurable at all.
 - **A CLI.** PDF capture is built: `docling` reads an uploaded PDF into markdown
   in `Stage::Extract`, locally and without a model, and the corpus is text like
   any other from there. Spans into it are line spans labelled `extraction`, not
