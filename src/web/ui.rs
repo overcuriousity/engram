@@ -356,6 +356,21 @@ pub fn fmt_duration(secs: i64) -> String {
     }
 }
 
+/// How long something took, past tense.
+///
+/// `fmt_duration` above answers a different question — when does this run next
+/// — and says "now" for zero and "in 5m" for three hundred. Housekeeping spent
+/// it on the TOOK column, so every sweep in the history claimed to have taken
+/// "now", and a sweep that genuinely ran for five minutes would have claimed
+/// to be about to happen.
+pub fn fmt_elapsed(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
+        s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
 /// Unix seconds as an ISO-ish UTC stamp, computed directly so the project does
 /// not pull in a date library for one display string.
 pub fn fmt_time(ts: i64) -> String {
@@ -2467,7 +2482,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
                         .unwrap_or_else(|| "it failed".into()),
                     false => String::new(),
                 },
-                took: fmt_duration((r.ended_at - r.started_at).max(0)),
+                took: fmt_elapsed(r.ended_at - r.started_at),
                 stage: r.stage,
                 counts: counts
                     .into_iter()
@@ -3583,6 +3598,21 @@ mod tests {
             verdict_bar: String::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_sweep_that_took_no_time_does_not_say_it_happens_now() {
+        // Every row of Housekeeping's TOOK column read "now", because the
+        // column spends `fmt_duration` — which answers when something runs
+        // next, not how long it took.
+        assert_eq!(fmt_elapsed(0), "0s");
+        assert_eq!(fmt_elapsed(3), "3s");
+        assert_eq!(fmt_elapsed(75), "1m 15s");
+        assert_eq!(fmt_elapsed(3600), "1h 0m");
+        assert_eq!(fmt_elapsed(-5), "0s", "a clock that went backwards");
+        // And the future-tense helper keeps its own meaning.
+        assert_eq!(fmt_duration(0), "now");
+        assert_eq!(fmt_duration(300), "in 5m");
     }
 
     #[test]
