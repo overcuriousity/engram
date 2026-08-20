@@ -44,3 +44,12 @@
    result carries, because it means the same thing — this is the row the page is
    pointing at. */
 .rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+
+/* Bounded once it is open: the reasoning runs to several times the length of
+   the answer it precedes, and an unbounded box pushes that answer off screen
+   for as long as the model is thinking. */
+.reasoning-box { margin-bottom: 0.75rem; }
+.reasoning-box > summary {
+  cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted);
+}
+.reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }

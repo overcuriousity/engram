@@ -195,6 +195,9 @@
     if (!form) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
+    // The disclosure around it: what is shown or hidden is the box, while the
+    // text still streams into the div inside it.
+    var reasoningBox = document.getElementById('ask-reasoning-box');
     var progress = document.getElementById('ask-progress');
     var rail = document.getElementById('ask-rail');
     var result = document.getElementById('ask-result');
@@ -225,7 +228,7 @@
       box.textContent = message;
       result.appendChild(box);
       live.hidden = true;
-      reasoning.hidden = true;
+      reasoningBox.hidden = true;
       progress.hidden = true;
     }
 
@@ -284,8 +287,11 @@
       });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;
-        reasoning.hidden = false;
+        reasoningBox.hidden = false;
         reasoning.appendChild(document.createTextNode(JSON.parse(e.data).text));
+        // Only while it is open. A closed box has no scroll position to keep,
+        // and asking for one fights the page for the reader's.
+        if (reasoningBox.open) reasoning.scrollTop = reasoning.scrollHeight;
       });
       source.addEventListener('token', function (e) {
         if (!current()) return;
@@ -306,7 +312,7 @@
         // the rendered answer. Hidden rather than emptied, so the next ask
         // reuses them.
         live.hidden = true;
-        reasoning.hidden = true;
+        reasoningBox.hidden = true;
         // `progress` deliberately stays: what the retrieval went looking for
         // still describes the rail underneath the answer, and it is the only
         // place on the page that says a fan-out happened at all.
@@ -347,7 +353,8 @@
       rail.textContent = '';
       result.textContent = '';
       live.hidden = true;
-      reasoning.hidden = true;
+      reasoningBox.hidden = true;
+      reasoningBox.open = false;
       form.classList.add('asking');
 
       fetch('/ui/ask', {

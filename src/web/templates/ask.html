@@ -37,9 +37,19 @@
    this column would put the finished answer on a grid row below the excerpts
    rather than beside them. #}
 <div class="region-focus">
-  {# What the model said on the way to the answer, kept dim and out of the way:
-     it is not the answer, and nothing in it is cited. #}
-  <div id="ask-reasoning" class="reasoning" hidden></div>
+  {# What the model said on the way to the answer. Behind a disclosure and
+     closed, rather than dim and out of the way: it is not the answer, nothing
+     in it is cited, and what it actually contains is the prompt's own
+     constraints restated back at whoever is reading — "Answer *only* using the
+     provided knowledge-base excerpts", for fifty seconds, above an empty
+     space where the answer will be. Kept rather than dropped because it is
+     what a tuning session wants to see; closed because nobody else asked for
+     it. The id stays on the inner element, so the stream appends where it
+     always did. #}
+  <details id="ask-reasoning-box" class="reasoning-box" hidden>
+    <summary>Reasoning</summary>
+    <div id="ask-reasoning" class="reasoning"></div>
+  </details>
   {# The answer as it is being written, in plain text; the markdown is rendered
      by the server and swapped in whole at the end. `aria-live="polite"` so a
      reader who cannot see it knows the answer is arriving — the announcement is

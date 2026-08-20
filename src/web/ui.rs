@@ -3518,6 +3518,31 @@ mod tests {
         }
     }
 
+    fn ask_page_fixture() -> String {
+        askama::Template::render(&AskTemplate {
+            judge_pending: None,
+            ask_enabled: true,
+            q: String::new(),
+            sitting: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_ask_page_does_not_open_with_the_models_reasoning_showing() {
+        // The deployment streamed the chain of thought into the page for fifty
+        // seconds, restating the prompt's own constraints verbatim — "Answer
+        // *only* using the provided knowledge-base excerpts" — above the empty
+        // space where the answer was going to be.
+        let html = ask_page_fixture();
+        assert!(html.contains("ask-reasoning-box"), "{html}");
+        assert!(
+            !html.contains("<details open")
+                && !html.contains("<details id=\"ask-reasoning-box\" open"),
+            "reasoning must start closed: {html}"
+        );
+    }
+
     #[test]
     fn a_pair_card_carries_both_texts_to_read_in_place() {
         // The titles were links, so reading either side meant leaving the
