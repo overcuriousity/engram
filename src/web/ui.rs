@@ -1384,7 +1384,19 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
 
 async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
-    for s in st.core.store.list_corpora(10, 0).await? {
+    let corpora = st.core.store.list_corpora(10, 0).await?;
+    // Asked once for the page rather than once per row: this fragment is polled
+    // while anything is in flight, and the coverage read is a three-way join.
+    // Failure is the empty map for the reason a missing capture is: the line is
+    // what a capture did beyond being stored, and a page that cannot say so
+    // says nothing rather than failing to render the queue.
+    let covered = st
+        .core
+        .store
+        .gaps_covered_by_each(&corpora.iter().map(|c| c.id.clone()).collect::<Vec<_>>())
+        .await
+        .unwrap_or_default();
+    for s in corpora {
         let (resolved, total) = st.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
         // Terminal states: nothing else will happen without someone asking.
@@ -1432,15 +1444,10 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             status: s.status.as_str().to_string(),
             artifact_count: st.core.store.count_artifacts_for_corpus(&s.id).await?,
             created: fmt_time(s.created_at),
-            covered: st
-                .core
-                .store
-                .gaps_covered_by(&s.id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|g| g.text)
-                .collect(),
+            covered: covered
+                .get(&s.id)
+                .map(|gs| gs.iter().map(|g| g.text.clone()).collect())
+                .unwrap_or_default(),
             id: s.id,
         });
     }

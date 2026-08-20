@@ -177,8 +177,15 @@ macro_rules! search_gaps_sql {
 /// is not one: "nothing came close" is a claim about what was measured, and
 /// nothing was.
 ///
-/// A search already judged `gap` is left out, or it would be two gaps: the same
-/// row, said twice, in two different words.
+/// A search that has been judged at all is left out. `gap` for the obvious
+/// reason — it would be two gaps, the same row said twice in two different
+/// words — but `discard` and `hit` equally, and those are the ones worth
+/// naming. `discard` is the operator saying this was never a search: a typo, or
+/// poking at the box. A typo's candidates are exactly what scores below
+/// `weak_below`, so a rule that only skipped `gap` would take every dismissed
+/// typo and put it back on the capture page as a hole in the base. And a `hit`
+/// whose candidates all scored weakly is a search someone answered; the
+/// scores say the ranking was poor, not that the knowledge is missing.
 ///
 /// The guard this needs already exists. A typing burst folds into one event by
 /// `feedback.coalesce_secs`, so what is measured is the finished query and not
@@ -190,7 +197,7 @@ macro_rules! unmatched_gaps_sql {
             $cols,
             " FROM search_events e
               WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
-                AND (e.verdict IS NULL OR e.verdict <> 'gap')
+                AND e.verdict IS NULL
                 AND NOT EXISTS (SELECT 1 FROM gap_coverage
                                  WHERE kind = 'unmatched' AND gap_id = e.id)
                 AND (SELECT MAX(c.similarity) FROM search_candidates c
@@ -480,21 +487,51 @@ impl Store {
     /// The gaps this capture answered, newest first: what the capture page says
     /// it did beyond being stored.
     pub async fn gaps_covered_by(&self, corpus_id: &str) -> Result<Vec<Gap>> {
-        let mut out = Vec::new();
-        for r in sqlx::query(
-            "SELECT c.kind, c.gap_id,
+        let one = [corpus_id.to_string()];
+        Ok(self
+            .gaps_covered_by_each(&one)
+            .await?
+            .remove(corpus_id)
+            .unwrap_or_default())
+    }
+
+    /// The same, for a list of captures at once.
+    ///
+    /// One statement rather than one per capture. The queue fragment renders a
+    /// page of rows and the capture page polls it while anything is in flight,
+    /// so asking per row makes a three-way `LEFT JOIN` into a round of them on
+    /// a hot path — for an answer the same join gives in a single pass.
+    ///
+    /// Captures with nothing covered are absent from the map rather than
+    /// present and empty, which is the same thing to every caller: they ask for
+    /// a list and take `unwrap_or_default`.
+    pub async fn gaps_covered_by_each(
+        &self,
+        corpus_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<Gap>>> {
+        let mut out: std::collections::HashMap<String, Vec<Gap>> = std::collections::HashMap::new();
+        if corpus_ids.is_empty() {
+            return Ok(out);
+        }
+        // The ids are bound, never spliced; what is spliced is a count of
+        // placeholders.
+        let holes = vec!["?"; corpus_ids.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT c.corpus_id, c.kind, c.gap_id,
                     COALESCE(a.question, s.query, p.queries) AS text
                FROM gap_coverage c
                LEFT JOIN ask_events a    ON c.kind = 'ask'    AND a.id = c.gap_id
                LEFT JOIN search_events s ON c.kind IN ('search', 'unmatched') AND s.id = c.gap_id
                LEFT JOIN pursuits p      ON c.kind = 'pursuit' AND p.id = c.gap_id
-              WHERE c.corpus_id = ?
-              ORDER BY c.covered_at DESC",
-        )
-        .bind(corpus_id)
-        .fetch_all(&self.pool)
-        .await?
-        {
+              WHERE c.corpus_id IN ({holes})
+              ORDER BY c.covered_at DESC"
+        )));
+        for id in corpus_ids {
+            q = q.bind(id);
+        }
+        // One descending order over the whole set is still newest-first inside
+        // each capture, because a filter never reorders what it keeps.
+        for r in q.fetch_all(&self.pool).await? {
             let Some(kind) = GapKind::parse(&r.get::<String, _>("kind")) else {
                 continue;
             };
@@ -503,14 +540,16 @@ impl Store {
             // pursuit purged. The coverage row outlives it and says nothing
             // useful without it, so it is skipped rather than rendered blank.
             let Some(text) = text else { continue };
-            out.push(Gap {
-                kind,
-                id: r.get("gap_id"),
-                text: match kind {
-                    GapKind::Pursuit => pursuit_text(&text),
-                    _ => text,
-                },
-            });
+            out.entry(r.get::<String, _>("corpus_id"))
+                .or_default()
+                .push(Gap {
+                    kind,
+                    id: r.get("gap_id"),
+                    text: match kind {
+                        GapKind::Pursuit => pursuit_text(&text),
+                        _ => text,
+                    },
+                });
         }
         Ok(out)
     }
@@ -812,6 +851,109 @@ mod tests {
             .map(|g| g.gap.kind)
             .collect();
         assert_eq!(mine, vec![GapKind::Search]);
+    }
+
+    #[tokio::test]
+    async fn a_search_the_operator_settled_is_not_an_unmatched_one() {
+        // `discard` is the operator saying this was never a search — a typo, or
+        // poking at the box. A typo's candidates are exactly what scores below
+        // the line, so a rule that only skipped `gap` would take every judgement
+        // of "this was nothing" and put it straight back on the capture page as
+        // a hole in the base. A `hit` whose candidates all scored weakly is the
+        // other half of the same mistake: the ranking was poor, the knowledge
+        // was there.
+        let store = Store::memory().await.unwrap();
+        let typo = search_with(&store, "mont an E01", &[0.10]).await;
+        store.judge(&typo, Verdict::Discard).await.unwrap();
+        let weak_hit = search_with(&store, "grep a pcap", &[0.12]).await;
+        store.judge(&weak_hit, Verdict::Hit).await.unwrap();
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+
+        assert!(
+            gaps.iter().all(|g| g.gap.kind != GapKind::Unmatched),
+            "a judged search is settled, whatever the judgement was: {:?}",
+            gaps.iter().map(|g| &g.gap.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gaps_a_page_of_captures_answered_come_back_grouped() {
+        // The queue fragment is polled while anything is in flight, and asking
+        // per row turns one three-way join into a round of them.
+        let store = Store::memory().await.unwrap();
+        // `gap_coverage` names both a capture and the artifact of it that
+        // answered, and both are foreign keys.
+        for (c, a) in [("corpus-a", "art-1"), ("corpus-b", "art-2")] {
+            sqlx::query(
+                "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
+                                      created_at, updated_at)
+                 VALUES (?, 'text', 'paste', ?, 'ready', 0, 0)",
+            )
+            .bind(c)
+            .bind(c)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
+                 VALUES (?, ?, 0, 'text', 0)",
+            )
+            .bind(a)
+            .bind(c)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        let one = search_with(&store, "mount an E01", &[0.10]).await;
+        let two = search_with(&store, "grep a pcap", &[0.10]).await;
+        store
+            .cover_gap(GapKind::Unmatched, &one, "corpus-a", "art-1", 0.8)
+            .await
+            .unwrap();
+        store
+            .cover_gap(GapKind::Unmatched, &two, "corpus-b", "art-2", 0.9)
+            .await
+            .unwrap();
+
+        let by_corpus = store
+            .gaps_covered_by_each(&[
+                "corpus-a".to_string(),
+                "corpus-b".to_string(),
+                "corpus-c".to_string(),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            by_corpus["corpus-a"]
+                .iter()
+                .map(|g| g.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mount an E01"]
+        );
+        assert_eq!(
+            by_corpus["corpus-b"]
+                .iter()
+                .map(|g| g.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grep a pcap"]
+        );
+        assert!(
+            !by_corpus.contains_key("corpus-c"),
+            "a capture that answered nothing is absent, not present and empty"
+        );
+        // And the single-capture reader is the same answer.
+        assert_eq!(
+            store
+                .gaps_covered_by("corpus-a")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|g| g.text)
+                .collect::<Vec<_>>(),
+            vec!["mount an E01".to_string()]
+        );
     }
 
     #[tokio::test]
