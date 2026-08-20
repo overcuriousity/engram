@@ -3676,6 +3676,28 @@ mod tests {
         .unwrap()
     }
 
+    fn settings_fixture(tokens: Vec<TokenRow>) -> String {
+        askama::Template::render(&SettingsTemplate {
+            judge_pending: None,
+            ask_enabled: true,
+            tokens,
+            feedback: None,
+            asks: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_token_table_with_no_tokens_says_so_instead_of_showing_its_headings() {
+        // Five column headings over nothing is a table pretending to have
+        // rows — the same thing `_decide.html` names at its top: the old Ops
+        // page answered five headings with "None." and made an empty base look
+        // like a backlog.
+        let html = settings_fixture(vec![]);
+        assert!(!html.contains("Minted by"), "{html}");
+        assert!(html.contains("No tokens yet"), "{html}");
+    }
+
     #[test]
     fn a_sweep_stage_reads_as_words_and_keeps_its_identifier() {
         // Housekeeping listed `arm_dedupe`, `link_judge` and `segment_window`

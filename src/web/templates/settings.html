@@ -23,6 +23,13 @@ reading, and search from a panel beside it.</p>
   <button class="btn btn-accent" type="submit">Mint</button>
 </form>
 
+{# Column headings over no rows is a table pretending to have some — the same
+   thing the decide list names at its top: five headings answered with "None."
+   made an empty base look like a backlog. #}
+{% if tokens.is_empty() %}
+<p class="muted">No tokens yet. Mint one to let Claude Code, Claude Desktop or
+  anything else on the API read and write this base without your session.</p>
+{% else %}
 <table class="grid">
   <thead><tr><th>Name</th><th>Minted by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
   <tbody>
@@ -55,6 +62,7 @@ reading, and search from a panel beside it.</p>
   {% endfor %}
   </tbody>
 </table>
+{% endif %}
 {% match feedback %}
 {% when Some with (f) %}
 <h3>Feedback</h3>
