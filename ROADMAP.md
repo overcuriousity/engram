@@ -214,6 +214,16 @@ own.
   out of the PDF and stored (attachments are one row per corpus today, and this
   is many), a span or anchor tying each to the place in the markdown it came
   from, and a renderer for it. Worth doing after the text itself is clean.
+- **The pursuit sweep's promotion call, which almost never has anything to do.**
+  A one-engaged-artifact pursuit calls `maybe_promote`, but every engagement
+  already calls it at the bump — `search::mark_artifact_seen` on an open,
+  `associate` on a confirmation — and the sweep only runs once the sitting has
+  been idle for `idle_secs`. It therefore re-checks the same artifact against a
+  *more* decayed activation than the live call saw, and can only ever decline
+  where that one declined. The one case it does cover: an artifact engaged
+  solely by an ask citation, which counts toward the pursuit but bumps no
+  activation. Either give a citation its own bump and drop the call, or leave
+  it as the cheap backstop it is.
 - **DOCX, EPUB, XLSX and the rest.** `docling` is in the tree and already reads
   them; only a door and a `kind` are missing. Deliberately out of PDF capture.
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored

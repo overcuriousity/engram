@@ -187,19 +187,36 @@ pub enum Decision {
     Generate,
 }
 
+/// The signals that say the need went unmet, whatever else happened: no strong
+/// hit was engaged, the question was rephrased and rephrased, the last search
+/// was walked away from, the model declined to answer.
+///
+/// Read twice — once here, once by the caller of a `Promote`, which has to say
+/// whether the need was met after finding out what the promotion did — and so
+/// it lives in one place rather than being spelled out in both.
+pub fn unsatisfied(n: &Need) -> bool {
+    !n.strong_engaged || n.refined >= 2 || n.abandoned || n.abstained
+}
+
 /// The analysis pass, in the spec's order. Pure: every input is in `Need`.
 pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
     if n.answered {
         return Decision::Satisfied("a synthesized artifact led the list".into());
     }
     let total: f64 = n.engagement.iter().map(|(_, w)| *w).sum();
-    let unsatisfied = !n.strong_engaged || n.refined >= 2 || n.abandoned || n.abstained;
+    let unsatisfied = unsatisfied(n);
     if n.engagement.len() < min_sources {
         if n.engagement.len() == 1 {
             return Decision::Promote(n.engagement[0].0.clone());
         }
         return if unsatisfied {
-            Decision::Unsatisfied("nothing engaged".into())
+            // Above the shipped `min_sources = 2` this is reachable with
+            // artifacts engaged, and "nothing engaged" would then be a lie.
+            Decision::Unsatisfied(if n.engagement.is_empty() {
+                "nothing engaged".into()
+            } else {
+                format!("{} engaged, below min_sources", n.engagement.len())
+            })
         } else {
             Decision::Satisfied("nothing to assemble".into())
         };
@@ -388,15 +405,27 @@ pub async fn run(core: &Core) -> Result<usize> {
                     .await?;
             }
             Decision::Promote(id) => {
-                core.store
-                    .close_pursuit(
-                        &pid,
+                // Promoted first, then closed: the reason is a statement about
+                // what happened, and every guard in `maybe_promote` can
+                // decline silently. A promotion case that armed nothing did
+                // nothing at all for this need, so it is only `satisfied` when
+                // nothing said otherwise — one open at the end of three
+                // rephrasings is not a need that was met.
+                let armed =
+                    crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&id), now)
+                        .await?;
+                let (state, why) = match (armed > 0, unsatisfied(&need)) {
+                    (true, _) => (
                         "satisfied",
-                        "one artifact engaged: a promotion case",
-                        now,
-                    )
-                    .await?;
-                crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&id), now).await?;
+                        "one artifact engaged: its window is being re-read",
+                    ),
+                    (false, false) => ("satisfied", "one artifact engaged and searching stopped"),
+                    (false, true) => (
+                        "unsatisfied",
+                        "one artifact engaged, not enough to write from",
+                    ),
+                };
+                core.store.close_pursuit(&pid, state, why, now).await?;
             }
             Decision::Generate => {
                 // Nothing to arm without a generator. `run_claimed` would drop
@@ -728,6 +757,19 @@ mod tests {
         n.strong_engaged = false;
         n.abandoned = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
+    }
+
+    #[test]
+    fn a_short_pursuit_says_how_much_was_engaged_not_that_nothing_was() {
+        // Only reachable above the shipped `min_sources = 2`, where two
+        // engaged artifacts are still too few to write from.
+        let mut n = need(&[("a", 1.0), ("b", 1.0)]);
+        n.abandoned = true;
+        let Decision::Unsatisfied(why) = decide(&n, 3, 3.0) else {
+            panic!("{:?}", decide(&n, 3, 3.0));
+        };
+        assert!(!why.contains("nothing engaged"), "{why}");
+        assert!(why.contains('2'), "{why}");
     }
 
     /// A core at earned with pursuits on, recording, and a tiny idle window.
@@ -1209,6 +1251,49 @@ mod tests {
             Some(crate::store::segments::SegmentState::Pending),
             "the window was not promoted"
         );
+        // And the row says what was done, not which branch was taken.
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "satisfied", "{p:?}");
+        assert!(
+            p.reason.as_deref().unwrap_or_default().contains("re-read"),
+            "{p:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_that_armed_nothing_after_refining_closes_unsatisfied() {
+        let core = pursuing_core().await;
+        let out = core
+            .ingest("a verbatim passage", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::passages::capture_verbatim(&core, &out.id)
+            .await
+            .unwrap();
+        let p = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let now = crate::store::now();
+        // No activation: the promotion check will decline, so nothing at all
+        // happens for this need — and three phrasings of one question with a
+        // single open at the end is the shape of a need that went unmet.
+        // Inside one sitting: further apart than `idle_secs` and these would
+        // be three pursuits, not one need asked three ways.
+        search_event(&core, "where is it stored", vec![1.0, 0.0], &[&p], now - 40).await;
+        search_event(&core, "where is it kept", vec![1.0, 0.0], &[&p], now - 36).await;
+        search_event(&core, "storage location", vec![1.0, 0.0], &[&p], now - 32).await;
+        core.store
+            .record_interaction(&p, "opened", None, Some("me"), now - 31)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Verbatim),
+            "nothing should have been promoted"
+        );
+        let row = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(row.state, "unsatisfied", "{row:?}");
     }
 
     #[tokio::test]
