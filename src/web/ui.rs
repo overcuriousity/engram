@@ -3480,7 +3480,11 @@ pub async fn not_found(State(st): State<AppState>, uri: axum::http::Uri) -> Resp
         ask_enabled: crate::web::state::ask_enabled(&st),
     };
     match askama::Template::render(&page) {
-        Ok(html) => (axum::http::StatusCode::NOT_FOUND, axum::response::Html(html)).into_response(),
+        Ok(html) => (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::response::Html(html),
+        )
+            .into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
@@ -3685,6 +3689,37 @@ mod tests {
             asks: None,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn the_ungrouped_gaps_say_what_being_ungrouped_means() {
+        // "not yet grouped (1)" over a question, with no indication that the
+        // grouping is a sweep that has not run rather than a state of the
+        // question itself.
+        // `_gaps.html` is only ever included, so it has no template struct of
+        // its own; this is one, standing in for the page that includes it.
+        #[derive(Template)]
+        #[template(path = "_gaps.html")]
+        struct Gaps {
+            gaps: Vec<GapGroup>,
+            loose: Vec<GapMember>,
+            ask_enabled: bool,
+        }
+        let html = askama::Template::render(&Gaps {
+            gaps: vec![],
+            loose: vec![GapMember {
+                kind: "ask".into(),
+                badge: "asked",
+                id: "g1".into(),
+                text: "wie werden bei chipkarten die private keys geschützt?".into(),
+            }],
+            ask_enabled: true,
+        })
+        .unwrap();
+        assert!(
+            html.contains("has not run yet"),
+            "nothing says why these are ungrouped: {html}"
+        );
     }
 
     #[test]

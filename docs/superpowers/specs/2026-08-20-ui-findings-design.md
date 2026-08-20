@@ -139,8 +139,9 @@ the card, with the differing values marked, makes the decision local.
 - A **Stop** control closes the `EventSource` and keeps what has arrived.
 - `{{ dropped }} excerpt(s) omitted for context budget` (`_answer.html:16`)
   becomes plain English, pluralised properly.
-- The verdict row (`_ask_verdict.html:14`) and "keep this answer" become
-  controls that look like controls.
+- The verdict row and "keep this answer" were a finding and are withdrawn:
+  both are already `btn btn-ghost btn-sm`. Ghost weight is subtle on purpose,
+  and it is used consistently for actions that are offered rather than urged.
 - **`.sitting` has no stylesheet.** `_sitting.html` renders `.sitting` and
   `.pane-label`; no rule for `.sitting` exists in any of the eleven CSS files.
   It needs one, and a heading that says what a sitting is.
@@ -184,8 +185,11 @@ which regions each page claims.
 - Unknown `/ui` paths get a real 404 instead of the browser's.
 - The API-tokens table renders bare headers with no rows; it gets an empty
   state.
-- Capture's gaps row styles `asked` (a state) exactly like `ask again` and
-  `covered` (actions).
+- Capture's "not yet grouped" says nothing about what grouping is. The rest of
+  that finding is withdrawn: `asked` already renders as `.badge` and the two
+  actions as `.btn`, so the state and the actions are distinct markup. That
+  they read alike is the ghost weight, which is the same deliberate choice as
+  in the verdict bar.
 - Markdown leaks into plain-text snippets — `custom\_passphrase`, `raw\_key`,
   `# Configure Linux…`, `**Was nicht abgedeckt ist:**`. Snippets get stripped.
 

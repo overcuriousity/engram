@@ -183,7 +183,10 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         let body = crate::web::test_support::body_of(res).await;
-        assert!(!body.contains("<html"), "an API 404 came back as a page: {body}");
+        assert!(
+            !body.contains("<html"),
+            "an API 404 came back as a page: {body}"
+        );
     }
 
     #[tokio::test]

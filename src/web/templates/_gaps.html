@@ -28,7 +28,11 @@
   {% endfor %}
   {% if !loose.is_empty() %}
   <details class="gap">
-    <summary>not yet grouped <span class="muted">({{ loose.len() }})</span></summary>
+    {# Grouping is a sweep, not a property of the question: these are the ones
+       asked since it last ran. Without saying so, "not yet grouped" reads as
+       something wrong with the question itself. #}
+    <summary>not yet grouped <span class="muted">({{ loose.len() }})</span>
+      <span class="muted"> — the sweep that groups them has not run yet</span></summary>
     <ul>
       {% for m in loose %}
       <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
