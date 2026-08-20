@@ -61,14 +61,14 @@ passage has no title by design, and `Untitled` is a word that says nothing
 while looking like it does. Four sites decide a stand-in title, and no two
 agree:
 
-- `web/ui.rs:1950` — `title_of`, `c.text.chars().take(60)`
+- `web/ui.rs:1957` — `title_of`, `c.text.chars().take(60)`
 - `web/judge.rs:179` and `:515` — `unwrap_or_else(|| "Untitled".into())`
-- `web/ui.rs:367` and `:3095` — `format!("Chunk {}", c.ordinal)`
+- `web/ui.rs:367` and `:3102` — `format!("Chunk {}", c.ordinal)`
 - `mcp/mod.rs:19` — `unwrap_or_else(|| "Untitled".into())`
 
 They collapse into one rule, which is the rail's rule made precise. The rail
 shows *no heading at all* and lets the snippet speak (`render_hit`,
-`ui.rs:1323`). That is right wherever a snippet sits beside the name, and
+`ui.rs:1324`). That is right wherever a snippet sits beside the name, and
 impossible where a name is structurally required — a button reading `Keep ""`
 decides nothing. So:
 
@@ -79,7 +79,7 @@ decides nothing. So:
   trimmed at a word boundary, stripped of leading punctuation, and marked as a
   stand-in rather than presented as a name.
 
-`title_of` is the center of this, and it is worth being concrete about what it
+`title_of` (now `ui.rs:1957`) is the center of this, and it is worth being concrete about what it
 does today. A hard cut at sixty characters produces
 `Die digitale Forensik unterscheidet sich zusätzlich darin vo` in the sitting —
 mid-word — and it is the same function that titles the dedupe cards, which is
@@ -91,10 +91,23 @@ fixes the sitting, the dedupe queue, and the judge together.
 **Truncation respects word boundaries**, and a stand-in drops leading
 punctuation before it is shown as a heading.
 
-**Colliding titles get a disambiguator.** Three distinct artifacts on the
-deployment carry the title `LevelDB: Funktionsweise und forensische Analyse`.
-When two rows of one list share a title, each says what distinguishes it.
-Without this, section 2's grouping still looks like a repeat.
+**Colliding titles get a disambiguator, and it has to be visible.** Two
+different lists have this problem and they need opposite work.
+
+Capture's "Recent" already has the repair: `disambiguate_labels`
+(`ui.rs:1368`) appends the capture's opening words to any label that is not
+unique, and its comment names the exact failure this review found — "six rows
+read `HOCHSCHULE MITTWEIDA` and named nothing". It ran on the deployment and
+the rows still read identically, because `.qtitle` is
+`white-space: nowrap; text-overflow: ellipsis` (`41-capture.css:15`): the
+suffix that distinguishes the row is cut off before it can be seen. The
+function is right; the row gives it nowhere to appear. The distinguishing part
+must survive the truncation.
+
+The dedupe queue has the opposite problem — three artifacts genuinely titled
+`LevelDB: Funktionsweise und forensische Analyse`, with no disambiguation at
+all. There the rule from `disambiguate_labels` is what is missing, and it
+should be shared rather than written a second time.
 
 ## 2. The consolidation queue
 

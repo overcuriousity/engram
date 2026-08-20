@@ -19,7 +19,7 @@
 - **Truncate by chars, never by bytes.** Slicing mid-codepoint panics; the corpus is largely German.
 - **Do not change:** the phone hiding KIND chips (`50-phone.css:108`), the phone badge dropping its number (`layout.html:130`), Judge's rank numbers stopping at nine (`judge.rs:190`), or Judge's IR vocabulary. All are deliberate and defended in comments.
 - **Comment style:** this codebase explains *why* in prose above the code, and expects it. Match it.
-- **Test fixtures:** several tasks call helpers like `render_ask_page_fixture()` or `chunk_fixture()`. Where one does not exist yet, build it in that task's test module following the pattern already in `ui.rs:4700` — construct the real struct with every field named, and render through `askama::Template::render`. Do not stub the type under test.
+- **Test fixtures:** several tasks call helpers like `render_ask_page_fixture()` or `chunk_fixture()`. Where one does not exist yet, build it in that task's test module following the pattern already in `ui.rs:4707` — construct the real struct with every field named, and render through `askama::Template::render`. Do not stub the type under test.
 
 ---
 
@@ -144,7 +144,7 @@ git commit -m "feat(ui): a name cut at a word, and never the punctuation in fron
 ### Task 2: `title_of` adopts the rule
 
 **Files:**
-- Modify: `src/web/ui.rs:1950` (`title_of`)
+- Modify: `src/web/ui.rs:1957` (`title_of`)
 - Test: `src/web/ui.rs` (inline `mod tests`)
 
 **Interfaces:**
@@ -185,7 +185,7 @@ Expected: FAIL — the assertion on `- schneller…`, because `title_of` returns
 
 - [ ] **Step 3: Implement**
 
-Replace `title_of` (`ui.rs:1950`):
+Replace `title_of` (`ui.rs:1957`):
 
 ```rust
 /// What to call an artifact in a place that must call it something.
@@ -289,7 +289,7 @@ git commit -m "fix(judge): no heading where there is no name, and no markup in t
 ### Task 4: The artifact pane stops saying "Chunk 56"
 
 **Files:**
-- Modify: `src/web/ui.rs:367`, `src/web/ui.rs:3095`
+- Modify: `src/web/ui.rs:367`, `src/web/ui.rs:3102`
 - Test: `src/web/ui.rs` (inline `mod tests`)
 
 **Interfaces:**
@@ -317,7 +317,7 @@ Expected: FAIL — title is `Chunk 56`.
 
 - [ ] **Step 3: Implement**
 
-At both `ui.rs:367` and `ui.rs:3095`, replace `.unwrap_or_else(|| format!("Chunk {}", c.ordinal))` with `.unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))`, with a comment saying why the ordinal is not a name.
+At both `ui.rs:367` and `ui.rs:3102`, replace `.unwrap_or_else(|| format!("Chunk {}", c.ordinal))` with `.unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))`, with a comment saying why the ordinal is not a name.
 
 - [ ] **Step 4: Run the tests**
 
@@ -376,83 +376,85 @@ git commit -m "fix(mcp): the door reads a passage's opening rather than the word
 
 ---
 
-### Task 6: Two rows with one name say what tells them apart
+### Task 6: The disambiguator that runs but cannot be seen
 
 **Files:**
-- Modify: `src/web/ui.rs` (the pair-row builder around `ui.rs:1895`)
+- Modify: `assets/css/41-capture.css:14-18` (`.qtitle`)
+- Modify: `src/web/ui.rs:1368` (`disambiguate_labels`, generalised)
+- Modify: `src/web/ui.rs` (pair rows, to reuse it)
 - Test: `src/web/ui.rs` (inline `mod tests`)
 
 **Interfaces:**
-- Produces: `PairRow.a_title` / `b_title` may carry a disambiguating suffix. Task 8 consumes the same rows.
+- Produces: `fn disambiguate_by<T>(rows: &mut [T], label: impl Fn(&T) -> &str, opening: impl Fn(&T) -> &str, set: impl Fn(&mut T, String))` — or, if the generic form fights the borrow checker, a `disambiguate_labels`-shaped function per row type sharing one helper for the collision set. Task 8 consumes the disambiguated pair rows.
 
-- [ ] **Step 1: Write the failing test**
+**Context you need before touching this.** Capture's Recent list already has a repair for shared titles: `disambiguate_labels` at `ui.rs:1368`, whose comment names this exact failure — "six rows read `HOCHSCHULE MITTWEIDA` and named nothing". It works. The reason the deployment still showed six identical rows is that `.qtitle` is one line with `text-overflow: ellipsis`, so the ` · opening` suffix it appends is cut off before it is ever visible. Do not rewrite the function; give its output somewhere to be seen. The dedupe pair rows are the opposite case — they have no disambiguation at all, and should borrow this one rather than grow a second copy.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
-    fn two_rows_sharing_a_title_say_what_tells_them_apart() {
-        // Three artifacts on the deployment carried the title "LevelDB:
-        // Funktionsweise und forensische Analyse", so the queue read as the
-        // same question asked three times.
-        let rows = disambiguate(vec![
-            ("a".to_string(), "LevelDB: Funktionsweise".to_string(), "Der Aufbau".to_string()),
-            ("b".to_string(), "LevelDB: Funktionsweise".to_string(), "Die Extraktion".to_string()),
-            ("c".to_string(), "SQLite und WAL".to_string(), "Pragma".to_string()),
+    fn a_disambiguated_row_shows_the_part_that_distinguishes_it() {
+        // `disambiguate_labels` appended the opening words and `.qtitle`
+        // truncated them away, so six rows still read "HOCHSCHULE MITTWEIDA ·
+        // HOCHSCH…" and the one column that exists to tell captures apart
+        // still could not.
+        let html = render_queue_fixture(vec![
+            ("HOCHSCHULE MITTWEIDA", "Fachbereich Angewandte Computer- und Biowissenschaften"),
+            ("HOCHSCHULE MITTWEIDA", "Ein Verfahren zur Sicherung flüchtiger Daten"),
         ]);
-        assert_ne!(rows[0].1, rows[1].1, "two rows still read identically");
-        assert!(rows[0].1.starts_with("LevelDB: Funktionsweise"));
-        assert_eq!(rows[2].1, "SQLite und WAL", "a unique title is left alone");
+        assert!(html.contains("qtitle-opening"), "the opening has no element of its own: {html}");
+    }
+
+    #[test]
+    fn pair_rows_sharing_a_title_are_disambiguated_too() {
+        // Three artifacts on the deployment were titled "LevelDB:
+        // Funktionsweise und forensische Analyse", so one cluster of
+        // questions read as the same question three times.
+        let mut rows = vec![
+            pair_row_fixture("LevelDB: Funktionsweise", "Der Aufbau der Datenlagerung"),
+            pair_row_fixture("LevelDB: Funktionsweise", "Die Extraktion der Keys"),
+            pair_row_fixture("SQLite und WAL", "Pragma-Abfragen"),
+        ];
+        disambiguate_pair_titles(&mut rows);
+        assert_ne!(rows[0].a_title, rows[1].a_title, "still identical");
+        assert_eq!(rows[2].a_title, "SQLite und WAL", "a unique title is left alone");
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test --lib web::ui::tests::two_rows_sharing_a_title`
-Expected: FAIL — `cannot find function disambiguate`.
+Run: `cargo test --lib web::ui::tests::a_disambiguated_row_shows web::ui::tests::pair_rows_sharing_a_title`
+Expected: FAIL — no `qtitle-opening` element, and `cannot find function disambiguate_pair_titles`.
 
 - [ ] **Step 3: Implement**
 
-```rust
-/// Make every title in one list distinguishable from the others.
-///
-/// Three artifacts named "LevelDB: Funktionsweise und forensische Analyse" is
-/// what made a queue of three different questions look like one question
-/// asked three times. A title that is already unique in its list is left
-/// exactly as it is: a suffix on a name that needs no suffix is noise.
-fn disambiguate(rows: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
-    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (_, title, _) in &rows {
-        *seen.entry(title.as_str()).or_default() += 1;
-    }
-    let shared: std::collections::HashSet<String> = seen
-        .iter()
-        .filter(|(_, n)| **n > 1)
-        .map(|(t, _)| (*t).to_string())
-        .collect();
-    rows.into_iter()
-        .map(|(id, title, body)| {
-            if !shared.contains(&title) {
-                return (id, title, body);
-            }
-            let mark = crate::web::markdown::stand_in_title(&body, 40);
-            let title = if mark.is_empty() { title } else { format!("{title} — {mark}") };
-            (id, title, body)
-        })
-        .collect()
+Two changes, and neither touches `disambiguate_labels`' logic.
+
+First, give the suffix a place to live. In the queue template, render the label and the opening as two elements rather than one concatenated string, and in `41-capture.css` let the opening sit on its own line, dim and smaller, exempt from the parent's `nowrap`:
+
+```css
+/* The label truncates; what tells this row from the one above it does not.
+   `disambiguate_labels` appends the capture's opening words to a label that
+   collides, and a single `nowrap` line cut the appended half off — so the
+   repair ran, and six rows still read the same six words. */
+.qtitle-opening {
+  display: block; white-space: normal; overflow: visible;
+  font-size: 0.8125rem; color: var(--color-fg-muted);
 }
 ```
 
-Call it where `PairRow`s are collected, passing each side's body text, before they reach the template.
+Second, apply the same collision rule to the dedupe pair titles. Factor the collision-set half of `disambiguate_labels` into a small shared helper and call it from a `disambiguate_pair_titles(&mut [PairRow])` that appends `markdown::stand_in_title(&body, 40)` to any `a_title`/`b_title` shared by another row. Keep the three exemptions the original documents: a label already unique, a row with no opening to offer, and an opening equal to the label.
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 4: Run the tests, then look at the page**
 
 Run: `cargo test --lib web::ui`
-Expected: PASS.
+Expected: PASS. Then load `/ui/capture` against a base with repeated headings and confirm Recent's rows are now distinguishable without hovering.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/web/ui.rs
-git commit -m "feat(ui): a name shared by three artifacts says which one it is"
+git add src/web/ui.rs assets/css/41-capture.css src/web/templates
+git commit -m "fix(capture): the half of the label that tells two rows apart survives the truncation"
 ```
 
 ---
@@ -514,12 +516,12 @@ git commit -m "fix(dedupe): an escalated pair says what it is escalating"
 ### Task 8: One cluster is one question
 
 **Files:**
-- Modify: `src/web/ui.rs` (pair collection, near `PAIR_LIMIT` at `ui.rs:1967`)
+- Modify: `src/web/ui.rs` (pair collection, near `PAIR_LIMIT` at `ui.rs:1974`)
 - Modify: `src/web/templates/_decide.html`
 - Test: `src/web/ui.rs` (inline `mod tests`)
 
 **Interfaces:**
-- Consumes: `disambiguate` (Task 6), the `Clusters` disjoint-set pattern in `jobs/consolidate.rs:60`.
+- Consumes: `disambiguate_pair_titles` (Task 6), the `Clusters` disjoint-set pattern in `jobs/consolidate.rs:60`.
 - Produces: the template iterates clusters, each carrying `Vec<PairRow>`.
 
 - [ ] **Step 1: Write the failing test**
@@ -940,7 +942,7 @@ git commit -m "feat(ui): a sentence that does not finish says where it goes on"
 ### Task 17: Elapsed time stops being borrowed from a future-tense helper
 
 **Files:**
-- Modify: `src/web/ui.rs:331` (add `fmt_elapsed` beside `fmt_duration`), `ui.rs:2286`
+- Modify: `src/web/ui.rs:331` (add `fmt_elapsed` beside `fmt_duration`), `ui.rs:2293`
 - Test: `src/web/ui.rs` (inline `mod tests`)
 
 **Interfaces:**
@@ -986,7 +988,7 @@ pub fn fmt_elapsed(secs: i64) -> String {
 }
 ```
 
-At `ui.rs:2286`, call `fmt_elapsed` instead of `fmt_duration`.
+At `ui.rs:2293`, call `fmt_elapsed` instead of `fmt_duration`.
 
 - [ ] **Step 4: Run the tests**
 
