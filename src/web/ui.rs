@@ -361,10 +361,15 @@ pub fn fmt_time(ts: i64) -> String {
 }
 
 /// What to call an artifact that has no title of its own.
+///
+/// Not the ordinal. "Chunk 56" is a position in the ingest, not a name for
+/// anything a reader went looking for — and it was the heading over every
+/// verbatim passage in the pane. The opening of the body at least says what
+/// the passage is about.
 fn artifact_title(c: &crate::store::artifacts::Chunk) -> String {
     c.title
         .clone()
-        .unwrap_or_else(|| format!("Chunk {}", c.ordinal))
+        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))
 }
 
 /// How an artifact's own text is rendered.
@@ -3106,7 +3111,12 @@ pub(crate) async fn build_artifact_detail(
         source_at_lines,
         lineage,
         id: c.id,
-        title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
+        // The same rule as `artifact_title`, and for the same reason: an
+        // ordinal in the ingest is not a name.
+        title: c
+            .title
+            .clone()
+            .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60)),
         html,
         text: c.text,
         category: c.category,
@@ -3304,6 +3314,22 @@ mod tests {
             last_verified_at: None,
             cues: vec![],
         }
+    }
+
+    #[test]
+    fn the_artifact_pane_does_not_call_a_passage_chunk_fifty_six() {
+        // "Chunk 56" is a position in the ingest, not a name for anything a
+        // reader asked for. The fixture's ordinal is 56 for exactly that.
+        let t = artifact_title(&chunk_fixture(
+            None,
+            "Die digitale Forensik unterscheidet sich zusätzlich",
+        ));
+        assert!(!t.starts_with("Chunk"), "{t:?}");
+        assert!(t.starts_with("Die digitale Forensik"), "{t:?}");
+        assert_eq!(
+            artifact_title(&chunk_fixture(Some("SQLite und WAL"), "body")),
+            "SQLite und WAL"
+        );
     }
 
     #[test]
