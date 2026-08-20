@@ -29,10 +29,13 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// A browser landing on a page it has no session for should end up in front
 /// of the identity provider, not staring at `{"error":"unauthorized"}` with
-/// no way to act on it. That includes a path nothing handles: no route in
-/// this router answers `/`, so an unauthenticated visit to the bare domain
-/// falls through to the same rejection as an expired-session page load, and
-/// both should end the same way.
+/// no way to act on it.
+///
+/// This rewrites a 401 and nothing else. An unmatched path is a 404 and stays
+/// one — which is why the bare domain needs a route of its own rather than
+/// relying on this: a request that matches nothing never reaches the
+/// authentication that would have produced the 401 to rewrite. See `/` in
+/// `ui::ui_router`.
 ///
 /// API tokens and the MCP endpoint need the real status code — a script
 /// cannot follow a redirect into an interactive OIDC login — so this only
@@ -46,9 +49,20 @@ async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response
         && !path.starts_with("/api/")
         && path != "/mcp";
 
+    // Kept before the request is consumed: after the login this is the page to
+    // come back to, and losing it means every bounced deep link lands on
+    // Search instead. `auth_routes::safe_next` decides whether it is followed.
+    let went_to: String = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or(&path)
+        .to_string();
+
     let res = next.run(req).await;
     if is_page_load && res.status() == StatusCode::UNAUTHORIZED {
-        return Redirect::to("/auth/login?go=1").into_response();
+        let go: String = url::form_urlencoded::byte_serialize(went_to.as_bytes()).collect();
+        return Redirect::to(&format!("/auth/login?go={go}")).into_response();
     }
     res
 }
@@ -79,6 +93,71 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn the_bare_domain_is_a_door_into_the_ui_and_not_a_404() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let get = |c: Option<&str>| {
+            let mut r = axum::http::Request::builder().uri("/");
+            if let Some(c) = c {
+                r = r.header("cookie", c);
+            }
+            r.body(Body::empty()).unwrap()
+        };
+
+        let res = app.clone().oneshot(get(Some(&cookie))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert_eq!(res.headers()["location"], "/ui/search");
+
+        // And with no session at all: `/` is still a route, so the rejection
+        // it produces is a 401 the middleware can turn into a login — which is
+        // what an unmatched path never was.
+        let res = app.oneshot(get(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert_eq!(res.headers()["location"], "/ui/search");
+    }
+
+    #[tokio::test]
+    async fn a_bounced_page_load_tells_the_login_where_it_was_going() {
+        let core = crate::core::test_support::test_core().await;
+        let app = crate::web::test_support::router(core, None);
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/corpora/abc?terms=x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert_eq!(
+            res.headers()["location"],
+            "/auth/login?go=%2Fui%2Fcorpora%2Fabc%3Fterms%3Dx"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_nothing_serves_is_still_a_404() {
+        // The bare domain gets a door; a typo does not get a redirect that
+        // pretends the page exists.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
+    }
 
     #[test]
     fn the_body_limit_is_deliberate_and_large_enough_for_a_chapter() {

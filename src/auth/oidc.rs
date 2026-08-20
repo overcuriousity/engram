@@ -14,6 +14,9 @@ pub struct PendingAuth {
     pub nonce: String,
     pub pkce_verifier: String,
     pub created_at: i64,
+    /// The page that asked for the login. The provider hands back only
+    /// `state`, so the destination has to wait here for the callback.
+    pub next: Option<String>,
 }
 
 /// In-memory, single-use, expiring store of in-flight login attempts. Not
@@ -238,6 +241,9 @@ impl OidcClient {
                 nonce: nonce.secret().clone(),
                 pkce_verifier: verifier.secret().clone(),
                 created_at: crate::store::now(),
+                // Filled in by the caller, which is the half that knows where
+                // the browser was going. See `web::auth_routes::login_page`.
+                next: None,
             },
         ))
     }
@@ -409,9 +415,15 @@ mod tests {
             nonce: "n".into(),
             pkce_verifier: "v".into(),
             created_at: crate::store::now(),
+            next: Some("/ui/ops".into()),
         };
         store.put(p.clone());
-        assert!(store.take("state-1").is_some());
+        let back = store.take("state-1").expect("the attempt must come back");
+        assert_eq!(
+            back.next.as_deref(),
+            Some("/ui/ops"),
+            "the destination has to survive the round trip"
+        );
         assert!(
             store.take("state-1").is_none(),
             "replaying a state value must fail"
@@ -426,6 +438,7 @@ mod tests {
             nonce: "n".into(),
             pkce_verifier: "v".into(),
             created_at: crate::store::now() - (PENDING_TTL_SECS + 10),
+            next: None,
         });
         assert!(
             store.take("old").is_none(),

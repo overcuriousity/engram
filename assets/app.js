@@ -345,6 +345,16 @@
       if (document.visibilityState === 'hidden') flushDwell();
       else trackDwell();
     });
+    // A session that ended while the page stayed open. htmx swaps nothing on a
+    // 4xx by design, so every click after that point did visibly nothing at
+    // all — the one case the server cannot fix, because a fragment request
+    // must not be answered with a full-page redirect into a login. Handled
+    // here instead, and it names the page so signing in comes back to it.
+    document.body.addEventListener('htmx:responseError', function (e) {
+      if (!e.detail || !e.detail.xhr || e.detail.xhr.status !== 401) return;
+      var here = window.location.pathname + window.location.search;
+      window.location.assign('/auth/login?go=' + encodeURIComponent(here));
+    });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       enhance(e.target);
       trackDwell();

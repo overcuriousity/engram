@@ -2916,6 +2916,12 @@ async fn mark_artifact_reviewed(
 
 pub fn ui_router() -> Router<AppState> {
     Router::new()
+        // The bare domain and `/ui` are the same door, and both open on the
+        // page the app starts at. Without the first of them the router simply
+        // had no answer for `/`, and a browser typing the domain got a 404 —
+        // signed in or not, because an unmatched path never reaches the
+        // authentication that would have redirected it to a login.
+        .route("/", get(|| async { Redirect::to("/ui/search") }))
         .route("/ui", get(|| async { Redirect::to("/ui/search") }))
         .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/search", get(search_page))
@@ -4671,9 +4677,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::SEE_OTHER, "{uri} was unprotected");
+            // And it names the page it bounced, so signing in comes back here
+            // rather than dropping everyone on Search.
+            let go: String = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect();
             assert_eq!(
                 res.headers().get("location").unwrap(),
-                "/auth/login?go=1",
+                &format!("/auth/login?go={go}"),
                 "{uri} did not send an unauthenticated page load to sign in"
             );
         }
