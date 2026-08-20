@@ -96,8 +96,19 @@ impl Sittings {
                 // A backspace, or a repeat. The longer spelling stands.
                 return;
             }
-            s.queries
-                .retain(|q| !query.starts_with(q.as_str()) && q != query);
+            // Only the head is a prefix of the run being typed. Scanning the
+            // whole carried list deleted queries from earlier in the sitting
+            // that merely happen to be prefixes: "E01" in the morning and
+            // "E01 mounting on Linux" ten minutes later are two searches, and
+            // the rail kept one. Anything else is dropped only when it is the
+            // same query again, which is a repeat and not a run.
+            if s.queries
+                .front()
+                .is_some_and(|f| query.starts_with(f.as_str()))
+            {
+                s.queries.pop_front();
+            }
+            s.queries.retain(|q| q != query);
             s.queries.push_front(query.to_string());
             s.queries.truncate(CARRY);
         });
@@ -221,6 +232,36 @@ mod tests {
         assert_eq!(
             s.read("sess", 20, IDLE).queries,
             vec!["how do I mount an E01"]
+        );
+    }
+
+    #[test]
+    fn a_later_query_does_not_delete_an_earlier_one_it_happens_to_begin_with() {
+        // Folding a typing run is about the run, not about the whole sitting.
+        // Scanning everything carried meant that coming back to a subject with
+        // a longer question deleted the shorter question asked before it — two
+        // searches, ten minutes apart, and the rail remembered one.
+        let s = Sittings::default();
+        s.queried("sess", "E01", 10, IDLE);
+        s.queried("sess", "write blocker", 20, IDLE);
+        s.queried("sess", "E01 mounting on Linux", 30, IDLE);
+
+        assert_eq!(
+            s.read("sess", 40, IDLE).queries,
+            vec!["E01 mounting on Linux", "write blocker", "E01"]
+        );
+    }
+
+    #[test]
+    fn asking_the_same_thing_twice_moves_it_up_rather_than_listing_it_twice() {
+        let s = Sittings::default();
+        s.queried("sess", "E01", 10, IDLE);
+        s.queried("sess", "write blocker", 20, IDLE);
+        s.queried("sess", "E01", 30, IDLE);
+
+        assert_eq!(
+            s.read("sess", 40, IDLE).queries,
+            vec!["E01", "write blocker"]
         );
     }
 
