@@ -311,12 +311,20 @@ fn mark_past_cliff(results: &mut [SearchResult]) {
 /// every comparison reads from an activation snapshot untouched by any move,
 /// so no row can ever borrow a gap another row's move opened.
 fn prime(
-    results: Vec<SearchResult>,
+    mut results: Vec<SearchResult>,
     activation: &HashMap<String, f64>,
     margin: f64,
     lift: usize,
     sitting: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
+    // Marked before anything can return. `in_sitting` is a fact about the row —
+    // this sitting has been in it — and not a consequence of the reordering. A
+    // list of two is a list nothing can move in, not a list where the badge
+    // stops being true, and a badge that disappears on short result lists reads
+    // as the page forgetting rather than as a rule.
+    for r in &mut results {
+        r.in_sitting = sitting.contains(&r.artifact_id);
+    }
     if lift == 0 || results.len() < 3 {
         return results;
     }
@@ -389,7 +397,6 @@ fn prime(
             // displaced by another row's climb did not move up, and
             // labelling it would say something untrue about it.
             r.primed = pos < i;
-            r.in_sitting = sitting.contains(&r.artifact_id);
             r
         })
         .collect()
@@ -1993,6 +2000,19 @@ mod tests {
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed);
         assert!(out[1].in_sitting, "the page cannot say why it moved");
+    }
+
+    #[test]
+    fn a_list_too_short_to_reorder_still_says_what_the_sitting_read() {
+        // `in_sitting` is a fact about the row, not a consequence of a move. A
+        // list of two is a list nothing can be lifted in — but a badge that
+        // vanishes on short lists reads as the page forgetting, not as a rule.
+        let sitting = std::collections::HashSet::from(["b".to_string()]);
+        let out = prime(ranked(&["a", "b"]), &HashMap::new(), 0.5, 2, &sitting);
+        assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
+        assert!(out[1].in_sitting);
+        assert!(!out[0].in_sitting);
+        assert!(out.iter().all(|r| !r.primed), "and nothing was primed");
     }
 
     #[test]
