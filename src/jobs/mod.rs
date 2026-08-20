@@ -98,10 +98,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
-        // The sweep looks at the whole collection, so it ignores the target.
-        (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
-        // The sweep looks at the whole collection, so it ignores the target.
-        (Stage::Associate, _) => associate::run(core).await,
         (Stage::LinkJudge, _) => associate::judge(core, &job.target_id).await,
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
@@ -109,15 +105,18 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
-        (Stage::Pursuit, _) => pursuit::run(core).await.map(|_| ()),
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
-        // Both look at the whole collection, so both ignore the target.
-        (Stage::Retention, _) => retention::run(core).await.map(|_| ()),
-        (Stage::ArmDedupe, _) => consolidate::arm_dedupe(core).await.map(|n| {
-            if n > 0 {
-                tracing::info!(armed = n, "armed dedupe units");
-            }
-        }),
+        // Every periodic unit goes through one path, because every periodic
+        // unit is accounted for. The sweeps below look at the whole collection,
+        // so they ignore the target.
+        (
+            Stage::Consolidate
+            | Stage::Associate
+            | Stage::Pursuit
+            | Stage::Retention
+            | Stage::ArmDedupe,
+            _,
+        ) => run_accounted(core, job.stage).await,
     };
 
     match result {
@@ -215,6 +214,58 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             Ok(true)
         }
     }
+}
+
+/// Run one periodic unit and write down what it did.
+///
+/// The counts are the ones each sweep already returns; nothing here is counted
+/// for the account's sake. A failed run is recorded too — it is exactly the run
+/// an operator needs to see, and a history that kept only the successes would
+/// show a sweep going quiet with nothing anywhere saying why.
+///
+/// The row is written whatever happens to the unit afterwards, which is why it
+/// is written here rather than beside `complete_job`: a failed sweep stays
+/// queued behind a backoff, and that is a retry of the same unit rather than a
+/// run that never happened.
+async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
+    let started_at = crate::store::now();
+    let outcome = match stage {
+        Stage::Consolidate => consolidate::run(core).await.and_then(detail),
+        Stage::Associate => associate::run(core).await.and_then(detail),
+        Stage::Retention => retention::run(core).await.and_then(detail),
+        Stage::Pursuit => pursuit::run(core)
+            .await
+            .and_then(|n| detail(serde_json::json!({ "pursuits": n }))),
+        Stage::ArmDedupe => consolidate::arm_dedupe(core).await.and_then(|n| {
+            if n > 0 {
+                tracing::info!(armed = n, "armed dedupe units");
+            }
+            detail(serde_json::json!({ "armed": n }))
+        }),
+        // `run_claimed` sends only the five above here, and a sixth arriving
+        // silently unaccounted for is worse than a row saying so.
+        _ => detail(serde_json::json!({})),
+    };
+    let (state, written) = match &outcome {
+        Ok(d) => ("ok", d.clone()),
+        Err(e) => (
+            "failed",
+            serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+    };
+    if let Err(e) = core
+        .store
+        .record_sweep_run(stage.as_str(), started_at, state, &written)
+        .await
+    {
+        tracing::warn!(stage = stage.as_str(), error = %e, "could not record what the sweep did");
+    }
+    outcome.map(|_| ())
+}
+
+/// The counts a sweep returned, as the JSON the account stores.
+fn detail<T: serde::Serialize>(report: T) -> Result<String> {
+    Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()))
 }
 
 /// A sweep that has finished arms itself one interval out.
@@ -385,6 +436,36 @@ mod tests {
             .fetch_optional(&core.store.pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_ran_says_what_it_did() {
+        // The question a system that describes itself as sleeping has to be
+        // able to answer: what did the memory do while I was away.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.store
+            .arm_periodic(
+                Stage::Associate,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        run_claimed(&core, job).await.unwrap();
+
+        let runs = core.store.sweep_history(10).await.unwrap();
+        assert_eq!(runs.len(), 1, "the run was never recorded");
+        assert_eq!(runs[0].stage, "associate");
+        assert_eq!(runs[0].outcome, "ok");
+        assert!(
+            runs[0].detail.contains("forgotten"),
+            "the counts the sweep already returns were not kept: {}",
+            runs[0].detail
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ pub mod pairs;
 pub mod pursuits;
 pub mod segments;
 pub mod shingle;
+pub mod sweeps;
 
 use crate::config::StoreConfig;
 use crate::error::Result;

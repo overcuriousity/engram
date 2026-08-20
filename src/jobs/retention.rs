@@ -59,6 +59,14 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
+    // Housekeeping about housekeeping: the account is trimmed by the unit that
+    // already decides what is past keeping.
+    match core.store.trim_sweep_runs().await {
+        Ok(n) if n > 0 => tracing::info!(dropped = n, "trimmed the sweep history"),
+        Err(e) => tracing::warn!(error = %e, "could not trim the sweep history"),
+        _ => {}
+    }
+
     Ok(report)
 }
 

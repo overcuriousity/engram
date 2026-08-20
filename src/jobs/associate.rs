@@ -76,9 +76,26 @@ fn replayable(stamps: &[i64], limit: usize) -> usize {
 }
 
 /// One sweep over everything learned since the last one.
-pub async fn run(core: &Core) -> Result<()> {
+/// What one association sweep did. The numbers it already logged, given a
+/// shape so the account can keep them: a sweep whose runs thin out is then
+/// visible on Ops rather than only in a journal nobody is reading.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct Report {
+    /// Search events replayed into link weight.
+    pub events: usize,
+    /// Verdicts replayed.
+    pub verdicts: usize,
+    /// Learning links whose decayed weight fell under `prune_below`.
+    pub forgotten: u64,
+    /// Judged links reopened because one side was re-embedded.
+    pub reopened: u64,
+    /// Judge units armed. The calls happen later, one unit at a time.
+    pub armed: i64,
+}
+
+pub async fn run(core: &Core) -> Result<Report> {
     if !core.associating() {
-        return Ok(());
+        return Ok(Report::default());
     }
     let at = crate::store::now();
     let bound = replay_events(core, at).await?;
@@ -142,7 +159,13 @@ pub async fn run(core: &Core) -> Result<()> {
         armed,
         "association sweep"
     );
-    Ok(())
+    Ok(Report {
+        events: bound,
+        verdicts: confirmed,
+        forgotten,
+        reopened,
+        armed,
+    })
 }
 
 /// Every pair of shown candidates in every settled event past the watermark.
