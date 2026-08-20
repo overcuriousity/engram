@@ -350,11 +350,27 @@ fn artifact_title(c: &crate::store::artifacts::Chunk) -> String {
         .unwrap_or_else(|| format!("Chunk {}", c.ordinal))
 }
 
+/// How an artifact's own text is rendered.
+///
+/// A passage is a slice of the document, kept as it was written; markdown is
+/// the wrong reader for it. It eats the `#` of a section number, and it joins
+/// lines whose breaks carry the structure — a table of contents lifted out of
+/// a PDF collapses into one paragraph whose leader dots then stretch the width
+/// of the card. Everything else here *was* written as markdown by a model, and
+/// showing that as plain text would put the syntax on the page.
+fn artifact_html(c: &crate::store::artifacts::Chunk) -> String {
+    if c.provenance == crate::store::artifacts::Provenance::Passage {
+        markdown::render_verbatim(&c.text)
+    } else {
+        markdown::render(&c.text)
+    }
+}
+
 fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
     ArtifactView {
         id: c.id.clone(),
         title: artifact_title(c),
-        html: markdown::render(&c.text),
+        html: artifact_html(c),
         text: c.text.clone(),
         tags: c.tags.clone(),
         embed_state: c.embed_state.as_str().to_string(),
@@ -2668,6 +2684,7 @@ pub(crate) async fn build_artifact_detail(
     terms: &str,
 ) -> Result<ArtifactDetail> {
     let c = core.store.get_artifact(artifact_id).await?;
+    let html = artifact_html(&c);
     // A merged artifact belongs to no corpus, so there are no lines to show
     // beside it and no span to highlight. Task 15 fills that half of the pane
     // with the artifacts it was written from; until then it renders without a
@@ -2794,7 +2811,7 @@ pub(crate) async fn build_artifact_detail(
         lineage,
         id: c.id,
         title: c.title.unwrap_or_else(|| format!("Chunk {}", c.ordinal)),
-        html: markdown::render(&c.text),
+        html,
         text: c.text,
         category: c.category,
         tags: c.tags,
@@ -4325,6 +4342,59 @@ mod tests {
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
         assert!(!html.contains("#1"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_verbatim_passage_card_keeps_the_lines_markdown_would_flatten() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .ingest("Dateiattribute\n.........24", "web", None)
+            .await
+            .unwrap();
+        let na = |t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: t.into(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: Some(0),
+            caveats: vec![],
+        };
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[na("Dateiattribute\n.........24")],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let card = artifact_view(&core.store.get_artifact(&p[0].id).await.unwrap());
+        assert!(card.html.contains("<pre"), "{}", card.html);
+        assert!(
+            card.html.contains("Dateiattribute\n.........24"),
+            "{}",
+            card.html
+        );
+
+        // And a model-written artifact is still markdown: it was written as
+        // markdown, and reading it as plain text would show the syntax.
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na("## Heading\n\n- one")])
+            .await
+            .unwrap();
+        let written = artifact_view(&core.store.get_artifact(&a[0].id).await.unwrap());
+        assert!(written.html.contains("<h2>"), "{}", written.html);
+
+        // The detail pane renders the same artifact and has to say the same
+        // thing about it: it is the half of the search page that shows a
+        // passage in full.
+        let d = super::build_artifact_detail(&core, &p[0].id, "")
+            .await
+            .unwrap();
+        assert!(d.html.contains("<pre"), "{}", d.html);
     }
 
     fn rendered(via: Option<&str>, reason: Option<&str>) -> RenderedResult {

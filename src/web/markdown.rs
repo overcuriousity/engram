@@ -27,6 +27,26 @@ pub fn render(markdown: &str) -> String {
         .to_string()
 }
 
+/// Render text that is not markdown: a passage kept as the document wrote it.
+///
+/// Escaped rather than parsed, and inside a `<pre>`, because the line breaks
+/// are the structure. Read as markdown, a table of contents lifted out of a
+/// PDF loses every break and becomes one paragraph of stretched leader dots,
+/// and a section number written `# 3` becomes a heading.
+///
+/// Escaping is the whole sanitization: no markup is produced from the input,
+/// so there is nothing to clean afterwards. Three replacements are the
+/// complete set for text content — quotes and spaces only need escaping inside
+/// an attribute, and `ammonia::clean_text` escaping them too turned every
+/// space and newline of a document into a numeric entity.
+pub fn render_verbatim(text: &str) -> String {
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!("<pre class=\"verbatim\">{escaped}</pre>")
+}
+
 /// Plain-text preview with markup removed. Used in list views where rendered
 /// HTML would break the layout.
 pub fn snippet(markdown: &str, max_chars: usize) -> String {
@@ -59,6 +79,27 @@ mod tests {
         assert!(html.contains("<li>one</li>"));
         assert!(html.contains("<code"));
         assert!(html.contains("ls -la"));
+    }
+
+    #[test]
+    fn verbatim_keeps_the_line_structure_markdown_would_flatten() {
+        // A table of contents lifted out of a PDF: every entry is its own
+        // line, and read as markdown they collapse into one paragraph whose
+        // leader dots then stretch the width of the card.
+        let html = render_verbatim("Dateiattribute\n.........24\n\nSlack\n.....24");
+        assert!(html.contains("<pre"), "{html}");
+        assert!(html.contains("Dateiattribute\n.........24"), "{html}");
+        assert!(!html.contains("<p>"), "{html}");
+    }
+
+    #[test]
+    fn verbatim_is_shown_as_written_not_read_as_markup() {
+        // Source text, not model output: `#` is a number sign the document
+        // used, and `<b>` is four characters it contains.
+        let html = render_verbatim("# 3 auf Seite 12\n<b>not bold</b>");
+        assert!(!html.contains("<h1"), "{html}");
+        assert!(!html.contains("<b>"), "{html}");
+        assert!(html.contains("# 3 auf Seite 12"), "{html}");
     }
 
     #[test]

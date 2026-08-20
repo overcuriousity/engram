@@ -223,6 +223,17 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 .md code { background: var(--color-bg-surface); padding: 1px 4px;
            border-radius: var(--radius-sm); font-size: 0.85em; }
 .md pre code { background: none; padding: 0; }
+/* A verbatim passage is a slice of the document, not a code block. Kept as
+   written — the line breaks are its structure, and a table of contents whose
+   breaks are gone is one paragraph of stretched leader dots — but in the
+   reading font and without a code block's chrome, because it is prose as often
+   as it is not. `anywhere` is for those leader dots: one unbreakable word the
+   width of the card. */
+.md pre.verbatim {
+  background: none; border: 0; border-radius: 0; padding: 0;
+  font-family: inherit; font-size: inherit;
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
+}
 .md table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
 .md th, .md td { border: 1px solid var(--color-border); padding: 0.375rem 0.5rem; text-align: left; }
 .md blockquote { margin: 0.5rem 0; padding-left: 0.75rem;
