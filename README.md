@@ -133,6 +133,10 @@ engram --export-eval ~/engram-eval          # artifacts.json + pairs.json
 ENGRAM_EVAL_DIR=~/engram-eval cargo test --test eval -- --ignored --nocapture
 ```
 
+What the two harnesses measure, why both numbers are reported, which knob to
+sweep for which metric, and what they cannot measure at all:
+**[docs/evaluation.md](docs/evaluation.md)**.
+
 The export reads SQLite only: no inference, no Qdrant, and the artifacts keep
 their real ids, so running it again does not invalidate the pairs. Nothing
 leaves the machine, `enabled` is off until you turn it on, and Ops has a button

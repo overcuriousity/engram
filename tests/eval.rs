@@ -21,6 +21,11 @@
 //! The corpus it reads is whatever the operator actually wants to search, and
 //! is not in this repository. Nothing here prints artifact text; a miss is named
 //! by the leading characters of its own query.
+//!
+//! See `docs/evaluation.md` for what the numbers mean, which parameter to sweep
+//! for which of them, and what this harness cannot measure — notably anything
+//! about a *sequence* of queries, since every pair is scored independently and
+//! `Door::Ui` here carries no session.
 
 use engram::config::Config;
 use engram::core::Core;
