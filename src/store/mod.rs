@@ -124,18 +124,22 @@ impl Store {
     /// Put the sweeps in the background class.
     ///
     /// `jobs.class` defaults to `0`, which is foreground — the safe direction
-    /// to be wrong in for a row written before the column existed, and the
-    /// wrong answer for every sweep among them. This is the one statement that
-    /// corrects them, and it runs on every connect rather than once: it is
-    /// idempotent by construction, since it only ever moves rows that are still
-    /// `0` *and* whose stage says they should not be, which is why
+    /// to be wrong in, and the wrong answer for every sweep. Not for a row
+    /// written before the column existed: `migrate` reads the columns before it
+    /// applies the schema and refuses a base without `jobs.class` outright, so
+    /// no such row ever reaches this. What it corrects is a row written by an
+    /// older binary for a stage that was foreground then and is background now
+    /// — pending work outlives an upgrade, and nothing else revisits its class.
+    ///
+    /// It runs on every connect rather than once: it is idempotent by
+    /// construction, since it only ever moves rows that are still `0` *and*
+    /// whose stage says they should not be, which is why
     /// `applying_the_schema_twice_changes_nothing` still holds.
     ///
-    /// It does undo an ageing (§4.4) across a restart, turning an aged sweep
-    /// back into a background one. That costs nothing: the ageing predicate is
-    /// `created_at` older than `schedule.age_after_mins`, and a row that had
-    /// already aged still satisfies it, so the first repair tick after boot
-    /// ages it straight back.
+    /// It cannot tell such a row from one that aged (§4.4) and so undoes an
+    /// ageing across a restart. That costs a moment: the repair ticker's first
+    /// tick fires immediately at boot, the ageing predicate is still satisfied
+    /// by a row that had already aged, and it ages straight back.
     async fn backfill_job_class(&self) -> Result<()> {
         let background: Vec<&str> = crate::store::jobs::Stage::ALL
             .iter()
