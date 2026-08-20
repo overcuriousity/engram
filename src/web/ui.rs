@@ -1454,6 +1454,19 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
         .map(|(l, _)| l.to_string())
         .collect();
     for r in rows.iter_mut() {
+        // The opening is the capture's first words and the label is a heading
+        // lifted out of those same words, so the opening usually begins by
+        // repeating it: "HOCHSCHULE MITTWEIDA" beside "HOCHSCHULE MITTWEIDA
+        // Ein Verfahren zur…". Only the part that differs is worth the room —
+        // and the doubled reading is what the deployment showed, truncated to
+        // "HOCHSCHULE MITTWEIDA · HOCHSCH…", which is how a repair that had
+        // run looked exactly like one that never had.
+        if let Some(rest) = r.opening.strip_prefix(r.label.as_str()) {
+            let rest = rest
+                .trim_start_matches([' ', ':', '·', '—', '-', ','])
+                .trim();
+            r.opening = rest.to_string();
+        }
         // Kept beside the label rather than folded into it. Appending it was
         // the whole of this repair, and the row then truncated the appended
         // half away — `.qtitle` is one `nowrap` line — so six captures still
@@ -3596,6 +3609,27 @@ mod tests {
             opening: opening.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_opening_that_repeats_its_own_label_says_only_the_rest() {
+        // Found by walking the running app, not by a fixture: the label is a
+        // heading lifted out of the capture's first words, so the opening
+        // beside it began by repeating it — "HOCHSCHULE MITTWEIDA" over
+        // "HOCHSCHULE MITTWEIDA Ein Verfahren zur…".
+        let mut rows = vec![
+            queue_row_fixture(
+                "HOCHSCHULE MITTWEIDA",
+                "HOCHSCHULE MITTWEIDA Ein Verfahren zur Sicherung",
+            ),
+            queue_row_fixture(
+                "HOCHSCHULE MITTWEIDA",
+                "HOCHSCHULE MITTWEIDA Fachbereich Angewandte",
+            ),
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].opening, "Ein Verfahren zur Sicherung");
+        assert_eq!(rows[1].opening, "Fachbereich Angewandte");
     }
 
     #[test]
