@@ -57,6 +57,26 @@ pub enum Stage {
 }
 
 impl Stage {
+    /// Every stage there is. Written out rather than derived, and the compiler
+    /// is no help here — a stage left out of this list is not an error, it is a
+    /// stage the class backfill silently never sees.
+    pub const ALL: [Stage; 14] = [
+        Stage::Synthesize,
+        Stage::Enrich,
+        Stage::SegmentWindow,
+        Stage::Title,
+        Stage::Embed,
+        Stage::Consolidate,
+        Stage::Dedupe,
+        Stage::Relate,
+        Stage::Describe,
+        Stage::Extract,
+        Stage::Associate,
+        Stage::LinkJudge,
+        Stage::Pursuit,
+        Stage::Generate,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Stage::Synthesize => "synthesize",
@@ -75,6 +95,38 @@ impl Stage {
             Stage::Generate => "generate",
         }
     }
+    /// Is someone waiting on this? `0` foreground, `1` background.
+    ///
+    /// Foreground is the capture pipeline: the operator pasted something and is
+    /// watching it move `raw → embedding → ready`. Background is every sweep
+    /// whose result nobody is standing in front of. One distinction and not a
+    /// scale — two classes cannot say that embedding matters more than titling,
+    /// and deliberately so: the distinction that pays is *someone is waiting*,
+    /// and a second one can be added later without moving the column.
+    ///
+    /// Exhaustive on purpose. A stage added later has to answer this question
+    /// rather than inherit an answer from a wildcard arm.
+    pub fn class(self) -> i64 {
+        match self {
+            // `Enrich` shares `synthesize::plan` with `Synthesize` and is
+            // foreground for the same reason: it is a capture in flight.
+            Stage::Synthesize
+            | Stage::Enrich
+            | Stage::SegmentWindow
+            | Stage::Title
+            | Stage::Embed
+            | Stage::Describe
+            | Stage::Extract => 0,
+            Stage::Consolidate
+            | Stage::Dedupe
+            | Stage::Relate
+            | Stage::Associate
+            | Stage::LinkJudge
+            | Stage::Pursuit
+            | Stage::Generate => 1,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
@@ -177,6 +229,7 @@ async fn upsert_job_with<'e>(
         .bind(target_id)
         .bind(now())
         .bind(seq)
+        .bind(stage.class())
         .execute(exec)
         .await?;
     Ok(())
@@ -187,11 +240,16 @@ async fn upsert_job_with<'e>(
 macro_rules! arm_job {
     ($guard:literal) => {
         concat!(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq)
-             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?)
              ON CONFLICT(stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
-               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq ",
+               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq,
+               -- Re-armed rows take the stage's class back, ageing included: an
+               -- arming resets `attempts` and `created_at` too, so what it
+               -- leaves behind is a fresh unit, and a fresh background unit has
+               -- not waited for anything yet.
+               class = excluded.class ",
             $guard
         )
     };
@@ -363,6 +421,13 @@ impl Store {
     /// `seq` then interleaves whole documents. Without it, a corpus armed as
     /// thirty-four units takes thirty-four consecutive ids and reproduces the
     /// same head-of-line blocking one level down.
+    ///
+    /// `class` sorts ahead of all of that and answers one question: is somebody
+    /// waiting on this? Without it a capture the operator is watching queues
+    /// behind a consolidation sweep armed a minute earlier and waits for it,
+    /// with nothing anywhere able to say that one of the two has a person in
+    /// front of it. It sorts *before* `seq` and never instead of it: within one
+    /// class the fairness above is untouched.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE jobs
@@ -370,7 +435,7 @@ impl Store {
               WHERE id = (
                 SELECT id FROM jobs
                  WHERE state = 'pending' AND run_after <= ?
-                 ORDER BY attempts, seq, id LIMIT 1
+                 ORDER BY class, attempts, seq, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
         )
@@ -523,6 +588,89 @@ mod tests {
         assert!(
             s.claim_job().await.unwrap().is_none(),
             "duplicate enqueue created a second job"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_does_not_wait_behind_a_sweep() {
+        // The whole point of the class column: a sweep armed first is not what
+        // the operator is standing in front of.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Associate, "collection", "collection")
+            .await
+            .unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+
+        let first = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            first.stage,
+            Stage::Synthesize,
+            "the capture queued behind the sweep that was armed a moment earlier"
+        );
+        let second = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(second.stage, Stage::Associate, "the sweep must still run");
+    }
+
+    #[tokio::test]
+    async fn within_one_class_the_order_is_still_attempts_then_seq() {
+        // `seq`'s anti-starvation property is the easiest thing to lose to a
+        // priority column, so it is asserted directly rather than inferred from
+        // the claim ordering being "unchanged".
+        let s = Store::memory().await.unwrap();
+        // Two documents' worth of windows, interleaved by seq: the second
+        // document's first window must beat the first document's second.
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "a#0", 0)
+            .await
+            .unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "a#1", 1)
+            .await
+            .unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "b#0", 0)
+            .await
+            .unwrap();
+
+        let mut order = Vec::new();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            order.push(j.target_id);
+        }
+        assert_eq!(
+            order,
+            vec!["a#0", "b#0", "a#1"],
+            "seq no longer interleaves whole documents"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claim_still_walks_one_index_and_never_sorts() {
+        // The shape of the class column, and of ageing being a write rather
+        // than a read, exists to keep this true. An inequality or a computed
+        // age in the ordering turns every poll into a temp B-tree sort, and
+        // nothing about the queue's behaviour would say so.
+        let s = Store::memory().await.unwrap();
+        let rows = sqlx::query(
+            "EXPLAIN QUERY PLAN
+             SELECT id FROM jobs
+              WHERE state = 'pending' AND run_after <= ?
+              ORDER BY class, attempts, seq, id LIMIT 1",
+        )
+        .bind(now())
+        .fetch_all(&s.pool)
+        .await
+        .unwrap();
+        let plan = rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_jobs_claim3"),
+            "the claim stopped using its covering index: {plan}"
+        );
+        assert!(
+            !plan.to_uppercase().contains("TEMP B-TREE"),
+            "the claim now sorts: {plan}"
         );
     }
 

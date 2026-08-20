@@ -76,6 +76,8 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
 
+        self.backfill_job_class().await?;
+
         let mut missing = Vec::new();
         for (table, columns) in schema_columns(SCHEMA) {
             // The table-valued form of `PRAGMA table_info`, which takes a bind
@@ -101,6 +103,40 @@ impl Store {
                 missing.join(", ")
             )));
         }
+        Ok(())
+    }
+
+    /// Put the sweeps in the background class.
+    ///
+    /// `jobs.class` defaults to `0`, which is foreground — the safe direction
+    /// to be wrong in for a row written before the column existed, and the
+    /// wrong answer for every sweep among them. This is the one statement that
+    /// corrects them, and it runs on every connect rather than once: it is
+    /// idempotent by construction, since it only ever moves rows that are still
+    /// `0` *and* whose stage says they should not be, which is why
+    /// `applying_the_schema_twice_changes_nothing` still holds.
+    ///
+    /// It does undo an ageing (§4.4) across a restart, turning an aged sweep
+    /// back into a background one. That costs nothing: the ageing predicate is
+    /// `created_at` older than `schedule.age_after_mins`, and a row that had
+    /// already aged still satisfies it, so the first repair tick after boot
+    /// ages it straight back.
+    async fn backfill_job_class(&self) -> Result<()> {
+        let background: Vec<&str> = crate::store::jobs::Stage::ALL
+            .iter()
+            .filter(|s| s.class() == 1)
+            .map(|s| s.as_str())
+            .collect();
+        // The stage names are `&'static str` from our own enum, never anything
+        // a request supplied, so splicing the placeholders is splicing a count.
+        let holes = vec!["?"; background.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE jobs SET class = 1 WHERE class = 0 AND stage IN ({holes})"
+        )));
+        for stage in background {
+            q = q.bind(stage);
+        }
+        q.execute(&self.pool).await?;
         Ok(())
     }
 
