@@ -32,3 +32,16 @@ h3 { font-size: var(--text-lg); font-weight: 600; margin: 1.5rem 0 0.375rem; }
 
 :focus-visible { outline: 1.5px solid var(--color-accent); outline-offset: 2px; }
 ::selection { background: var(--color-accent-dim); }
+
+/* A measure for prose.
+   Housekeeping's introduction ran near 200 characters a line, because the page
+   is wide and the paragraph inherited the width. Wide is right for the table
+   beside it and wrong for the sentence above it, so only the sentence is
+   constrained.
+
+   Structural rather than a class the templates have to remember: on a table
+   page every top-level paragraph is prose by definition, and a rule that must
+   be applied by hand is a rule the next paragraph will not have. */
+.prose,
+.regions-table > p,
+.regions-table > .crumb { max-width: 68ch; }
