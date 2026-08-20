@@ -13,6 +13,11 @@ use crate::core::gaps::{
 use crate::error::Result;
 use crate::store::gaps::{GapCluster, GapKind};
 
+/// How many coverage queries one capture keeps in the air at once. Small enough
+/// that a capture never becomes the load on the vector store, large enough that
+/// the wait is the slowest query and not the sum of them.
+const COVER_IN_FLIGHT: usize = 16;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     /// Groups of `MIN_CLUSTER` or more: the ones that are stored and shown as
@@ -29,6 +34,16 @@ pub struct SweepReport {
 /// only, and no model call anywhere. A gap whose best new hit reaches
 /// `weak_below` is closed — the same line that decided the gap was a gap in the
 /// first place, read the other way round.
+///
+/// The queries are issued `COVER_IN_FLIGHT` at a time rather than one after
+/// another. There are four kinds of gap, each capped at `MAX_OPEN_GAPS`, and
+/// since the unmatched ones are derived from the search log without anybody
+/// judging anything, a base with capture on reaches those caps as a matter of
+/// course rather than as a worst case. A round trip apiece, in series, is then
+/// minutes of a capture sitting at its last step for work that is entirely
+/// waiting. Bounded rather than unbounded because the same reasoning applies to
+/// the other end: two thousand simultaneous queries is not concurrency, it is
+/// an outage in the vector store the whole memory shares.
 ///
 /// Filtered to this corpus on purpose: the question is whether *this capture*
 /// answered something. A hit from anywhere else answers a different question —
@@ -60,15 +75,56 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
         include_deprecated: false,
         corpus_id: Some(corpus_id.to_string()),
     };
+    // One hit per gap: the question is whether the best new artifact reaches
+    // the line, and the second-best cannot answer it. Kept by the gap's index
+    // so the concurrent answers land back in the order the gaps were read,
+    // which is what makes the writes below deterministic.
+    let mut best: Vec<Option<crate::vector::SearchHit>> = vec![None; open.gaps.len()];
+    let mut failure: Option<crate::error::Error> = None;
+    let mut inflight = tokio::task::JoinSet::new();
+    let mut next = 0usize;
+    loop {
+        while inflight.len() < COVER_IN_FLIGHT && next < open.gaps.len() {
+            let at = next;
+            next += 1;
+            let vectors = core.vectors.clone();
+            let vec = open.gaps[at].vec.clone();
+            let filter = filter.clone();
+            inflight.spawn(async move {
+                (
+                    at,
+                    vectors.search(&vec, &Default::default(), 1, &filter).await,
+                )
+            });
+        }
+        let Some(joined) = inflight.join_next().await else {
+            break;
+        };
+        match joined {
+            Ok((at, Ok(hits))) => best[at] = hits.into_iter().next(),
+            Ok((_, Err(e))) => {
+                failure.get_or_insert(e);
+            }
+            // The task itself did not finish — a panic inside the vector
+            // client, or the runtime shutting down under us. Not this
+            // module's error, and not something a retry of the same search
+            // would answer, but it is still a search that did not happen and
+            // must not be reported as a gap that stayed open.
+            Err(e) => {
+                failure.get_or_insert(crate::error::Error::Internal(e.to_string()));
+            }
+        }
+    }
+    // Every search that was already in flight is allowed to finish before the
+    // first failure is returned: they cost nothing more once issued, and a gap
+    // one of them closed is closed whether or not another query failed.
+    if let Some(e) = failure {
+        return Err(e);
+    }
+
     let mut closed = 0;
-    for g in &open.gaps {
-        // One hit: the question is whether the best new artifact reaches the
-        // line, and the second-best cannot answer it.
-        let hits = core
-            .vectors
-            .search(&g.vec, &Default::default(), 1, &filter)
-            .await?;
-        let Some(hit) = hits.first() else { continue };
+    for (g, hit) in open.gaps.iter().zip(best) {
+        let Some(hit) = hit else { continue };
         // `None` is "no opinion" and not a low value — a lexical hit the dense
         // half never returned. It cannot close a gap, because closing one is a
         // claim about distance.
