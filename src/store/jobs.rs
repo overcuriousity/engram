@@ -217,7 +217,14 @@ pub fn backoff_secs(attempts: i64) -> i64 {
 enum Guard {
     /// Anything, running included. An operator's reprocess.
     Any,
-    /// Only a row closed while its work was not.
+    /// Only a row nothing is going to run: closed, or given up on.
+    ///
+    /// `'failed'` belongs here with `'done'`. Nothing writes that state any
+    /// more — a job out of attempts is delayed rather than abandoned — but bases
+    /// upgraded across that change still hold rows in it, and a row that is
+    /// neither live nor armable is a unit that never runs again. For a periodic
+    /// sweep that is silent and permanent: `arm_missing_periodic` sees a unit
+    /// nothing is going to run, and the arming it answers with is refused.
     Closed,
 }
 
@@ -277,7 +284,7 @@ impl Guard {
     fn statement(self) -> &'static str {
         match self {
             Guard::Any => arm_job!(""),
-            Guard::Closed => arm_job!("WHERE jobs.state = 'done'"),
+            Guard::Closed => arm_job!("WHERE jobs.state IN ('done', 'failed')"),
         }
     }
 }
@@ -340,6 +347,8 @@ impl Store {
     /// Guarded on the row being closed, like every automatic arming: a sweep
     /// already queued is already going to run, and pushing its `run_after` an
     /// interval further out on every pass is how a sweep would recede forever.
+    /// `'failed'` counts as closed here for the reason `Guard::Closed` gives —
+    /// a row nothing will run is not a row that is going to recede.
     pub async fn arm_periodic(
         &self,
         stage: Stage,
@@ -354,7 +363,7 @@ impl Store {
                state = 'pending', attempts = 0, run_after = excluded.run_after,
                last_error = NULL, claimed_at = NULL,
                created_at = excluded.created_at, class = excluded.class
-             WHERE jobs.state = 'done'",
+             WHERE jobs.state IN ('done', 'failed')",
         )
         .bind(stage.as_str())
         .bind(target_kind)
@@ -382,12 +391,18 @@ impl Store {
     /// something has been waiting, and a unit that is being armed is not the
     /// unit that waited: leaving the aged class on it would hand a sweep
     /// foreground priority for the rest of its life, one arming at a time.
+    ///
+    /// `created_at` moves with them, for the same reason: pulling `run_after`
+    /// down to zero on a row stamped a period ago would leave a unit that has
+    /// been ready for one instant looking, to `age_background`, like one that
+    /// has been waiting all period.
     pub async fn arm_now(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
         sqlx::query(
-            "UPDATE jobs SET run_after = 0, class = ?
+            "UPDATE jobs SET run_after = 0, class = ?, created_at = ?
               WHERE stage = ? AND target_id = ? AND state = 'pending' AND run_after > 0",
         )
         .bind(stage.class())
+        .bind(now())
         .bind(stage.as_str())
         .bind(target_id)
         .execute(&self.pool)
@@ -643,20 +658,29 @@ impl Store {
     /// A unit that has aged stays aged: it has already waited, and demoting it
     /// again would be starting its wait over.
     ///
-    /// Only units that are actually ready age. A unit asleep on its own period
+    /// The wait is measured from the moment the unit became *ready*, which is
+    /// the later of the two stamps it carries. A unit asleep on its own period
     /// carries the `created_at` of the moment it was rescheduled, so waiting and
     /// sleeping look identical from `created_at` alone — and every sweep whose
     /// period is longer than `age_after_mins` (consolidation's day, retention's
-    /// six hours) would be promoted while it is still resting, then jump ahead
-    /// of the captures the class exists to protect. `run_after` is what tells
-    /// the two apart: a unit that is not due yet is not waiting.
+    /// six hours) would arrive at its `run_after` with a `created_at` already a
+    /// whole period old, and be promoted on the very next repair tick without
+    /// having waited in the queue at all. That is the promotion the class exists
+    /// to stop, arriving a period late instead of never. `run_after` is what
+    /// tells resting from waiting, and taking the later of the two stamps says
+    /// both things at once: a unit that is not due yet cannot age, and a unit
+    /// that has just come due starts its wait then.
+    ///
+    /// A job that was never delayed has `run_after = 0`, so for everything that
+    /// is not periodic the later stamp is `created_at` and this reads exactly as
+    /// it did.
     pub async fn age_background(&self, older_than: i64) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE jobs SET class = 0
-              WHERE state = 'pending' AND class = 1 AND created_at < ? AND run_after <= ?",
+              WHERE state = 'pending' AND class = 1
+                AND max(created_at, run_after) < ?",
         )
         .bind(older_than)
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -850,6 +874,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.age_background(now() - 3600).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_has_just_come_due_has_not_been_waiting() {
+        // The other half of the test above, and the one the `run_after` guard
+        // alone did not answer: a sweep re-armed for six hours' time carries a
+        // `created_at` six hours old by the moment it comes due, so the very
+        // next repair tick would promote a unit that had been ready for
+        // seconds. The wait has to be measured from when it became ready.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Retention, "collection", "collection", now() + 21_600)
+            .await
+            .unwrap();
+        // Six hours later: due a minute ago, stamped when it was rescheduled.
+        sqlx::query("UPDATE jobs SET created_at = ?, run_after = ? WHERE stage = 'retention'")
+            .bind(now() - 21_600)
+            .bind(now() - 60)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.age_background(now() - 3600).await.unwrap(),
+            0,
+            "a sweep one minute past due has not waited an hour for a worker"
+        );
+
+        // An hour of actually being ready, and now it ages.
+        sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'retention'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.age_background(now() - 3600).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn arming_a_sleeping_unit_starts_its_wait_over() {
+        // `arm_now` pulls `run_after` to zero, which leaves `created_at` as the
+        // only stamp — and on a sweep armed an interval ago that stamp is an
+        // interval old, so the unit would be ready and immediately ageable
+        // without having waited at all.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Pursuit, "collection", "collection", now() + 600)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        s.arm_now(Stage::Pursuit, "collection", "collection")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.age_background(now() - 3600).await.unwrap(),
+            0,
+            "a unit that was just armed is not a unit that waited two hours"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_left_failed_by_an_older_build_can_still_be_armed() {
+        // Nothing writes `failed` any more — a job out of attempts is delayed
+        // rather than abandoned — but a base upgraded across that change still
+        // holds rows in it. Such a row is not live, so the repair pass asks for
+        // it; if the arming refuses, the sweep never runs again, silently, for
+        // the life of the install.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Consolidate, "collection", "collection", 0)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(!s.live_job(Stage::Consolidate, "collection").await.unwrap());
+
+        s.arm_periodic(Stage::Consolidate, "collection", "collection", 0)
+            .await
+            .unwrap();
+
+        assert!(
+            s.live_job(Stage::Consolidate, "collection").await.unwrap(),
+            "a sweep nothing was going to run stayed that way"
+        );
     }
 
     #[tokio::test]
