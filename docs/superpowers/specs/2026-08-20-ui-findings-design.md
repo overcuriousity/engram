@@ -66,8 +66,18 @@ agree:
 - `web/ui.rs:367` and `:3095` — `format!("Chunk {}", c.ordinal)`
 - `mcp/mod.rs:19` — `unwrap_or_else(|| "Untitled".into())`
 
-They collapse into one rule, the rail's: the opening of the body stands in for
-the heading, marked as a stand-in rather than presented as a name.
+They collapse into one rule, which is the rail's rule made precise. The rail
+shows *no heading at all* and lets the snippet speak (`render_hit`,
+`ui.rs:1323`). That is right wherever a snippet sits beside the name, and
+impossible where a name is structurally required — a button reading `Keep ""`
+decides nothing. So:
+
+- **Where a snippet accompanies the row** — the search rail, the judge card —
+  there is no heading.
+- **Where a name is structurally required** — a button label, the sitting list,
+  the artifact pane's own heading — a stand-in is derived from the body,
+  trimmed at a word boundary, stripped of leading punctuation, and marked as a
+  stand-in rather than presented as a name.
 
 `title_of` is the center of this, and it is worth being concrete about what it
 does today. A hard cut at sixty characters produces
@@ -131,7 +141,7 @@ which regions each page claims.
   snippets rather than two clipped lines. The placeholder stays.
 - **Judge**: `None of these` / `Can't remember` / `Not a real search`
   (`_judge_card.html:78-89`) sit below twenty-three candidate cards. They
-  become a sticky footer. Rank numbers stop after nine; they continue.
+  become a sticky footer.
 - **The artifact pane**: the title becomes sticky, `copy` moves out of the text
   flow it currently overlaps, `Delete` separates from `Verified`/`Hide`, and a
   segment cut mid-sentence links to its continuation — the source pane beside
@@ -141,7 +151,10 @@ which regions each page claims.
 ## 5. Copy and empty states
 
 - Housekeeping's counts are one run-on sentence; they become a stat row.
-- `TOOK` reads `now` for every sweep (`ops.html:60`); it reads a duration.
+- `TOOK` reads `now` for every sweep (`ops.html:60`). The cause is a reused
+  helper: `fmt_duration` (`ui.rs:331`) is future-tense — `"now"`, `"in 5m"` —
+  written for when a job runs next, and Ops spends it on elapsed time. Elapsed
+  time gets its own helper.
 - Sweep identifiers (`arm_dedupe`, `pursuit`, `consolidate`, `retention`)
   get human labels, keeping the raw name available.
 - One name for the page: the link says Housekeeping, the URL is `/ui/ops`, the
@@ -167,6 +180,12 @@ the question is not reopened blind.
   is set would respect the original reasoning.
 - **The phone badge drops its number** (`layout.html:130`, "the count is not
   the point — that anything is waiting is"). Deliberate. Left alone.
+- **Judge's rank numbers stop at nine** (`judge.rs:190`). Reviewed as a
+  finding and withdrawn: the number is a keyboard shortcut, the shortcut is one
+  digit, and "the tenth choosable option and everything after it keeps its
+  column and loses the number" is the correct reading of that constraint. The
+  sticky action bar in section 4 addresses what actually made the long list
+  hard to use.
 
 ## Testing
 
