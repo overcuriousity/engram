@@ -1064,8 +1064,9 @@ impl Core {
                 ));
             }
             // The pursuit sweep looks at every recorded search, not at one
-            // corpus.
-            Stage::Pursuit => {
+            // corpus; retention and dedupe arming look at the whole collection
+            // for the same reason.
+            Stage::Pursuit | Stage::Retention | Stage::ArmDedupe => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));

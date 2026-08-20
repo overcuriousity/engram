@@ -54,13 +54,23 @@ pub enum Stage {
     Pursuit,
     /// One pursuit, one call: write the artifact it earned.
     Generate,
+    /// The periodic retention sweep: expire what `feedback.retain_days` says is
+    /// past keeping, then regroup the knowledge gaps. In that order, which is
+    /// the order the ticker it replaces used — grouping reads the rows expiring
+    /// removes. Local work, no call.
+    Retention,
+    /// The periodic dedupe arming: walks the pairs `Relate` found and arms
+    /// `Dedupe` units for the ones worth a call. Named for what it does — it
+    /// arms judgements, it is not one — and local, since the call belongs to
+    /// the units it arms.
+    ArmDedupe,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 14] = [
+    pub const ALL: [Stage; 16] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -75,6 +85,8 @@ impl Stage {
         Stage::LinkJudge,
         Stage::Pursuit,
         Stage::Generate,
+        Stage::Retention,
+        Stage::ArmDedupe,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -93,6 +105,8 @@ impl Stage {
             Stage::LinkJudge => "link_judge",
             Stage::Pursuit => "pursuit",
             Stage::Generate => "generate",
+            Stage::Retention => "retention",
+            Stage::ArmDedupe => "arm_dedupe",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -123,7 +137,9 @@ impl Stage {
             | Stage::Associate
             | Stage::LinkJudge
             | Stage::Pursuit
-            | Stage::Generate => 1,
+            | Stage::Generate
+            | Stage::Retention
+            | Stage::ArmDedupe => 1,
         }
     }
 
@@ -143,6 +159,8 @@ impl Stage {
             "link_judge" => Some(Stage::LinkJudge),
             "pursuit" => Some(Stage::Pursuit),
             "generate" => Some(Stage::Generate),
+            "retention" => Some(Stage::Retention),
+            "arm_dedupe" => Some(Stage::ArmDedupe),
             _ => None,
         }
     }

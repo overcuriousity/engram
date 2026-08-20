@@ -11,6 +11,7 @@ pub mod promote;
 pub mod pursuit;
 pub mod reconcile;
 pub mod relate;
+pub mod retention;
 pub mod synthesize;
 pub mod window;
 
@@ -110,6 +111,13 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
         (Stage::Pursuit, _) => pursuit::run(core).await.map(|_| ()),
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
+        // Both look at the whole collection, so both ignore the target.
+        (Stage::Retention, _) => retention::run(core).await.map(|_| ()),
+        (Stage::ArmDedupe, _) => consolidate::arm_dedupe(core).await.map(|n| {
+            if n > 0 {
+                tracing::info!(armed = n, "armed dedupe units");
+            }
+        }),
     };
 
     match result {
