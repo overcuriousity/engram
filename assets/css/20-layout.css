@@ -125,6 +125,16 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
   .regions-rail-focus-source { grid-template-columns: [rail] 19rem [focus] minmax(0, 1fr); }
 }
 
+/* Until something is opened into it, the pane holds one line of placeholder
+   and the rail holds every result — so the rail takes the width the pane is
+   not using. `has-selection` is what the pane gains when an artifact is
+   swapped into it, so its absence is exactly "nothing open yet".
+   The pane is not filled on arrival instead: opening the top hit would spend
+   a read on every search, including the ones the rail already answers. */
+.regions-rail-focus-source:not(.has-selection) {
+  grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
+}
+
 /* One-up: one region, the rest a navigation away. This is the phone, and it is
    equally a half-width desktop window — which is the whole reason it is a
    container query and not a device breakpoint. */

@@ -3542,6 +3542,21 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn a_search_with_nothing_open_leaves_the_grid_free_to_widen_the_rail() {
+        // 22rem of rail beside a thousand pixels holding one line of
+        // placeholder is the whole complaint. `has-selection` is what the pane
+        // gains when something is opened into it, so its absence on first
+        // paint is what the wide-rail rule keys on — see `40-search.css`.
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/search?q=write+blocker").await;
+        assert!(page.contains("regions-rail-focus-source"), "{page}");
+        assert!(
+            !page.contains("has-selection"),
+            "a fresh search already claims something is open: {page}"
+        );
+    }
+
     #[test]
     fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
         // "18 excerpt(s) omitted for context budget" is the accounting, and

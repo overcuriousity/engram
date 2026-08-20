@@ -112,6 +112,14 @@ body { overflow-x: hidden; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.4em;
 }
+/* With the rail at its reading width there is room for the whole excerpt, and
+   the two-line clamp is what made a result unreadable without opening it.
+   The floor stays: an artifact whose excerpt came back empty still must not
+   collapse the card. */
+.regions-rail-focus-source:not(.has-selection) .rail-snippet {
+  -webkit-line-clamp: unset; display: block; overflow: visible;
+}
+
 .pane { min-width: 0; }
 
 /* Association is a second list on the same page, not a continuation of the
