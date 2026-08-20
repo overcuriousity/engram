@@ -8226,7 +8226,7 @@ mod tests {
         crate::jobs::embed::run(&handle, &g.id).await.unwrap();
         handle
             .store
-            .insert_pursuit(1, &["why was this asked".into()], &[s[0].id.clone()])
+            .insert_pursuit(1, &["why was this asked".into()], &[s[0].id.clone()], None)
             .await
             .unwrap();
 

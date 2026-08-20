@@ -24,6 +24,13 @@ pub enum GapKind {
     /// computed over the existing log retroactively. It is also the more honest
     /// claim: not *you gave up*, but *the base held nothing near this*.
     Unmatched,
+    /// A pursuit that closed `unsatisfied`: a run of searches on one subject
+    /// that the base did not answer. It landed on Ops and nowhere else, and its
+    /// clustered queries were already stored — what it lacked was a vector, so
+    /// the sweep now carries the leading query's forward when it writes the
+    /// row. A pursuit written before that has none and is not a gap, which is
+    /// the same rule `vec_dim > 0` already applies to everything else here.
+    Pursuit,
 }
 
 impl GapKind {
@@ -32,6 +39,7 @@ impl GapKind {
             GapKind::Ask => "ask",
             GapKind::Search => "search",
             GapKind::Unmatched => "unmatched",
+            GapKind::Pursuit => "pursuit",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -39,6 +47,7 @@ impl GapKind {
             "ask" => Some(GapKind::Ask),
             "search" => Some(GapKind::Search),
             "unmatched" => Some(GapKind::Unmatched),
+            "pursuit" => Some(GapKind::Pursuit),
             _ => None,
         }
     }
@@ -185,6 +194,32 @@ macro_rules! unmatched_gaps_sql {
     };
 }
 
+/// A run of searches the base did not answer.
+///
+/// The text is the leading clustered query rather than all of them joined: the
+/// naming prompt keeps the first twelve members, and a member that is itself a
+/// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
+/// so the first element is read out in Rust rather than in SQL.
+macro_rules! pursuit_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT id, queries",
+            $cols,
+            " FROM pursuits
+              WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
+              ORDER BY opened_at DESC, id DESC LIMIT ?"
+        )
+    };
+}
+
+/// The words a pursuit gap shows: its leading clustered query.
+fn pursuit_text(queries_json: &str) -> String {
+    serde_json::from_str::<Vec<String>>(queries_json)
+        .ok()
+        .and_then(|q| q.into_iter().next())
+        .unwrap_or_default()
+}
+
 /// How many stored query vectors the linkage calibration reads, per table.
 ///
 /// Every recorded search and question counts, not only the gaps: what
@@ -282,7 +317,29 @@ impl Store {
         let unmatched_capped = (out.len() - asks - searches) as i64 > MAX_OPEN_GAPS;
         out.truncate(asks + searches + MAX_OPEN_GAPS as usize);
         let unmatched = out.len() - asks - searches;
-        let capped = asks_capped || searches_capped || unmatched_capped;
+        let before_pursuits = out.len();
+        for r in sqlx::query(pursuit_gaps_sql!(", query_vec, opened_at"))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS + 1)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            out.push((
+                r.get("opened_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Pursuit,
+                        id: r.get("id"),
+                        text: pursuit_text(&r.get::<String, _>("queries")),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
+        }
+        let pursuits_capped = (out.len() - before_pursuits) as i64 > MAX_OPEN_GAPS;
+        out.truncate(before_pursuits + MAX_OPEN_GAPS as usize);
+        let pursuits = out.len() - before_pursuits;
+        let capped = asks_capped || searches_capped || unmatched_capped || pursuits_capped;
         // The same key each half was already read by, applied across both:
         // whole-second `judged_at`, ties broken by a uuid v7 id, so a second's
         // worth of gaps is still ordered by when they were recorded.
@@ -294,6 +351,7 @@ impl Store {
                 asks,
                 searches,
                 unmatched,
+                pursuits,
                 "more open gaps than one pass reads; the oldest are left out of this one"
             );
         }
@@ -337,6 +395,18 @@ impl Store {
                 kind: GapKind::Unmatched,
                 id: r.get("id"),
                 text: r.get("text"),
+            });
+        }
+        for r in sqlx::query(pursuit_gaps_sql!(""))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            out.push(Gap {
+                kind: GapKind::Pursuit,
+                id: r.get("id"),
+                text: pursuit_text(&r.get::<String, _>("queries")),
             });
         }
         Ok(out)
@@ -386,6 +456,16 @@ impl Store {
             // either — the operator has already said this one is answered.
             GapKind::Search | GapKind::Unmatched => {
                 sqlx::query("UPDATE search_events SET dismissed_at = ? WHERE id = ?")
+                    .bind(now())
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?
+            }
+            // A pursuit has a state rather than a dismissal column, and
+            // `dismissed` is already one of the states it can be in — set by
+            // the operator on Ops, meaning the same thing it means here.
+            GapKind::Pursuit => {
+                sqlx::query("UPDATE pursuits SET state = 'dismissed', closed_at = ? WHERE id = ?")
                     .bind(now())
                     .bind(id)
                     .execute(&self.pool)
@@ -655,6 +735,82 @@ mod tests {
 
         store.dismiss_gap(GapKind::Unmatched, &id).await.unwrap();
 
+        assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pursuit_that_ended_unsatisfied_is_a_gap() {
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .insert_pursuit(
+                100,
+                &["how do I mount an E01".into(), "E01 mount".into()],
+                &[],
+                Some((&[1.0, 0.0], "fake")),
+            )
+            .await
+            .unwrap();
+        store
+            .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", 200)
+            .await
+            .unwrap();
+        // A pursuit that got its answer is not a hole in the base.
+        let happy = store
+            .insert_pursuit(
+                300,
+                &["grep a pcap".into()],
+                &[],
+                Some((&[0.0, 1.0], "fake")),
+            )
+            .await
+            .unwrap();
+        store
+            .close_pursuit(&happy, "satisfied", "a strong hit was engaged", 400)
+            .await
+            .unwrap();
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        let mine: Vec<(&str, &str)> = gaps
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Pursuit)
+            .map(|g| (g.gap.id.as_str(), g.gap.text.as_str()))
+            .collect();
+        assert_eq!(mine, vec![(id.as_str(), "how do I mount an E01")]);
+    }
+
+    #[tokio::test]
+    async fn a_pursuit_written_before_the_vector_was_carried_is_not_a_gap() {
+        // Nothing to group it by. The same rule `vec_dim > 0` already applies
+        // to a search whose vector the cache had evicted: an uncomparable
+        // vector is left out rather than compared anyway.
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .insert_pursuit(100, &["how do I mount an E01".into()], &[], None)
+            .await
+            .unwrap();
+        store
+            .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", 200)
+            .await
+            .unwrap();
+
+        assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_pursuit_gap_closes_the_pursuit() {
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .insert_pursuit(100, &["q".into()], &[], Some((&[1.0, 0.0], "fake")))
+            .await
+            .unwrap();
+        store
+            .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", 200)
+            .await
+            .unwrap();
+
+        store.dismiss_gap(GapKind::Pursuit, &id).await.unwrap();
+
+        assert_eq!(store.get_pursuit(&id).await.unwrap().state, "dismissed");
         assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
     }
 

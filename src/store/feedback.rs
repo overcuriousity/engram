@@ -142,7 +142,7 @@ pub struct RecordedEvent {
     pub shown: Vec<(String, Option<f32>)>,
 }
 
-fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+pub(crate) fn vec_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
@@ -1373,7 +1373,10 @@ mod tests {
         // ever elapsing, and the sweep that waits for quiet never ran at all.
         assert_eq!(store.newest_event_at().await.unwrap(), Some(now));
         // The forget button takes the pursuits along.
-        store.insert_pursuit(now, &["q".into()], &[]).await.unwrap();
+        store
+            .insert_pursuit(now, &["q".into()], &[], None)
+            .await
+            .unwrap();
         store.purge_feedback().await.unwrap();
         assert!(store.recent_pursuits(10).await.unwrap().is_empty());
     }

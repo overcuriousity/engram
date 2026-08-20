@@ -463,7 +463,17 @@ CREATE TABLE IF NOT EXISTS pursuits (
   -- The engaged artifact ids, JSON, in engagement order. What generation reads.
   sources      TEXT NOT NULL DEFAULT '[]',
   -- The generated artifact, once there is one.
-  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL
+  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+  -- The leading clustered query's vector, carried forward when the pursuit is
+  -- written. A pursuit that closes unsatisfied is a gap, and a gap is a
+  -- question plus the vector it was found by — `queries` holds the words and
+  -- the words alone, and re-embedding them to group the gap would be a call
+  -- spent on a vector that was already computed. Null on a pursuit written
+  -- before this column existed, which is why `vec_dim > 0` is the test: an
+  -- uncomparable vector is exactly what `open_gaps` already leaves out.
+  query_vec    BLOB,
+  vec_dim      INTEGER NOT NULL DEFAULT 0,
+  embed_model  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 
