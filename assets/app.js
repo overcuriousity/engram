@@ -102,11 +102,79 @@
     });
   }
 
+  // A blank source line costs a full numbered row, and in a chapter of
+  // exercises that was a third of the pane. Runs of three or more fold to one
+  // rule carrying their count.
+  //
+  // Rendering only: the server still sends every line, and the numbers either
+  // side of a fold are the source's own. A row inside the extraction range is
+  // never folded, whatever it holds — the pane exists to show that range, and
+  // hiding part of it to save space defeats the only thing the pane is for.
+  function collapseBlanks(root) {
+    root.querySelectorAll('.raw table:not([data-folded])').forEach(function (table) {
+      table.setAttribute('data-folded', '1');
+      var run = [];
+      function flush() {
+        if (run.length < 3) { run = []; return; }
+        var hidden = run.slice();
+        var mark = document.createElement('tr');
+        mark.className = 'srcfold';
+        var cell = document.createElement('td');
+        cell.colSpan = 2;
+        cell.textContent = hidden.length + ' blank lines';
+        mark.appendChild(cell);
+        hidden[0].parentNode.insertBefore(mark, hidden[0]);
+        hidden.forEach(function (el) { el.hidden = true; });
+        mark.addEventListener('click', function () {
+          hidden.forEach(function (el) { el.hidden = false; });
+          mark.remove();
+        });
+        run = [];
+      }
+      Array.prototype.slice.call(table.rows).forEach(function (tr) {
+        var blank = tr.cells.length > 1 && tr.cells[1].textContent.trim() === '';
+        if (blank && !tr.classList.contains('in')) { run.push(tr); } else { flush(); }
+      });
+      flush();
+    });
+  }
+
+  // The artifact and the lines it came from are one thing read twice, so they
+  // move together. Proportional rather than line-mapped: prose and source do
+  // not share a line count, and pretending they do lands on the wrong line
+  // more often than it helps.
+  //
+  // The guard is not decoration. Setting scrollTop fires scroll, which would
+  // set the other back, which would fire again.
+  function lockstep(root) {
+    var split = root.querySelector('.split');
+    if (!split || split.dataset.lockstep) return;
+    var artifact = split.children[0];
+    var source = split.querySelector('.raw');
+    if (!artifact || !source) return;
+    split.dataset.lockstep = '1';
+    var busy = false;
+    function sync(from, to) {
+      return function () {
+        if (busy) return;
+        busy = true;
+        var span = from.scrollHeight - from.clientHeight;
+        var ratio = span > 0 ? from.scrollTop / span : 0;
+        to.scrollTop = ratio * (to.scrollHeight - to.clientHeight);
+        requestAnimationFrame(function () { busy = false; });
+      };
+    }
+    artifact.addEventListener('scroll', sync(artifact, source));
+    source.addEventListener('scroll', sync(source, artifact));
+  }
+
   function enhance(root) {
     if (!root || root.nodeType !== 1) return;
     highlight(root);
     clamp(root);
     copyButtons(root);
+    collapseBlanks(root);
+    lockstep(root);
   }
 
   // ── Ask, as it happens ────────────────────────────────────────────────────

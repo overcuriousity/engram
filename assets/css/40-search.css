@@ -352,3 +352,35 @@ body { overflow-x: hidden; }
    than the snippet: this explains the row, it is not the row. Gone in reading
    mode with everything else but the rank. */
 .rail-why { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
+
+/* ── The source pane ─────────────────────────────────────────────────────── */
+
+/* The tint says these lines are the ones. A bar down their edge says where the
+   run starts and stops, which a background shared with the row above it does
+   not — and it survives a glance from across the pane. */
+.raw tr.in td.ln { box-shadow: inset 2px 0 0 var(--color-accent); }
+
+/* A fold is a rule with a count, not a gap. "Something was left out here" is
+   what empty space fails to say. Indented past the gutter, so the line-number
+   column stays a column. */
+.raw tr.srcfold td {
+  cursor: pointer; padding: 0.125rem 0.5rem 0.125rem 3.25rem;
+  border-top: 1px dashed var(--color-border-subtle);
+  color: var(--color-fg-muted); font-size: var(--text-xs);
+}
+.raw tr.srcfold:hover td {
+  color: var(--color-fg-secondary); background: var(--color-bg-hover);
+}
+
+/* The artifact gets a scroll box of its own, matching the source's, so the two
+   can move together — an artifact and the lines it came from are one thing
+   read twice. Only where the split is actually side by side: stacked, they are
+   one column and "in lockstep" would mean scrolling a thing off screen to move
+   the thing below it. */
+@container shell (min-width: 60rem) {
+  .split > :first-child { max-height: min(60vh, 45rem); overflow: auto; }
+}
+
+/* With the source hidden there is nothing left to stay in step with, so the
+   artifact stops being a box that scrolls inside a page that also scrolls. */
+.regions.hide-source .split > :first-child { max-height: none; overflow: visible; }
