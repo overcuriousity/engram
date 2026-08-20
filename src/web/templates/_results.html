@@ -74,6 +74,22 @@
          rail heavy enough to need a scrollbar of its own. The facets above
          narrow by tag, which is what the chips were being read for. #}
       <div class="rail-snippet">{{ r.snippet }}</div>
+      {# The badges above say what a result *is*. This says why it is *here* —
+         one quiet line rather than a row of chips, because "moved up because
+         you reach this one often" is a sentence and `primed` is a word you
+         have to already know.
+
+         No new data and no new query: every one of these already reached the
+         template, as a badge with the explanation hidden in a title attribute
+         that only appears once you have hovered the thing you were unsure
+         about. The badges stay, as the scannable form. #}
+      {% if r.primed || r.weak || r.model_written %}
+      <p class="rail-why">
+        {%- if r.primed %}moved up — you reach this one often{% endif -%}
+        {%- if r.weak %}{% if r.primed %} · {% endif %}a loose match{% endif -%}
+        {%- if r.model_written %}{% if r.primed || r.weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
+      </p>
+      {% endif %}
     </a>
     {# Swaps its own row out and leaves the rest of the results alone, so the
        search you were reading is still on screen afterwards. #}

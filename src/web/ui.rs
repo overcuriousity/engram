@@ -4751,6 +4751,44 @@ mod tests {
     }
 
     #[test]
+    fn a_primed_hit_says_why_it_arrived() {
+        // primed, loose and model-written already reached the rail as chips
+        // scattered across the header, each with its explanation hidden in a
+        // title attribute. The badge said what the result is; nothing said why
+        // it was here.
+        let mut r = ranked(false);
+        r.primed = true;
+        let body = ResultsTemplate {
+            results: vec![r],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(body.contains("rail-why"), "no provenance line: {body}");
+        assert!(body.contains("you reach this one often"), "{body}");
+    }
+
+    #[test]
+    fn an_ordinary_hit_explains_nothing() {
+        // A line under every result saying "this matched your query" is noise
+        // that makes the lines worth reading harder to see.
+        let body = ResultsTemplate {
+            results: vec![ranked(false)],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(
+            !body.contains("rail-why"),
+            "an ordinary hit explained itself: {body}"
+        );
+    }
+
+    #[test]
     fn a_primed_hit_gets_a_small_marker() {
         let mut r = ranked(false);
         r.primed = true;

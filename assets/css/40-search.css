@@ -347,3 +347,8 @@ body { overflow-x: hidden; }
    artifact itself, hidden by the key meant to give it more room. */
 .regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
 .regions.hide-source .split > :nth-child(2) { display: none; }
+
+/* Why a result arrived, under the snippet that shows what it says. Quieter
+   than the snippet: this explains the row, it is not the row. Gone in reading
+   mode with everything else but the rank. */
+.rail-why { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
