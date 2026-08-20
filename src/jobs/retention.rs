@@ -24,10 +24,20 @@ pub struct Report {
 
 pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
+    // The first thing that went wrong, held rather than returned. Neither half
+    // stops the other — they are independent, and a base whose grouping is
+    // failing still wants its log trimmed — but a pass where nothing worked
+    // must not report itself as a pass. `run_accounted` reads the return value
+    // and nothing else, so swallowing these into warnings is what would make
+    // the `failed` flag on `sweep_runs` unreachable for this sweep, and the
+    // history's whole reason for existing is that a sweep going wrong is
+    // visible there rather than only in the log.
+    //
+    // The error is carried as itself, not flattened to a string: `retryable`
+    // classifies the variant, and that decides whether the worker spends
+    // another attempt.
+    let mut failure: Option<crate::error::Error> = None;
 
-    // Each half is reported on its own and neither stops the other: they are
-    // independent, both are retried on the next run, and a base whose grouping
-    // is failing still wants its log trimmed.
     if core.feedback.retain_days > 0 {
         match core.store.expire_feedback(core.feedback.retain_days).await {
             Ok(n) => {
@@ -36,7 +46,10 @@ pub async fn run(core: &Core) -> Result<Report> {
                 }
                 report.expired = n;
             }
-            Err(e) => tracing::warn!(error = %e, "could not expire captured searches"),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not expire captured searches");
+                failure.get_or_insert(e);
+            }
         }
     }
 
@@ -55,7 +68,10 @@ pub async fn run(core: &Core) -> Result<Report> {
                 report.named = r.named;
                 report.removed = r.removed;
             }
-            Err(e) => tracing::warn!(error = %e, "could not group knowledge gaps"),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not group knowledge gaps");
+                failure.get_or_insert(e);
+            }
         }
     }
 
@@ -63,11 +79,17 @@ pub async fn run(core: &Core) -> Result<Report> {
     // already decides what is past keeping.
     match core.store.trim_sweep_runs().await {
         Ok(n) if n > 0 => tracing::info!(dropped = n, "trimmed the sweep history"),
-        Err(e) => tracing::warn!(error = %e, "could not trim the sweep history"),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not trim the sweep history");
+            failure.get_or_insert(e);
+        }
         _ => {}
     }
 
-    Ok(report)
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +148,29 @@ mod tests {
             captured(&core).await,
             0,
             "an event past the window outlived the retention unit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_where_nothing_worked_does_not_report_a_clean_run() {
+        // `run_accounted` reads the return value and nothing else, so a pass
+        // that warned about every half and then returned `Ok` would be written
+        // into `sweep_runs` as `ok` with no counts — and the `failed` flag, the
+        // stated reason that history exists, could never fire for this sweep.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.feedback.retain_days = 30;
+        // The expiry's table, taken out from under it.
+        sqlx::query("DROP TABLE search_events")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let err = run(&core).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("search_events"),
+            "the failure has to reach the account, and say what failed: {err}"
         );
     }
 
