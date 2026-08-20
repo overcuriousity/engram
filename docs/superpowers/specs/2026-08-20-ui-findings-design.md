@@ -159,7 +159,8 @@ which regions each page claims.
   flow it currently overlaps, `Delete` separates from `Verified`/`Hide`, and a
   segment cut mid-sentence links to its continuation — the source pane beside
   it already shows the rest.
-- **Judge, Ops and Settings** use the width they have.
+- **Ops** already uses `regions-table`. Judge and Settings are left at their
+  reading measure — see the tension below.
 
 ## 5. Copy and empty states
 
@@ -193,6 +194,12 @@ the question is not reopened blind.
   is set would respect the original reasoning.
 - **The phone badge drops its number** (`layout.html:130`, "the count is not
   the point — that anything is waiting is"). Deliberate. Left alone.
+- **Judge's card is capped at 52rem** (`42-judge.css:9`), which is why its
+  content sits in the left half of a wide window. Reviewed as a finding and
+  withdrawn: the cap is a reading measure — "wide enough to read a snippet
+  without every line wrapping" — and a judgement made by scanning twenty
+  snippets is exactly the case a measure exists for. The sticky action bar is
+  what fixes the complaint underneath the finding.
 - **Judge's rank numbers stop at nine** (`judge.rs:190`). Reviewed as a
   finding and withdrawn: the number is a keyboard shortcut, the shortcut is one
   digit, and "the tenth choosable option and everything after it keeps its

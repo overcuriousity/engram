@@ -44,7 +44,17 @@
 .judge-peek > summary:hover { color: var(--color-fg-secondary); }
 .judge-full { max-height: 22rem; overflow-y: auto; margin-top: 0.25rem; }
 .judge-full .md { font-size: 0.875rem; }
-.judge-outs { margin-bottom: 1rem; }
+/* Sticky, because the three answers sat below every candidate: twenty-three
+   cards at `feedback.candidates` of twenty, and the way out of the question
+   was a scroll past all of them. The shortcuts always worked from anywhere;
+   the bar is what says so. Its own background, or the cards scroll through
+   it. */
+.judge-outs {
+  position: sticky; bottom: 0; z-index: 1;
+  margin-bottom: 0; padding: 0.6rem 0;
+  background: var(--color-bg-base);
+  border-top: 1px solid var(--color-border-subtle);
+}
 .judge-undo { margin-left: 0.5rem; }
 
 /* Read from the ranks the searches actually gave, so it moves on every

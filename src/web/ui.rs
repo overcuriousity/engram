@@ -3542,6 +3542,24 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn the_judges_own_answers_stay_with_the_question() {
+        // The three ways out sat below every candidate — twenty at
+        // `feedback.candidates`' default — so answering "None of these" meant
+        // scrolling past all of them first. The bar is sticky in CSS; what
+        // this holds is that it is one element, in one place, for the rule to
+        // key on.
+        let css = include_str!("../../assets/css/42-judge.css");
+        assert!(
+            css.contains(".judge-outs {") && css.contains("position: sticky"),
+            "the action bar is not sticky"
+        );
+        assert!(
+            css.contains("background: var(--color-bg-base)"),
+            "a sticky bar with no background is one the cards scroll through"
+        );
+    }
+
     #[tokio::test]
     async fn a_search_with_nothing_open_leaves_the_grid_free_to_widen_the_rail() {
         // 22rem of rail beside a thousand pixels holding one line of
