@@ -164,10 +164,9 @@ nav.top a.brand img { display: block; }
 /* Each row says what it narrows by. The label sits on the baseline of the first
    chip rather than above the row, so two rows cost two lines, not four. */
 .facet-row { display: flex; gap: 0.5rem; align-items: baseline; }
-.facet-label {
-  flex: none; width: 2.5rem; font-size: 0.75rem; text-transform: uppercase;
-  letter-spacing: 0.03em; color: var(--color-fg-muted); padding-top: 3px;
-}
+/* Composes `.label` for the type; keeps only what is about its place in the
+   row. */
+.facet-label { flex: none; width: 2.5rem; padding-top: 3px; }
 .chip { display: inline-flex; cursor: pointer; }
 .chip input {
   position: absolute; width: 1px; height: 1px; margin: -1px;

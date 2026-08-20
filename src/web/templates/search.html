@@ -50,7 +50,7 @@
   {% if !facets.categories.is_empty() %}
   <div class="facets">
     <div class="facet-row">
-    <span class="facet-label">Kind</span>
+    <span class="label facet-label">Kind</span>
     {# Named because the form's `change` trigger listens here: the event
        bubbles out of the radios to this row and no further than the box. #}
     <div class="chips" id="kind-chips" role="group" aria-label="Kind">

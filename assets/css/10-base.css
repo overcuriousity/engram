@@ -8,8 +8,22 @@ body {
 }
 a { color: var(--color-accent); }
 .mono, code, pre { font-family: var(--font-mono); }
-h3 { font-size: 0.8125rem; color: var(--color-fg-muted); text-transform: uppercase;
-     letter-spacing: 0.04em; margin: 1.5rem 0 0.5rem; }
+/* Headings carry hierarchy. h3 used to be restyled globally into a small
+   uppercase muted label, which is why no page had any: the element that would
+   have said "this is a section and that is inside it" had been spent on a
+   style. Every <h3> in the templates — Recent, Merged, Pursuits, API tokens —
+   was a real heading wearing a label's clothes.
+
+   The style itself was not wrong, only misfiled. It is `.label` now, and the
+   two classes that had independently reinvented it defer to it. */
+h1 { font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+h2 { font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.01em; margin: 1.75rem 0 0.5rem; }
+h3 { font-size: var(--text-lg); font-weight: 600; margin: 1.5rem 0 0.375rem; }
+
+.label {
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

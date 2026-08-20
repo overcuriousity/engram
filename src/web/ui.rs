@@ -4623,6 +4623,34 @@ mod tests {
     }
 
     #[test]
+    fn headings_are_headings_and_labels_are_labels() {
+        // h3 was restyled globally into a small uppercase muted label, which is
+        // why no page had hierarchy: the element that would carry it had been
+        // spent on a style. Every <h3> in the templates was a real heading —
+        // Recent, Merged, Pursuits, API tokens — wearing a label's clothes.
+        let css = include_str!("../../assets/app.css");
+        assert!(css.contains(".label {"), "no .label class to carry the old h3 style");
+        assert!(
+            !css.contains("h3 { font-size: 0.8125rem"),
+            "h3 is still restyled as a label"
+        );
+        assert!(css.contains("--text-lg:"), "the type scale is missing");
+
+        // The two classes that had independently reinvented the label style now
+        // defer to it, so there is one label vocabulary rather than three.
+        let detail = include_str!("templates/_artifact_detail.html");
+        assert!(
+            detail.contains(r#"class="label pane-label""#),
+            "the pane label does not compose .label"
+        );
+        let search = include_str!("templates/search.html");
+        assert!(
+            search.contains(r#"class="label facet-label""#),
+            "the facet label does not compose .label"
+        );
+    }
+
+    #[test]
     fn the_artifact_actions_carry_labels() {
         // One screen carried three button vocabularies: unlabelled icon
         // buttons stranded at the top of a wide row, text links inside the

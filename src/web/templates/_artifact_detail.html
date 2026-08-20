@@ -130,7 +130,7 @@
 
   <div class="split">
     <div>
-      <div class="pane-label">Artifact</div>
+      <div class="label pane-label">Artifact</div>
       <div class="card">
         <div class="card-head">
           <span class="card-title">{{ d.title }}</span>
@@ -186,7 +186,7 @@
          rather than naming `#pane`: the same partial is also the whole of the
          standalone artifact page, where no pane exists and a missing target
          would leave the link dead. #}
-      <div class="pane-label">Related</div>
+      <div class="label pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
         <a class="rail-item" href="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
@@ -203,7 +203,7 @@
       {% if !d.seen_together.is_empty() %}
       {# Beside the nearest neighbours, not instead of them: one list is what
          this resembles, the other is what it has been needed alongside. #}
-      <div class="pane-label">Seen together</div>
+      <div class="label pane-label">Seen together</div>
       <div class="related">
         {% for r in d.seen_together %}
         <div class="seen-row{% if !r.cross_corpus %} muted{% endif %}">
@@ -250,7 +250,7 @@
          render a dead link over an empty table — on the very artifact whose
          orphan notice matters most. #}
       {% if !d.merged %}
-      <div class="pane-label">
+      <div class="label pane-label">
         {# "highlighted" was doing no work: the highlight is visible in the table
            directly below, and the label already names the lines. #}
         <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }}
