@@ -144,12 +144,18 @@
   // not share a line count, and pretending they do lands on the wrong line
   // more often than it helps.
   //
+  // The card, not the column it sits in. Related and Seen together share that
+  // column and are not this artifact, so binding here moved the source panel
+  // whenever the neighbour list was scrolled — the one pane on the screen
+  // whose whole claim is that it shows where *this* artifact came from. The
+  // card is the scroll box for the same reason; see 40-search.css.
+  //
   // The guard is not decoration. Setting scrollTop fires scroll, which would
   // set the other back, which would fire again.
   function lockstep(root) {
     var split = root.querySelector('.split');
     if (!split || split.dataset.lockstep) return;
-    var artifact = split.children[0];
+    var artifact = split.children[0] && split.children[0].querySelector('.card');
     var source = split.querySelector('.raw');
     if (!artifact || !source) return;
     split.dataset.lockstep = '1';
