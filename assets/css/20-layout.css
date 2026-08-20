@@ -1,0 +1,32 @@
+/* The shell, the top row and the phone's tab bar — the frame every page is
+   drawn inside, and nothing that belongs to one page. */
+
+.shell { max-width: 60rem; margin: 0 auto; padding: 0 1rem 4rem; }
+/* The reading measure is right for prose and wrong for a table or a three-pane
+   workspace. Those pages opt out by name rather than every page growing: a
+   capture textarea 110rem wide is a worse place to paste a chapter, not a
+   better one. */
+.shell-wide { max-width: 110rem; }
+/* The one thing on Search that stays narrow. A full-width search box reads as a
+   form to fill in; a narrow one reads as a question to ask. */
+.shell-wide #filters { max-width: 48rem; margin-inline: auto; }
+/* Full-bleed, so the rule under the header runs the width of the window
+   instead of stopping at whatever measure the page below happens to use. The
+   row inside it takes the wider of the two measures: it lines up with content
+   on the pages that are that wide, and simply runs wider than the reading
+   column on the pages that are not. Always the same width beats sometimes
+   lining up. */
+.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; }
+nav.top {
+  display: flex; gap: 0.25rem; align-items: center;
+  max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;
+}
+nav.top a {
+  color: var(--color-fg-secondary); text-decoration: none;
+  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: 0.875rem;
+  transition: background 120ms ease, color 120ms ease;
+}
+nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var(--color-bg-active); }
+.spacer { flex: 1; }
+

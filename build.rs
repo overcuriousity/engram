@@ -20,6 +20,8 @@ use std::path::Path;
 const SIGNED: &str = "extension/firefox-signed.xpi";
 
 fn main() {
+    build_stylesheet();
+
     println!("cargo:rerun-if-changed=extension/shared");
     println!("cargo:rerun-if-changed=extension/chrome/manifest.json");
     println!("cargo:rerun-if-changed=extension/firefox/manifest.json");
@@ -44,6 +46,49 @@ fn main() {
         // that had the signed package would have the page promise one-click
         // install of an XPI Firefox refuses.
         let _ = std::fs::remove_file(&marker);
+    }
+}
+
+/// One stylesheet, assembled from layers.
+///
+/// `assets/app.css` is generated and gitignored, exactly like
+/// `assets/extension/`: `rust-embed` takes the whole of `assets/`, so writing
+/// it there is what puts it in the binary. Concatenated in filename order,
+/// which is what the numeric prefixes are for — the cascade depends on the
+/// tokens arriving before the rules that name them.
+///
+/// Must run before `stamp_assets`, which hashes the bytes of the file this
+/// writes.
+fn build_stylesheet() {
+    println!("cargo:rerun-if-changed=assets/css");
+    let dir = Path::new("assets/css");
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("assets/css")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".css"))
+        .collect();
+    // Sorted, so the same layers produce the same stylesheet twice running.
+    names.sort();
+
+    let mut out = String::new();
+    for name in &names {
+        let body = std::fs::read_to_string(dir.join(name))
+            .unwrap_or_else(|e| panic!("assets/css/{name}: {e}"));
+        out.push_str("/* ===== ");
+        out.push_str(name);
+        out.push_str(" ===== */\n");
+        out.push_str(&body);
+        out.push('\n');
+    }
+
+    // Written only when the bytes differ. `stamp_assets` declares
+    // `rerun-if-changed=assets/app.css`, so writing an identical file on every
+    // build would touch an mtime cargo is watching and rebuild for ever.
+    let dest = Path::new("assets/app.css");
+    if std::fs::read_to_string(dest).ok().as_deref() != Some(out.as_str()) {
+        std::fs::write(dest, &out).expect("assets/app.css");
     }
 }
 

@@ -1,0 +1,46 @@
+/* Ask, as it streams. */
+
+/* ── Ask, as it streams ──────────────────────────────────────────────────── */
+
+/* Visible for as long as the stream is open. The htmx indicator class does not
+   apply here: this request is a fetch and an EventSource, neither of which htmx
+   knows about. */
+#ask-form.asking .spinner { visibility: visible; }
+
+/* The answer while it is being written: plain text, wrapped, and deliberately
+   quieter than the rendered version that replaces it — what is on screen here
+   is not finished, has no citations yet, and nothing in it has been checked
+   against an excerpt. */
+.answer-live {
+  margin: 0 0 1rem; padding: 0.75rem;
+  font-family: var(--font-mono); font-size: 0.875rem; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--color-fg-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
+}
+
+/* What the model said on the way. Dimmer and smaller again than the draft
+   answer, and capped: it is a long aside that no one has to read, and letting
+   it grow would push the answer it precedes off the screen. */
+.reasoning {
+  margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap;
+  color: var(--color-fg-muted);
+  border-left: 2px solid var(--color-border-strong);
+  max-height: 12rem; overflow-y: auto;
+}
+
+/* A citation in the prose. Small and raised, so `[1]` reads as a mark on the
+   sentence rather than as a word in it. */
+.cite {
+  font-family: var(--font-mono); font-size: 0.75em;
+  vertical-align: super; line-height: 0;
+  text-decoration: none; padding: 0 0.1em;
+}
+.cite:hover { text-decoration: underline; }
+
+/* The excerpt a citation was just followed to. The same emphasis a selected
+   result carries, because it means the same thing — this is the row the page is
+   pointing at. */
+.rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
