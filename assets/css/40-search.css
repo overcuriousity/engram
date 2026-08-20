@@ -257,6 +257,14 @@ body { overflow-x: hidden; }
   line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* `.rail-snippet` carries a two-line floor so card heights stop swinging
+     down a list that is read by scanning. Left standing here it defeats the
+     clamp: line-clamp truncates what overflows the box, and a box held two
+     lines tall by `min-height` has nothing overflowing at one line — so two
+     lines rendered and the second was cut through the middle at the border,
+     with no ellipsis to say anything was missing. The floor belongs to the
+     rows that are still a list; the open one is a single line by decision. */
+  min-height: 0;
   opacity: 0.6;
 }
 

@@ -48,8 +48,15 @@
   <input class="input" type="search" name="q"
          placeholder="Describe the situation, in your own words…"
          aria-describedby="search-hint" value="{{ q }}">
+  {# The spinner rides the end of the hint rather than owning a row. It is
+     `visibility: hidden` when idle, which reserves its space — and as its own
+     grid child that space was a permanent empty band between the filters and
+     the results, on every load, whether or not anything was searching. Here it
+     costs nothing until it has something to say, and it still disappears with
+     the hint inside the phone's fixed bar exactly as the row it replaces did. #}
   <p id="search-hint" class="muted hint">A sentence or a whole paragraph finds
-    more than keywords do — paste what you are looking at.</p>
+    more than keywords do — paste what you are looking at.
+    <span id="search-spinner" class="spinner">searching…</span></p>
 
   {# One row, and one taxonomy in it. The tag row is gone: subject words have no
      vocabulary that can be closed, so `forensics` and `forensik` sat beside
@@ -86,9 +93,6 @@
   {% endif %}
 </form>
 
-<div class="row" style="margin:0.5rem 0 1rem">
-  <span id="search-spinner" class="spinner">searching…</span>
-</div>
 {# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
    a hint that cannot be dismissed is a banner. Hidden until app.js decides
    there is a keyboard to use it with. #}

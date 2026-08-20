@@ -1,6 +1,12 @@
 {% extends "layout.html" %}
 {% block title %}Capture — engram{% endblock %}
+{# What you are doing on the left, what has already been done on the right.
+   Recent was a full-width list stacked under the paste box while six hundred
+   pixels beside that box stayed empty; it is the same list, in the space that
+   was already there. #}
+{% block regions %}regions-focus-aside{% endblock %}
 {% block content %}
+<div class="region-focus">
 {# The `captured` event is what puts the new capture under "Recent": this form
    swaps only its own result card, and the queue below listens for the event to
    fetch itself again. Fired on the body rather than aimed at the queue, so the
@@ -84,7 +90,9 @@
 {% endif %}
 
 {% include "_gaps.html" %}
+</div>
 
+<div class="region-aside">
 <h3>Recent</h3>
 {# Loaded rather than rendered inline, so the first paint and every refresh
    afterwards go through exactly the same fragment. #}
@@ -96,8 +104,11 @@
    half of what that page used to be: what is true about this installation
    rather than about what is in it. Neither belongs in the top row, which stays
    three destinations wide. #}
-<a class="quiet-link" href="/ui/ops">Housekeeping</a>
-<a class="quiet-link" href="/ui/settings" style="margin-left:1rem">Settings</a>
+<p class="quiet-links">
+  <a class="quiet-link" href="/ui/ops">Housekeeping</a>
+  <a class="quiet-link" href="/ui/settings">Settings</a>
+</p>
+</div>
 <script>
   (function () {
     var box = document.querySelector('textarea[name="text"]');

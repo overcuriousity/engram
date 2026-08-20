@@ -6980,7 +6980,7 @@ mod tests {
         // reading measure, or a table that is as wide as its columns need.
         // Every one of them starts at the shell's left edge, which is what
         // stops the content column moving as you navigate.
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie, core) = app_session_and_core().await;
 
         let search = get_body(&app, &cookie, "/ui/search").await;
         assert!(
@@ -6994,10 +6994,51 @@ mod tests {
             "housekeeping is a table and has no reading measure: {ops}"
         );
 
+        // `regions-focus-aside`, not `regions-focus`: a substring check would
+        // pass on either, and the difference is the whole point — the prose
+        // keeps its measure and what used to be empty beside it holds the
+        // page's second thing.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains("regions-focus"),
-            "capture is prose and keeps the reading measure: {capture}"
+            capture.contains(r#"regions regions-focus-aside"#),
+            "capture is prose beside its record: {capture}"
+        );
+        assert!(
+            capture.contains(r#"class="region-aside""#),
+            "capture's Recent has nothing to sit in: {capture}"
+        );
+
+        let ask = get_body(&app, &cookie, "/ui/ask").await;
+        assert!(
+            ask.contains(r#"regions regions-focus-aside"#),
+            "ask is an answer beside what it was written from: {ask}"
+        );
+        // The excerpts must not be a rail region. `r` is gated on one, and
+        // reading mode rewrites the grid to a spine beside a single column —
+        // which would take this page apart on a key that means nothing here.
+        assert!(
+            !ask.contains("region-rail"),
+            "ask's excerpts would answer to reading mode: {ask}"
+        );
+
+        // No measure on the one page whose whole subject is an artifact and
+        // the lines it came from — it is the same split the search pane holds,
+        // so it gets the same room rather than a reading column with the rest
+        // of the window empty beside it. Fetched as a real artifact page: the
+        // assertion is about what `/ui/artifacts/<id>` declares, and pointing
+        // it at any other route would pass without testing that.
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let id = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let artifact = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
+        assert!(
+            artifact.contains(r#"regions regions-split"#),
+            "the artifact page is a split, not prose: {artifact}"
         );
 
         // No page says how wide it is any more.
@@ -7005,6 +7046,7 @@ mod tests {
             ("/ui/search", &search),
             ("/ui/ops", &ops),
             ("/ui/capture", &capture),
+            ("/ui/ask", &ask),
         ] {
             assert!(!body.contains("shell-wide"), "{uri} still declares a width");
         }

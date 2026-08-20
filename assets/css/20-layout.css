@@ -53,6 +53,27 @@
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 .regions-table > * { grid-column: 1 / -1; }
 
+/* Two regions: what the page is for, and what it has already done with it.
+   Prose keeps its measure on the left — a paste box and an answer are both
+   prose — and the aside takes what is left of the window.
+
+   This exists because the prose pages were leaving that remainder empty. At
+   1690px a 68rem column anchored left is six hundred pixels of nothing beside
+   it, and every one of those pages had a second thing already on it, stacked
+   underneath or folded into a scroller: Capture's Recent, Ask's excerpts. The
+   width was never the problem. Not using it was. */
+.regions-focus-aside {
+  grid-template-columns: [focus] minmax(0, 68rem) [aside] minmax(0, 1fr);
+}
+.region-aside { grid-column: aside; }
+
+/* An artifact and where it came from, as one `.split` in a single full-width
+   region. Not prose and not a table: the split decides its own two columns,
+   and this is the same pair the search pane renders — so it gets the same
+   room rather than a reading measure with a void beside it. */
+.regions-split { grid-template-columns: minmax(0, 1fr); }
+.regions-split > * { grid-column: 1 / -1; }
+
 /* Three-up. The third region is the source, and it is not a third grid column:
    an artifact and the lines it came from are rendered together, as one
    `.split` inside focus, because the pane is swapped as a unit and nothing

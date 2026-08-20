@@ -243,3 +243,58 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   padding: 0 5px; border: 1px solid var(--color-border);
   border-radius: var(--radius-sm); background: var(--color-bg-surface);
 }
+
+/* ── The bottom of a box that scrolls ────────────────────────────────────────
+   Five boxes in this app scroll inside a page that also scrolls: the results
+   rail, the source table, the artifact pane beside it, the ask reasoning and
+   the judge's full text. Every one of them ended at a hard border drawn
+   straight through a line of type — glyphs sliced across the middle, with
+   nothing to say whether that was the end of the text or only the end of the
+   box. Three of them are visible at once on the search page, so the screen read
+   as damaged rather than as scrollable.
+
+   The last few millimetres fade instead. A cut that fades is a sentence that
+   continues; a cut that is a straight edge is a sentence that was severed. And
+   the fade retracts as you reach the end, so the final line is delivered whole
+   rather than permanently half-erased — which is the failure of every static
+   scrim, and the reason this is on a scroll timeline rather than a plain rule.
+
+   `--edge` is animated rather than the gradient itself: two gradients only
+   interpolate when their stops correspond, and a registered property is one
+   number the browser can simply count down.
+
+   Behind `@supports`, and harmless without it. An inactive timeline leaves
+   `--edge` at its initial `0px`, which makes the mask fully opaque — so a box
+   that does not scroll, and a browser that cannot drive this, both render
+   exactly as they do today. */
+@property --edge {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (animation-timeline: scroll(self)) {
+  .rail,
+  .raw,
+  .reasoning,
+  .judge-full,
+  .split > :first-child {
+    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--edge)), transparent);
+    animation: scroll-edge linear both;
+    animation-timeline: scroll(self);
+  }
+
+  /* Held for most of the travel and given back over the last stretch, so the
+     fade is gone by the time the last line arrives rather than lifting the
+     instant anything is scrolled. */
+  @keyframes scroll-edge {
+    from, 88% { --edge: 2.5rem; }
+    to        { --edge: 0px; }
+  }
+
+  /* No `prefers-reduced-motion` carve-out, deliberately. Nothing here moves on
+     its own: the mask tracks a scroll the reader is already performing, so
+     there is no motion to reduce. Pinning the fade for those readers instead
+     would put a permanent gradient on the boxes that are too short to scroll,
+     which is the one case that has nothing to indicate. */
+}

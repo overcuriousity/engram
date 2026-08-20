@@ -61,9 +61,16 @@
 }
 .decide a:hover { text-decoration-color: currentColor; }
 
-/* Reachable, not advertised. */
+/* Reachable, not advertised.
+
+   The pair is wrapped in a row of its own because they are direct children of
+   the region grid otherwise, and a grid item is blockified whatever its
+   `display` says: two links written side by side came out stacked, each
+   holding its own 2rem top margin, and the `margin-left` that was meant to be
+   the gap between them read as a stray indent under the first. */
+.quiet-links { display: flex; gap: 1rem; margin-top: 2rem; }
 .quiet-link {
-  display: inline-block; margin-top: 2rem; font-size: 0.8125rem;
+  display: inline-block; font-size: 0.8125rem;
   color: var(--color-fg-muted); text-decoration: none;
 }
 .quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
