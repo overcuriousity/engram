@@ -404,8 +404,75 @@
     paint();
   }
 
+  // One input that reaches everything. The prefix decides where it goes: plain
+  // text searches, `>` asks, and a paste long enough to be a document offers to
+  // keep it rather than to look for it.
+  function commandBar() {
+    var overlay = document.querySelector('.cmdk');
+    if (!overlay) return;
+    var input = overlay.querySelector('[data-cmdk-input]');
+    // Long enough to be a document rather than a question. A sentence you are
+    // searching for does not run this far; a chapter always does.
+    var PASTE = 400;
+
+    function open() {
+      overlay.hidden = false;
+      input.value = '';
+      input.focus();
+    }
+    function close() { overlay.hidden = true; }
+
+    document.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); open(); return; }
+      // Ahead of the global Escape handler by registration order, and it
+      // returns, so closing the bar never also fires "back".
+      if (e.key === 'Escape' && !overlay.hidden) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        close();
+      }
+    }, true);
+
+    // The backdrop, not the box: a click inside the box is a click in the box.
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var v = input.value.trim();
+      if (!v) return;
+      if (v.charAt(0) === '>') {
+        location.href = '/ui/ask?q=' + encodeURIComponent(v.slice(1).trim());
+      } else if (v.length > PASTE) {
+        // Handed over in sessionStorage rather than in the URL. `/ui/capture`
+        // takes a `from_ask` and nothing else, so a `?text=` would arrive at a
+        // page that ignores it — and a chapter in a query string is past what
+        // a URL may be anyway. Nothing on the server has to learn about this.
+        try { sessionStorage.setItem('engram.paste', v); } catch (err) {}
+        location.href = '/ui/capture';
+      } else {
+        location.href = '/ui/search?q=' + encodeURIComponent(v);
+      }
+    });
+  }
+
+  // The other half of the command bar's paste. Claimed once and cleared, so a
+  // later visit to Capture does not refill a box you emptied on purpose.
+  function claimPaste() {
+    var box = document.querySelector('textarea[name="text"]');
+    if (!box || box.value) return;
+    var text = null;
+    try {
+      text = sessionStorage.getItem('engram.paste');
+      if (text) sessionStorage.removeItem('engram.paste');
+    } catch (e) { return; }
+    if (text) { box.value = text; box.focus(); }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    commandBar();
+    claimPaste();
     themeToggle();
     keyHint();
     restoreReading();
