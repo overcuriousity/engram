@@ -23,6 +23,76 @@ pub struct SweepReport {
     pub removed: usize,
 }
 
+/// Does this capture answer anything the base could not?
+///
+/// One filtered vector query per open gap, against this document's artifacts
+/// only, and no model call anywhere. A gap whose best new hit reaches
+/// `weak_below` is closed — the same line that decided the gap was a gap in the
+/// first place, read the other way round.
+///
+/// Filtered to this corpus on purpose: the question is whether *this capture*
+/// answered something. A hit from anywhere else answers a different question —
+/// the base held it all along, and the gap is open for a reason.
+///
+/// Closed silently and reversibly. The source row is untouched, so nothing an
+/// automatic score decided overwrites what a person judged, and an operator who
+/// disagrees reopens the gap. Silently, because a base with forty gaps would
+/// otherwise turn its own housekeeping into a review queue.
+///
+/// Every failure here is a warning and nothing more. A capture that is stored
+/// is stored; a coverage check that could not run is a line on the capture page
+/// that does not appear.
+pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
+    if !core.feedback.enabled {
+        return Ok(0);
+    }
+    let open = core
+        .store
+        .open_gaps(core.embedder.model(), core.weak_below)
+        .await?;
+    if open.gaps.is_empty() {
+        return Ok(0);
+    }
+    let filter = crate::vector::SearchFilter {
+        tags: Vec::new(),
+        category: None,
+        include_superseded: false,
+        include_deprecated: false,
+        corpus_id: Some(corpus_id.to_string()),
+    };
+    let mut closed = 0;
+    for g in &open.gaps {
+        // One hit: the question is whether the best new artifact reaches the
+        // line, and the second-best cannot answer it.
+        let hits = core
+            .vectors
+            .search(&g.vec, &Default::default(), 1, &filter)
+            .await?;
+        let Some(hit) = hits.first() else { continue };
+        // `None` is "no opinion" and not a low value — a lexical hit the dense
+        // half never returned. It cannot close a gap, because closing one is a
+        // claim about distance.
+        let Some(sim) = hit.similarity else { continue };
+        if sim < core.weak_below {
+            continue;
+        }
+        core.store
+            .cover_gap(
+                g.gap.kind,
+                &g.gap.id,
+                corpus_id,
+                &hit.payload.artifact_id,
+                sim,
+            )
+            .await?;
+        closed += 1;
+    }
+    if closed > 0 {
+        tracing::info!(corpus_id, closed, "a capture answered open gaps");
+    }
+    Ok(closed)
+}
+
 pub async fn sweep(core: &Core) -> Result<SweepReport> {
     let open = core
         .store
@@ -185,6 +255,169 @@ mod tests {
             .await
             .unwrap();
         id
+    }
+
+    /// A recorded search judged a gap, with a vector chosen by the caller.
+    async fn gap_search(core: &Core, q: &str, vec: Vec<f32>) -> String {
+        let id = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: q.into(),
+                    door: crate::store::feedback::Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec,
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store
+            .judge(&id, crate::store::feedback::Verdict::Gap)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// A document, embedded, with the queue drained and the coverage check
+    /// that reaching `ready` fires already finished.
+    ///
+    /// Every caller sets `weak_below = 1.0` first, so that pass closes nothing:
+    /// what a document actually scores is only knowable once it is embedded,
+    /// and a test that wants to sit either side of that line has to capture
+    /// before it can choose one.
+    async fn captured(core: &Core, text: &str) -> String {
+        let src = core.ingest(text, "web", None).await.unwrap();
+        while crate::jobs::run_one(core).await.unwrap() {}
+        core.background.wait_idle().await;
+        src.id
+    }
+
+    /// How close this vector gets to anything in that document. What the
+    /// coverage line is compared against, asked of the store directly so the
+    /// test does not have to predict the fake embedder's geometry.
+    async fn best_similarity(core: &Core, v: &[f32], corpus_id: &str) -> f32 {
+        core.vectors
+            .search(
+                v,
+                &Default::default(),
+                1,
+                &crate::vector::SearchFilter {
+                    corpus_id: Some(corpus_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .first()
+            .and_then(|h| h.similarity)
+            .expect("the document embedded nothing")
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_answers_a_gap_closes_it_and_says_which() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.weak_below = 1.0;
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        // Just under whatever this document actually scores: the capture
+        // reaches the line.
+        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+
+        let closed = cover(&core, &corpus).await.unwrap();
+
+        assert_eq!(closed, 1);
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below)
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .all(|g| g.gap.id != id),
+            "the gap is still open"
+        );
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert_eq!(covered.len(), 1, "the capture page cannot say which");
+        assert_eq!(covered[0].text, "how do I mount an E01");
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_answers_nothing_closes_nothing() {
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.weak_below = 1.0;
+        let corpus = captured(&core, "Trimming a systemd journal.").await;
+        // Just over what this document scores: nothing here came close.
+        core.weak_below = best_similarity(&core, &v, &corpus).await + 0.01;
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_capture_that_closed_a_gap_reopens_it() {
+        // Reversible, and by the cascade rather than by a second mechanism.
+        // Nothing an automatic score decided overwrote what a person judged.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.weak_below = 1.0;
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+
+        core.delete_corpus(&corpus).await.unwrap();
+
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below)
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id),
+            "the judgement went with the capture that answered it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_coverage_check_embeds_nothing() {
+        // The gap's vector is stored and the artifacts' are stored; the
+        // question is a distance between two things that already exist. An
+        // embedding call here would be paying for a vector twice, on every
+        // capture, once per open gap.
+        let (mut core, embedder) =
+            crate::core::test_support::test_core_counting_embed_calls().await;
+        core.feedback.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.weak_below = 1.0;
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+        let before = embedder.calls();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(
+            embedder.calls(),
+            before,
+            "the coverage check embedded something"
+        );
     }
 
     #[tokio::test]

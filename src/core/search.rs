@@ -828,6 +828,9 @@ impl Core {
             // the review queue and the undo need. A caller opts in explicitly.
             include_superseded: query.include_superseded,
             include_deprecated: query.include_deprecated,
+            // Ordinary search asks the whole base. Narrowing to one document is
+            // the coverage check's question, not a searcher's.
+            corpus_id: None,
         };
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.

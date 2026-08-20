@@ -397,6 +397,29 @@ CREATE TABLE IF NOT EXISTS gap_clusters (
   created_at  INTEGER NOT NULL
 );
 
+-- A gap the base has since answered, and the capture that answered it.
+--
+-- Its own table rather than a column on the source row, which is deliberately
+-- left untouched: nothing an automatic score decides should overwrite what a
+-- person judged, and an operator who disagrees reopens the gap by deleting the
+-- row here rather than by re-judging anything. The cascades are that
+-- reversibility for free — delete the capture that closed a gap and the gap
+-- comes back.
+CREATE TABLE IF NOT EXISTS gap_coverage (
+  -- The `GapKind` and the id of the row it came from: an ask event, a search
+  -- event, a pursuit. Not a foreign key, because it names one of three tables.
+  kind        TEXT NOT NULL,
+  gap_id      TEXT NOT NULL,
+  corpus_id   TEXT NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Similarity of the best new hit. Kept so the page can say how strong a
+  -- claim this was; a hit at exactly `weak_below` is a weak one.
+  score       REAL NOT NULL,
+  covered_at  INTEGER NOT NULL,
+  PRIMARY KEY (kind, gap_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gap_coverage_corpus ON gap_coverage(corpus_id);
+
 -- ── Association ──────────────────────────────────────────────────────────────
 -- Two artifacts that keep being retrieved by the same searches. The other half
 -- of relatedness: `artifact_pairs` is about two texts saying the same thing,

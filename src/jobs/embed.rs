@@ -918,7 +918,20 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     } else {
         CorpusStatus::Ready
     };
+    let ready = status == CorpusStatus::Ready;
     core.store.set_corpus_status(corpus_id, status).await?;
+    if ready {
+        // On the background handle, not on this path: the document is stored
+        // and settled either way, and a vector query per open gap is not
+        // something the last chunk's embedding should wait behind.
+        let core = core.clone();
+        let id = corpus_id.to_string();
+        core.clone().background.spawn(async move {
+            if let Err(e) = crate::jobs::gaps::cover(&core, &id).await {
+                tracing::warn!(corpus_id = %id, error = %e, "could not check what this capture answered");
+            }
+        });
+    }
     Ok(())
 }
 

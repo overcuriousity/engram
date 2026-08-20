@@ -320,6 +320,10 @@ impl VectorStore for MemoryVectors {
                         .category
                         .as_ref()
                         .is_none_or(|c| p.payload.category.as_ref() == Some(c))
+                    && filter
+                        .corpus_id
+                        .as_ref()
+                        .is_none_or(|c| &p.payload.corpus_id == c)
             })
             .map(|p| {
                 // Dense only here, so the ranking score *is* the similarity.

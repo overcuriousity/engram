@@ -146,6 +146,8 @@ macro_rules! ask_gaps_sql {
             " FROM ask_events
               WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
                 AND embed_model = ? AND vec_dim > 0
+                AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                                 WHERE kind = 'ask' AND gap_id = ask_events.id)
               ORDER BY judged_at DESC, id DESC LIMIT ?"
         )
     };
@@ -159,6 +161,8 @@ macro_rules! search_gaps_sql {
             " FROM search_events
               WHERE verdict = 'gap' AND dismissed_at IS NULL
                 AND embed_model = ? AND vec_dim > 0
+                AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                                 WHERE kind = 'search' AND gap_id = search_events.id)
               ORDER BY judged_at DESC, id DESC LIMIT ?"
         )
     };
@@ -187,6 +191,8 @@ macro_rules! unmatched_gaps_sql {
             " FROM search_events e
               WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
                 AND (e.verdict IS NULL OR e.verdict <> 'gap')
+                AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                                 WHERE kind = 'unmatched' AND gap_id = e.id)
                 AND (SELECT MAX(c.similarity) FROM search_candidates c
                       WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?
               ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
@@ -207,6 +213,8 @@ macro_rules! pursuit_gaps_sql {
             $cols,
             " FROM pursuits
               WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
+                AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                                 WHERE kind = 'pursuit' AND gap_id = pursuits.id)
               ORDER BY opened_at DESC, id DESC LIMIT ?"
         )
     };
@@ -437,6 +445,85 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// This capture answered this gap.
+    ///
+    /// Silent and reversible. The source row is untouched, so an operator who
+    /// disagrees reopens the gap by deleting this row — and nothing is deleted
+    /// on a score. Silent because a base with forty gaps would otherwise turn
+    /// its own housekeeping into a review queue.
+    pub async fn cover_gap(
+        &self,
+        kind: GapKind,
+        gap_id: &str,
+        corpus_id: &str,
+        artifact_id: &str,
+        score: f32,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO gap_coverage
+               (kind, gap_id, corpus_id, artifact_id, score, covered_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(kind.as_str())
+        .bind(gap_id)
+        .bind(corpus_id)
+        .bind(artifact_id)
+        .bind(score)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The gaps this capture answered, newest first: what the capture page says
+    /// it did beyond being stored.
+    pub async fn gaps_covered_by(&self, corpus_id: &str) -> Result<Vec<Gap>> {
+        let mut out = Vec::new();
+        for r in sqlx::query(
+            "SELECT c.kind, c.gap_id,
+                    COALESCE(a.question, s.query, p.queries) AS text
+               FROM gap_coverage c
+               LEFT JOIN ask_events a    ON c.kind = 'ask'    AND a.id = c.gap_id
+               LEFT JOIN search_events s ON c.kind IN ('search', 'unmatched') AND s.id = c.gap_id
+               LEFT JOIN pursuits p      ON c.kind = 'pursuit' AND p.id = c.gap_id
+              WHERE c.corpus_id = ?
+              ORDER BY c.covered_at DESC",
+        )
+        .bind(corpus_id)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let Some(kind) = GapKind::parse(&r.get::<String, _>("kind")) else {
+                continue;
+            };
+            let text: Option<String> = r.get("text");
+            // The source row can be gone — a search expired by retention, a
+            // pursuit purged. The coverage row outlives it and says nothing
+            // useful without it, so it is skipped rather than rendered blank.
+            let Some(text) = text else { continue };
+            out.push(Gap {
+                kind,
+                id: r.get("gap_id"),
+                text: match kind {
+                    GapKind::Pursuit => pursuit_text(&text),
+                    _ => text,
+                },
+            });
+        }
+        Ok(out)
+    }
+
+    /// Undo a coverage: the gap is open again, and the judgement behind it was
+    /// never touched.
+    pub async fn uncover_gap(&self, kind: GapKind, gap_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM gap_coverage WHERE kind = ? AND gap_id = ?")
+            .bind(kind.as_str())
+            .bind(gap_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn dismiss_gap(&self, kind: GapKind, id: &str) -> Result<()> {

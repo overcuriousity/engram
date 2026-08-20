@@ -2315,6 +2315,7 @@ mod patch_tests {
                     category: None,
                     include_superseded: false,
                     include_deprecated: false,
+                    corpus_id: None,
                 },
             )
             .await
