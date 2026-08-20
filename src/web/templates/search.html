@@ -74,6 +74,14 @@
 <div class="row" style="margin:0.5rem 0 1rem">
   <span id="search-spinner" class="spinner">searching…</span>
 </div>
+{# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
+   a hint that cannot be dismissed is a banner. Hidden until app.js decides
+   there is a keyboard to use it with. #}
+<p class="keyhint" hidden>
+  <kbd>/</kbd> search <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
+  <kbd>s</kbd> source <kbd>r</kbd> reading
+  <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
+</p>
 </div>
 
 <div id="rail" class="region-rail rail" role="listbox" aria-label="Results"></div>

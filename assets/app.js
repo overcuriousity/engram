@@ -336,8 +336,36 @@
     if (id) { dwell.id = id; dwell.since = Date.now(); }
   }
 
+  // Shown until it is dismissed, then never again on this browser. Not shown
+  // at all on a touch screen: there are no keys there and the row would be
+  // furniture that costs a line of the results.
+  function keyHint() {
+    var hint = document.querySelector('.keyhint');
+    if (!hint) return;
+    var seen = true;
+    try { seen = localStorage.getItem('engram.hints') === 'seen'; } catch (e) { seen = true; }
+    if (seen || !window.matchMedia('(pointer: fine)').matches) return;
+    hint.hidden = false;
+    hint.querySelector('[data-dismiss-hint]').addEventListener('click', function () {
+      hint.hidden = true;
+      try { localStorage.setItem('engram.hints', 'seen'); } catch (e) {}
+    });
+  }
+
+  // Restored before anything is drawn into the rail, so a remembered reading
+  // mode does not flash the wide rail first.
+  function restoreReading() {
+    var regions = document.querySelector('.regions');
+    if (!regions || !document.querySelector('.region-rail')) return;
+    try {
+      if (localStorage.getItem('engram.reading') === '1') regions.classList.add('reading');
+    } catch (e) {}
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    keyHint();
+    restoreReading();
     askDriver();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
@@ -392,19 +420,76 @@
   var field = document.querySelector('input[name="q"], textarea[name="text"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
+  // Whether something is being typed into. Every letter shortcut below is
+  // gated on this: a letter belongs to the field that has focus, and nothing
+  // else, which is the rule the judge shortcuts already follow.
+  function typing() {
+    var el = document.activeElement;
+    if (!el) return false;
+    var tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+  }
+
   // The rail is a list: arrows move through it, Enter opens what is focused.
+  // j and k do the same, for hands that never left the home row.
   document.addEventListener('keydown', function (e) {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var down = e.key === 'ArrowDown' || e.key === 'j';
+    var up = e.key === 'ArrowUp' || e.key === 'k';
+    if (!down && !up) return;
+    if ((e.key === 'j' || e.key === 'k') && typing()) return;
     var items = Array.prototype.slice.call(document.querySelectorAll('.rail-item'));
     if (!items.length) return;
     var i = items.indexOf(document.activeElement);
-    var next = e.key === 'ArrowDown' ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
+    var next = down ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
     if (i === -1) next = 0;
     items.forEach(function (el) { el.setAttribute('aria-selected', 'false'); });
     items[next].setAttribute('aria-selected', 'true');
     items[next].focus();
     e.preventDefault();
   });
+  // The keys that are the same on every page. `/` reaches the query without a
+  // pointer, Esc steps back one region — which on a narrow window is the only
+  // way back to a list that has been replaced — and `s` and `r` are the two
+  // things the search page can show more or less of.
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    if (e.key === '/' && !typing()) {
+      var q = document.querySelector('input[name="q"]');
+      if (q) { e.preventDefault(); q.focus(); q.select(); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      // Out of the field first. Only once nothing is focused does Escape mean
+      // "back", or typing a query you thought better of would throw away the
+      // results behind it.
+      if (typing()) { document.activeElement.blur(); return; }
+      var back = document.querySelector('.back');
+      if (back) { e.preventDefault(); back.click(); }
+      return;
+    }
+    if (typing()) return;
+    var regions = document.querySelector('.regions');
+    if (!regions) return;
+    // Scoped to the regions that exist, not merely to the grid. `s` is also
+    // the judge's "skip", and every page has a `.regions` — without this, one
+    // keypress on the judge queue fired a verdict and toggled a pane that page
+    // does not have.
+    if (e.key === 's' && document.querySelector('.region-source')) {
+      e.preventDefault();
+      regions.classList.toggle('show-source');
+      return;
+    }
+    if (e.key === 'r' && document.querySelector('.region-rail')) {
+      e.preventDefault();
+      var on = regions.classList.toggle('reading');
+      // Remembered: this is a way of working rather than a choice made once
+      // per visit.
+      try { localStorage.setItem('engram.reading', on ? '1' : '0'); } catch (err) {}
+    }
+  });
+
   // Judging has to cost about five seconds, or it will not happen. Digits pick
   // an option, N/S/X take the three ways out. Ignored while a text field has
   // focus, so typing in the assignment search does not fire a verdict.
