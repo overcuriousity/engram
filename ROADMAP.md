@@ -10,24 +10,25 @@ The search box stays the application. Nothing here is a screen to look at; it
 is what makes the answer to the situation you are in come first, while you are
 still typing it.
 
-What is built: the pipeline from capture to ranked artifact; the last hop from a
-ranked artifact back to its corpus lines; synthesis verified against what it
+What is built: the pipeline from capture to ranked artifact; the last hop from
+a ranked artifact back to its corpus lines; synthesis verified against what it
 must not alter; filter chips from facet counts; nearest neighbours in the
 detail pane; near-duplicate detection at capture; autonomous consolidation with
-complete pair coverage, merge-loss checks and undo; caveats on artifacts; text
-and image capture; hybrid search inside Qdrant; the evaluation harness fed from
-judged real searches (`cargo test --test eval`, `/ui/judge`, `--export-eval`);
-Hebbian links learned from co-retrieval with bounded priming and one-hop
-association in the results; the cliff — where a ranked list's relevance falls
-off — marked on the rail, over the API and over MCP; ask that streams to the
-page, packs to the cliff rather than to the window, reaches one hop sideways for
-candidates, checks its own answer's literals against the excerpts it was shown,
-and offers the answer back as a paste the operator approves; one bounded extra
-retrieval round behind `[infer.ask] follow_up`, off until the harness says
-otherwise; named model tiers, so a role picks a model by what the call is worth;
-judged questions with a second harness — citation recall, abstention,
-faithfulness by literals and by claim check; knowledge gaps grouped and named on
-the capture page.
+complete pair coverage, merge-loss checks and undo; caveats on artifacts; text,
+image and PDF capture, the extracted markdown normalised so that unrenderable
+bullet glyphs and blank-line runs never reach the splitter; hybrid search
+inside Qdrant; the evaluation harness fed from judged real searches (`cargo
+test --test eval`, `/ui/judge`, `--export-eval`); Hebbian links learned from
+co-retrieval with bounded priming and one-hop association in the results; the
+cliff — where a ranked list's relevance falls off — marked on the rail, over
+the API and over MCP; ask that streams to the page, packs to the cliff rather
+than to the window, reaches one hop sideways for candidates, checks its own
+answer's literals against the excerpts it was shown, and offers the answer back
+as a paste the operator approves; one bounded extra retrieval round behind
+`[infer.ask] follow_up`, off until the harness says otherwise; named model
+tiers, so a role picks a model by what the call is worth; judged questions with
+a second harness — citation recall, abstention, faithfulness by literals and by
+claim check; knowledge gaps grouped and named on the capture page.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -200,21 +201,12 @@ own.
   library and a model download; a scan is refused with that reason until it is
   switched on. Making it the default waits on someone wanting it enough to pay
   for it.
-- **What comes out of a PDF is not clean text yet.** A real document read
-  through `pdf-text` arrives with runs of blank lines between every paragraph
-  and, where the source had a bullet list, a line holding one unrenderable
-  glyph followed by the item's text on a later line — the bullet character of a
-  symbol font, kept as the private-use codepoint no font on the reading side
-  maps. Both survive into the corpus, the passages and every window the
-  splitter cuts, and blank-line runs are exactly what the splitter falls back
-  to for boundaries once headings are missing. The fix is a normalisation pass
-  in `core::pdf::to_markdown` after `export_to_markdown` — fold private-use
-  bullet glyphs into a markdown list marker, collapse runs of blank lines —
-  pinned by a fixture generated from a document with a bullet list, the way
-  `tests/fixtures/one-heading.pdf` was.
-- **Images in a source, shown where the source is read.** A PDF's figures are
-  dropped by extraction, and the corpus page has no place for them anyway: it
-  shows the photo of an image capture and the text of everything else. Showing
+- **Images in a source, shown where the source is read.** *(The text itself is
+  clean now: `core::pdf::normalise` folds private-use bullet glyphs into
+  markdown list markers and collapses blank-line runs, pinned by
+  `tests/fixtures/bullet-list.pdf`.)* A PDF's figures are dropped by extraction,
+  and the corpus page has no place for them anyway: it shows the photo of an
+  image capture and the text of everything else. Showing
   a document's figures inline — on the raw corpus and on the passages that
   claim their lines — needs three things that do not exist: the images pulled
   out of the PDF and stored (attachments are one row per corpus today, and this
