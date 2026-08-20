@@ -58,18 +58,28 @@ rule degrades search, judge, recent, and the dedupe queue at once.
 
 The right rule already exists, with its argument, at `ui.rs:1157`: a verbatim
 passage has no title by design, and `Untitled` is a word that says nothing
-while looking like it does. Three places do not follow it:
+while looking like it does. Four sites decide a stand-in title, and no two
+agree:
 
+- `web/ui.rs:1950` — `title_of`, `c.text.chars().take(60)`
 - `web/judge.rs:179` and `:515` — `unwrap_or_else(|| "Untitled".into())`
 - `web/ui.rs:367` and `:3095` — `format!("Chunk {}", c.ordinal)`
 - `mcp/mod.rs:19` — `unwrap_or_else(|| "Untitled".into())`
 
-All adopt the rail's treatment: the opening of the body stands in for the
-heading, marked as a stand-in rather than presented as a name.
+They collapse into one rule, the rail's: the opening of the body stands in for
+the heading, marked as a stand-in rather than presented as a name.
 
-**Truncation respects word boundaries.** The sitting renders
-`Die digitale Forensik unterscheidet sich zusätzlich darin vo` — a cut mid-word.
-Wherever a stand-in title is shortened, it ends at a word.
+`title_of` is the center of this, and it is worth being concrete about what it
+does today. A hard cut at sixty characters produces
+`Die digitale Forensik unterscheidet sich zusätzlich darin vo` in the sitting —
+mid-word — and it is the same function that titles the dedupe cards, which is
+why "Needs you" offers
+`Keep "- schneller Schreibzugriff (Änderungen vom Key auf Stapel) -"`: a body
+opening, leading punctuation and all, pressed into service as a name. One rule
+fixes the sitting, the dedupe queue, and the judge together.
+
+**Truncation respects word boundaries**, and a stand-in drops leading
+punctuation before it is shown as a heading.
 
 **Colliding titles get a disambiguator.** Three distinct artifacts on the
 deployment carry the title `LevelDB: Funktionsweise und forensische Analyse`.
