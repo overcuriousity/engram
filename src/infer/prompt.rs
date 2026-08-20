@@ -380,22 +380,39 @@ pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
 /// what is covered, then what is not — fixed the near miss and left the
 /// no-match case looping at the ceiling. Only the lexical test passes both.
 ///
+/// What the lexical test does not settle on its own is which rule applies when
+/// the subject is *compound*. "macOS artifacts worth reading on a ransomware
+/// offender's machine" is two subjects, and excerpts that carry one and not the
+/// other answer the abstention test and the partial-coverage rule at the same
+/// time. Both conditions read as true, neither is stated to win, and the model
+/// recomputes the same undecidable question until something else stops it —
+/// observed on nine excerpts: fifteen restarts, five of them re-running the
+/// abstention test and reaching the same answer every time. So the two are
+/// ordered outright. Any part of the subject that appears is a partial answer;
+/// abstention is what is left when no part appears at all.
+///
+/// Everything else is stated once and briefly, because a rule the model can
+/// rehearse is a rule it does rehearse: the same transcript closes by walking
+/// the citation rule and the caveat rule one at a time with the answer already
+/// drafted.
+///
 /// [`ABSTAIN_PREFIX`] still has to reach the reply verbatim: [`abstained`] reads
 /// it, and a gap cluster is recorded on the strength of it. Narrowing when it is
 /// asked for narrows what gets recorded — a question half-covered is now an
 /// answer naming its own gap rather than a gap event — which is the more honest
 /// of the two records, and the one the reader of the answer is better served by.
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
-Quote commands, paths and code exactly as they appear. \
-If the excerpts cover only part of the question, answer that part and say plainly what they do not \
-cover — do not withhold a partial answer, and do not stretch an excerpt to cover what it does not. \
-If no excerpt mentions the subject of the question, begin your reply with the exact words \
-`Not in the knowledge base.` and say what is missing rather than guessing. \
-Cite excerpts by their number, and cite the excerpt the words you used came from. \
-An excerpt reading `(continues [n])` is the rest of excerpt n: its text is printed there, and a \
-claim drawn from that part of the text is cited by whichever of the two numbers holds it. \
-An excerpt may carry lines beginning `Caveat:` — the conditions under which it does not apply. \
-Repeat any caveat that bears on your answer rather than dropping it.";
+Quote commands, paths and code exactly as they appear, and cite each claim by the number of the \
+excerpt it came from. \
+Answer whatever the excerpts cover and say plainly what they do not, without stretching an excerpt \
+to cover what it does not. \
+Abstain only when no excerpt mentions any part of the subject: then begin your reply with the exact \
+words `Not in the knowledge base.` and say what is missing rather than guessing. \
+A subject the excerpts carry in part is answered in part and never abstained on. \
+`(continues [n])` marks an excerpt whose text is printed under excerpt n; cite whichever of the two \
+numbers holds the words you used. \
+Lines beginning `Caveat:` give the conditions under which an excerpt does not apply — repeat any \
+that bears on your answer.";
 
 /// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
 /// emphasis, heading and list marks, and opening quotes are skipped, because
@@ -531,53 +548,108 @@ pub fn claims_schema() -> serde_json::Value {
     })
 }
 
-/// The one question the retrieval loop is allowed to ask itself.
+/// How many extra queries one plan may name.
 ///
-/// Deliberately narrow: it may name one more thing to look for, or nothing at
-/// all. It is never asked to answer, to plan, or to say how many rounds it
-/// wants — "let the model say once what it still needs" is the bounded version
-/// of a mechanism whose unbounded version is an agent, and an agent is not what
-/// this is.
-pub const FOLLOW_UP_SYSTEM: &str = r#"You are helping a search system decide whether it has enough material.
+/// Three, because a question that genuinely spans more subjects than that is
+/// several questions, and answering it from three excerpts per subject is not
+/// what a context window has room for. It doubles as the fan-out's concurrency
+/// bound: the cap on how many queries may be planned is the cap on how many
+/// searches run at once, so there is one number to reason about rather than
+/// two that can disagree.
+pub const PLAN_MAX_QUERIES: usize = 3;
 
-You are given a question and the excerpts retrieved for it. Decide whether the
-excerpts together contain what is needed to answer.
+/// What else to search for, asked once, over the whole question.
+///
+/// The bounded version of a mechanism whose unbounded version is an agent, and
+/// an agent is not what this is: the model is asked once, sees the excerpts one
+/// round already found, and names the subjects that round missed. It is never
+/// asked to answer, to say how many rounds it wants, or to judge its own
+/// output. What it may say is a list of at most [`PLAN_MAX_QUERIES`] queries,
+/// and the rounds those become all run on the same terms the first one did.
+pub const PLAN_SYSTEM: &str = r#"You are helping a search system decide what else to look for.
+
+You are given a question and the excerpts retrieved for it so far. A question
+can span several subjects; the excerpts may cover some of them and miss others.
 
 Reply with JSON only, in exactly this shape:
 
-{"need": "a short search query" }   or   {"need": null}
+{"need": ["a short search query", "another one"]}   or   {"need": []}
 
-- null: the excerpts are sufficient. This is the common answer.
-- a query: name the ONE thing that is missing, as the words you would search
-  for. Not a question, not a sentence — a query. Never repeat the original
-  question back."#;
+- An empty list: the excerpts already cover every subject the question raises.
+  This is the common answer.
+- Otherwise one query per subject the excerpts do NOT yet cover — at most three,
+  fewest first. Each is the words you would type into a search box: not a
+  question, not a sentence, and never the original question repeated back.
+  Do not name a subject the excerpts already cover just to be thorough."#;
 
-/// `need` is nullable in the schema rather than optional, because "I have
-/// enough" is the common answer and a grammar that can only express a query
-/// would put the model in the position of inventing one.
-pub fn follow_up_schema() -> serde_json::Value {
+/// `need` is an array rather than a nullable string, because "several subjects
+/// are missing" is the case this exists for and a grammar that can only express
+/// one would force the model to drop the rest. The empty array carries what
+/// `null` used to: a grammar that can say "I have enough" without inventing a
+/// query to say it with.
+///
+/// No `maxItems`, deliberately, though the plan is capped at
+/// [`PLAN_MAX_QUERIES`]. Array-length keywords are not something every
+/// structured-output backend's grammar compiler can express, and one that
+/// cannot rejects the whole request rather than ignoring the keyword — every
+/// planning call 400s, and the fan-out degrades to the single-round answer at
+/// one wasted call per question. The audience for `plan_tier` is precisely the
+/// small local endpoint where that is most likely. The cap is not lost by
+/// leaving it out: `parse_plan` truncates to `PLAN_MAX_QUERIES` whatever
+/// arrives, and it is the parser the fan-out reads. Stating it in the schema
+/// too was belt-and-braces bought at the price of the belt.
+pub fn plan_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "properties": { "need": {"type": ["string", "null"]} },
+        "properties": {
+            "need": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
         "required": ["need"],
         "additionalProperties": false
     })
 }
 
-/// The query to run next, or `None` for "the excerpts are enough".
+/// The queries to run next, or empty for "the excerpts are enough".
 ///
-/// Every failure reads as `None`: unparsable output, a missing field, a reply
-/// that was prose. A follow-up is an optional extra round, so anything that is
-/// not unambiguously a query has to mean "do not spend a second retrieval on
-/// it" — the alternative is searching for a fragment of an error message.
+/// Every failure reads as empty: unparsable output, a missing field, a reply
+/// that was prose. The fan-out is extra retrieval on top of a round that already
+/// happened, so anything that is not unambiguously a list of queries has to mean
+/// "spend no further retrieval on it" — the alternative is searching for a
+/// fragment of an error message.
 ///
-/// Whitespace-only counts as nothing further for the same reason a model that
-/// answers `{"need": ""}` means it has enough: an empty search finds the whole
-/// base or none of it, and neither is what was asked for.
-pub fn parse_follow_up(reply: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(extract_json(reply)).ok()?;
-    let need = v["need"].as_str()?.trim();
-    (!need.is_empty()).then(|| need.to_string())
+/// A bare string where an array was asked for is read as the one query it
+/// plainly is. That is the way a small model most often gets this shape wrong,
+/// and refusing it would throw away a usable query over its brackets.
+///
+/// Blank entries are dropped and repeats are dropped, for the same reason a
+/// model answering `{"need": []}` means it has enough: an empty search finds the
+/// whole base or none of it, and the same search run twice costs two rounds to
+/// learn what one already said.
+pub fn parse_plan(reply: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(extract_json(reply)) else {
+        return Vec::new();
+    };
+    let raw: Vec<&str> = match &v["need"] {
+        serde_json::Value::String(one) => vec![one.as_str()],
+        serde_json::Value::Array(many) => many.iter().filter_map(|q| q.as_str()).collect(),
+        // `null`, a missing field, an object: nothing further.
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for q in raw {
+        let q = q.trim();
+        if q.is_empty() || out.iter().any(|kept| kept.eq_ignore_ascii_case(q)) {
+            continue;
+        }
+        out.push(q.to_string());
+        if out.len() == PLAN_MAX_QUERIES {
+            break;
+        }
+    }
+    out
 }
 
 /// Names a knowledge gap from the questions in it. Sees questions only, never
@@ -1268,37 +1340,65 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    /// `null` is the common answer and must be readable as "I have enough",
-    /// never as a query to run.
+    /// An empty list is the common answer and must be readable as "I have
+    /// enough", never as a query to run.
     #[test]
-    fn a_null_need_parses_as_nothing_further() {
-        assert_eq!(parse_follow_up(r#"{"need": null}"#), None);
-        assert_eq!(parse_follow_up(r#"{"need": ""}"#), None);
-        assert_eq!(parse_follow_up(r#"{"need": "   "}"#), None);
+    fn an_empty_need_parses_as_nothing_further() {
+        assert!(parse_plan(r#"{"need": []}"#).is_empty());
+        assert!(parse_plan(r#"{"need": null}"#).is_empty());
+        assert!(parse_plan(r#"{"need": ""}"#).is_empty());
+        assert!(parse_plan(r#"{"need": ["   ", ""]}"#).is_empty());
     }
 
-    /// A follow-up is an optional extra round, so anything that is not
-    /// unambiguously a query means "spend no second retrieval on it" rather
-    /// than "search for whatever this was".
+    /// The fan-out is retrieval on top of a round that already happened, so
+    /// anything that is not unambiguously a list of queries means "spend no
+    /// further retrieval on it" rather than "search for whatever this was".
     #[test]
     fn a_reply_that_is_not_the_shape_asked_for_is_nothing_further() {
-        assert_eq!(parse_follow_up("I think you need more on tickers"), None);
-        assert_eq!(parse_follow_up(r#"{"query": "tickers"}"#), None);
-        assert_eq!(parse_follow_up(r#"{"need": {"q": "tickers"}}"#), None);
-        assert_eq!(parse_follow_up(""), None);
+        assert!(parse_plan("I think you need more on tickers").is_empty());
+        assert!(parse_plan(r#"{"query": "tickers"}"#).is_empty());
+        assert!(parse_plan(r#"{"need": {"q": "tickers"}}"#).is_empty());
+        assert!(parse_plan("").is_empty());
     }
 
     #[test]
-    fn a_need_parses_as_the_query_to_run() {
+    fn a_need_parses_as_the_queries_to_run() {
         assert_eq!(
-            parse_follow_up(r#"{"need": "engram retention ticker interval"}"#),
-            Some("engram retention ticker interval".to_string())
+            parse_plan(r#"{"need": ["retention ticker interval", "backup schedule"]}"#),
+            vec![
+                "retention ticker interval".to_string(),
+                "backup schedule".to_string()
+            ]
         );
         // Models fence their JSON and preface it with prose no matter what the
         // prompt says, which is what `extract_json` is for.
         assert_eq!(
-            parse_follow_up("Here you go:\n```json\n{\"need\": \"ticker interval\"}\n```"),
-            Some("ticker interval".to_string())
+            parse_plan("Here you go:\n```json\n{\"need\": [\"ticker interval\"]}\n```"),
+            vec!["ticker interval".to_string()]
+        );
+    }
+
+    /// The commonest way a small model gets this shape wrong is answering with
+    /// the one query rather than a list of one, and that is a usable query.
+    #[test]
+    fn a_bare_string_reads_as_the_one_query_it_is() {
+        assert_eq!(
+            parse_plan(r#"{"need": "ticker interval"}"#),
+            vec!["ticker interval".to_string()]
+        );
+    }
+
+    /// The same search twice costs two rounds to learn what one already said,
+    /// and a plan longer than the cap would fan out wider than the cap allows.
+    #[test]
+    fn repeats_are_dropped_and_the_plan_is_capped() {
+        assert_eq!(
+            parse_plan(r#"{"need": ["tickers", "TICKERS", " tickers "]}"#),
+            vec!["tickers".to_string()]
+        );
+        assert_eq!(
+            parse_plan(r#"{"need": ["a", "b", "c", "d", "e"]}"#).len(),
+            PLAN_MAX_QUERIES
         );
     }
 
@@ -1306,16 +1406,27 @@ mod tests {
     /// that has drifted from its parser constrains the model into output the
     /// parser then rejects — a failure that looks exactly like a bad model.
     #[test]
-    fn a_reply_that_satisfies_the_follow_up_schema_parses() {
-        let schema = follow_up_schema();
-        assert!(schema["properties"]["need"].is_object());
+    fn a_reply_that_satisfies_the_plan_schema_parses() {
+        let schema = plan_schema();
         assert_eq!(
-            schema["properties"]["need"]["type"],
-            serde_json::json!(["string", "null"]),
-            "the grammar must be able to say `null`, which is the common answer"
+            schema["properties"]["need"]["type"], "array",
+            "the grammar must be able to name more than one missing subject"
         );
-        assert!(parse_follow_up(r#"{"need":"x"}"#).is_some());
-        assert!(parse_follow_up(r#"{"need":null}"#).is_none());
+        assert!(
+            schema["properties"]["need"]["maxItems"].is_null(),
+            "an endpoint whose grammar compiler cannot express maxItems refuses \
+             the whole call; the cap is the parser's job"
+        );
+        assert_eq!(
+            parse_plan(r#"{"need":["a","b","c","d","e"]}"#).len(),
+            PLAN_MAX_QUERIES,
+            "the parser is now the only thing holding the fan-out to its width"
+        );
+        assert!(!parse_plan(r#"{"need":["x"]}"#).is_empty());
+        assert!(
+            parse_plan(r#"{"need":[]}"#).is_empty(),
+            "the empty list is the common answer and must parse as one"
+        );
     }
 
     /// A captured artifact: one with nothing behind it to show as context.
@@ -1624,7 +1735,7 @@ mod tests {
             ("link", link_schema()),
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
-            ("follow_up", follow_up_schema()),
+            ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
             // A strict `json_schema` response format needs an object at the

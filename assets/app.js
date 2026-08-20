@@ -242,33 +242,39 @@
         rail.innerHTML = JSON.parse(e.data).rail;
         enhance(rail);
       });
-      // The extra retrieval round, made visible. `follow_up` ships off, so on a
-      // default install neither of these ever fires and the line stays hidden;
-      // with it on, the second search is a silent pause in front of the answer
-      // and the query it ran is otherwise nowhere on the page.
+      // The fanned-out retrieval, made visible. Without it the extra searches
+      // are a silent pause in front of the answer, and the queries they ran are
+      // otherwise nowhere on the page. With `plan = false` neither of these ever
+      // fires and the line stays hidden.
       source.addEventListener('needs', function (e) {
         if (!current()) return;
         progress.hidden = false;
-        // textContent, not innerHTML: this string is model output that went
+        // textContent, not innerHTML: these strings are model output that went
         // through no renderer. Same rule as the error box.
-        progress.textContent = 'Looking further: ' + JSON.parse(e.data).text;
+        progress.textContent = 'Looking further: ' +
+          JSON.parse(e.data).queries.join(', ');
       });
       source.addEventListener('retrieved', function (e) {
         if (!current()) return;
         var round = JSON.parse(e.data);
         // Round one happens on every ask, including every ask that will never
-        // have a second round, and a line of retrieval statistics in front of
-        // every answer is noise. Round two is the one nobody can otherwise see
-        // happen.
+        // fan out, and a line of retrieval statistics in front of every answer
+        // is noise. The fan-out is the part nobody can otherwise see happen.
         if (round.round < 2) return;
         progress.hidden = false;
         // Appended, not assigned: the line already holds what `needs` said the
-        // second round went looking for, and after this event nothing else on
-        // the page does. Round one never writes here, so the join is only ever
-        // to that query.
+        // fan-out went looking for, and after this event nothing else on the
+        // page does. Round one never writes here, so the join is only ever to
+        // those queries.
+        //
+        // What was searched beside what is shown, rather than what was left
+        // out. Every round the fan-out runs widens the net, so the number not
+        // shown grows with the feature working — and "26 left out" reads as
+        // twenty-six failures. The pair says the true thing: a wide search,
+        // narrowed to what the window holds.
         progress.textContent = (progress.textContent ?
           progress.textContent + ' \u2014 ' : 'Round ' + round.round + ': ') +
-          round.shown + ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
+          'searched ' + round.retrieved + ', showing ' + round.shown;
       });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;
@@ -297,7 +303,7 @@
         reasoning.hidden = true;
         // `progress` deliberately stays: what the retrieval went looking for
         // still describes the rail underneath the answer, and it is the only
-        // place on the page that says a second round happened at all.
+        // place on the page that says a fan-out happened at all.
         // Said once, when there is something to read. The tokens streamed into
         // a polite live region as they arrived, which tells a reader that an
         // answer is coming; nothing until now said it had finished.

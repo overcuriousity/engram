@@ -145,10 +145,16 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
     const send = (name, data) =>
       res.write('event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n');
-    send('retrieved', { round: 1, shown: 2, dropped: 0, cliff_at: null });
-    // A follow-up round, so the page has to show its query and then keep it.
-    send('needs', { text: 'more about bravo' });
-    send('retrieved', { round: 2, shown: 2, dropped: 1, cliff_at: null });
+    send('retrieved', { round: 1, retrieved: 2, shown: 2, dropped: 0, cliff_at: null });
+    // A fan-out, so the page has to show every query it named and then keep
+    // them. Two of them, because one would pass whether or not the page joins
+    // the list.
+    send('needs', { queries: ['more about bravo', 'charlie'] });
+    // `retrieved` is the whole net folded into this round, cliff and all — so
+    // it is three, not two: the pair the line reports is what was searched
+    // beside what fits. Deliberately different from both `shown` and
+    // `dropped`, or a handler reading the wrong one of the three would pass.
+    send('retrieved', { round: 2, retrieved: 3, shown: 2, dropped: 1, cliff_at: null });
     send('citations', { rail: RAIL });
     setTimeout(() => send('reasoning', { text: 'weighing alpha\nagainst bravo' }), 60);
     setTimeout(() => send('token', { text: 'alpha ' }), 120);

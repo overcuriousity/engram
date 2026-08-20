@@ -24,8 +24,8 @@ cliff — where a ranked list's relevance falls off — marked on the rail, over
 the API and over MCP; ask that streams to the page, packs to the cliff rather
 than to the window, reaches one hop sideways for candidates, checks its own
 answer's literals against the excerpts it was shown, and offers the answer back
-as a paste the operator approves; one bounded extra retrieval round behind
-`[infer.ask] follow_up`, off until the harness says otherwise; named model
+as a paste the operator approves; one bounded round of planned retrieval behind
+`[infer.ask] plan`, fanning out to a search per uncovered subject; named model
 tiers, so a role picks a model by what the call is worth; judged questions with
 a second harness — citation recall, abstention, faithfulness by literals and by
 claim check; knowledge gaps grouped and named on the capture page.
@@ -104,9 +104,11 @@ Ask is the part of engram that is allowed to think, and it is built (spec
 tokens included, when the model emits them — packs excerpts to the relevance
 cliff rather than to the context window, reaches one hop sideways for
 candidates, checks its own literals against the excerpts it was shown, and
-offers the answer back as a paste the operator approves. `[infer.ask]
-follow_up` adds one bounded extra retrieval round and ships **off**, because a
-default moves only after the harness has run.
+offers the answer back as a paste the operator approves. `[infer.ask] plan`
+adds one bounded round of planned retrieval and ships **on**: after the first
+round the model names the subjects the excerpts miss, each becomes a search of
+its own, and up to three run at once and merge into one set of excerpts. One
+plan, never a second, and never a loop.
 
 Two things it did not give up. An answer cannot carry a literal the excerpts
 did not — `verify::missing_literals`, the same guard synthesis runs, now
@@ -118,7 +120,7 @@ Model tiers are built. The config carries named tiers under `[infer.tiers.*]`
 and each chat role points at one, resolved at parse time into the same concrete
 role structs the completers already took — so nothing downstream changed. The
 inline shape still parses and warns, naming its replacement. The capability the
-rename existed to express is now used: the follow-up call runs on the efficient
+rename existed to express is now used: the planning call runs on the efficient
 tier while the answer it feeds runs on the deep one.
 
 The ask harness and ask feedback are built (spec
@@ -128,8 +130,8 @@ abstention accuracy and faithfulness by literals and by claim check, plus an
 unsupported-literal count, and "nothing here" surfaced as knowledge gaps on the
 capture page.
 
-What is left here is one number nobody has run yet: whether `follow_up` earns
-its call, and whether packing to the cliff helps on a base with no reranker
+What is left here is one number nobody has run yet: whether the planning call
+earns itself, and whether packing to the cliff helps on a base with no reranker
 configured. A search's own fused scores are smooth enough that a cliff may
 rarely form without one — the rail has always lived with that, and ask now
 inherits it. Both are harness questions, not design ones.

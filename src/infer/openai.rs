@@ -1030,22 +1030,22 @@ impl HttpCompleter {
         Self::judging(cfg, ("artifact", prompt::generate_schema()))
     }
 
-    /// The model that says, once, what one answer still needs.
+    /// The model that says, once, which subjects one answer still lacks.
     ///
     /// Takes a `TierConfig` rather than a role because that is honestly what it
     /// is handed: this call has no role of its own, it runs on whichever
-    /// endpoint the operator pointed `ask.follow_up_tier` at — the efficient
-    /// one, typically, while the answer it feeds runs on the deep one. Falling
-    /// back to the ask role's own endpoint is the config layer's job, so by the
-    /// time this is called there is exactly one endpoint to build.
-    pub fn for_follow_up(cfg: &TierConfig) -> Self {
+    /// endpoint the operator pointed `ask.plan_tier` at — the efficient one,
+    /// typically, while the answer it feeds runs on the deep one. Falling back
+    /// to the ask role's own endpoint is the config layer's job, so by the time
+    /// this is called there is exactly one endpoint to build.
+    pub fn for_plan(cfg: &TierConfig) -> Self {
         Self {
             ep: Endpoint::new(
                 &cfg.base_url,
                 &cfg.model,
                 cfg.api_key.as_deref(),
                 cfg.timeout_secs,
-                "follow_up",
+                "plan",
             )
             .with_ceiling_param(cfg.ceiling_param, cfg.reasoning_effort.as_deref()),
             context_tokens: cfg.context_tokens,
@@ -1053,7 +1053,7 @@ impl HttpCompleter {
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: cfg
                 .structured_output
-                .then_some(("need", prompt::follow_up_schema())),
+                .then_some(("need", prompt::plan_schema())),
         }
     }
 
@@ -1412,9 +1412,9 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
-            follow_up: false,
+            plan: false,
             structured_output: true,
-            follow_up_endpoint: None,
+            plan_endpoint: None,
         }
     }
     fn vision_cfg(base: Option<String>) -> crate::config::VisionRole {
@@ -1579,9 +1579,9 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
-            follow_up: false,
+            plan: false,
             structured_output: true,
-            follow_up_endpoint: None,
+            plan_endpoint: None,
         })
         .complete("s", "u")
         .await
@@ -1933,9 +1933,9 @@ mod tests {
             timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
             reasoning_effort: None,
             ceiling_param: None,
-            follow_up: false,
+            plan: false,
             structured_output: true,
-            follow_up_endpoint: None,
+            plan_endpoint: None,
         };
         assert_eq!(
             HttpCompleter::new(&cfg).complete("s", "u").await.unwrap(),
@@ -1964,9 +1964,9 @@ mod tests {
                     timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
                     reasoning_effort: None,
                     ceiling_param: None,
-                    follow_up: false,
+                    plan: false,
                     structured_output: true,
-                    follow_up_endpoint: None,
+                    plan_endpoint: None,
                 }),
                 _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
             };

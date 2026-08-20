@@ -71,89 +71,206 @@ pub(super) fn append_neighbours(
     out
 }
 
-/// Two rounds of hits as one candidate list: every ranked hit, in round order,
-/// then every artifact that was only ever reached sideways. `ranked` is where
-/// the second half starts.
+/// Every round's hits as one candidate list: the ranked ones interleaved across
+/// rounds, then everything that was only ever reached sideways. `ranked` is
+/// where the second half starts.
 ///
-/// The ordering is the same safety property `append_neighbours` states, held
-/// across the seam between the rounds. A neighbour is the most speculative
-/// excerpt in the prompt, and appending it last is what makes it the first
-/// thing the budget drops. Merging the two rounds as whole lists — round one's
-/// neighbours ahead of round two's ranked hits — inverts that on precisely the
-/// windows where it matters: a tight one would drop an artifact the model
-/// explicitly asked for and keep a speculative neighbour of something else.
+/// The ordering is the packing priority, and two properties are held in it.
 ///
-/// This cannot reach the cliff. Both rounds computed theirs over their own
+/// Reached last, always — the same safety property `append_neighbours` states,
+/// held across every seam between rounds. A neighbour is the most speculative
+/// excerpt in the prompt, and putting it behind every ranked hit is what makes
+/// it the first thing the budget drops. Merging the rounds as whole lists —
+/// round one's neighbours ahead of round two's ranked hits — inverts that on
+/// precisely the windows where it matters: a tight one would drop an artifact
+/// a round explicitly asked for and keep a speculative neighbour of something
+/// else.
+///
+/// Ranked round-robin, not concatenated. A question that named three subjects
+/// is answered from all three or from none, and concatenating would let the
+/// first subject's hits fill the window while the other two go unrepresented —
+/// which is the failure the fan-out exists to fix. The first round is the
+/// question asked verbatim and still takes the first slot, because round-robin
+/// starts with it.
+///
+/// Only what a round's own ranking vouched for is interleaved. A round that
+/// found a cliff was cut at it and every hit it still carries is one that
+/// ranking stood behind, so it interleaves whole. A round that found none was
+/// cut nowhere — `above_cliff` hands back the entire ranked list — and with no
+/// reranker wired that is the ordinary case rather than the exotic one.
+/// Interleaving such a list whole would put a planned query's eighth-best hit
+/// ahead of the asked question's second-best, and a tight window would then be
+/// spent on the model's guesses while the question's own hits were evicted.
+/// So an uncut round interleaves its leading [`UNCUT_PREFIX`] and its tail
+/// follows the interleaved section in round order — still ranked, still ahead
+/// of everything reached, but behind every hit that got there on a ranking's
+/// word.
+///
+/// This cannot reach the cliff. Every round computed its own over its own
 /// scores before returning, and nothing downstream of here recomputes one, so
 /// the seam is a packing-priority decision and nothing more.
 ///
 /// Deduped by `artifact_id`: an artifact in front of the model twice is a
-/// wasted excerpt, not a stronger one. Where the two rounds disagree about what
-/// an artifact *is*, round two's ranking wins the position and round one keeps
-/// the story — an artifact round one only reached and round two then ranked
-/// takes its ranked place, carrying the `via` that says how it was first found.
-/// Leaving it in the tail because that is where it entered would demote a hit
-/// the model explicitly asked for below neighbours of something else, and would
-/// have `dropped` report it missing while it sat in the prompt.
+/// wasted excerpt, not a stronger one. Where the rounds disagree about what an
+/// artifact *is*, the earliest round to rank it wins the position and the
+/// earliest round to touch it at all decides what it carries — an artifact one
+/// round only reached and another then ranked takes its ranked place while
+/// keeping the `via` that says how it was first found. Leaving it in the tail
+/// because that is where it entered would demote a hit a round explicitly asked
+/// for below neighbours of something else, and would have `dropped` report it
+/// missing while it sat in the prompt. Giving it a `via` when the first round to
+/// touch it ranked it outright would be the same error inverted: claiming an
+/// artifact was reached sideways when it was retrieved.
 pub(super) struct Merged {
     pub hits: Vec<crate::core::search::SearchResult>,
     /// How many leading hits are ranked. Everything from here on was reached.
     pub ranked: usize,
 }
 
-pub(super) fn merge_rounds(
-    first: Vec<crate::core::search::SearchResult>,
-    second: Vec<crate::core::search::SearchResult>,
-) -> Merged {
-    use crate::core::search::SearchResult;
-    let is_ranked = |h: &SearchResult| h.via.is_none();
+/// How many leading hits of a round that found no cliff are trusted enough to
+/// interleave.
+///
+/// The same judgement `anchor_count` makes, for the same reason: "no cliff"
+/// means no basis for calling any part of the list the reliable part, and the
+/// answer is neither "all of it" nor "none of it". None of it would leave a
+/// planned round unable to reach the prompt at all on any deployment without a
+/// reranker — the fan-out reduced to a no-op on the configuration that ships.
+/// All of it would let a round's tail outrank another round's second-best.
+/// A few off the top is what a ranking is worth when nothing confirms where it
+/// stops being worth anything.
+pub(super) const UNCUT_PREFIX: usize = 3;
 
-    // How round one found each artifact it reached, so a promoted hit can keep
-    // saying so on the rail.
-    let reached: std::collections::HashMap<&str, (&Option<String>, &Option<String>)> = first
-        .iter()
-        .filter(|h| !is_ranked(h))
-        .map(|h| (h.artifact_id.as_str(), (&h.via, &h.reason)))
-        .collect();
-    let ranked_already: std::collections::HashSet<&str> = first
-        .iter()
-        .filter(|h| is_ranked(h))
-        .map(|h| h.artifact_id.as_str())
-        .collect();
+/// One round's hits, already split where its own `ranked` said to split them.
+///
+/// The split is the round's own count and never a property read off a hit: a
+/// hit carries a `via` when *some* round reached it, and that stays true of the
+/// round that then ranked it. Reading `via.is_none()` to decide would file such
+/// a hit under "reached" in the very round that retrieved it.
+pub(super) struct Part {
+    pub ranked: Vec<crate::core::search::SearchResult>,
+    pub reached: Vec<crate::core::search::SearchResult>,
+    /// Whether this round's ranking found its own cliff. False says the list
+    /// was cut nowhere, and `merge` interleaves only its leading
+    /// [`UNCUT_PREFIX`] on that account.
+    cut: bool,
+}
 
-    let mut promoted: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut second_ranked: Vec<SearchResult> = Vec::new();
-    let mut second_reached: Vec<SearchResult> = Vec::new();
-    for h in &second {
-        let id = h.artifact_id.as_str();
-        if ranked_already.contains(id) {
-            continue;
+impl Part {
+    /// Split a round's hits at the count it reported.
+    ///
+    /// Takes the round's `cliff_at` rather than a bare flag so the caller
+    /// cannot get the question backwards: it is the same `Option` the round
+    /// already reported on the wire, and `Some` is exactly "this ranking said
+    /// where it stopped meaning anything".
+    pub fn of(
+        mut hits: Vec<crate::core::search::SearchResult>,
+        ranked: usize,
+        cliff_at: Option<usize>,
+    ) -> Self {
+        let reached = hits.split_off(ranked.min(hits.len()));
+        Part {
+            ranked: hits,
+            reached,
+            cut: cliff_at.is_some(),
         }
-        match (is_ranked(h), reached.get(id)) {
-            (true, Some((via, reason))) => {
-                promoted.insert(id);
-                let mut h = h.clone();
-                h.via = (*via).clone();
-                h.reason = (*reason).clone();
-                second_ranked.push(h);
+    }
+}
+
+/// Round-robin across the lists: every list's first before any list's second.
+///
+/// Empty lists simply contribute nothing, so a round that retrieved less than
+/// the others does not leave gaps in the order.
+fn interleave(
+    lists: Vec<Vec<crate::core::search::SearchResult>>,
+) -> Vec<crate::core::search::SearchResult> {
+    let longest = lists.iter().map(Vec::len).max().unwrap_or(0);
+    let mut cursors: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut out = Vec::new();
+    for _ in 0..longest {
+        for c in cursors.iter_mut() {
+            if let Some(h) = c.next() {
+                out.push(h);
             }
-            (true, None) => second_ranked.push(h.clone()),
-            // Reached in both rounds, or reached now and never ranked: round
-            // one's copy already stands for it.
-            (false, Some(_)) => {}
-            (false, None) => second_reached.push(h.clone()),
+        }
+    }
+    out
+}
+
+pub(super) fn merge(parts: Vec<Part>) -> Merged {
+    use crate::core::search::SearchResult;
+    type Story = Option<(Option<String>, Option<String>)>;
+
+    // How each artifact first entered the answer, in round order. `None` says
+    // some round ranked it before any round reached it, and a hit that was
+    // retrieved must not go on to claim it was reached sideways.
+    let mut origin: std::collections::HashMap<String, Story> = std::collections::HashMap::new();
+    for p in &parts {
+        for h in &p.ranked {
+            origin.entry(h.artifact_id.clone()).or_insert(None);
+        }
+        for h in &p.reached {
+            origin
+                .entry(h.artifact_id.clone())
+                .or_insert_with(|| Some((h.via.clone(), h.reason.clone())));
         }
     }
 
-    let mut out: Vec<SearchResult> = first.iter().filter(|h| is_ranked(h)).cloned().collect();
-    out.extend(second_ranked);
+    // Each round's ranked hits split into the part its own ranking vouched for
+    // and the part nothing did. A round that found a cliff vouched for all of
+    // what it still carries; one that found none vouched for its leading few.
+    let mut ranked_lists = Vec::with_capacity(parts.len());
+    let mut tails: Vec<SearchResult> = Vec::new();
+    let mut reached_lists = Vec::with_capacity(parts.len());
+    for p in parts {
+        let mut vouched = p.ranked;
+        if !p.cut {
+            tails.extend(vouched.split_off(UNCUT_PREFIX.min(vouched.len())));
+        }
+        ranked_lists.push(vouched);
+        reached_lists.push(p.reached);
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let take = |h: &mut SearchResult, seen: &mut std::collections::HashSet<String>| -> bool {
+        if !seen.insert(h.artifact_id.clone()) {
+            return false;
+        }
+        match origin.get(&h.artifact_id) {
+            Some(Some((via, reason))) => {
+                h.via = via.clone();
+                h.reason = reason.clone();
+            }
+            // Retrieved before it was ever reached: it carries no `via`, even
+            // if the copy that won this position came from a round that
+            // reached it.
+            _ => {
+                h.via = None;
+                h.reason = None;
+            }
+        }
+        true
+    };
+
+    let mut out: Vec<SearchResult> = Vec::new();
+    for mut h in interleave(ranked_lists) {
+        if take(&mut h, &mut seen) {
+            out.push(h);
+        }
+    }
+    // The uncut rounds' tails, in round order. Ranked hits all, so they sit
+    // inside `ranked` and count as shown — they simply pack last among the
+    // hits, which is the whole of what "nothing vouched for this" buys them.
+    for mut h in tails {
+        if take(&mut h, &mut seen) {
+            out.push(h);
+        }
+    }
     let ranked = out.len();
-    out.extend(
-        first
-            .into_iter()
-            .filter(|h| !is_ranked(h) && !promoted.contains(h.artifact_id.as_str())),
-    );
-    out.extend(second_reached);
+    for mut h in interleave(reached_lists) {
+        if take(&mut h, &mut seen) {
+            out.push(h);
+        }
+    }
     Merged { hits: out, ranked }
 }
 
@@ -161,19 +278,19 @@ pub(super) fn merge_rounds(
 /// model.
 ///
 /// Counted by identity rather than by arithmetic over list lengths, because
-/// there are now two rounds and one merged list: `retrieved` spans both rounds
-/// while the prefix that survived packing spans neither cleanly, so "the ranked
-/// ones that survived are exactly `kept.min(ranked)`" stopped being true the
-/// moment a second round existed. Identity is true either way.
+/// there are several rounds and one merged list: `retrieved` spans all of them
+/// while the prefix that survived packing spans none of them cleanly, so "the
+/// ranked ones that survived are exactly `kept.min(ranked)`" stopped being true
+/// the moment a second round existed. Identity is true either way.
 ///
 /// Only the ranked part of the list counts as showing a retrieved artifact.
 /// `dropped` answers "what did I ask for and not get shown", where the asking
 /// is the ranking: an artifact the cliff cut and adjacency then reached back is
 /// still a hit the ranking lost, and reading it as retained would hide the
 /// cliff on exactly the lists where it did the most work. Position rather than
-/// `via` is what tells the two apart, because a promoted hit carries a `via`
-/// and is a ranked hit all the same — round two returned it above its own
-/// cliff, which is the opposite of lost.
+/// `via` is what tells the two apart, because a hit one round reached and
+/// another ranked carries a `via` and is a ranked hit all the same — that
+/// round returned it above its own cliff, which is the opposite of lost.
 pub(super) fn dropped_count(
     retrieved: &[String],
     shown: &[crate::core::search::SearchResult],
@@ -219,21 +336,53 @@ mod tests {
         }
     }
 
+    /// One round, as `Part::of` receives it: ranked hits first, then whatever
+    /// was reached from them, split at the count the round reported.
+    ///
+    /// `cliff_at` is `Some` — this round's ranking found where it stopped
+    /// meaning anything and was cut there, so every hit it carries is vouched
+    /// for. `part_uncut` is the other case.
+    fn part(ranked: &[&str], reached: &[(&str, &str)]) -> Part {
+        let n = ranked.len();
+        Part::of(hits_of(ranked, reached), n, Some(n))
+    }
+
+    /// A round whose ranking found no cliff, so nothing vouched for where its
+    /// list stops being worth reading.
+    fn part_uncut(ranked: &[&str], reached: &[(&str, &str)]) -> Part {
+        let n = ranked.len();
+        Part::of(hits_of(ranked, reached), n, None)
+    }
+
+    fn hits_of(
+        ranked: &[&str],
+        reached: &[(&str, &str)],
+    ) -> Vec<crate::core::search::SearchResult> {
+        ranked
+            .iter()
+            .map(|id| hit(id, None))
+            .chain(reached.iter().map(|(id, from)| hit(id, Some(from))))
+            .collect()
+    }
+
+    fn ids(m: &Merged) -> Vec<&str> {
+        m.hits.iter().map(|h| h.artifact_id.as_str()).collect()
+    }
+
     /// The seam between the rounds obeys the same rule as the seam inside one:
     /// everything ranked before everything reached. Merging the rounds as whole
     /// lists would leave round one's neighbours ahead of round two's hits, and
-    /// a tight window would then drop the artifact the model explicitly asked
+    /// a tight window would then drop the artifact a round explicitly asked
     /// for while keeping a neighbour of something else — the priority
     /// `append_neighbours` exists to set, inverted at the one point nothing was
     /// checking.
     #[test]
-    fn every_ranked_hit_of_either_round_packs_ahead_of_every_reached_one() {
-        let first = vec![hit("r1", None), hit("n1", Some("r1"))];
-        let second = vec![hit("r2", None), hit("n2", Some("r2"))];
-
-        let merged = merge_rounds(first, second);
-        let ids: Vec<&str> = merged.hits.iter().map(|h| h.artifact_id.as_str()).collect();
-        assert_eq!(ids, vec!["r1", "r2", "n1", "n2"]);
+    fn every_ranked_hit_of_every_round_packs_ahead_of_every_reached_one() {
+        let merged = merge(vec![
+            part(&["r1"], &[("n1", "r1")]),
+            part(&["r2"], &[("n2", "r2")]),
+        ]);
+        assert_eq!(ids(&merged), vec!["r1", "r2", "n1", "n2"]);
         assert_eq!(merged.ranked, 2, "the seam is where the reaching starts");
 
         let last_ranked = merged.hits.iter().rposition(|h| h.via.is_none()).unwrap();
@@ -244,27 +393,54 @@ mod tests {
         );
     }
 
-    /// An artifact round one only reached and round two then ranked is a hit,
-    /// and packs like one. Leaving it in the tail because that is where it
-    /// entered demotes it below neighbours of something else — the R32
-    /// inversion, surviving inside the dedup — and has `dropped` report it
-    /// missing while it sits in the prompt.
+    /// The reason the fan-out exists. A question that named three subjects gets
+    /// a round for each, and a window that holds three excerpts has to spend
+    /// them on three subjects rather than on the first subject's three best
+    /// hits. Concatenating the rounds would do the latter and leave two thirds
+    /// of the question unretrieved in the prompt.
+    #[test]
+    fn the_rounds_interleave_so_a_tight_window_still_covers_every_subject() {
+        let merged = merge(vec![
+            part(&["a1", "a2", "a3"], &[]),
+            part(&["b1", "b2"], &[]),
+            part(&["c1"], &[]),
+        ]);
+        assert_eq!(ids(&merged), vec!["a1", "b1", "c1", "a2", "b2", "a3"]);
+        assert_eq!(
+            &ids(&merged)[..3],
+            &["a1", "b1", "c1"],
+            "a window holding three excerpts must hold one per subject"
+        );
+    }
+
+    /// Round-robin does not cost the question its own best hit. The first part
+    /// is the question as it was actually asked, and round-robin starts there.
+    #[test]
+    fn the_question_as_asked_still_takes_the_first_place() {
+        let merged = merge(vec![part(&["asked"], &[]), part(&["planned"], &[])]);
+        assert_eq!(ids(&merged)[0], "asked");
+    }
+
+    /// An artifact one round only reached and another then ranked is a hit, and
+    /// packs like one. Leaving it in the tail because that is where it entered
+    /// demotes it below neighbours of something else — the R32 inversion,
+    /// surviving inside the dedup — and has `dropped` report it missing while it
+    /// sits in the prompt.
     ///
     /// It keeps its `via` all the same: that string is how the rail explains
-    /// where it came from, and round two ranking it does not unsay it.
+    /// where it came from, and a later round ranking it does not unsay it.
     #[test]
-    fn an_artifact_round_two_ranked_takes_a_ranked_place_and_keeps_how_it_was_reached() {
-        let first = vec![hit("a", None), hit("b", Some("a"))];
-        // The second round ranks what the first only reached, and re-finds what
-        // it already had.
-        let second = vec![hit("b", None), hit("a", None), hit("c", None)];
-
-        let merged = merge_rounds(first, second);
-        let ids: Vec<&str> = merged.hits.iter().map(|h| h.artifact_id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b", "c"]);
+    fn an_artifact_a_later_round_ranked_takes_a_ranked_place_and_keeps_how_it_was_reached() {
+        let merged = merge(vec![
+            part(&["a"], &[("b", "a")]),
+            // The second round ranks what the first only reached, and re-finds
+            // what it already had.
+            part(&["b", "a", "c"], &[]),
+        ]);
+        assert_eq!(ids(&merged), vec!["a", "b", "c"]);
         assert_eq!(
             merged.ranked, 3,
-            "the promoted hit is inside the ranked half"
+            "the reached hit is inside the ranked half"
         );
         assert_eq!(
             merged.hits[1].via.as_deref(),
@@ -282,13 +458,27 @@ mod tests {
         );
     }
 
+    /// The inverse, and the reason `origin` is built in round order rather than
+    /// from whichever copy wins a position: an artifact the first round
+    /// retrieved outright was not reached sideways, and a later round happening
+    /// to link to it must not have the rail claim it was. `via` is a statement
+    /// about how an artifact first entered the answer.
+    #[test]
+    fn an_artifact_ranked_before_it_was_ever_reached_carries_no_via() {
+        let merged = merge(vec![part(&["a", "x"], &[]), part(&["y"], &[("a", "y")])]);
+        assert_eq!(ids(&merged), vec!["a", "y", "x"]);
+        assert_eq!(
+            merged.hits[0].via, None,
+            "a retrieved artifact was reported as reached sideways"
+        );
+    }
+
     /// `dropped` is measured by position, not by `via`, and the two disagree
     /// exactly here: an artifact the cliff cut and adjacency reached back is a
     /// hit the ranking lost, however it reads on the rail.
     #[test]
     fn an_artifact_the_cliff_cut_stays_dropped_even_when_the_reach_puts_it_back() {
-        let first = vec![hit("a", None), hit("b", Some("a"))];
-        let merged = merge_rounds(first, vec![]);
+        let merged = merge(vec![part(&["a"], &[("b", "a")])]);
         assert_eq!(
             dropped_count(
                 &["a".to_string(), "b".to_string()],
@@ -300,32 +490,31 @@ mod tests {
         );
     }
 
-    /// The second round can leave the model with *fewer* excerpts than the
-    /// first, and that is the R32 priority working rather than a regression: a
-    /// hit round two asked for packs ahead of round one's neighbours, so a
-    /// window that held three small speculative excerpts may hold one hit
-    /// instead. `Retrieved { round: 2, shown }` can therefore be lower than
-    /// round one's, which is honest — those neighbours are no longer in the
-    /// prompt.
+    /// The fan-out can leave the model with *fewer* excerpts than the first
+    /// round did, and that is the R32 priority working rather than a
+    /// regression: a hit a planned round asked for packs ahead of round one's
+    /// neighbours, so a window that held three small speculative excerpts may
+    /// hold one hit instead. `Retrieved { round: 2, shown }` can therefore be
+    /// lower than round one's, which is honest — those neighbours are no longer
+    /// in the prompt.
     #[test]
-    fn a_second_round_can_show_fewer_excerpts_than_the_first_did() {
-        let first = vec![
-            hit("r1", None),
-            hit("n1", Some("r1")),
-            hit("n2", Some("r1")),
-        ];
-        let second = vec![hit("big", None)];
-
+    fn the_fan_out_can_show_fewer_excerpts_than_the_first_round_did() {
+        let first = part(&["r1"], &[("n1", "r1"), ("n2", "r1")]);
         let block = |h: &crate::core::search::SearchResult| match h.artifact_id.as_str() {
             "big" => "x".repeat(60),
             _ => "x".repeat(20),
         };
         let budget = 25;
 
-        let one: Vec<String> = first.iter().map(block).collect();
+        let one: Vec<String> = first
+            .ranked
+            .iter()
+            .chain(first.reached.iter())
+            .map(block)
+            .collect();
         let kept_one = pack_by_budget(&one, &TokenCounter, budget);
 
-        let merged = merge_rounds(first, second);
+        let merged = merge(vec![first, part(&["big"], &[])]);
         let two: Vec<String> = merged.hits.iter().map(block).collect();
         let kept_two = pack_by_budget(&two, &TokenCounter, budget);
 
@@ -334,6 +523,59 @@ mod tests {
             kept_two < kept_one,
             "nothing was displaced: {kept_one} then {kept_two}"
         );
+    }
+
+    /// The no-reranker case, which is the shipped one. Nothing cut these lists,
+    /// so `above_cliff` handed each round all eight of its hits. Interleaving
+    /// them whole would put a planned query's fourth-best hit ahead of the
+    /// asked question's fourth-best and let the model's guesses fill a window
+    /// the question's own hits were evicted from. Only the leading
+    /// `UNCUT_PREFIX` of each round interleaves; the tails follow, in round
+    /// order, behind every hit some ranking vouched for.
+    #[test]
+    fn an_uncut_round_interleaves_only_what_its_ranking_can_vouch_for() {
+        let merged = merge(vec![
+            part_uncut(&["a1", "a2", "a3", "a4", "a5"], &[]),
+            part_uncut(&["b1", "b2", "b3", "b4"], &[]),
+        ]);
+        assert_eq!(
+            ids(&merged),
+            vec!["a1", "b1", "a2", "b2", "a3", "b3", "a4", "a5", "b4"],
+            "an uncut tail outranked another round's vouched-for hits"
+        );
+        assert_eq!(
+            merged.ranked, 9,
+            "a tail is still a ranked hit; it only packs last among them"
+        );
+    }
+
+    /// A round that found its cliff was cut at it, so everything it still
+    /// carries is vouched for and interleaves whole — even past
+    /// `UNCUT_PREFIX`. Holding a cut round to the same prefix would throw away
+    /// the one thing a cliff is for.
+    #[test]
+    fn a_round_that_found_its_cliff_interleaves_whole() {
+        let merged = merge(vec![
+            part(&["a1", "a2", "a3", "a4"], &[]),
+            part(&["b1", "b2", "b3", "b4"], &[]),
+        ]);
+        assert_eq!(
+            ids(&merged),
+            vec!["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4"]
+        );
+    }
+
+    /// The seam the tails must not cross. A tail is untrusted among the ranked
+    /// hits and packs behind all of them, but it is still a hit a round
+    /// retrieved, and a neighbour of something else must not outrank it.
+    #[test]
+    fn an_uncut_tail_still_packs_ahead_of_everything_reached() {
+        let merged = merge(vec![
+            part_uncut(&["a1", "a2", "a3", "a4"], &[("n1", "a1")]),
+            part_uncut(&["b1"], &[]),
+        ]);
+        assert_eq!(ids(&merged), vec!["a1", "b1", "a2", "a3", "a4", "n1"]);
+        assert_eq!(merged.ranked, 5, "the reaching starts after every tail");
     }
 
     /// The whole point: a list whose relevance falls off is cut where it falls
