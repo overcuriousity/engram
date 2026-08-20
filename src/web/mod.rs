@@ -165,6 +165,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_asset_is_a_missing_asset_and_not_a_login() {
+        // The fallback is the whole application's, not the UI router's, so a
+        // stylesheet nobody routed arrived at the page — which for a browser
+        // with no session is a 401, which the redirect middleware then turns
+        // into the login screen. A 303 to `/auth/login` in place of a 404 on a
+        // `<link>` is not a missing stylesheet, it is a mystery.
+        let core = crate::core::test_support::test_core().await;
+        let (app, _cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/nothing-here.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_mcp_path_is_not_a_web_page_either() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/mcp/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(!body.contains("<html"), "an HTML document to parse: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_post_to_a_path_nobody_routed_is_not_handed_a_page() {
+        // Nobody types a POST into a browser bar, so there is nobody to show a
+        // page to; whatever sent it wants the status.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/ui/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(!body.contains("<html"), "an HTML document to parse: {body}");
+    }
+
+    #[tokio::test]
     async fn an_unknown_api_path_is_still_not_a_web_page() {
         // The fallback is for people typing URLs. An agent asking the API for
         // a route that does not exist must not be handed a login-shaped HTML

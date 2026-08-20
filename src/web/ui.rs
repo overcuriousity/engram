@@ -3483,7 +3483,13 @@ struct NotFoundTemplate {
 ///
 /// Only for the pages: an agent asking `/api/v1` for a route that does not
 /// exist must not be handed an HTML document to parse, which is what a router
-/// fallback would do to every door at once.
+/// fallback would do to every door at once. `/api/` is not the only such door.
+/// This is the fallback for the whole application, so a missing static asset,
+/// an unrouted `/mcp` path and every request that is not a `GET` arrive here
+/// too — and each of them was answered with the page, which for a browser with
+/// no session meant a 401 that `redirect_unauthenticated_browsers` turned into
+/// the login screen. A stylesheet that 303s to a login is not a missing
+/// stylesheet, it is a mystery. They get the plain 404 they asked for.
 ///
 /// The page is behind a session like every other page. `Identity` is asked for
 /// optionally rather than required so that the `/api` answer above stays a 404
@@ -3495,9 +3501,15 @@ struct NotFoundTemplate {
 pub async fn not_found(
     State(st): State<AppState>,
     id: Option<Identity>,
+    method: axum::http::Method,
     uri: axum::http::Uri,
 ) -> Response {
-    if uri.path().starts_with("/api/") {
+    let path = uri.path();
+    let machine = path.starts_with("/api/")
+        || path.starts_with("/assets/")
+        || path == "/mcp"
+        || path.starts_with("/mcp/");
+    if machine || method != axum::http::Method::GET {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
     }
     if id.is_none() {
