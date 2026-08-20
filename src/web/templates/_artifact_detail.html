@@ -60,14 +60,23 @@
      decision that does not depend on whether it is currently hidden.
 
      `.actions` rather than `.chips`: it pushes delete to the far end, so the
-     one control that cannot be undone is never flush against two that can. #}
-  <div class="actions">
+     one control that cannot be undone is never flush against two that can. It
+     is also a `.pane-header`, which anchors the row to the artifact under a
+     rule rather than leaving it floating at the top of a wide column — at
+     three-up the lone trash button ended a thousand pixels from its siblings
+     and read as stranded rather than as caution.
+
+     Every one of them carries its word. An icon alone is a guess: a check mark
+     could as easily mean "done" as "still true", and the tooltip that said
+     which only appears once you have already hovered the thing you were unsure
+     about. #}
+  <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
               title="Confirm still accurate" aria-label="Confirm still accurate">
-        {% include "_icon_check.html" %}
+        {% include "_icon_check.html" %}<span>Verified</span>
       </button>
     </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
@@ -75,7 +84,7 @@
       <button class="btn-icon" type="submit"
               title="Deprecate — hide from results, keep the artifact"
               aria-label="Deprecate: hide from results, keep the artifact">
-        {% include "_icon_hide.html" %}
+        {% include "_icon_hide.html" %}<span>Hide</span>
       </button>
     </form>
     {% endif %}
@@ -86,7 +95,7 @@
           onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete permanently" aria-label="Delete artifact permanently">
-        {% include "_icon_trash.html" %}
+        {% include "_icon_trash.html" %}<span>Delete</span>
       </button>
     </form>
   </div>

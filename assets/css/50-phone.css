@@ -80,7 +80,10 @@
   .input, .select { height: 44px; }
 
   /* Targets a thumb can hit. */
-  .btn-icon { width: 44px; height: 44px; }
+  /* :not(:has(span)) — a labelled control still needs room for its word;
+     only the square ones grow into a 44px target. */
+  .btn-icon:not(:has(span)) { width: 44px; height: 44px; }
+  .btn-icon:has(span) { height: 44px; }
   .chip > span { padding: 8px 12px; font-size: 0.8125rem; }
   .facet-row { align-items: center; }
 

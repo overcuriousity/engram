@@ -4623,6 +4623,33 @@ mod tests {
     }
 
     #[test]
+    fn the_artifact_actions_carry_labels() {
+        // One screen carried three button vocabularies: unlabelled icon
+        // buttons stranded at the top of a wide row, text links inside the
+        // card, and solid buttons elsewhere. An icon alone is a guess — a
+        // check mark could as easily mean "done" as "still true".
+        //
+        // Asserted against the template source rather than a render: the
+        // fragment is `ArtifactDetailFragment { d: ArtifactDetail }` and
+        // building an ArtifactDetail by hand is thirty lines of scaffolding to
+        // check for three words. The words are the whole change.
+        let tpl = include_str!("templates/_artifact_detail.html");
+        for word in ["Verified", "Hide", "Delete"] {
+            assert!(
+                tpl.contains(&format!("<span>{word}</span>")),
+                "the {word} control has no label"
+            );
+        }
+        // The square is still right for the controls that repeat down a list,
+        // where the row already says what they act on.
+        let rail = include_str!("templates/_results.html");
+        assert!(
+            rail.contains("btn-icon btn-icon-danger"),
+            "the rail's delete stopped being an icon button"
+        );
+    }
+
+    #[test]
     fn the_open_rail_card_keeps_a_line_of_itself() {
         // The rail is the ranking as well as a list of links. A card
         // collapsing to a bare stub when opened punched a hole in the ordering
