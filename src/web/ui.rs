@@ -432,10 +432,14 @@ pub fn fmt_time(ts: i64) -> String {
 /// anything a reader went looking for — and it was the heading over every
 /// verbatim passage in the pane. The opening of the body at least says what
 /// the passage is about.
+///
+/// `title_of` itself, because the rule that strips markup off a *stored* title
+/// belongs here too: without this the corpus page and the artifact pane showed
+/// "**Was nicht abgedeckt ist:** * Es werden keine" with its asterisks while
+/// Housekeeping showed it cleaned, which is the drift `title_of` was gathered
+/// into one place to close.
 fn artifact_title(c: &crate::store::artifacts::Chunk) -> String {
-    c.title
-        .clone()
-        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))
+    title_of(c)
 }
 
 /// How an artifact's own text is rendered.
@@ -2105,10 +2109,18 @@ pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
     // and nothing stopped it writing markup into one: Housekeeping listed a
     // merged artifact as "**Was nicht abgedeckt ist:** * Es werden keine". A
     // title is a name, and a name is never marked up.
-    match &c.title {
+    let name = match &c.title {
         Some(t) => crate::web::markdown::stand_in_title(t, 80),
         None => crate::web::markdown::stand_in_title(&c.text, 60),
+    };
+    // `stand_in_title` strips markup and leading punctuation, so a body that is
+    // only those leaves nothing at all — a rule the sitting rail cannot use,
+    // since a list entry with no text is a link nobody can see or click. The id
+    // is a poor name and a working one.
+    if name.is_empty() {
+        return c.id.clone();
     }
+    name
 }
 
 /// How many decisions Capture offers at once, and the order it looks for them
@@ -3352,6 +3364,9 @@ pub(crate) async fn build_artifact_detail(
             .map(|n| n.id),
         _ => None,
     };
+    // The same rule as `artifact_title`, and for the same reason: an ordinal in
+    // the ingest is not a name. Taken before the struct, which moves `c`.
+    let title = artifact_title(&c);
     Ok(ArtifactDetail {
         continues_at,
         related,
@@ -3360,12 +3375,7 @@ pub(crate) async fn build_artifact_detail(
         source_at_lines,
         lineage,
         id: c.id,
-        // The same rule as `artifact_title`, and for the same reason: an
-        // ordinal in the ingest is not a name.
-        title: c
-            .title
-            .clone()
-            .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60)),
+        title,
         html,
         text: c.text,
         category: c.category,
@@ -4061,6 +4071,33 @@ mod tests {
             "every row's B side is one artifact under one name — appearing three \
              times is a cluster, not a collision"
         );
+    }
+
+    #[test]
+    fn the_artifact_pane_shows_a_stored_title_by_the_same_rule_as_the_rest() {
+        // Synthesis writes titles and nothing stopped it writing markup into
+        // one. Housekeeping showed it cleaned while the corpus page and the
+        // pane showed the asterisks — the drift `title_of` was gathered into
+        // one place to close, still open on the path that read `c.title`
+        // straight.
+        assert_eq!(
+            artifact_title(&chunk_fixture(
+                Some("**Was nicht abgedeckt ist:** * Es werden keine"),
+                "body"
+            )),
+            "Was nicht abgedeckt ist: * Es werden keine"
+        );
+    }
+
+    #[test]
+    fn an_artifact_whose_opening_is_only_markup_still_has_a_name() {
+        // `stand_in_title` takes markup and leading punctuation off the front,
+        // so a body that is only those leaves nothing at all. The sitting rail
+        // rendered that as a list entry with no text — a link nobody can see
+        // or click. The id is a poor name and a working one.
+        let t = title_of(&chunk_fixture(None, "---"));
+        assert!(!t.is_empty(), "a rail entry with no text is not a link");
+        assert_eq!(t, "a", "the fixture's id");
     }
 
     #[test]

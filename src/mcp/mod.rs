@@ -24,6 +24,15 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
                 .title
                 .clone()
                 .unwrap_or_else(|| crate::web::markdown::stand_in_title(&r.text, 60));
+            // `stand_in_title` takes markup and leading punctuation off the
+            // front, so a passage that is only those leaves nothing — and a
+            // heading with no text after it is a numbered entry an agent
+            // cannot refer back to. The id is a poor name and a working one.
+            let title = if title.is_empty() {
+                r.artifact_id.clone()
+            } else {
+                title
+            };
             let tags = if r.tags.is_empty() {
                 String::new()
             } else {
