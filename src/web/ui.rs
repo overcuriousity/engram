@@ -1952,12 +1952,19 @@ async fn reprocess_ui(
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
+/// What to call an artifact in a place that must call it something.
+///
 /// A title is what makes two near-identical artifacts tellable apart at a
-/// glance; falling back to the opening of the body beats an id.
+/// glance; falling back to the opening of the body beats an id. Sixty
+/// characters of raw body was that fallback, and it is where the sitting's
+/// "…darin vo" and the dedupe queue's `Keep "- schneller Schreibzugriff …"`
+/// both came from. The rule lives in one place now — see
+/// `markdown::stand_in_title` — so the sitting, the pair cards and the judge
+/// cannot drift apart again.
 pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
     c.title
         .clone()
-        .unwrap_or_else(|| c.text.chars().take(60).collect())
+        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.text, 60))
 }
 
 /// How many decisions Capture offers at once, and the order it looks for them
@@ -3267,6 +3274,61 @@ pub fn ui_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Chunk` with every field named, so a test can say the one thing it
+    /// cares about and nothing else. `Chunk` has no `Default` on purpose —
+    /// most of its fields are decisions — so the fixture carries them here
+    /// rather than putting a misleading default on the type.
+    fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
+        crate::store::artifacts::Chunk {
+            id: "a".into(),
+            corpus_id: Some("s".into()),
+            provenance: crate::store::artifacts::Provenance::Captured,
+            source_count: 0,
+            ordinal: 56,
+            text: text.into(),
+            corpus_span: None,
+            title: title.map(str::to_string),
+            category: None,
+            tags: vec![],
+            embed_state: crate::store::artifacts::EmbedState::Embedded,
+            embed_model: None,
+            created_at: 0,
+            embed_rev: 0,
+            segment_idx: None,
+            flags: vec![],
+            flag_detail: None,
+            superseded_by: None,
+            caveats: vec![],
+            status: crate::store::artifacts::ArtifactStatus::Active,
+            last_verified_at: None,
+            cues: vec![],
+        }
+    }
+
+    #[test]
+    fn an_untitled_artifact_is_named_by_its_opening_not_by_its_first_sixty_bytes() {
+        // Both of these came off the deployment: the sitting cut a name
+        // mid-word, and "Needs you" offered a button reading
+        // `Keep "- schneller Schreibzugriff (…) -"`.
+        let t = title_of(&chunk_fixture(
+            None,
+            "Die digitale Forensik unterscheidet sich zusätzlich darin von einem Tatort",
+        ));
+        assert!(!t.ends_with("vo"), "cut mid-word: {t:?}");
+        assert_eq!(
+            title_of(&chunk_fixture(
+                None,
+                "- schneller Schreibzugriff (Änderungen vom Key auf Stapel) -"
+            )),
+            "schneller Schreibzugriff (Änderungen vom Key auf Stapel) -"
+        );
+        assert_eq!(
+            title_of(&chunk_fixture(Some("LevelDB"), "body")),
+            "LevelDB",
+            "a real title is never replaced"
+        );
+    }
     use crate::web::test_support::{a_png, app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
