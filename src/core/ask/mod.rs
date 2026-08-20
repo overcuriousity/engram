@@ -158,7 +158,7 @@ impl Core {
                 // Emitted even though it is empty: a reader that waits for the
                 // rail before the answer must not wait forever on the one
                 // question that retrieved nothing.
-                yield AskEvent::Retrieved { round: 1, shown: 0, dropped: 0, cliff_at: None };
+                yield AskEvent::Retrieved { round: 1, retrieved: 0, shown: 0, dropped: 0, cliff_at: None };
                 yield AskEvent::Citations(vec![]);
                 let response = core.record_ask(&req, &origin, response).await?;
                 yield AskEvent::Done(Box::new(response));
@@ -194,7 +194,13 @@ impl Core {
                     unsupported: vec![],
                     event_id: None,
                 };
-                yield AskEvent::Retrieved { round: 1, shown: 0, dropped, cliff_at: first.cliff_at };
+                yield AskEvent::Retrieved {
+                    round: 1,
+                    retrieved: retrieved.len(),
+                    shown: 0,
+                    dropped,
+                    cliff_at: first.cliff_at,
+                };
                 yield AskEvent::Citations(vec![]);
                 let response = core.record_ask(&req, &origin, response).await?;
                 yield AskEvent::Done(Box::new(response));
@@ -207,6 +213,7 @@ impl Core {
             // cause.
             yield AskEvent::Retrieved {
                 round: 1,
+                retrieved: retrieved.len(),
                 shown: kept,
                 dropped,
                 cliff_at: first.cliff_at,
@@ -234,11 +241,11 @@ impl Core {
 
                 // Round one's hits are the first part, so round-robin starts
                 // with the question as it was actually asked.
-                let mut parts = vec![retrieve::Part::of(hits.clone(), ranked)];
+                let mut parts = vec![retrieve::Part::of(hits.clone(), ranked, first.cliff_at)];
                 let mut fanned_retrieved: Vec<String> = Vec::new();
                 for round in extra {
                     fanned_retrieved.extend(round.retrieved);
-                    parts.push(retrieve::Part::of(round.hits, round.ranked));
+                    parts.push(retrieve::Part::of(round.hits, round.ranked, round.cliff_at));
                 }
 
                 // Nothing came back at all: every planned round failed. Round
@@ -247,7 +254,13 @@ impl Core {
                 // rest of the answer.
                 if parts.len() == 1 {
                     tracing::warn!("ask: every planned round failed; answering from the first");
-                    yield AskEvent::Retrieved { round: 2, shown: kept, dropped, cliff_at: None };
+                    yield AskEvent::Retrieved {
+                        round: 2,
+                        retrieved: retrieved.len(),
+                        shown: kept,
+                        dropped,
+                        cliff_at: None,
+                    };
                 } else {
                     let merged = retrieve::merge(parts);
 
@@ -300,7 +313,13 @@ impl Core {
                     // the merged list is several rankings interleaved, so there
                     // is no one position in it where relevance fell off; naming
                     // one would be inventing it.
-                    yield AskEvent::Retrieved { round: 2, shown: kept, dropped, cliff_at: None };
+                    yield AskEvent::Retrieved {
+                        round: 2,
+                        retrieved: retrieved.len(),
+                        shown: kept,
+                        dropped,
+                        cliff_at: None,
+                    };
                 }
             }
 
@@ -396,12 +415,39 @@ impl Core {
             yield AskEvent::Done(Box::new(response));
         }
     }
+}
 
+/// The planned rounds, held so that dropping them stops them.
+///
+/// A `JoinHandle` dropped on the floor does not cancel its task, and these
+/// tasks are searches: an embedding call and a vector query each. A reader who
+/// closes the tab drops the stream, and everything the ask was doing inline
+/// stops at its next await — but three detached rounds would run to completion
+/// against the same hardware, for an answer nobody will read. Round two used to
+/// run inline in the generator and was cancelled that way; spawning is what
+/// took the property away, so spawning is what has to give it back.
+///
+/// Not the answer call, deliberately. That one keeps running on purpose — it
+/// holds the interactive lane, and killing it mid-generation would hand the
+/// worker a window against a GPU still finishing the work. A retrieval that
+/// nobody is waiting for has no such claim.
+struct Fanned(Vec<tokio::task::JoinHandle<Result<Round>>>);
+
+impl Drop for Fanned {
+    fn drop(&mut self) {
+        for t in &self.0 {
+            t.abort();
+        }
+    }
+}
+
+impl Core {
     /// Every planned query at once, in plan order.
     ///
     /// Concurrent because the rounds are independent searches against the same
     /// store: run in sequence, a three-subject question would charge the reader
     /// three embedding round trips end to end for work that shares nothing.
+    ///
     /// The width is bounded by `PLAN_MAX_QUERIES`, which is what the plan itself
     /// is capped at — one number, so the fan-out can never run wider than the
     /// plan can name.
@@ -416,16 +462,18 @@ impl Core {
     /// answer for a strictly better answer's absence — the operator asked a
     /// question, not for a retrieval strategy.
     async fn fan_out(&self, req: &AskRequest, queries: &[String]) -> Vec<Round> {
-        let spawned: Vec<_> = queries
-            .iter()
-            .map(|q| {
-                let (core, req, q) = (self.clone(), req.clone(), q.clone());
-                tokio::spawn(async move { core.retrieve_round(&req, &q, false).await })
-            })
-            .collect();
+        let mut spawned = Fanned(
+            queries
+                .iter()
+                .map(|q| {
+                    let (core, req, q) = (self.clone(), req.clone(), q.clone());
+                    tokio::spawn(async move { core.retrieve_round(&req, &q, false).await })
+                })
+                .collect(),
+        );
 
-        let mut out = Vec::with_capacity(spawned.len());
-        for (task, q) in spawned.into_iter().zip(queries) {
+        let mut out = Vec::with_capacity(spawned.0.len());
+        for (task, q) in spawned.0.iter_mut().zip(queries) {
             match task.await {
                 Ok(Ok(round)) => out.push(round),
                 Ok(Err(e)) => {

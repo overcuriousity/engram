@@ -1332,6 +1332,7 @@ impl Config {
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
+        cfg.warn_on_unplaced_plan_cost();
         Ok(cfg)
     }
 
@@ -1578,6 +1579,34 @@ impl Config {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The planning call has nowhere cheap to go.
+    ///
+    /// `plan` defaults on, and an operator who never wrote the key gets the
+    /// fan-out without asking for it — which is the intent. What is not the
+    /// intent is where the call lands: with no `plan_tier`, `plan_on` falls
+    /// back to the ask role's own endpoint, so every question now pays a full
+    /// deep-model completion in front of its answer. On a local deep model
+    /// that is tens of seconds of added latency per ask, arriving on an upgrade
+    /// with no config change to point at.
+    ///
+    /// A warning rather than a different default, because the feature is worth
+    /// having and the operator is the only one who knows which of their tiers
+    /// is the efficient one. Said once, at startup, where a latency change has
+    /// somewhere to be explained.
+    fn warn_on_unplaced_plan_cost(&self) {
+        let Some(a) = self.infer.ask.as_ref() else {
+            return;
+        };
+        if a.plan && a.plan_endpoint.is_none() {
+            tracing::warn!(
+                model = %a.model,
+                "infer.ask.plan is on with no infer.ask.plan_tier: the planning call \
+                 runs on the ask endpoint, one extra completion per question. Name a \
+                 cheaper tier there, or set plan = false"
+            );
+        }
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file

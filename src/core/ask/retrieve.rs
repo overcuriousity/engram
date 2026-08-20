@@ -89,11 +89,22 @@ pub(super) fn append_neighbours(
 /// Ranked round-robin, not concatenated. A question that named three subjects
 /// is answered from all three or from none, and concatenating would let the
 /// first subject's hits fill the window while the other two go unrepresented —
-/// which is the failure the fan-out exists to fix. Every round was cut at its
-/// own cliff before it arrived here, so each hit in each list is one its own
-/// ranking vouched for; interleaving them is not mixing the trusted with the
-/// doubtful. The first round is the question asked verbatim and still takes the
-/// first slot, because round-robin starts with it.
+/// which is the failure the fan-out exists to fix. The first round is the
+/// question asked verbatim and still takes the first slot, because round-robin
+/// starts with it.
+///
+/// Only what a round's own ranking vouched for is interleaved. A round that
+/// found a cliff was cut at it and every hit it still carries is one that
+/// ranking stood behind, so it interleaves whole. A round that found none was
+/// cut nowhere — `above_cliff` hands back the entire ranked list — and with no
+/// reranker wired that is the ordinary case rather than the exotic one.
+/// Interleaving such a list whole would put a planned query's eighth-best hit
+/// ahead of the asked question's second-best, and a tight window would then be
+/// spent on the model's guesses while the question's own hits were evicted.
+/// So an uncut round interleaves its leading [`UNCUT_PREFIX`] and its tail
+/// follows the interleaved section in round order — still ranked, still ahead
+/// of everything reached, but behind every hit that got there on a ranking's
+/// word.
 ///
 /// This cannot reach the cliff. Every round computed its own over its own
 /// scores before returning, and nothing downstream of here recomputes one, so
@@ -116,6 +127,19 @@ pub(super) struct Merged {
     pub ranked: usize,
 }
 
+/// How many leading hits of a round that found no cliff are trusted enough to
+/// interleave.
+///
+/// The same judgement `anchor_count` makes, for the same reason: "no cliff"
+/// means no basis for calling any part of the list the reliable part, and the
+/// answer is neither "all of it" nor "none of it". None of it would leave a
+/// planned round unable to reach the prompt at all on any deployment without a
+/// reranker — the fan-out reduced to a no-op on the configuration that ships.
+/// All of it would let a round's tail outrank another round's second-best.
+/// A few off the top is what a ranking is worth when nothing confirms where it
+/// stops being worth anything.
+pub(super) const UNCUT_PREFIX: usize = 3;
+
 /// One round's hits, already split where its own `ranked` said to split them.
 ///
 /// The split is the round's own count and never a property read off a hit: a
@@ -125,15 +149,29 @@ pub(super) struct Merged {
 pub(super) struct Part {
     pub ranked: Vec<crate::core::search::SearchResult>,
     pub reached: Vec<crate::core::search::SearchResult>,
+    /// Whether this round's ranking found its own cliff. False says the list
+    /// was cut nowhere, and `merge` interleaves only its leading
+    /// [`UNCUT_PREFIX`] on that account.
+    cut: bool,
 }
 
 impl Part {
     /// Split a round's hits at the count it reported.
-    pub fn of(mut hits: Vec<crate::core::search::SearchResult>, ranked: usize) -> Self {
+    ///
+    /// Takes the round's `cliff_at` rather than a bare flag so the caller
+    /// cannot get the question backwards: it is the same `Option` the round
+    /// already reported on the wire, and `Some` is exactly "this ranking said
+    /// where it stopped meaning anything".
+    pub fn of(
+        mut hits: Vec<crate::core::search::SearchResult>,
+        ranked: usize,
+        cliff_at: Option<usize>,
+    ) -> Self {
         let reached = hits.split_off(ranked.min(hits.len()));
         Part {
             ranked: hits,
             reached,
+            cut: cliff_at.is_some(),
         }
     }
 }
@@ -177,10 +215,18 @@ pub(super) fn merge(parts: Vec<Part>) -> Merged {
         }
     }
 
+    // Each round's ranked hits split into the part its own ranking vouched for
+    // and the part nothing did. A round that found a cliff vouched for all of
+    // what it still carries; one that found none vouched for its leading few.
     let mut ranked_lists = Vec::with_capacity(parts.len());
+    let mut tails: Vec<SearchResult> = Vec::new();
     let mut reached_lists = Vec::with_capacity(parts.len());
     for p in parts {
-        ranked_lists.push(p.ranked);
+        let mut vouched = p.ranked;
+        if !p.cut {
+            tails.extend(vouched.split_off(UNCUT_PREFIX.min(vouched.len())));
+        }
+        ranked_lists.push(vouched);
         reached_lists.push(p.reached);
     }
 
@@ -207,6 +253,14 @@ pub(super) fn merge(parts: Vec<Part>) -> Merged {
 
     let mut out: Vec<SearchResult> = Vec::new();
     for mut h in interleave(ranked_lists) {
+        if take(&mut h, &mut seen) {
+            out.push(h);
+        }
+    }
+    // The uncut rounds' tails, in round order. Ranked hits all, so they sit
+    // inside `ranked` and count as shown — they simply pack last among the
+    // hits, which is the whole of what "nothing vouched for this" buys them.
+    for mut h in tails {
         if take(&mut h, &mut seen) {
             out.push(h);
         }
@@ -284,14 +338,31 @@ mod tests {
 
     /// One round, as `Part::of` receives it: ranked hits first, then whatever
     /// was reached from them, split at the count the round reported.
+    ///
+    /// `cliff_at` is `Some` — this round's ranking found where it stopped
+    /// meaning anything and was cut there, so every hit it carries is vouched
+    /// for. `part_uncut` is the other case.
     fn part(ranked: &[&str], reached: &[(&str, &str)]) -> Part {
         let n = ranked.len();
-        let hits = ranked
+        Part::of(hits_of(ranked, reached), n, Some(n))
+    }
+
+    /// A round whose ranking found no cliff, so nothing vouched for where its
+    /// list stops being worth reading.
+    fn part_uncut(ranked: &[&str], reached: &[(&str, &str)]) -> Part {
+        let n = ranked.len();
+        Part::of(hits_of(ranked, reached), n, None)
+    }
+
+    fn hits_of(
+        ranked: &[&str],
+        reached: &[(&str, &str)],
+    ) -> Vec<crate::core::search::SearchResult> {
+        ranked
             .iter()
             .map(|id| hit(id, None))
             .chain(reached.iter().map(|(id, from)| hit(id, Some(from))))
-            .collect();
-        Part::of(hits, n)
+            .collect()
     }
 
     fn ids(m: &Merged) -> Vec<&str> {
@@ -452,6 +523,59 @@ mod tests {
             kept_two < kept_one,
             "nothing was displaced: {kept_one} then {kept_two}"
         );
+    }
+
+    /// The no-reranker case, which is the shipped one. Nothing cut these lists,
+    /// so `above_cliff` handed each round all eight of its hits. Interleaving
+    /// them whole would put a planned query's fourth-best hit ahead of the
+    /// asked question's fourth-best and let the model's guesses fill a window
+    /// the question's own hits were evicted from. Only the leading
+    /// `UNCUT_PREFIX` of each round interleaves; the tails follow, in round
+    /// order, behind every hit some ranking vouched for.
+    #[test]
+    fn an_uncut_round_interleaves_only_what_its_ranking_can_vouch_for() {
+        let merged = merge(vec![
+            part_uncut(&["a1", "a2", "a3", "a4", "a5"], &[]),
+            part_uncut(&["b1", "b2", "b3", "b4"], &[]),
+        ]);
+        assert_eq!(
+            ids(&merged),
+            vec!["a1", "b1", "a2", "b2", "a3", "b3", "a4", "a5", "b4"],
+            "an uncut tail outranked another round's vouched-for hits"
+        );
+        assert_eq!(
+            merged.ranked, 9,
+            "a tail is still a ranked hit; it only packs last among them"
+        );
+    }
+
+    /// A round that found its cliff was cut at it, so everything it still
+    /// carries is vouched for and interleaves whole — even past
+    /// `UNCUT_PREFIX`. Holding a cut round to the same prefix would throw away
+    /// the one thing a cliff is for.
+    #[test]
+    fn a_round_that_found_its_cliff_interleaves_whole() {
+        let merged = merge(vec![
+            part(&["a1", "a2", "a3", "a4"], &[]),
+            part(&["b1", "b2", "b3", "b4"], &[]),
+        ]);
+        assert_eq!(
+            ids(&merged),
+            vec!["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4"]
+        );
+    }
+
+    /// The seam the tails must not cross. A tail is untrusted among the ranked
+    /// hits and packs behind all of them, but it is still a hit a round
+    /// retrieved, and a neighbour of something else must not outrank it.
+    #[test]
+    fn an_uncut_tail_still_packs_ahead_of_everything_reached() {
+        let merged = merge(vec![
+            part_uncut(&["a1", "a2", "a3", "a4"], &[("n1", "a1")]),
+            part_uncut(&["b1"], &[]),
+        ]);
+        assert_eq!(ids(&merged), vec!["a1", "b1", "a2", "a3", "a4", "n1"]);
+        assert_eq!(merged.ranked, 5, "the reaching starts after every tail");
     }
 
     /// The whole point: a list whose relevance falls off is cut where it falls

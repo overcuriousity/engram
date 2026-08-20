@@ -15,6 +15,12 @@ pub enum AskEvent {
     /// owed is what the model ends up seeing and there is one such list.
     Retrieved {
         round: u8,
+        /// How many artifacts the ranking returned across every round folded
+        /// into this one, cliff and all. Reported beside `shown` because the
+        /// pair is what the reader can act on: a wide search that showed a
+        /// handful is the fan-out working, and `dropped` alone reads as a
+        /// count of failures when it is a count of a bigger net.
+        retrieved: usize,
         shown: usize,
         dropped: usize,
         cliff_at: Option<usize>,

@@ -587,14 +587,24 @@ Reply with JSON only, in exactly this shape:
 /// one would force the model to drop the rest. The empty array carries what
 /// `null` used to: a grammar that can say "I have enough" without inventing a
 /// query to say it with.
+///
+/// No `maxItems`, deliberately, though the plan is capped at
+/// [`PLAN_MAX_QUERIES`]. Array-length keywords are not something every
+/// structured-output backend's grammar compiler can express, and one that
+/// cannot rejects the whole request rather than ignoring the keyword — every
+/// planning call 400s, and the fan-out degrades to the single-round answer at
+/// one wasted call per question. The audience for `plan_tier` is precisely the
+/// small local endpoint where that is most likely. The cap is not lost by
+/// leaving it out: `parse_plan` truncates to `PLAN_MAX_QUERIES` whatever
+/// arrives, and it is the parser the fan-out reads. Stating it in the schema
+/// too was belt-and-braces bought at the price of the belt.
 pub fn plan_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
             "need": {
                 "type": "array",
-                "items": {"type": "string"},
-                "maxItems": PLAN_MAX_QUERIES
+                "items": {"type": "string"}
             }
         },
         "required": ["need"],
@@ -1402,10 +1412,15 @@ mod tests {
             schema["properties"]["need"]["type"], "array",
             "the grammar must be able to name more than one missing subject"
         );
+        assert!(
+            schema["properties"]["need"]["maxItems"].is_null(),
+            "an endpoint whose grammar compiler cannot express maxItems refuses \
+             the whole call; the cap is the parser's job"
+        );
         assert_eq!(
-            schema["properties"]["need"]["maxItems"],
-            serde_json::json!(PLAN_MAX_QUERIES),
-            "the grammar must not be able to plan wider than the fan-out runs"
+            parse_plan(r#"{"need":["a","b","c","d","e"]}"#).len(),
+            PLAN_MAX_QUERIES,
+            "the parser is now the only thing holding the fan-out to its width"
         );
         assert!(!parse_plan(r#"{"need":["x"]}"#).is_empty());
         assert!(

@@ -198,9 +198,15 @@
         // fan-out went looking for, and after this event nothing else on the
         // page does. Round one never writes here, so the join is only ever to
         // those queries.
+        //
+        // What was searched beside what is shown, rather than what was left
+        // out. Every round the fan-out runs widens the net, so the number not
+        // shown grows with the feature working — and "26 left out" reads as
+        // twenty-six failures. The pair says the true thing: a wide search,
+        // narrowed to what the window holds.
         progress.textContent = (progress.textContent ?
           progress.textContent + ' \u2014 ' : 'Round ' + round.round + ': ') +
-          round.shown + ' excerpts' + (round.dropped ? ', ' + round.dropped + ' left out' : '');
+          'searched ' + round.retrieved + ', showing ' + round.shown;
       });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;

@@ -2455,6 +2455,7 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
     let (name, data) = match ev {
         Retrieved {
             round,
+            retrieved,
             shown,
             dropped,
             cliff_at,
@@ -2462,6 +2463,7 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
             "retrieved",
             serde_json::json!({
                 "round": round,
+                "retrieved": retrieved,
                 "shown": shown,
                 "dropped": dropped,
                 "cliff_at": cliff_at,
