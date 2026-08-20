@@ -300,8 +300,12 @@ pub struct SittingConfig {
     pub prime: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for SittingConfig {
     fn default() -> Self {
+        // Spelled out rather than derived: `false` here is a decision with a
+        // reason above it, and a derived `Default` would put that reason a
+        // refactor away from the value it explains.
         Self { prime: false }
     }
 }

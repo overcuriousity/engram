@@ -6941,7 +6941,11 @@ mod tests {
         // asked for anything.
         get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         core.background.wait_idle().await;
-        let before = core.store.activation_of(&[a.clone()]).await.unwrap();
+        let before = core
+            .store
+            .activation_of(std::slice::from_ref(&a))
+            .await
+            .unwrap();
 
         // Reading the sitting, repeatedly, from both pages.
         for _ in 0..3 {
