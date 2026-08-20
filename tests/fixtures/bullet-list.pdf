@@ -1,0 +1,67 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 544 >>
+stream
+BT /F1 12 Tf 1 0 0 1 72 760 Tm (The quarterly plan lists three goals.) Tj ET
+BT /F1 12 Tf 1 0 0 1 72 720 Tm (Each of them is owned by one team.) Tj ET
+BT /F2 12 Tf 1 0 0 1 72 680 Tm (∑) Tj ET
+BT /F1 12 Tf 1 0 0 1 90 680 Tm (ship the extraction door) Tj ET
+BT /F2 12 Tf 1 0 0 1 72 656 Tm (∑) Tj ET
+BT /F1 12 Tf 1 0 0 1 90 656 Tm (measure what it costs) Tj ET
+BT /F2 12 Tf 1 0 0 1 72 632 Tm (∑) Tj ET
+BT /F1 12 Tf 1 0 0 1 90 632 Tm (write down what it cannot do) Tj ET
+BT /F1 12 Tf 1 0 0 1 72 588 Tm (Nothing else is in scope this quarter.) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar 183 /LastChar 183 /Widths [350] /ToUnicode 7 0 R >>
+endobj
+7 0 obj
+<< /Length 254 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CMapName /Symbol-bullet def
+/CMapType 2 def
+1 begincodespacerange
+<00> <ff>
+endcodespacerange
+1 beginbfchar
+<b7> <f0b7>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000852 00000 n 
+0000000949 00000 n 
+0000001076 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1381
+%%EOF
