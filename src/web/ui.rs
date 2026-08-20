@@ -3529,6 +3529,14 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_in_flight_offers_a_way_to_stop_it() {
+        // Fifty seconds signalled by a small grey "thinking…" beside the
+        // button, and nothing on the page to end it with.
+        let html = ask_page_fixture();
+        assert!(html.contains(r#"id="ask-stop""#), "{html}");
+    }
+
+    #[test]
     fn an_ask_page_does_not_open_with_the_models_reasoning_showing() {
         // The deployment streamed the chain of thought into the page for fifty
         // seconds, restating the prompt's own constraints verbatim — "Answer

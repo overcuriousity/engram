@@ -202,7 +202,14 @@
     var rail = document.getElementById('ask-rail');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
+    var spinner = document.getElementById('ask-spinner');
+    var stopBtn = document.getElementById('ask-stop');
     var source = null;
+    // The wait is fifty seconds on a fan-out and nothing on the page predicted
+    // it. Counted from the submit rather than from the first token, because
+    // the retrieval in front of the model is most of what is being waited on.
+    var started = 0;
+    var ticker = null;
     // Which ask the page belongs to. See the submit handler.
     var generation = 0;
 
@@ -214,8 +221,32 @@
     // here.
     function stop() {
       if (source) { source.close(); source = null; }
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      stopBtn.hidden = true;
+      spinner.textContent = 'thinking…';
       form.classList.remove('asking');
     }
+
+    // Count up beside the spinner while the stream is open.
+    function startTicking() {
+      started = Date.now();
+      stopBtn.hidden = false;
+      if (ticker) clearInterval(ticker);
+      ticker = setInterval(function () {
+        var secs = Math.round((Date.now() - started) / 1000);
+        spinner.textContent = 'thinking… ' + secs + 's';
+      }, 1000);
+    }
+
+    stopBtn.addEventListener('click', function () {
+      if (!source) return;
+      var secs = Math.round((Date.now() - started) / 1000);
+      stop();
+      // What arrived stays. `live` holds the partial answer and the rail holds
+      // the excerpts it was being written from, and both are worth more than a
+      // cleared page — the reader stopped the wait, not the answer.
+      status.textContent = 'stopped after ' + secs + ' seconds';
+    });
 
     function fail(message) {
       stop();
@@ -356,6 +387,7 @@
       reasoningBox.hidden = true;
       reasoningBox.open = false;
       form.classList.add('asking');
+      startTicking();
 
       fetch('/ui/ask', {
         method: 'POST',

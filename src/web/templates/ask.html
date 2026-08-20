@@ -22,6 +22,11 @@
     <input class="input" name="q" value="{{ q }}" placeholder="Ask a question…" autofocus>
     <button class="btn btn-accent" type="submit">Ask</button>
     <span id="ask-spinner" class="spinner">thinking…</span>
+    {# A way out of a wait whose length nothing on the page predicts. Closing
+       the stream is what it does — the model call is already paid for either
+       way — so the tokens that did arrive stay where they are rather than
+       being thrown away with it. #}
+    <button id="ask-stop" class="btn btn-ghost btn-sm" type="button" hidden>Stop</button>
   </form>
   {# What the retrieval did before the model was asked anything, when there was
      more of it than usual. Silent on an ask the first round already covered: no
