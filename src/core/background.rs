@@ -229,6 +229,18 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
             tracing::warn!(error = %e, "could not look for artifacts that were never related")
         }
     }
+    // Priority without ageing is starvation: one long ingest would keep night
+    // work off the workers for as long as it lasted. Here rather than in the
+    // claim for the reason `age_background` gives — an inequality in the
+    // ordering costs the covering index — and here rather than on a sweep for
+    // the reason everything else in this pass is here: it is what keeps the
+    // schedule moving, so it cannot be scheduled by the thing it keeps moving.
+    let older_than = crate::store::now() - core.schedule.age_after_mins.max(0) * 60;
+    match core.store.age_background(older_than).await {
+        Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
+        Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
+        _ => {}
+    }
 }
 
 /// Compare what SQLite says exists against what the vector store holds.

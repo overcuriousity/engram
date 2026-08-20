@@ -25,6 +25,8 @@ pub struct Config {
     pub promote: PromoteConfig,
     #[serde(default)]
     pub pursuit: PursuitConfig,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -269,6 +271,32 @@ impl Default for ActivationConfig {
             opened: 0.5,
             confirmed: 3.0,
         }
+    }
+}
+
+/// What the queue does with work nobody is waiting on.
+///
+/// One key, because there is one thing to decide. `jobs.class` says whether
+/// somebody is standing in front of a unit, and that answer is a constant per
+/// stage rather than a setting — a priority the operator can set wrong presents
+/// as "the capture is hanging", with nothing anywhere saying why. What is left
+/// to configure is the one number that keeps priority from becoming starvation.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ScheduleConfig {
+    /// A background unit that has waited longer than this becomes foreground.
+    ///
+    /// Without it, one long ingest keeps night work off the workers
+    /// indefinitely, which is the exact failure a priority scheduler is
+    /// expected to have an answer for. The default is a guess; `sweep_runs` on
+    /// Ops is how the guess gets checked, since a sweep whose runs thin out is
+    /// visible there rather than silent.
+    pub age_after_mins: i64,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self { age_after_mins: 60 }
     }
 }
 

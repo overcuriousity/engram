@@ -549,6 +549,28 @@ impl Store {
             .collect())
     }
 
+    /// A background unit that has waited long enough becomes foreground.
+    ///
+    /// Written, not computed. Ageing at claim time would put `created_at` — an
+    /// inequality — into the ordering, and an inequality ends an index's usable
+    /// ordering: every poll would find the ready rows and then sort them in a
+    /// temp B-tree, which is the cost `idx_jobs_claim3`'s column order exists to
+    /// avoid. Ageing a few rows on the repair tick is one indexed update and
+    /// leaves the hot path exactly as fast as it was.
+    ///
+    /// A unit that has aged stays aged: it has already waited, and demoting it
+    /// again would be starting its wait over.
+    pub async fn age_background(&self, older_than: i64) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE jobs SET class = 0
+              WHERE state = 'pending' AND class = 1 AND created_at < ?",
+        )
+        .bind(older_than)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// How long the longest-waiting pending job has been queued, in seconds.
     ///
     /// Measured from `created_at`, not `run_after`: a job that was never
@@ -672,6 +694,39 @@ mod tests {
             !plan.to_uppercase().contains("TEMP B-TREE"),
             "the claim now sorts: {plan}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_background_unit_that_has_waited_long_enough_goes_first() {
+        // Priority without ageing is starvation. The claim is unchanged: what
+        // moves is the row.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Associate, "collection", "collection")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'associate'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+
+        let aged = s.age_background(now() - 3600).await.unwrap();
+        assert_eq!(aged, 1);
+
+        let first = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            first.stage,
+            Stage::Associate,
+            "a sweep that has waited an hour is still behind a fresh capture"
+        );
+        let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'associate'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(class, 0, "having aged must be durable, not recomputed");
     }
 
     #[tokio::test]

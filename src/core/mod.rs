@@ -142,6 +142,9 @@ pub struct Core {
     /// Whether and how a run of searches may be written up. See
     /// `PursuitConfig`.
     pub pursuit: crate::config::PursuitConfig,
+    /// What the queue does with work nobody is waiting on. Read by the repair
+    /// pass, which is where ageing happens.
+    pub schedule: crate::config::ScheduleConfig,
     /// The pacer every inference call passes through. Shared by every clone,
     /// because a per-clone gate would pace nothing: the point is one queue of
     /// calls in front of one GPU.
@@ -222,6 +225,7 @@ impl Core {
             activation: cfg.activation.clone(),
             promote: cfg.promote.clone(),
             pursuit: cfg.pursuit.clone(),
+            schedule: cfg.schedule.clone(),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
             )),
@@ -385,6 +389,7 @@ pub mod test_support {
             activation: crate::config::ActivationConfig::default(),
             promote: crate::config::PromoteConfig::default(),
             pursuit: crate::config::PursuitConfig::default(),
+            schedule: crate::config::ScheduleConfig::default(),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
