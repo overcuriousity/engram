@@ -37,8 +37,6 @@
 .region-bar { grid-column: 1 / -1; }
 .region-rail { grid-column: rail; }
 .region-focus { grid-column: focus; }
-/* Earns its place only at three-up. Below that the artifact carries it. */
-.region-source { display: none; }
 
 /* One region. Two of them, and the difference is what the region holds rather
    than how wide the page fancies being — which is the distinction the three
@@ -55,12 +53,15 @@
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 .regions-table > * { grid-column: 1 / -1; }
 
-/* Three-up. */
+/* Three-up. The third region is the source, and it is not a third grid column:
+   an artifact and the lines it came from are rendered together, as one
+   `.split` inside focus, because the pane is swapped as a unit and nothing
+   fills a column the server does not know about. What the extra width buys is
+   that split having room to be two columns instead of two stacked halves.
+
+   So the rail gives some back rather than the grid growing a column. */
 @container shell (min-width: 90rem) {
-  .regions-rail-focus-source {
-    grid-template-columns: [rail] 20rem [focus] minmax(0, 1fr) [source] minmax(0, 1.2fr);
-  }
-  .regions-rail-focus-source .region-source { display: block; grid-column: source; }
+  .regions-rail-focus-source { grid-template-columns: [rail] 19rem [focus] minmax(0, 1fr); }
 }
 
 /* One-up: one region, the rest a navigation away. This is the phone, and it is

@@ -472,13 +472,18 @@
     if (typing()) return;
     var regions = document.querySelector('.regions');
     if (!regions) return;
-    // Scoped to the regions that exist, not merely to the grid. `s` is also
-    // the judge's "skip", and every page has a `.regions` — without this, one
-    // keypress on the judge queue fired a verdict and toggled a pane that page
-    // does not have.
-    if (e.key === 's' && document.querySelector('.region-source')) {
+    // Scoped to what is actually on the page, not merely to the grid. `s` is
+    // also the judge's "skip", and every page has a `.regions` — without this,
+    // one keypress on the judge queue fired a verdict and toggled something
+    // that page does not have.
+    //
+    // The source is the second half of the `.split` inside the artifact, so
+    // this hides that half and gives the prose the whole column. Off by
+    // default: showing an artifact beside the lines it came from is the point
+    // of the page, and s is for the times you have already checked.
+    if (e.key === 's' && document.querySelector('.split')) {
       e.preventDefault();
-      regions.classList.toggle('show-source');
+      regions.classList.toggle('hide-source');
       return;
     }
     if (e.key === 'r' && document.querySelector('.region-rail')) {

@@ -304,3 +304,46 @@ body { overflow-x: hidden; }
   from { opacity: 0; transform: translateY(3px); }
   to   { opacity: 1; transform: none; }
 }
+
+/* ── Reading mode ────────────────────────────────────────────────────────── */
+
+/* Once an artifact is open the list has done its job and the verification has
+   not. `r` gives the width to the artifact and its source, and leaves the rail
+   as a spine of ranks.
+
+   It narrows rather than closes for one reason: the spine still marks the
+   cliff, so position in the ordering survives. A rail that closed would take
+   that with it, and "where in the ranking was this" is the question the pane
+   beside it cannot answer.
+
+   Only at three-up. Below that the rail is already the whole column or already
+   hidden, and a 3rem spine would be neither. */
+@container shell (min-width: 90rem) {
+  .regions.reading {
+    grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr) [source] minmax(0, 1.2fr);
+  }
+  .regions.reading .rail-title,
+  .regions.reading .rail-snippet,
+  .regions.reading .rail-why,
+  .regions.reading .badge,
+  .regions.reading .rail-row > form { display: none; }
+  .regions.reading .rail-item {
+    padding: 0.5rem 0; text-align: center;
+  }
+  .regions.reading .rail-head { justify-content: center; }
+  /* The divider keeps its meaning without its sentence: there is no room for
+     the words at 3rem, and the line is the half that has to survive. */
+  .regions.reading .cliff-rule {
+    font-size: 0; padding: 0; margin: 0.375rem 0;
+    border-top: 1px dashed var(--color-accent-muted);
+  }
+}
+
+/* `s`: the artifact takes the whole column.
+
+   The source is the second half of the split, so it is the second half that
+   goes. Targeted by position rather than by `:last-child`, because a merged
+   artifact renders no source at all — and `:last-child` would then be the
+   artifact itself, hidden by the key meant to give it more room. */
+.regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
+.regions.hide-source .split > :nth-child(2) { display: none; }
