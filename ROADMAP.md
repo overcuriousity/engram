@@ -57,14 +57,15 @@ a layer crossing without a measured retrieval gain does not go in. The harness
 is the only figure comparable across months; a default that changes ranking
 moves only after it has been run.
 
-Most of what is left is not a mechanism but a seam. The mechanisms are mostly
-built and mostly work alone: six background tickers on six intervals with no
-order between them (`src/core/background.rs`), four front doors with nothing
-carried between them, and four separate ways of saying *the base did not
-answer*, each ending somewhere else. The list is grouped by subject, as it
-always was, but read end to end it is one project — and roughly in the order it
-would be built, because a seam that only joins two surfaces ships when it is
-written, while a seam that moves ranking waits for the harness.
+Most of what is left is not a mechanism but a seam. Three of them are now
+closed — the queue is the scheduler, the sitting is live, and the four ways of
+saying *the base did not answer* end on one list
+(`docs/superpowers/specs/2026-08-20-one-system-design.md`). What is left below
+is what those three make easier rather than what they replace. The list is
+grouped by subject, as it always was, but read end to end it is one project —
+and roughly in the order it would be built, because a seam that only joins two
+surfaces ships when it is written, while a seam that moves ranking waits for
+the harness.
 
 ## [Associative Memory]
 
@@ -74,28 +75,36 @@ bounded priming and one-hop association in the results, a sparse judge on
 strong cross-corpus links, switched on with `[associate]` and `[activation]`
 in config. The items below are the mechanisms that come after it, in order.
 
-- **Sleep as an explicit cycle.** The background work already exists — link
-  replay, activation decay, pruning, relate/dedupe, retention. It becomes phases
-  of one scheduled cycle with one Ops report: last sleep, what changed. Framing
-  over what exists, and the home every later mechanism slots into. The part
-  that is more than framing is the order, and the account. Each of those is its
-  own ticker with its own interval and its own gate
-  (`spawn_consolidation_ticker` and its five siblings), so what runs before
-  what is whichever interval elapsed first — `Relate` arms the pairs that
-  `Dedupe` and the consolidation sweep both read, and nothing sequences the
-  three. Inside one ticker the order is already right; it is the orderings that
-  cross a ticker boundary that were never written down. And each ticker's
-  account of itself is one `info` line in a log.
-- **Working memory.** Within a session, what you just opened primes its
-  neighbours and links for the next query. Session-scoped, expires with it,
-  never written to activation. The sitting this needs already exists — but only
-  afterwards, reconstructed from idle gaps in the search log by the pursuit
-  sweep (`jobs/pursuit.rs`), which is to say the base can name what you were
-  working on last week and not what you are working on now. Making it live is
-  also what joins the doors: the query carries from search into ask, the answer
-  into capture, and a sitting can say what it has touched.
-  `Core::record_interaction` already writes the events and nothing reads them
-  until the sweep.
+- **Sleep as an explicit cycle.** Built, and not as a cycle. The queue was
+  already three-quarters of a scheduler; it has a priority column now
+  (`jobs.class` — is somebody waiting on this?), ageing on the repair pass, and
+  five fewer tickers: a sweep arms itself one interval out when it finishes, so
+  `run_after` is the cursor saying when it last ran. Ordering is expressed the
+  way the tree already expressed dependencies, by arming — the association
+  sweep pulls the pursuit sweep forward, replay before pursue. The account is
+  `sweep_runs`, one row per run, shown on Ops as the last day with the history
+  under it.
+
+  What did not survive contact is the *cycle*. Units on their own periods do
+  not line up into one night, and grouping them by an invented cycle identity
+  would be inventing it — so there is no "last sleep", there is the last day.
+  Repair stays outside the schedule: it is what recovers an interrupted one.
+- **Working memory.** Built, carrying only. A live sitting keyed by web
+  session (`src/core/sitting.rs`), in memory, expiring at `pursuit.idle_secs` —
+  the same number the sweep uses, so the live definition and the reconstructed
+  one agree by construction. It joins the doors: the query carries from search
+  into ask, an answer kept from ask shows the question it answered, and both
+  pages carry a rail of what this sitting has been in. It never writes
+  activation, and there is a test saying so.
+
+  Priming from it is behind `[sitting] prime`, off, sharing the one budget
+  `associate.prime_lift` bounds. It is the one thing here that moves ranking,
+  so it waits for the harness — see below.
+- **`[sitting] prime` is unmeasured.** The one default here that would move
+  ranking, and the harness has not been run either way: it needs a live Qdrant,
+  a real embedding endpoint and a corpus that is not in this repository. Until
+  it has, the flag stays `false`. It moves in a commit of its own, carrying
+  both numbers in its message, or it does not move.
 - **Every door counts as engagement.** Retrieval is recorded at every door —
   `core.search` bumps activation whether the query came from the rail, the API
   or `/mcp`. Engagement is not: `mark_artifact_seen` and `record_interaction`
@@ -257,23 +266,29 @@ base already knows are currently spread across four pages in four vocabularies,
 and a mechanism the operator cannot see the effect of is one they cannot decide
 to trust.
 
-- **One queue for "the base did not answer".** There are four ways to say it
-  today and each ends somewhere else: a search judged `gap` becomes a knowledge
-  gap, an ask verdict of *nothing here* becomes a knowledge gap by a second
-  path, a quiet run of engaged searches becomes a pursuit on Ops, and a search
-  abandoned with nothing opened — the most telling of all, and the reason the
-  feedback log records it — becomes nothing at all. They are one statement
-  about one hole. One queue, closable three ways: by a paste, by a pursuit that
-  earned itself, or by dismissal. And the capture page saying *this closes two
-  open gaps* is the loop shutting where the operator can see it, which is the
-  part the app currently does all the work for and never shows.
+- **One queue for "the base did not answer".** Built. Four `GapKind`s on the
+  one list the capture page already had, each badged with what asked it:
+  *judged*, *asked*, *nothing near*, *pursued*. Closable three ways — a capture
+  that covers it, a pursuit that earns itself, or dismissal — and a capture
+  that answered something says so on its own queue row, which is the loop
+  shutting where the operator can see it.
+
+  The fourth source is distance, not behaviour: a search whose best candidate
+  fell under `vector.weak_below`. *Abandoned* was the first draft and it was
+  wrong twice — not clicking a result can mean the list was useless or that the
+  titles told you what you needed, and an open is only recorded when pursuits
+  *and* feedback are on, so with pursuits off every search looks abandoned.
+  Coverage is stored in `gap_coverage` rather than on the judged row, so
+  nothing an automatic score decided overwrites what a person judged, and
+  deleting the capture that closed a gap reopens it.
 - **Ops as the state of the memory, not the housekeeping table.** It lists
   merges, deprecations, hidden near-duplicates, retries. What it does not say
   is what the memory is *like*: how much is held and how densely, what is
   activated and what is fading, recall@10 and MRR over months rather than as
-  today's number on the judge page, when it last slept and what changed. Four
-  figures in four places, and the one page named for the answer has none of
-  them.
+  today's number on the judge page. Four figures in four places, and the one
+  page named for the answer has none of them. What the sweeps did is answered
+  now — the last day, and the history under it — which leaves the shape of the
+  base itself.
 - **Where an artifact came from, end to end.** Corpus lines, passage, the
   window whose reading earned a synthesis, the merge, the pursuit, the answer
   it was cited in. `store/lineage.rs` and `web/lineage_view.rs` hold the middle
