@@ -13,10 +13,26 @@ use crate::core::gaps::{
 use crate::error::Result;
 use crate::store::gaps::{GapCluster, GapKind};
 
-/// How many coverage queries one capture keeps in the air at once. Small enough
-/// that a capture never becomes the load on the vector store, large enough that
-/// the wait is the slowest query and not the sum of them.
+/// How many coverage queries are in the air at once. Small enough that captures
+/// never become the load on the vector store, large enough that the wait is the
+/// slowest query and not the sum of them.
 const COVER_IN_FLIGHT: usize = 16;
+
+/// The budget above, held by the process rather than by one pass.
+///
+/// A per-pass bound is not a bound: `settle_corpus` starts a coverage check for
+/// every document that finishes embedding, so an ingest of fifty documents
+/// settling together is fifty passes of sixteen queries — eight hundred at once
+/// against the vector store the whole memory shares, which is the outage the
+/// bound exists to prevent, reached by a route the bound did not cover.
+/// A permit per query, taken from one pool, makes the number in the comment
+/// above the number that is actually true.
+///
+/// A pass that cannot get a permit waits for one. Permits are only ever held
+/// across a single search, so the wait is bounded by the slowest query in
+/// flight, and no pass holds one while it waits for another.
+static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(COVER_IN_FLIGHT));
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
@@ -43,7 +59,9 @@ pub struct SweepReport {
 /// minutes of a capture sitting at its last step for work that is entirely
 /// waiting. Bounded rather than unbounded because the same reasoning applies to
 /// the other end: two thousand simultaneous queries is not concurrency, it is
-/// an outage in the vector store the whole memory shares.
+/// an outage in the vector store the whole memory shares. The bound is
+/// `COVER_SLOTS`, held by the process, so concurrent captures share the one
+/// budget instead of each being granted it.
 ///
 /// Filtered to this corpus on purpose: the question is whether *this capture*
 /// answered something. A hit from anywhere else answers a different question —
@@ -90,11 +108,18 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
             let vectors = core.vectors.clone();
             let vec = open.gaps[at].vec.clone();
             let filter = filter.clone();
+            // Nothing ever closes a static semaphore, so the only way this
+            // fails is a bug in the standard library.
+            let permit = COVER_SLOTS
+                .acquire()
+                .await
+                .expect("the coverage budget is never closed");
             inflight.spawn(async move {
-                (
-                    at,
-                    vectors.search(&vec, &Default::default(), 1, &filter).await,
-                )
+                let out = vectors.search(&vec, &Default::default(), 1, &filter).await;
+                // Held for exactly the query, and released before the answer is
+                // read back: what the budget limits is load on the store.
+                drop(permit);
+                (at, out)
             });
         }
         let Some(joined) = inflight.join_next().await else {
