@@ -3,6 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Inline, and before the stylesheet. A stylesheet cannot know a stored
+     choice and a deferred script runs after the first paint, so either way the
+     wrong theme flashes on every load — on a phone, brightly. Small enough to
+     cost nothing, and wrapped because a browser with storage disabled must
+     still render a page. #}
+  <script>
+    try {
+      var t = localStorage.getItem('engram.theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
   <title>{% block title %}engram{% endblock %}</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   {# Installable as an app. iOS reads the touch icon and its own meta tags
@@ -63,21 +74,48 @@
         <span class="badge badge-accent">{{ n }}</span>{% endif %}</a>
       {% endif %}
       <span class="spacer"></span>
+      {# The light palette has been in the stylesheet since the port and nobody
+         has ever seen it, because it activated only on prefers-color-scheme.
+         The label names where the button goes, not where it is. #}
+      <button class="btn btn-ghost btn-sm" type="button" data-theme-toggle
+              aria-label="Switch between dark and light">
+        <span data-theme-label>Theme</span>
+      </button>
       <form method="post" action="/auth/logout" style="display:inline">
         <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
       </form>
     </nav>
   </header>
   {% endblock %}
-  {# The reading measure is the default and most pages want it. A page whose
-     content is a table or a three-pane workspace says so by name. #}
-  <div class="{% block shell_class %}shell{% endblock %}">
-    {% block content %}{% endblock %}
+  {# A page says which regions it uses. It never says how wide it is: the grid
+     puts rail and focus in the same columns everywhere, and the viewport
+     decides only how many regions are visible at once. Prose in one column is
+     the default, because most pages are that. #}
+  <div class="shell">
+    <div class="regions {% block regions %}regions-focus{% endblock %}">
+      {% block content %}{% endblock %}
+    </div>
   </div>
   {# On a phone the destinations move under the thumb and the top row keeps
      only identity. Hidden above 40rem, where the top row does the same job.
      The same links as the top row, so an installed window and a desktop tab
      are the same app rather than two arrangements of one. #}
+  {# One input that reaches everything, from any page. The tabs stay: the bar
+     is the fast path, not the only path, and a shortcut is no substitute for a
+     door you can see — least of all on a phone, where there is no key to press.
+
+     Outside `.shell`, so it is not inside the container the region grid
+     queries and cannot be caught by a rule meant for page content. #}
+  <div class="cmdk" hidden>
+    <div class="cmdk-box" role="dialog" aria-modal="true" aria-label="Command">
+      <input class="input" type="text" data-cmdk-input autocomplete="off"
+             spellcheck="false" placeholder="Search, or > to ask…">
+      <p class="cmdk-hint">
+        <kbd>↵</kbd> go <kbd>&gt;</kbd> ask <kbd>esc</kbd> close
+      </p>
+    </div>
+  </div>
+
   <nav class="tabbar" aria-label="Sections">
     <a href="/ui/capture">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Capture</a>

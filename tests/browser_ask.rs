@@ -133,7 +133,7 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
     // The planned queries survived round two's statistics landing after them.
     assert_eq!(
         report["progressText"],
-        "Looking further: more about bravo, charlie \u{2014} 2 excerpts, 1 left out",
+        "Looking further: more about bravo, charlie \u{2014} searched 3, showing 2",
         "{report}"
     );
     // The rail arrived with its ids, and a citation click marked its excerpt.

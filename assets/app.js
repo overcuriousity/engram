@@ -102,11 +102,79 @@
     });
   }
 
+  // A blank source line costs a full numbered row, and in a chapter of
+  // exercises that was a third of the pane. Runs of three or more fold to one
+  // rule carrying their count.
+  //
+  // Rendering only: the server still sends every line, and the numbers either
+  // side of a fold are the source's own. A row inside the extraction range is
+  // never folded, whatever it holds — the pane exists to show that range, and
+  // hiding part of it to save space defeats the only thing the pane is for.
+  function collapseBlanks(root) {
+    root.querySelectorAll('.raw table:not([data-folded])').forEach(function (table) {
+      table.setAttribute('data-folded', '1');
+      var run = [];
+      function flush() {
+        if (run.length < 3) { run = []; return; }
+        var hidden = run.slice();
+        var mark = document.createElement('tr');
+        mark.className = 'srcfold';
+        var cell = document.createElement('td');
+        cell.colSpan = 2;
+        cell.textContent = hidden.length + ' blank lines';
+        mark.appendChild(cell);
+        hidden[0].parentNode.insertBefore(mark, hidden[0]);
+        hidden.forEach(function (el) { el.hidden = true; });
+        mark.addEventListener('click', function () {
+          hidden.forEach(function (el) { el.hidden = false; });
+          mark.remove();
+        });
+        run = [];
+      }
+      Array.prototype.slice.call(table.rows).forEach(function (tr) {
+        var blank = tr.cells.length > 1 && tr.cells[1].textContent.trim() === '';
+        if (blank && !tr.classList.contains('in')) { run.push(tr); } else { flush(); }
+      });
+      flush();
+    });
+  }
+
+  // The artifact and the lines it came from are one thing read twice, so they
+  // move together. Proportional rather than line-mapped: prose and source do
+  // not share a line count, and pretending they do lands on the wrong line
+  // more often than it helps.
+  //
+  // The guard is not decoration. Setting scrollTop fires scroll, which would
+  // set the other back, which would fire again.
+  function lockstep(root) {
+    var split = root.querySelector('.split');
+    if (!split || split.dataset.lockstep) return;
+    var artifact = split.children[0];
+    var source = split.querySelector('.raw');
+    if (!artifact || !source) return;
+    split.dataset.lockstep = '1';
+    var busy = false;
+    function sync(from, to) {
+      return function () {
+        if (busy) return;
+        busy = true;
+        var span = from.scrollHeight - from.clientHeight;
+        var ratio = span > 0 ? from.scrollTop / span : 0;
+        to.scrollTop = ratio * (to.scrollHeight - to.clientHeight);
+        requestAnimationFrame(function () { busy = false; });
+      };
+    }
+    artifact.addEventListener('scroll', sync(artifact, source));
+    source.addEventListener('scroll', sync(source, artifact));
+  }
+
   function enhance(root) {
     if (!root || root.nodeType !== 1) return;
     highlight(root);
     clamp(root);
     copyButtons(root);
+    collapseBlanks(root);
+    lockstep(root);
   }
 
   // ── Ask, as it happens ────────────────────────────────────────────────────
@@ -342,8 +410,158 @@
     if (id) { dwell.id = id; dwell.since = Date.now(); }
   }
 
+  // Shown until it is dismissed, then never again on this browser. Not shown
+  // at all on a touch screen: there are no keys there and the row would be
+  // furniture that costs a line of the results.
+  function keyHint() {
+    var hint = document.querySelector('.keyhint');
+    if (!hint) return;
+    var seen = true;
+    try { seen = localStorage.getItem('engram.hints') === 'seen'; } catch (e) { seen = true; }
+    if (seen || !window.matchMedia('(pointer: fine)').matches) return;
+    hint.hidden = false;
+    hint.querySelector('[data-dismiss-hint]').addEventListener('click', function () {
+      hint.hidden = true;
+      try { localStorage.setItem('engram.hints', 'seen'); } catch (e) {}
+    });
+  }
+
+  // Restored before anything is drawn into the rail, so a remembered reading
+  // mode does not flash the wide rail first.
+  function restoreReading() {
+    var regions = document.querySelector('.regions');
+    if (!regions || !document.querySelector('.region-rail')) return;
+    try {
+      if (localStorage.getItem('engram.reading') === '1') regions.classList.add('reading');
+    } catch (e) {}
+  }
+
+  // Follows the system until it is touched; a remembered two-state switch from
+  // then on. The pre-paint script in the head is what applies a stored choice
+  // before anything is drawn — this only has to keep the button honest and
+  // move the status-bar colour with it.
+  function themeToggle() {
+    var btn = document.querySelector('[data-theme-toggle]');
+    if (!btn) return;
+    var label = btn.querySelector('[data-theme-label]');
+
+    function current() {
+      var set = document.documentElement.getAttribute('data-theme');
+      if (set) return set;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function paint() {
+      var now = current();
+      // Names the destination, not the state: a button called "Dark" while the
+      // page is dark reads as a label rather than as something to press.
+      label.textContent = now === 'dark' ? 'Light' : 'Dark';
+      // An installed app frames the page in this colour. Left alone, a light
+      // page keeps a dark status bar and looks broken on a phone. The two
+      // media-scoped tags in the head answer the system, not the choice, so
+      // the choice needs one of its own.
+      var meta = document.querySelector('meta[name="theme-color"]:not([media])');
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.setAttribute('name', 'theme-color');
+        document.head.appendChild(meta);
+      }
+      meta.setAttribute('content', now === 'dark' ? '#0e1015' : '#f8f6f1');
+    }
+
+    btn.addEventListener('click', function () {
+      var next = current() === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('engram.theme', next); } catch (e) {}
+      paint();
+    });
+    paint();
+  }
+
+  // One input that reaches everything. The prefix decides where it goes: plain
+  // text searches, `>` asks, and a paste long enough to be a document offers to
+  // keep it rather than to look for it.
+  function commandBar() {
+    var overlay = document.querySelector('.cmdk');
+    if (!overlay) return;
+    var input = overlay.querySelector('[data-cmdk-input]');
+    // Long enough to be a document rather than a question. A sentence you are
+    // searching for does not run this far; a chapter always does.
+    var PASTE = 400;
+
+    function open() {
+      overlay.hidden = false;
+      input.value = '';
+      input.focus();
+    }
+    function close() { overlay.hidden = true; }
+
+    document.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); open(); return; }
+      // Ahead of the global Escape handler by registration order, and it
+      // returns, so closing the bar never also fires "back".
+      if (e.key === 'Escape' && !overlay.hidden) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        close();
+      }
+    }, true);
+
+    // The backdrop, not the box: a click inside the box is a click in the box.
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var v = input.value.trim();
+      if (!v) return;
+      if (v.charAt(0) === '>') {
+        location.href = '/ui/ask?q=' + encodeURIComponent(v.slice(1).trim());
+      } else if (v.length > PASTE) {
+        // Handed over in sessionStorage rather than in the URL. `/ui/capture`
+        // takes a `from_ask` and nothing else, so a `?text=` would arrive at a
+        // page that ignores it — and a chapter in a query string is past what
+        // a URL may be anyway. Nothing on the server has to learn about this.
+        try { sessionStorage.setItem('engram.paste', v); } catch (err) {}
+        location.href = '/ui/capture';
+      } else {
+        location.href = '/ui/search?q=' + encodeURIComponent(v);
+      }
+    });
+  }
+
+  // The other half of the command bar's paste. Claimed once and cleared, so a
+  // later visit to Capture does not refill a box you emptied on purpose —
+  // which means clearing it even when the box already has something in it and
+  // the paste is dropped. Clearing only on the path that used it left the text
+  // in storage to be injected on some later visit, the one thing this is
+  // supposed to prevent.
+  function claimPaste() {
+    var box = document.querySelector('textarea[name="text"]');
+    if (!box) return;
+    var text = null;
+    try {
+      text = sessionStorage.getItem('engram.paste');
+      if (text) sessionStorage.removeItem('engram.paste');
+    } catch (e) { return; }
+    if (!text || box.value) return;
+    box.value = text;
+    // Assigning `value` fires nothing, and the segment-and-cost hint on the
+    // capture page is bound to `input`. The command bar only routes here for a
+    // paste past PASTE characters — exactly the multi-segment case the hint
+    // exists to warn about — so without this it stayed hidden for every paste
+    // that needed it.
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.focus();
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    commandBar();
+    claimPaste();
+    themeToggle();
+    keyHint();
+    restoreReading();
     askDriver();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
@@ -365,7 +583,7 @@
       enhance(e.target);
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
-      var ws = document.querySelector('.workspace');
+      var ws = document.querySelector('.regions');
       if (ws && e.target.id === 'pane') ws.classList.add('has-selection');
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
@@ -398,19 +616,91 @@
   var field = document.querySelector('input[name="q"], textarea[name="text"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
+  // Whether something is being typed into. Every letter shortcut below is
+  // gated on this: a letter belongs to the field that has focus, and nothing
+  // else, which is the rule the judge shortcuts already follow.
+  function typing() {
+    var el = document.activeElement;
+    if (!el) return false;
+    var tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+  }
+
   // The rail is a list: arrows move through it, Enter opens what is focused.
+  // j and k do the same, for hands that never left the home row.
   document.addEventListener('keydown', function (e) {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var down = e.key === 'ArrowDown' || e.key === 'j';
+    var up = e.key === 'ArrowUp' || e.key === 'k';
+    if (!down && !up) return;
+    if ((e.key === 'j' || e.key === 'k') && typing()) return;
     var items = Array.prototype.slice.call(document.querySelectorAll('.rail-item'));
     if (!items.length) return;
     var i = items.indexOf(document.activeElement);
-    var next = e.key === 'ArrowDown' ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
+    var next = down ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
     if (i === -1) next = 0;
     items.forEach(function (el) { el.setAttribute('aria-selected', 'false'); });
     items[next].setAttribute('aria-selected', 'true');
     items[next].focus();
     e.preventDefault();
   });
+  // The keys that are the same on every page. `/` reaches the query without a
+  // pointer, Esc steps back one region — which on a narrow window is the only
+  // way back to a list that has been replaced — and `s` and `r` are the two
+  // things the search page can show more or less of.
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    if (e.key === '/' && !typing()) {
+      var q = document.querySelector('input[name="q"]');
+      if (q) { e.preventDefault(); q.focus(); q.select(); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      // Out of the field first. Only once nothing is focused does Escape mean
+      // "back", or typing a query you thought better of would throw away the
+      // results behind it.
+      if (typing()) { document.activeElement.blur(); return; }
+      // `.back` is in the DOM wherever an artifact is, and `display: none`
+      // above 60rem — and on the standalone artifact page at every width.
+      // Testing for existence alone made Escape a browser Back on a wide
+      // window, where the list is already on screen and there is no region to
+      // step out of. `offsetParent` is null exactly when it is not rendered.
+      var back = document.querySelector('.back');
+      if (back && back.offsetParent !== null) { e.preventDefault(); back.click(); }
+      return;
+    }
+    if (typing()) return;
+    var regions = document.querySelector('.regions');
+    if (!regions) return;
+    // Scoped to what is actually on the page, not merely to the grid. `s` is
+    // also the judge's "skip", and every page has a `.regions` — without this,
+    // one keypress on the judge queue fired a verdict and toggled something
+    // that page does not have.
+    //
+    // The source is the second half of the `.split` inside the artifact, so
+    // this hides that half and gives the prose the whole column. Off by
+    // default: showing an artifact beside the lines it came from is the point
+    // of the page, and s is for the times you have already checked.
+    //
+    // Gated on the source itself rather than on the split around it. A merged
+    // artifact has no `.raw` — its second half is the lineage — so the split
+    // was there, the key fired, and `s` hid a merge's provenance under a word
+    // that says source.
+    if (e.key === 's' && document.querySelector('.raw')) {
+      e.preventDefault();
+      regions.classList.toggle('hide-source');
+      return;
+    }
+    if (e.key === 'r' && document.querySelector('.region-rail')) {
+      e.preventDefault();
+      var on = regions.classList.toggle('reading');
+      // Remembered: this is a way of working rather than a choice made once
+      // per visit.
+      try { localStorage.setItem('engram.reading', on ? '1' : '0'); } catch (err) {}
+    }
+  });
+
   // Judging has to cost about five seconds, or it will not happen. Digits pick
   // an option, N/S/X take the three ways out. Ignored while a text field has
   // focus, so typing in the assignment search does not fire a verdict.

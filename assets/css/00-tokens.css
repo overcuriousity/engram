@@ -1,0 +1,150 @@
+/* Palette, geometry and both themes. Everything downstream reads from here,
+   which is why this layer sorts first: the cascade depends on the tokens
+   arriving before the rules that name them. */
+
+/* Palette and geometry ported from Vestigo (frontend/src/index.css and
+   frontend/src/components/ui/), converted from Tailwind @theme to plain CSS.
+   Visualization palette and density toggle deliberately not carried. */
+
+@font-face { font-family: "Inter"; font-weight: 400; font-display: swap;
+  src: url("/assets/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 500; font-display: swap;
+  src: url("/assets/fonts/inter-500.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 600; font-display: swap;
+  src: url("/assets/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 400; font-display: swap;
+  src: url("/assets/fonts/jetbrains-mono-400.woff2") format("woff2"); }
+
+:root {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  /* Sizes were chosen per component — 0.6875, 0.75, 0.8125, 0.875, 1, 1.375 —
+     so two things meaning the same thing rarely looked the same size. Named,
+     so a component picks a step rather than a number. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+}
+
+:root {
+  --color-bg-base: #f8f6f1;
+  --color-bg-surface: #f2f0ea;
+  --color-bg-elevated: #ffffff;
+  --color-bg-overlay: #ffffff;
+  --color-bg-hover: #ece9e2;
+  --color-bg-active: #e2ded3;
+
+  --color-fg-primary: #2d2d2d;
+  --color-fg-secondary: #5a5a5a;
+  --color-fg-muted: #7a7a72;
+  --color-fg-disabled: #b8b5ac;
+
+  --color-border: #ddd8cc;
+  --color-border-strong: #c9c3b4;
+  --color-border-subtle: #eae7de;
+
+  --color-accent: #3b6e91;
+  --color-accent-dim: rgba(59, 110, 145, 0.1);
+  --color-accent-muted: rgba(59, 110, 145, 0.25);
+  --color-accent-fg: #ffffff;
+
+  --color-danger: #b3382c;  --color-danger-dim: rgba(179, 56, 44, 0.1);
+  --color-warning: #9a6a1a; --color-warning-dim: rgba(154, 106, 26, 0.1);
+  --color-success: #2f7a4f; --color-success-dim: rgba(47, 122, 79, 0.1);
+  --color-info: #3d6f99;    --color-info-dim: rgba(61, 111, 153, 0.1);
+
+  --shadow-sm: 0 1px 2px rgba(45, 45, 45, 0.08);
+  --shadow-md: 0 4px 12px rgba(45, 45, 45, 0.1);
+  --shadow-lg: 0 12px 32px rgba(45, 45, 45, 0.14);
+
+  color-scheme: light;
+}
+
+/* Three states, two selectors.
+
+   The system preference applies unless an explicit light choice says
+   otherwise; an explicit dark choice applies whatever the system says. Light
+   needs no block of its own — it is already on bare `:root` above, and
+   `[data-theme="light"]` wins simply by excluding itself from the media query.
+
+   The declarations are written twice because CSS has no way to give one block
+   two conditions: a custom property cannot be defined once and applied
+   conditionally, since the conditional *is* the cascade. The two blocks are
+   adjacent so they are changed together. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg-base: #0e1015;
+    --color-bg-surface: #14171d;
+    --color-bg-elevated: #1b1e26;
+    --color-bg-overlay: #22252f;
+    --color-bg-hover: #262a34;
+    --color-bg-active: #2d3140;
+
+    --color-fg-primary: #e2e4ec;
+    --color-fg-secondary: #8b8fa8;
+    --color-fg-muted: #7d82a0;
+    --color-fg-disabled: #3a3d50;
+
+    --color-border: #232636;
+    --color-border-strong: #2e3244;
+    --color-border-subtle: #191c26;
+
+    --color-accent: #5aa8b0;
+    --color-accent-dim: rgba(90, 168, 176, 0.15);
+    --color-accent-muted: rgba(90, 168, 176, 0.35);
+    --color-accent-fg: #0e1015;
+
+    --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
+    --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
+    --color-info: #5e9ed6;    --color-info-dim: rgba(94, 158, 214, 0.15);
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.8);
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+    --color-bg-base: #0e1015;
+    --color-bg-surface: #14171d;
+    --color-bg-elevated: #1b1e26;
+    --color-bg-overlay: #22252f;
+    --color-bg-hover: #262a34;
+    --color-bg-active: #2d3140;
+
+    --color-fg-primary: #e2e4ec;
+    --color-fg-secondary: #8b8fa8;
+    --color-fg-muted: #7d82a0;
+    --color-fg-disabled: #3a3d50;
+
+    --color-border: #232636;
+    --color-border-strong: #2e3244;
+    --color-border-subtle: #191c26;
+
+    --color-accent: #5aa8b0;
+    --color-accent-dim: rgba(90, 168, 176, 0.15);
+    --color-accent-muted: rgba(90, 168, 176, 0.35);
+    --color-accent-fg: #0e1015;
+
+    --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
+    --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
+    --color-info: #5e9ed6;    --color-info-dim: rgba(94, 158, 214, 0.15);
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.8);
+
+    color-scheme: dark;
+}

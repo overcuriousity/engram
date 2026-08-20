@@ -1,0 +1,144 @@
+/* The shell, the top row and the phone's tab bar — the frame every page is
+   drawn inside, and nothing that belongs to one page. */
+
+/* ── The region grid ─────────────────────────────────────────────────────
+   Four regions — bar, rail, focus, source — and a page says which of them it
+   uses. It never says how wide it is. `rail` and `focus` begin in the same
+   grid columns on every page, so the single left anchor is a property of the
+   model rather than a correction laid over three pages that disagreed: Capture
+   centred itself in 60rem, Search centred a 48rem filter block inside 110rem,
+   Housekeeping ran full bleed, and the content column moved under a brand that
+   did not.
+
+   Container queries rather than media queries. The workspace answers to the
+   space it is actually in, which is what a half-width desktop window needs —
+   and what the back link appearing at 60rem rather than at the phone
+   breakpoint was already working around. */
+.shell {
+  container-type: inline-size;
+  container-name: shell;
+  max-width: 110rem;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+.regions {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+  grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
+}
+
+/* A grid child defaults to `min-width: auto`, which resolves to min-content:
+   one unwrappable line of source widens its column instead of scrolling inside
+   it, and takes the document's width with it. */
+.regions > * { min-width: 0; }
+
+.region-bar { grid-column: 1 / -1; }
+.region-rail { grid-column: rail; }
+.region-focus { grid-column: focus; }
+
+/* One region. Two of them, and the difference is what the region holds rather
+   than how wide the page fancies being — which is the distinction the three
+   old shell widths were a clumsy proxy for.
+
+   Prose is the default, because most pages are prose: a capture textarea
+   110rem wide is a worse place to paste a chapter, not a better one. A table
+   is not prose and has no measure — it is as wide as its columns need.
+
+   Both start at the shell's left edge, and so does the rail. That is the whole
+   anchor: the inner grid is never centred, only the shell is. */
+.regions-focus { grid-template-columns: minmax(0, 68rem); }
+.regions-focus > * { grid-column: 1 / -1; }
+.regions-table { grid-template-columns: minmax(0, 1fr); }
+.regions-table > * { grid-column: 1 / -1; }
+
+/* Two regions: what the page is for, and what it has already done with it.
+   Prose keeps its measure on the left — a paste box and an answer are both
+   prose — and the aside takes what is left of the window.
+
+   This exists because the prose pages were leaving that remainder empty. At
+   1690px a 68rem column anchored left is six hundred pixels of nothing beside
+   it, and every one of those pages had a second thing already on it, stacked
+   underneath or folded into a scroller: Capture's Recent, Ask's excerpts. The
+   width was never the problem. Not using it was. */
+.regions-focus-aside {
+  grid-template-columns: [focus] minmax(0, 68rem) [aside] minmax(0, 1fr);
+}
+.region-aside { grid-column: aside; }
+
+/* An artifact and where it came from, as one `.split` in a single full-width
+   region. Not prose and not a table: the split decides its own two columns,
+   and this is the same pair the search pane renders — so it gets the same
+   room rather than a reading measure with a void beside it. */
+.regions-split { grid-template-columns: minmax(0, 1fr); }
+.regions-split > * { grid-column: 1 / -1; }
+
+/* Three-up. The third region is the source, and it is not a third grid column:
+   an artifact and the lines it came from are rendered together, as one
+   `.split` inside focus, because the pane is swapped as a unit and nothing
+   fills a column the server does not know about. What the extra width buys is
+   that split having room to be two columns instead of two stacked halves.
+
+   So the rail gives some back rather than the grid growing a column. */
+@container shell (min-width: 90rem) {
+  .regions-rail-focus-source { grid-template-columns: [rail] 19rem [focus] minmax(0, 1fr); }
+}
+
+/* One-up: one region, the rest a navigation away. This is the phone, and it is
+   equally a half-width desktop window — which is the whole reason it is a
+   container query and not a device breakpoint. */
+@container shell (max-width: 60rem) {
+  .regions { grid-template-columns: minmax(0, 1fr); }
+  .regions > * { grid-column: 1 / -1; }
+  .regions.has-selection .region-rail { display: none; }
+}
+
+/* Full-bleed, so the rule under the header runs the width of the window
+   instead of stopping at whatever measure the page below happens to use. The
+   row inside it takes the wider of the two measures: it lines up with content
+   on the pages that are that wide, and simply runs wider than the reading
+   column on the pages that are not. Always the same width beats sometimes
+   lining up. */
+.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; }
+nav.top {
+  display: flex; gap: 0.25rem; align-items: center;
+  max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;
+}
+nav.top a {
+  color: var(--color-fg-secondary); text-decoration: none;
+  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: 0.875rem;
+  transition: background 120ms ease, color 120ms ease;
+}
+nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var(--color-bg-active); }
+.spacer { flex: 1; }
+
+
+/* ── Motion ──────────────────────────────────────────────────────────────
+   One rule: motion explains what moved, and never decorates.
+
+   Anything that should be understood as the same thing across a change is
+   named here, so the browser tweens it rather than repainting it. Everything
+   unnamed cross-fades, which is the right default for content that genuinely
+   was replaced. */
+/* Navigating between two pages that share this grid should look like the
+   content changing, not like the window being replaced. An at-rule rather than
+   the old meta tag, and browsers without it simply navigate. */
+@view-transition { navigation: auto; }
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-group(*) { animation-duration: 180ms; }
+  .topbar { view-transition-name: topbar; }
+  .region-rail { view-transition-name: rail; }
+  .region-focus { view-transition-name: focus; }
+}
+
+/* `navigation: auto` is not inside the query above — an at-rule cannot be —
+   so the transition would still run at the browser's own duration for someone
+   who asked not to see motion. This is what actually turns it off. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+}

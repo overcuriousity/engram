@@ -1,6 +1,6 @@
 {% extends "layout.html" %}
 {% block title %}Search — engram{% endblock %}
-{% block shell_class %}shell shell-wide{% endblock %}
+{% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `keyup` only
@@ -12,10 +12,26 @@
    `from:` up to the first space, so `from:#filters input[type=radio]` bound to
    `#filters` and dropped the rest as a syntax error nobody sees. `submit` is
    listed so htmx cancels it: a single-field form submits implicitly on Enter,
-   and a full page load would throw away the open pane. #}
+   and a full page load would throw away the open pane.
+
+   120ms rather than 250. A quarter second is a pause you can feel between a
+   phrase and its answer, and the query path is the same work either way: one
+   embedding, one vector search, never a generation. The embedding measured
+   ~92ms p50 against the real endpoint with uncached prompts, so the answer is
+   already on its way before the pause would have ended — and embeddings are
+   the axis this project treats as free.
+
+   `hx-sync="this:replace"` because of that halving, not despite it: two
+   requests from the same box are only ordered by luck, and the slower one
+   lands last. A cold endpoint on the first keystroke and a warm one on the
+   third is enough to leave the rail showing results for a prefix of what is
+   in the box — and nothing on screen says so. Replace aborts the request in
+   flight, so the answer shown is always the answer to the last thing typed. #}
+<div class="region-bar">
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
+      hx-sync="this:replace"
       hx-trigger="change from:#kind-chips,
-                  keyup changed delay:250ms from:input[name=q],
+                  keyup changed delay:120ms from:input[name=q],
                   search from:input[name=q],
                   submit{% if !q.is_empty() %},
                   load{% endif %}"
@@ -32,8 +48,15 @@
   <input class="input" type="search" name="q"
          placeholder="Describe the situation, in your own words…"
          aria-describedby="search-hint" value="{{ q }}">
+  {# The spinner rides the end of the hint rather than owning a row. It is
+     `visibility: hidden` when idle, which reserves its space — and as its own
+     grid child that space was a permanent empty band between the filters and
+     the results, on every load, whether or not anything was searching. Here it
+     costs nothing until it has something to say, and it still disappears with
+     the hint inside the phone's fixed bar exactly as the row it replaces did. #}
   <p id="search-hint" class="muted hint">A sentence or a whole paragraph finds
-    more than keywords do — paste what you are looking at.</p>
+    more than keywords do — paste what you are looking at.
+    <span id="search-spinner" class="spinner">searching…</span></p>
 
   {# One row, and one taxonomy in it. The tag row is gone: subject words have no
      vocabulary that can be closed, so `forensics` and `forensik` sat beside
@@ -49,7 +72,7 @@
   {% if !facets.categories.is_empty() %}
   <div class="facets">
     <div class="facet-row">
-    <span class="facet-label">Kind</span>
+    <span class="label facet-label">Kind</span>
     {# Named because the form's `change` trigger listens here: the event
        bubbles out of the radios to this row and no further than the box. #}
     <div class="chips" id="kind-chips" role="group" aria-label="Kind">
@@ -70,14 +93,23 @@
   {% endif %}
 </form>
 
-<div class="row" style="margin:0.5rem 0 1rem">
-  <span id="search-spinner" class="spinner">searching…</span>
+{# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
+   a hint that cannot be dismissed is a banner. Hidden until app.js decides
+   there is a keyboard to use it with. #}
+<p class="keyhint" hidden>
+  <kbd>/</kbd> search <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
+  <kbd>s</kbd> hide source <kbd>r</kbd> reading
+  <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
+</p>
 </div>
 
-<div class="workspace">
-  <div id="rail" class="rail" role="listbox" aria-label="Results"></div>
-  <div id="pane" class="pane">
-    <p class="muted">Pick a result to see it beside the lines it came from.</p>
-  </div>
+<div id="rail" class="region-rail rail" role="listbox" aria-label="Results"></div>
+<div id="pane" class="region-focus pane">
+  {# Before a search there is no rail beside this, so the sentence used to sit
+     in a column that did not exist yet — stranded in empty space, pointing at
+     a list nobody had asked for. It says what the page is for until there is
+     something to point at. #}
+  <p class="muted">Search to see an artifact here, beside the lines it
+    came from.</p>
 </div>
 {% endblock %}

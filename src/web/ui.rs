@@ -62,9 +62,15 @@ pub struct RenderedResult {
     pub reason: Option<String>,
 }
 
+#[derive(Default)]
 pub struct QueueRow {
     pub id: String,
     pub label: String,
+    /// The capture's opening words, kept whether or not synthesis has named it.
+    /// Never rendered on its own: it is what tells two rows apart when
+    /// synthesis gave them the same name. Empty for a photo, or for a PDF whose
+    /// extraction has not landed.
+    pub opening: String,
     pub status: String,
     pub badge: &'static str,
     pub artifact_count: i64,
@@ -1184,6 +1190,35 @@ fn render_hit(
 /// Ten rather than everything: an index of every corpus was a page nobody read,
 /// and anything older than the last handful is found by searching for what it
 /// says rather than by scrolling a list of what it is called.
+/// Recent lists ten captures, and synthesis names a capture by lifting a
+/// heading out of it. A heading repeats across every document that carries it,
+/// so six rows read `HOCHSCHULE MITTWEIDA` and named nothing — the one column
+/// that exists to tell captures apart could not.
+///
+/// Where a label is not unique in the list, the capture's opening words are
+/// appended, because that is the one thing that differs between them. Three
+/// rows are left alone: one whose label was already unique, because the suffix
+/// is a repair rather than a decoration; one with no opening words to offer,
+/// because `document · document` tells no one anything; and one already called
+/// by its opening words, because a label repeated back to itself is worse than
+/// the collision.
+fn disambiguate_labels(rows: &mut [QueueRow]) {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in rows.iter() {
+        *counts.entry(r.label.as_str()).or_insert(0) += 1;
+    }
+    let collides: std::collections::HashSet<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(l, _)| l.to_string())
+        .collect();
+    for r in rows.iter_mut() {
+        if collides.contains(&r.label) && !r.opening.is_empty() && r.opening != r.label {
+            r.label = format!("{} · {}", r.label, r.opening);
+        }
+    }
+}
+
 async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
     for s in st.core.store.list_corpora(10, 0).await? {
@@ -1214,6 +1249,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // thing that tells three captures pasted in a row apart. `unnamed`
             // is what says the name is still coming; the label itself is not
             // the place to say it.
+            opening: markdown::snippet(&s.raw_text, 60),
             label: s.title_hint.clone().unwrap_or_else(|| {
                 if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
                     "photo".into()
@@ -1236,6 +1272,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             id: s.id,
         });
     }
+    disambiguate_labels(&mut rows);
     let active = rows.iter().any(|r| r.in_flight);
     Ok(HtmlTemplate(QueueTemplate { rows, active }).into_response())
 }
@@ -4627,6 +4664,244 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_theme_beats_the_system_preference() {
+        // The light palette has been in the stylesheet since the port from
+        // Vestigo and nobody has ever seen it: it activated only on
+        // prefers-color-scheme. A choice has to override the system in both
+        // directions, or it is not a choice.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            css.contains(r#":root[data-theme="dark"]"#),
+            "an explicit dark choice cannot beat a light system"
+        );
+        assert!(
+            css.contains(r#":root:not([data-theme="light"])"#),
+            "the system dark block does not yield to an explicit light choice"
+        );
+    }
+
+    #[test]
+    fn the_theme_is_applied_before_the_first_paint() {
+        // A deferred script runs after the first paint and a stylesheet cannot
+        // know a stored choice, so either way the wrong theme flashes on every
+        // load — on a phone, brightly. The inline script has to come before the
+        // stylesheet it is correcting.
+        let layout = include_str!("templates/layout.html");
+        let script = layout.find("engram.theme").expect("no pre-paint script");
+        let sheet = layout.find("/assets/app.css").expect("no stylesheet link");
+        assert!(
+            script < sheet,
+            "the theme is applied after the stylesheet loads, which is the flash"
+        );
+    }
+
+    #[test]
+    fn headings_are_headings_and_labels_are_labels() {
+        // h3 was restyled globally into a small uppercase muted label, which is
+        // why no page had hierarchy: the element that would carry it had been
+        // spent on a style. Every <h3> in the templates was a real heading —
+        // Recent, Merged, Pursuits, API tokens — wearing a label's clothes.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            css.contains(".label {"),
+            "no .label class to carry the old h3 style"
+        );
+        assert!(
+            !css.contains("h3 { font-size: 0.8125rem"),
+            "h3 is still restyled as a label"
+        );
+        assert!(css.contains("--text-lg:"), "the type scale is missing");
+
+        // The two classes that had independently reinvented the label style now
+        // defer to it, so there is one label vocabulary rather than three.
+        let detail = include_str!("templates/_artifact_detail.html");
+        assert!(
+            detail.contains(r#"class="label pane-label""#),
+            "the pane label does not compose .label"
+        );
+        let search = include_str!("templates/search.html");
+        assert!(
+            search.contains(r#"class="label facet-label""#),
+            "the facet label does not compose .label"
+        );
+    }
+
+    #[test]
+    fn the_artifact_actions_carry_labels() {
+        // One screen carried three button vocabularies: unlabelled icon
+        // buttons stranded at the top of a wide row, text links inside the
+        // card, and solid buttons elsewhere. An icon alone is a guess — a
+        // check mark could as easily mean "done" as "still true".
+        //
+        // Asserted against the template source rather than a render: the
+        // fragment is `ArtifactDetailFragment { d: ArtifactDetail }` and
+        // building an ArtifactDetail by hand is thirty lines of scaffolding to
+        // check for three words. The words are the whole change.
+        let tpl = include_str!("templates/_artifact_detail.html");
+        for word in ["Verified", "Hide", "Delete"] {
+            assert!(
+                tpl.contains(&format!("<span>{word}</span>")),
+                "the {word} control has no label"
+            );
+        }
+        // The square is still right for the controls that repeat down a list,
+        // where the row already says what they act on.
+        let rail = include_str!("templates/_results.html");
+        assert!(
+            rail.contains("btn-icon btn-icon-danger"),
+            "the rail's delete stopped being an icon button"
+        );
+    }
+
+    #[test]
+    fn the_open_rail_card_keeps_a_line_of_itself() {
+        // The rail is the ranking as well as a list of links. A card
+        // collapsing to a bare stub when opened punched a hole in the ordering
+        // and lost the reader's place in it; the accent border and background
+        // were always what said which one was open.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            !css.contains(r#".rail-item[aria-selected="true"] .rail-snippet { display: none; }"#),
+            "the open card still erases its snippet"
+        );
+        // Demoted, not unreadable: 0.55 over the dark base is very likely
+        // under AA, and a result past the cliff is still a result.
+        assert!(
+            !css.contains(".rail-past { opacity: 0.55; }"),
+            "past-cliff results are still dimmed below the contrast floor"
+        );
+    }
+
+    #[test]
+    fn every_page_anchors_to_the_same_left_edge() {
+        // Three shell widths meant the content column moved under a brand that
+        // did not, so navigating jolted — and on Search the query box lined up
+        // with nothing else on its own page. A page now declares which regions
+        // it uses and never declares a width; the grid puts `rail` and `focus`
+        // in the same columns everywhere, which is what makes the anchor
+        // single.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            !css.contains("shell-wide"),
+            "shell-wide still sets a per-page width"
+        );
+        assert!(
+            css.contains(".regions-rail-focus-source"),
+            "the three-up region tier is missing"
+        );
+    }
+
+    #[test]
+    fn colliding_capture_labels_get_told_apart() {
+        // Synthesis names a capture by lifting a heading out of it, and a
+        // heading repeats across every document that carries it: six rows read
+        // HOCHSCHULE MITTWEIDA and the column that exists to tell captures
+        // apart could not. The opening words are the one thing that differs.
+        let mut rows = vec![
+            QueueRow {
+                label: "HOCHSCHULE MITTWEIDA".into(),
+                opening: "Kapitel 1 Einleitung".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "HOCHSCHULE MITTWEIDA".into(),
+                opening: "Kapitel 5 Malware".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "Configure auditd".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "HOCHSCHULE MITTWEIDA · Kapitel 1 Einleitung");
+        assert_eq!(rows[1].label, "HOCHSCHULE MITTWEIDA · Kapitel 5 Malware");
+        // A label that was already unique is left alone: the suffix is a
+        // repair, not a decoration.
+        assert_eq!(rows[2].label, "Configure auditd");
+    }
+
+    #[test]
+    fn a_collision_with_no_opening_words_is_left_alone() {
+        // A photo, or a PDF whose extraction has not landed, has no opening
+        // words — and "document · document" tells no one anything.
+        let mut rows = vec![
+            QueueRow {
+                label: "document".into(),
+                opening: String::new(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "document".into(),
+                opening: String::new(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "document");
+        assert_eq!(rows[1].label, "document");
+    }
+
+    #[test]
+    fn a_label_is_not_repeated_back_to_itself() {
+        // An untitled capture is already called by its opening words. Appending
+        // them would render "auditctl -w /etc · auditctl -w /etc".
+        let mut rows = vec![
+            QueueRow {
+                label: "auditctl -w /etc".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "auditctl -w /etc".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "auditctl -w /etc");
+    }
+
+    #[test]
+    fn a_primed_hit_says_why_it_arrived() {
+        // primed, loose and model-written already reached the rail as chips
+        // scattered across the header, each with its explanation hidden in a
+        // title attribute. The badge said what the result is; nothing said why
+        // it was here.
+        let mut r = ranked(false);
+        r.primed = true;
+        let body = ResultsTemplate {
+            results: vec![r],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(body.contains("rail-why"), "no provenance line: {body}");
+        assert!(body.contains("you reach this one often"), "{body}");
+    }
+
+    #[test]
+    fn an_ordinary_hit_explains_nothing() {
+        // A line under every result saying "this matched your query" is noise
+        // that makes the lines worth reading harder to see.
+        let body = ResultsTemplate {
+            results: vec![ranked(false)],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+        }
+        .render()
+        .unwrap();
+        assert!(
+            !body.contains("rail-why"),
+            "an ordinary hit explained itself: {body}"
+        );
+    }
+
+    #[test]
     fn a_primed_hit_gets_a_small_marker() {
         let mut r = ranked(false);
         r.primed = true;
@@ -5758,7 +6033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_settled_recent_row_states_artifacts_and_coverage_the_same_way() {
+    async fn a_settled_row_states_its_count_and_mentions_coverage_only_when_it_is_short() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core
             .ingest("alpha line\n\nbravo line", "web", None)
@@ -5773,8 +6048,16 @@ mod tests {
 
         let frag = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
-            frag.contains("artifacts · ") && frag.contains(" covered"),
-            "a settled row states both, in one shape: {frag}"
+            frag.contains("artifacts"),
+            "a settled row states its count: {frag}"
+        );
+        // Ten rows all reading "100% covered" is a column that says nothing,
+        // and it crowded out the one number on the row that differs. Coverage
+        // speaks when it is short — see the low-coverage test below — and stays
+        // quiet when it is whole.
+        assert!(
+            !frag.contains(" covered"),
+            "a fully covered row announced a number that is the same on every row: {frag}"
         );
         assert!(
             !frag.contains("badge-warning"),
@@ -6691,23 +6974,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
-        let (app, cookie) = app_with_session().await;
+    async fn a_page_declares_what_it_holds_rather_than_how_wide_it_is() {
+        // The three shell widths are gone. What is left is a statement about
+        // content: a rail beside an artifact beside its source, prose at a
+        // reading measure, or a table that is as wide as its columns need.
+        // Every one of them starts at the shell's left edge, which is what
+        // stops the content column moving as you navigate.
+        let (app, cookie, core) = app_session_and_core().await;
 
         let search = get_body(&app, &cookie, "/ui/search").await;
         assert!(
-            search.contains(r#"class="shell shell-wide""#),
-            "search is a three-pane page and must not be held at the reading measure: {search}"
+            search.contains("regions-rail-focus-source"),
+            "search is a three-region page: {search}"
         );
 
         let ops = get_body(&app, &cookie, "/ui/ops").await;
-        assert!(ops.contains(r#"class="shell shell-wide""#), "{ops}");
+        assert!(
+            ops.contains("regions-table"),
+            "housekeeping is a table and has no reading measure: {ops}"
+        );
 
+        // `regions-focus-aside`, not `regions-focus`: a substring check would
+        // pass on either, and the difference is the whole point — the prose
+        // keeps its measure and what used to be empty beside it holds the
+        // page's second thing.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains(r#"class="shell""#) && !capture.contains("shell-wide"),
-            "capture is prose and keeps the reading measure: {capture}"
+            capture.contains(r#"regions regions-focus-aside"#),
+            "capture is prose beside its record: {capture}"
         );
+        assert!(
+            capture.contains(r#"class="region-aside""#),
+            "capture's Recent has nothing to sit in: {capture}"
+        );
+
+        let ask = get_body(&app, &cookie, "/ui/ask").await;
+        assert!(
+            ask.contains(r#"regions regions-focus-aside"#),
+            "ask is an answer beside what it was written from: {ask}"
+        );
+        // The excerpts must not be a rail region. `r` is gated on one, and
+        // reading mode rewrites the grid to a spine beside a single column —
+        // which would take this page apart on a key that means nothing here.
+        assert!(
+            !ask.contains("region-rail"),
+            "ask's excerpts would answer to reading mode: {ask}"
+        );
+
+        // No measure on the one page whose whole subject is an artifact and
+        // the lines it came from — it is the same split the search pane holds,
+        // so it gets the same room rather than a reading column with the rest
+        // of the window empty beside it. Fetched as a real artifact page: the
+        // assertion is about what `/ui/artifacts/<id>` declares, and pointing
+        // it at any other route would pass without testing that.
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let id = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let artifact = get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
+        assert!(
+            artifact.contains(r#"regions regions-split"#),
+            "the artifact page is a split, not prose: {artifact}"
+        );
+
+        // No page says how wide it is any more.
+        for (uri, body) in [
+            ("/ui/search", &search),
+            ("/ui/ops", &ops),
+            ("/ui/capture", &capture),
+            ("/ui/ask", &ask),
+        ] {
+            assert!(!body.contains("shell-wide"), "{uri} still declares a width");
+        }
     }
 
     #[tokio::test]

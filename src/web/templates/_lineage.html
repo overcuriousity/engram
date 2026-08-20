@@ -9,7 +9,7 @@
    What it does not show is how the wording developed: nothing keeps artifact
    revisions, so this is assembly, not authorship. #}
 {% if d.merged %}
-<div class="pane-label">
+<div class="label pane-label">
   {% if d.lineage.roots.is_empty() %}
   Written from artifacts that are gone
   {% else %}
@@ -21,7 +21,7 @@
 {% if d.synthesized && !d.cues.is_empty() %}
 {# Not "a model guessed you would want this" but "this was written because
    these things were asked and the base had no answer". #}
-<div class="pane-label">Written because these were asked</div>
+<div class="label pane-label">Written because these were asked</div>
 <ul class="cues">
   {% for q in d.cues %}<li>{{ q }}</li>{% endfor %}
 </ul>
@@ -78,7 +78,7 @@
    duplicate without merging anything, and "this replaced it" is a weaker claim
    than "this was written from it" — under one heading the page would say the
    winner's text carries the loser's, which in this case nothing checked. #}
-<div class="pane-label">Replaced without being merged</div>
+<div class="label pane-label">Replaced without being merged</div>
 <ul class="lineage">
   {% for f in d.lineage.flat_replaced() %}
   <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">

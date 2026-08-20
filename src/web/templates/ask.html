@@ -1,41 +1,68 @@
 {% extends "layout.html" %}
 {% block title %}Ask — engram{% endblock %}
+{# The excerpts are a region, not a box in the middle of the answer. They used
+   to sit in the one prose column between the retrieval line and the answer,
+   inside a scroller of their own — so reaching the answer meant scrolling
+   through a nested list first, and the fan-out made that list three times
+   longer. Beside the answer they are what they always were: what it was
+   written from, readable while it is still being written.
+
+   That is also what the empty half of a wide window was for. #}
+{% block regions %}regions-focus-aside{% endblock %}
 {% block content %}
-<p class="muted">Synthesis across several artifacts. Slower than search, and never the default path.</p>
-{# No `hx-post`: the answer arrives over SSE, which is two requests — the POST
-   parks the question and hands back an id, and an `EventSource` spends it. The
-   driver is in app.js. The page needs JS from here on; `/api/v1/ask` and the
-   MCP door are the JS-free ways in, and neither needs a browser. #}
-<form id="ask-form" class="row" style="margin-bottom:1rem">
-  <input class="input" name="q" value="{{ q }}" placeholder="Ask a question…" autofocus>
-  <button class="btn btn-accent" type="submit">Ask</button>
-  <span id="ask-spinner" class="spinner">thinking…</span>
-</form>
-{# What the retrieval did before the model was asked anything, when there was
-   more of it than usual. Silent on an ask the first round already covered: no
-   plan, no fan-out, nothing to report. When a plan does name something, those
-   searches are otherwise a silent pause of unknown length in front of the
-   answer, and what they went looking for is nowhere on the page. #}
-<p id="ask-progress" class="muted" hidden></p>
-{# What the model said on the way to the answer, kept dim and out of the way: it
-   is not the answer, and nothing in it is cited. #}
-<div id="ask-reasoning" class="reasoning" hidden></div>
-{# The answer as it is being written, in plain text; the markdown is rendered by
-   the server and swapped in whole at the end. `aria-live="polite"` so a reader
-   who cannot see it knows the answer is arriving — the announcement is the
-   appended text and nothing else, because rewriting the region or moving focus
-   into it on every token would talk over the reader for the whole answer. #}
-<pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
+{# The question and what the retrieval did about it, across both columns: it
+   describes the answer and the excerpts equally, and neither owns it. #}
+<div class="region-bar">
+  <p class="muted">Synthesis across several artifacts. Slower than search, and never the default path.</p>
+  {# No `hx-post`: the answer arrives over SSE, which is two requests — the POST
+     parks the question and hands back an id, and an `EventSource` spends it. The
+     driver is in app.js. The page needs JS from here on; `/api/v1/ask` and the
+     MCP door are the JS-free ways in, and neither needs a browser. #}
+  <form id="ask-form" class="row" style="margin-bottom:1rem">
+    <input class="input" name="q" value="{{ q }}" placeholder="Ask a question…" autofocus>
+    <button class="btn btn-accent" type="submit">Ask</button>
+    <span id="ask-spinner" class="spinner">thinking…</span>
+  </form>
+  {# What the retrieval did before the model was asked anything, when there was
+     more of it than usual. Silent on an ask the first round already covered: no
+     plan, no fan-out, nothing to report. When a plan does name something, those
+     searches are otherwise a silent pause of unknown length in front of the
+     answer, and what they went looking for is nowhere on the page. #}
+  <p id="ask-progress" class="muted" hidden></p>
+</div>
+
+{# One focus region, not two with the excerpts wedged between them: everything
+   here is the answer at some stage of being written, and a second region in
+   this column would put the finished answer on a grid row below the excerpts
+   rather than beside them. #}
+<div class="region-focus">
+  {# What the model said on the way to the answer, kept dim and out of the way:
+     it is not the answer, and nothing in it is cited. #}
+  <div id="ask-reasoning" class="reasoning" hidden></div>
+  {# The answer as it is being written, in plain text; the markdown is rendered
+     by the server and swapped in whole at the end. `aria-live="polite"` so a
+     reader who cannot see it knows the answer is arriving — the announcement is
+     the appended text and nothing else, because rewriting the region or moving
+     focus into it on every token would talk over the reader for the whole
+     answer. #}
+  <pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
+  {# The one announcement of the finished answer. The tokens above stream into a
+     polite live region as they arrive, so a reader who cannot see the page knows
+     an answer is coming; nothing else said it had arrived, and swapping the
+     rendered fragment into a live region instead would read the whole answer
+     aloud a second time. Off-screen, because the answer below it is the signal
+     for everyone who can see it. #}
+  <p id="ask-status" class="sr-only" role="status"></p>
+  <div id="ask-result"></div>
+</div>
+
 {# The excerpts, on screen before the first token. Each one carries the `cite-n`
    id that the answer's `[n]` links point at. A listbox of anchors, like the
-   search rail, because that is what the arrow keys in app.js move between. #}
-<div id="ask-rail" class="rail" role="listbox" aria-label="Excerpts"></div>
-{# The one announcement of the finished answer. The tokens above stream into a
-   polite live region as they arrive, so a reader who cannot see the page knows
-   an answer is coming; nothing else said it had arrived, and swapping the
-   rendered fragment into a live region instead would read the whole answer
-   aloud a second time. Off-screen, because the answer below it is the signal
-   for everyone who can see it. #}
-<p id="ask-status" class="sr-only" role="status"></p>
-<div id="ask-result"></div>
+   search rail, because that is what the arrow keys in app.js move between.
+
+   `region-aside`, deliberately not `region-rail`: `r` toggles reading mode on
+   any page that has a rail region, and reading mode rewrites the grid to a 3rem
+   spine beside one column — which would take this page apart on a keypress that
+   means nothing here. #}
+<div id="ask-rail" class="region-aside rail" role="listbox" aria-label="Excerpts"></div>
 {% endblock %}

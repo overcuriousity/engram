@@ -4,17 +4,24 @@
      60rem, where the rail is still on screen beside this — the same width that
      hides it, not the phone breakpoint.
 
-     Inside the workspace the rail is only hidden by a class, so back is "show
+     Inside the region grid the rail is only hidden by a class, so back is "show
      the list again" rather than a navigation: dropping the class puts the
      results back exactly as they were, and `history.back()` follows to undo
      the URL the click pushed. The plain href is what runs on the standalone
-     artifact page, which has no workspace and no results to return to —
+     artifact page, which has no rail and no results to return to —
      `/ui/search` cannot carry the query, because what this page is given is
-     the stripped highlight terms rather than what was typed. #}
+     the stripped highlight terms rather than what was typed.
+
+     The test is for the rail, not for the grid: every page is inside a
+     `.regions` now, so asking for that one found it on the standalone page too
+     and the plain href never ran — the link swallowed the click and popped a
+     history entry that was not there. What tells the two apart is whether
+     there is a list to go back to. #}
   <a class="back" href="/ui/search"
-     onclick="var w = document.querySelector('.workspace');
-              if (!w) return true;
-              w.classList.remove('has-selection'); history.back(); return false;">← Results</a>
+     onclick="var r = document.querySelector('.region-rail');
+              if (!r) return true;
+              r.closest('.regions').classList.remove('has-selection');
+              history.back(); return false;">← Results</a>
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">
@@ -60,14 +67,23 @@
      decision that does not depend on whether it is currently hidden.
 
      `.actions` rather than `.chips`: it pushes delete to the far end, so the
-     one control that cannot be undone is never flush against two that can. #}
-  <div class="actions">
+     one control that cannot be undone is never flush against two that can. It
+     is also a `.pane-header`, which anchors the row to the artifact under a
+     rule rather than leaving it floating at the top of a wide column — at
+     three-up the lone trash button ended a thousand pixels from its siblings
+     and read as stranded rather than as caution.
+
+     Every one of them carries its word. An icon alone is a guess: a check mark
+     could as easily mean "done" as "still true", and the tooltip that said
+     which only appears once you have already hovered the thing you were unsure
+     about. #}
+  <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
               title="Confirm still accurate" aria-label="Confirm still accurate">
-        {% include "_icon_check.html" %}
+        {% include "_icon_check.html" %}<span>Verified</span>
       </button>
     </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
@@ -75,7 +91,7 @@
       <button class="btn-icon" type="submit"
               title="Deprecate — hide from results, keep the artifact"
               aria-label="Deprecate: hide from results, keep the artifact">
-        {% include "_icon_hide.html" %}
+        {% include "_icon_hide.html" %}<span>Hide</span>
       </button>
     </form>
     {% endif %}
@@ -86,7 +102,7 @@
           onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete permanently" aria-label="Delete artifact permanently">
-        {% include "_icon_trash.html" %}
+        {% include "_icon_trash.html" %}<span>Delete</span>
       </button>
     </form>
   </div>
@@ -121,7 +137,7 @@
 
   <div class="split">
     <div>
-      <div class="pane-label">Artifact</div>
+      <div class="label pane-label">Artifact</div>
       <div class="card">
         <div class="card-head">
           <span class="card-title">{{ d.title }}</span>
@@ -177,7 +193,7 @@
          rather than naming `#pane`: the same partial is also the whole of the
          standalone artifact page, where no pane exists and a missing target
          would leave the link dead. #}
-      <div class="pane-label">Related</div>
+      <div class="label pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
         <a class="rail-item" href="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
@@ -194,7 +210,7 @@
       {% if !d.seen_together.is_empty() %}
       {# Beside the nearest neighbours, not instead of them: one list is what
          this resembles, the other is what it has been needed alongside. #}
-      <div class="pane-label">Seen together</div>
+      <div class="label pane-label">Seen together</div>
       <div class="related">
         {% for r in d.seen_together %}
         <div class="seen-row{% if !r.cross_corpus %} muted{% endif %}">
@@ -241,7 +257,7 @@
          render a dead link over an empty table — on the very artifact whose
          orphan notice matters most. #}
       {% if !d.merged %}
-      <div class="pane-label">
+      <div class="label pane-label">
         {# "highlighted" was doing no work: the highlight is visible in the table
            directly below, and the label already names the lines. #}
         <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }}

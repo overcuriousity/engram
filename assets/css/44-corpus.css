@@ -1,0 +1,36 @@
+/* The corpus, band by band. */
+
+/* ── The corpus, band by band ────────────────────────────────────────────── */
+
+/* One row per band: the source on the left, what was written from it on the
+   right. Heights are ragged on purpose — a band is as tall as its source, so
+   an eight-line passage that yielded one short artifact leaves the right cell
+   mostly empty. Folding it would hide source on the page that exists to show
+   source. */
+.bands { display: flex; flex-direction: column; gap: 0.75rem; }
+.band { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+.band > * { min-width: 0; }
+.band-src {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); overflow-x: auto;
+}
+.band-src table { border-collapse: collapse; width: 100%;
+                  font-family: var(--font-mono); font-size: 0.8125rem; }
+.band-src td { padding: 1px 0.5rem 1px 2rem; vertical-align: top;
+               white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -1.5rem; }
+.band-src td.ln {
+  width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
+  border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
+  padding: 1px 0.5rem; text-indent: 0;
+}
+.band-src tr.in td { background: var(--color-accent-dim); }
+
+/* Red carries one claim and one only: no artifact says it was written from
+   these lines. Not "the wording changed" — that is the percentage above. */
+.band-gap .band-src { border-color: var(--color-danger); background: var(--color-danger-dim); }
+.band-gap-head {
+  display: flex; gap: 0.5rem; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
+}
+.band-gap-label { font-size: 0.8125rem; color: var(--color-danger); }
+
