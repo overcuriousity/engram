@@ -140,13 +140,6 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
             }
         }
     }
-    // Every search that was already in flight is allowed to finish before the
-    // first failure is returned: they cost nothing more once issued, and a gap
-    // one of them closed is closed whether or not another query failed.
-    if let Some(e) = failure {
-        return Err(e);
-    }
-
     let mut closed = 0;
     for (g, hit) in open.gaps.iter().zip(best) {
         let Some(hit) = hit else { continue };
@@ -157,7 +150,14 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
         if sim < core.weak_below {
             continue;
         }
-        core.store
+        // Warned and skipped rather than returned: the vector store can hand
+        // back an `artifact_id` SQLite no longer has — the drift
+        // `reconcile_stores_once` exists to repair — and `gap_coverage`
+        // carries a foreign key onto it. One such row must not take the
+        // remaining gaps of this capture down with it, because nothing comes
+        // back for them: `cover` is called once, from `settle_corpus`.
+        match core
+            .store
             .cover_gap(
                 g.gap.kind,
                 &g.gap.id,
@@ -165,11 +165,25 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
                 &hit.payload.artifact_id,
                 sim,
             )
-            .await?;
-        closed += 1;
+            .await
+        {
+            Ok(()) => closed += 1,
+            Err(e) => {
+                tracing::warn!(gap_id = %g.gap.id, error = %e, "could not record that a capture answered a gap");
+                failure.get_or_insert(e);
+            }
+        }
     }
     if closed > 0 {
         tracing::info!(corpus_id, closed, "a capture answered open gaps");
+    }
+    // Reported only once every gap the successful queries answered has been
+    // written. `cover` runs once, from `settle_corpus` when a corpus reaches
+    // `ready`, so there is no second pass: returning at the first failed query
+    // threw away the answers all the other queries had already found, and with
+    // forty open gaps and one flaky query it closed none of them.
+    if let Some(e) = failure {
+        return Err(e);
     }
     Ok(closed)
 }
@@ -447,6 +461,64 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_gap_the_capture_cannot_record_does_not_cost_the_others() {
+        // `cover` runs once, from `settle_corpus` when a corpus reaches
+        // `ready`, so a gap it skips is a gap nothing comes back for. It used
+        // to return at the first refusal and leave every remaining gap of the
+        // capture open — with forty of them and one bad answer, none closed.
+        //
+        // The refusal here is the reachable one: the vector store hands back an
+        // `artifact_id` SQLite no longer has, which is exactly the drift
+        // `reconcile_stores_once` exists to repair, and `gap_coverage` carries
+        // a foreign key onto it.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        let dangling = vec![0.0, 1.0, 0.0, 0.0];
+        let answerable = vec![1.0, 0.0, 0.0, 0.0];
+        gap_search(&core, "what does a torn write look like", dangling.clone()).await;
+        let answerable_id = gap_search(&core, "how do I mount an E01", answerable.clone()).await;
+        core.weak_below = 1.0;
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.weak_below = best_similarity(&core, &answerable, &corpus).await - 0.01;
+
+        // Closer to the first gap than anything the capture wrote, and pointing
+        // at a row that is not there.
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: dangling.clone(),
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: "no-such-artifact".into(),
+                    corpus_id: corpus.clone(),
+                    text: "a torn write".into(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    created_at: crate::store::now(),
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+
+        // The pass still reports that something went wrong.
+        assert!(cover(&core, &corpus).await.is_err());
+
+        // And the gap it could answer is answered.
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert!(
+            covered.iter().any(|g| g.id == answerable_id),
+            "the gap the capture did answer was thrown away with the one it could not"
         );
     }
 
