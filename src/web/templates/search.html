@@ -12,11 +12,18 @@
    `from:` up to the first space, so `from:#filters input[type=radio]` bound to
    `#filters` and dropped the rest as a syntax error nobody sees. `submit` is
    listed so htmx cancels it: a single-field form submits implicitly on Enter,
-   and a full page load would throw away the open pane. #}
+   and a full page load would throw away the open pane.
+
+   120ms rather than 250. A quarter second is a pause you can feel between a
+   phrase and its answer, and the query path is the same work either way: one
+   embedding, one vector search, never a generation. The embedding measured
+   ~92ms p50 against the real endpoint with uncached prompts, so the answer is
+   already on its way before the pause would have ended — and embeddings are
+   the axis this project treats as free. #}
 <div class="region-bar">
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
       hx-trigger="change from:#kind-chips,
-                  keyup changed delay:250ms from:input[name=q],
+                  keyup changed delay:120ms from:input[name=q],
                   search from:input[name=q],
                   submit{% if !q.is_empty() %},
                   load{% endif %}"
