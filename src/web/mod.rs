@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
                 state.core.capture.pdf_max_bytes,
             ),
         )
+        .fallback(ui::not_found)
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -118,6 +119,71 @@ mod tests {
         let res = app.oneshot(get(None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
         assert_eq!(res.headers()["location"], "/ui/search");
+    }
+
+    #[tokio::test]
+    async fn housekeeping_is_one_name_and_one_url() {
+        // The nav says Housekeeping, the URL says /ui/ops, the page title said
+        // Ops — and /ui/housekeeping, the name a reader would type, was the
+        // browser's own error page.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/housekeeping")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT, "{res:?}");
+        assert_eq!(res.headers()["location"], "/ui/ops");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ui_path_gets_the_apps_own_page() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(
+            body.contains("engram"),
+            "the browser's error page, not ours: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_api_path_is_still_not_a_web_page() {
+        // The fallback is for people typing URLs. An agent asking the API for
+        // a route that does not exist must not be handed a login-shaped HTML
+        // document to parse.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(!body.contains("<html"), "an API 404 came back as a page: {body}");
     }
 
     #[tokio::test]

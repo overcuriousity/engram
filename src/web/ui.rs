@@ -3457,6 +3457,34 @@ async fn mark_artifact_reviewed(
     Ok(axum::response::Html(String::new()).into_response())
 }
 
+#[derive(Template)]
+#[template(path = "not_found.html")]
+struct NotFoundTemplate {
+    /// Waiting judgements for the nav. See `state::judge_pending`.
+    judge_pending: Option<i64>,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ask_enabled: bool,
+}
+
+/// The app's own answer to a path it does not have.
+///
+/// Only for the pages: an agent asking `/api/v1` for a route that does not
+/// exist must not be handed an HTML document to parse, which is what a router
+/// fallback would do to every door at once.
+pub async fn not_found(State(st): State<AppState>, uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let page = NotFoundTemplate {
+        judge_pending: crate::web::state::judge_pending(&st).await,
+        ask_enabled: crate::web::state::ask_enabled(&st),
+    };
+    match askama::Template::render(&page) {
+        Ok(html) => (axum::http::StatusCode::NOT_FOUND, axum::response::Html(html)).into_response(),
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 pub fn ui_router() -> Router<AppState> {
     Router::new()
         // The bare domain and `/ui` are the same door, and both open on the
@@ -3500,6 +3528,12 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         .route("/ui/ops", get(ops))
+        // One name for the page. The nav word is Housekeeping and the route is
+        // `/ui/ops`; a reader who types the word they were shown lands here.
+        .route(
+            "/ui/housekeeping",
+            get(|| async { Redirect::permanent("/ui/ops") }),
+        )
         .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
