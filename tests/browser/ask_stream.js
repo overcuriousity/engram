@@ -146,8 +146,10 @@ const server = http.createServer((req, res) => {
     const send = (name, data) =>
       res.write('event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n');
     send('retrieved', { round: 1, shown: 2, dropped: 0, cliff_at: null });
-    // A follow-up round, so the page has to show its query and then keep it.
-    send('needs', { text: 'more about bravo' });
+    // A fan-out, so the page has to show every query it named and then keep
+    // them. Two of them, because one would pass whether or not the page joins
+    // the list.
+    send('needs', { queries: ['more about bravo', 'charlie'] });
     send('retrieved', { round: 2, shown: 2, dropped: 1, cliff_at: null });
     send('citations', { rail: RAIL });
     setTimeout(() => send('reasoning', { text: 'weighing alpha\nagainst bravo' }), 60);

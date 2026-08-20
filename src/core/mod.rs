@@ -97,14 +97,15 @@ pub struct Core {
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
     pub generator: Option<Arc<dyn Completer>>,
-    /// The model that says, once, what one answer still needs — and with it,
-    /// whether an ask gets a second retrieval round at all.
+    /// The model that says, once, which subjects an answer still lacks — and
+    /// with it, whether an ask gets a fanned-out second round of retrieval at
+    /// all.
     ///
-    /// `None` is the shipped default and the whole of the off switch: there is
-    /// no completer to call, so the disabled path cannot cost a call however
-    /// the ask path is later edited. It is `Some` only when
-    /// `infer.ask.follow_up` is on.
-    pub follow_up: Option<Arc<dyn Completer>>,
+    /// `None` is the whole of the off switch: there is no completer to call, so
+    /// the disabled path cannot cost a call however the ask path is later
+    /// edited. It is `Some` whenever `infer.ask.plan` is on, which it is by
+    /// default.
+    pub planner: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
     /// How much inference capture spends. See `SynthesisMode`.
@@ -198,10 +199,9 @@ impl Core {
                 .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
             generator: synth
                 .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
-            follow_up: cfg.infer.ask.as_ref().and_then(|a| {
-                a.follow_up.then(|| {
-                    Arc::new(HttpCompleter::for_follow_up(&a.follow_up_on())) as Arc<dyn Completer>
-                })
+            planner: cfg.infer.ask.as_ref().and_then(|a| {
+                a.plan
+                    .then(|| Arc::new(HttpCompleter::for_plan(&a.plan_on())) as Arc<dyn Completer>)
             }),
             describer: cfg
                 .infer
@@ -355,9 +355,10 @@ pub mod test_support {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
             generator: Some(Arc::new(FakeCompleter::default())),
-            // Off, like the shipped default. The follow-up tests switch it on
-            // by putting a completer here, which is the only thing that does.
-            follow_up: None,
+            // Off, unlike the shipped default: a test that wants a fan-out puts
+            // a completer here, and every other test gets one round and no
+            // extra call to account for.
+            planner: None,
             describer: Some(Arc::new(FakeDescriber::default())),
             synthesis: crate::config::SynthesisMode::Eager,
             segment_tokens: crate::config::DEFAULT_SEGMENT_TOKENS,
@@ -490,29 +491,29 @@ mod tests {
         drop(held);
     }
 
-    /// The whole of the off switch. `follow_up` costs one model call on every
-    /// question, so the default must not merely skip the call — there must be
-    /// nothing to call, which is what `None` here means. The example config is
-    /// the shipped default, and this asserts the default it ships.
+    /// The whole of the off switch. Planning costs one model call on every
+    /// question, so `plan = false` must not merely skip the call — there must
+    /// be nothing to call, which is what `None` here means. The example config
+    /// is the shipped default, and this asserts the default it ships.
     #[tokio::test]
-    async fn the_follow_up_model_is_wired_only_when_the_operator_asked_for_it() {
+    async fn the_planner_is_wired_by_default_and_unwired_when_switched_off() {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
         let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
 
         assert!(
-            !cfg.infer.ask.as_ref().unwrap().follow_up,
-            "the shipped config asks for a second retrieval round"
+            cfg.infer.ask.as_ref().unwrap().plan,
+            "the shipped config does not fan out"
         );
         let core = Core::from_config(&cfg, vectors.clone(), store.clone());
+        assert!(core.planner.is_some());
+
+        cfg.infer.ask.as_mut().unwrap().plan = false;
+        let core = Core::from_config(&cfg, vectors, store);
         assert!(
-            core.follow_up.is_none(),
+            core.planner.is_none(),
             "there is a completer to call with the feature off"
         );
-
-        cfg.infer.ask.as_mut().unwrap().follow_up = true;
-        let core = Core::from_config(&cfg, vectors, store);
-        assert!(core.follow_up.is_some());
     }
 
     #[tokio::test]

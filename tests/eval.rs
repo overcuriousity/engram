@@ -529,7 +529,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         gap_namer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         generator: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         // The harness measures the shipped default, which is one round.
-        follow_up: None,
+        planner: None,
         describer: None,
         synthesis: engram::config::SynthesisMode::Eager,
         segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,

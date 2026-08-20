@@ -561,10 +561,22 @@ struct RawAskRole {
     #[serde(default)]
     ceiling_param: Option<CeilingParam>,
     // Role-only.
-    #[serde(default)]
-    follow_up: bool,
-    #[serde(default)]
-    follow_up_tier: Option<String>,
+    /// Named `plan` since the call became "which subjects are missing" rather
+    /// than "what is the one thing missing". The old name is still accepted:
+    /// a renamed key that silently reverts to its default is an operator whose
+    /// switch stopped working without anything saying so.
+    #[serde(default = "default_plan", alias = "follow_up")]
+    plan: bool,
+    #[serde(default, alias = "follow_up_tier")]
+    plan_tier: Option<String>,
+}
+
+/// On. The fan-out is what asking means now: a question that spans several
+/// subjects is retrieved for all of them or answered from whichever one the
+/// single ranked list happened to favour. The cost is one cheap call per
+/// question, and `plan_tier` is where that cost is placed.
+fn default_plan() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -644,8 +656,8 @@ impl TryFrom<RawInferConfig> for InferConfig {
                 // Resolved here rather than where it is used, so a typo in the name is
                 // a startup failure like every other tier name instead of a surprise on
                 // the first question someone asks.
-                let follow_up_endpoint = match a.follow_up_tier.as_deref() {
-                    Some(name) => Some(resolve_endpoint("ask.follow_up_tier", name, tiers)?),
+                let plan_endpoint = match a.plan_tier.as_deref() {
+                    Some(name) => Some(resolve_endpoint("ask.plan_tier", name, tiers)?),
                     None => None,
                 };
                 Some(AskRole {
@@ -658,8 +670,8 @@ impl TryFrom<RawInferConfig> for InferConfig {
                     reasoning_effort: a.reasoning_effort.or(at.reasoning_effort),
                     ceiling_param: a.ceiling_param.or(at.ceiling_param),
                     structured_output: at.structured_output,
-                    follow_up: a.follow_up,
-                    follow_up_endpoint,
+                    plan: a.plan,
+                    plan_endpoint,
                 })
             }
         };
@@ -1016,51 +1028,53 @@ pub struct AskRole {
     #[serde(default)]
     pub ceiling_param: Option<CeilingParam>,
     /// See `TierConfig::structured_output`. The ask call itself never sends a
-    /// response format — it answers in prose — but the follow-up call does,
-    /// and when no `follow_up_tier` is named it runs on this endpoint, whose
-    /// flag it has to honour rather than assume.
+    /// response format — it answers in prose — but the planning call does,
+    /// and when no `plan_tier` is named it runs on this endpoint, whose flag
+    /// it has to honour rather than assume.
     pub structured_output: bool,
-    /// One bounded extra retrieval round. Off by default: it costs a call, and
-    /// a default moves only after the harness has run.
-    pub follow_up: bool,
-    /// The resolved endpoint the "what do I still need" call runs on, from
-    /// `follow_up_tier`. `None` falls back to this role's own endpoint.
+    /// Whether one round of planned, fanned-out retrieval follows the first.
+    ///
+    /// On by default. It is what lets a question that spans several subjects be
+    /// retrieved for all of them, and that is the ordinary case rather than a
+    /// refinement. The switch survives for the operator with one slow endpoint
+    /// and no cheap tier to put the planning call on.
+    pub plan: bool,
+    /// The resolved endpoint the "which subjects are missing" call runs on,
+    /// from `plan_tier`. `None` falls back to this role's own endpoint.
     ///
     /// A `TierConfig` rather than a role, because that is honestly what it is:
     /// an endpoint and its ceilings, handed straight to a completer. That call
     /// is a cheap classification and belongs on the efficient model even when
     /// the answer it feeds belongs on the deep one — which is the capability
     /// the tier names exist to express.
-    pub follow_up_endpoint: Option<TierConfig>,
+    pub plan_endpoint: Option<TierConfig>,
 }
 
 impl AskRole {
-    /// The endpoint the follow-up call runs on.
+    /// The endpoint the planning call runs on.
     ///
     /// The fallback lives here, at config time, and not at call time. A caller
-    /// that reached for `Core::completer` when no follow-up tier was named
-    /// would spend an ask-endpoint call on a question the operator may have
-    /// turned off — the gate is `follow_up`, and nothing downstream of it may
-    /// invent an endpoint.
+    /// that reached for `Core::completer` when no plan tier was named would
+    /// spend an ask-endpoint call on a question the operator may have turned
+    /// off — the gate is `plan`, and nothing downstream of it may invent an
+    /// endpoint.
     ///
     /// The fallback is this endpoint as its tier described it, `structured_output`
     /// included: a tier that says it takes no response format must not be
-    /// sent one by the follow-up call, which would 400 on every ask and degrade
+    /// sent one by the planning call, which would 400 on every ask and degrade
     /// to the single-round answer — quietly, and one wasted call each time.
-    pub fn follow_up_on(&self) -> TierConfig {
-        self.follow_up_endpoint
-            .clone()
-            .unwrap_or_else(|| TierConfig {
-                base_url: self.base_url.clone(),
-                model: self.model.clone(),
-                api_key: self.api_key.clone(),
-                context_tokens: self.context_tokens,
-                max_output_tokens: self.max_output_tokens,
-                timeout_secs: self.timeout_secs,
-                reasoning_effort: self.reasoning_effort.clone(),
-                ceiling_param: self.ceiling_param,
-                structured_output: self.structured_output,
-            })
+    pub fn plan_on(&self) -> TierConfig {
+        self.plan_endpoint.clone().unwrap_or_else(|| TierConfig {
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone(),
+            context_tokens: self.context_tokens,
+            max_output_tokens: self.max_output_tokens,
+            timeout_secs: self.timeout_secs,
+            reasoning_effort: self.reasoning_effort.clone(),
+            ceiling_param: self.ceiling_param,
+            structured_output: self.structured_output,
+        })
     }
 }
 
@@ -1318,6 +1332,7 @@ impl Config {
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
+        cfg.warn_on_unplaced_plan_cost();
         Ok(cfg)
     }
 
@@ -1541,18 +1556,18 @@ impl Config {
                 v.ceiling_param(synth),
             ));
         }
-        // The follow-up call infers its name the same way (`for_follow_up`),
-        // off a tier of its own — so a guess there is not covered by the ask
-        // line above. Without a named tier it runs on ask's endpoint under
-        // ask's values, and the ask line is the one that speaks for it.
+        // The planning call infers its name the same way (`for_plan`), off a
+        // tier of its own — so a guess there is not covered by the ask line
+        // above. Without a named tier it runs on ask's endpoint under ask's
+        // values, and the ask line is the one that speaks for it.
         if let Some(f) = self
             .infer
             .ask
             .as_ref()
-            .and_then(|a| a.follow_up_endpoint.as_ref())
+            .and_then(|a| a.plan_endpoint.as_ref())
         {
             roles.push((
-                "infer.ask.follow_up_tier",
+                "infer.ask.plan_tier",
                 f.reasoning_effort.as_deref(),
                 f.ceiling_param,
             ));
@@ -1564,6 +1579,34 @@ impl Config {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The planning call has nowhere cheap to go.
+    ///
+    /// `plan` defaults on, and an operator who never wrote the key gets the
+    /// fan-out without asking for it — which is the intent. What is not the
+    /// intent is where the call lands: with no `plan_tier`, `plan_on` falls
+    /// back to the ask role's own endpoint, so every question now pays a full
+    /// deep-model completion in front of its answer. On a local deep model
+    /// that is tens of seconds of added latency per ask, arriving on an upgrade
+    /// with no config change to point at.
+    ///
+    /// A warning rather than a different default, because the feature is worth
+    /// having and the operator is the only one who knows which of their tiers
+    /// is the efficient one. Said once, at startup, where a latency change has
+    /// somewhere to be explained.
+    fn warn_on_unplaced_plan_cost(&self) {
+        let Some(a) = self.infer.ask.as_ref() else {
+            return;
+        };
+        if a.plan && a.plan_endpoint.is_none() {
+            tracing::warn!(
+                model = %a.model,
+                "infer.ask.plan is on with no infer.ask.plan_tier: the planning call \
+                 runs on the ask endpoint, one extra completion per question. Name a \
+                 cheaper tier there, or set plan = false"
+            );
+        }
     }
 
     /// Secrets belong in the environment. A secret sitting in the config file
@@ -1595,7 +1638,7 @@ impl Config {
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
         if let Some(a) = c.infer.ask.as_mut() {
             a.api_key = a.api_key.as_ref().map(|_| R.into());
-            if let Some(f) = a.follow_up_endpoint.as_mut() {
+            if let Some(f) = a.plan_endpoint.as_mut() {
                 f.api_key = f.api_key.as_ref().map(|_| R.into());
             }
         }
@@ -2334,19 +2377,19 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         );
     }
 
-    /// The follow-up call's whole reason to name a tier is to run somewhere
+    /// The planning call's whole reason to name a tier is to run somewhere
     /// cheaper than the answer it feeds, so the endpoint has to arrive resolved
     /// and complete — the completer is handed this, not a role.
     #[test]
-    fn a_follow_up_tier_resolves_to_a_complete_endpoint() {
+    fn a_plan_tier_resolves_to_a_complete_endpoint() {
         let _guard = env_guard();
-        let cfg = load_infer(&format!("{TIERED}\nfollow_up_tier = \"efficient\"\n")).unwrap();
+        let cfg = load_infer(&format!("{TIERED}\nplan_tier = \"efficient\"\n")).unwrap();
         let f = cfg
             .infer
             .ask
             .as_ref()
             .unwrap()
-            .follow_up_endpoint
+            .plan_endpoint
             .as_ref()
             .expect("the named tier resolved");
         assert_eq!(f.base_url, "http://localhost:8000/v1");
@@ -2355,60 +2398,64 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(f.api_key.as_deref(), Some("tier-key"));
         assert!(
             !cfg.redacted().contains("tier-key"),
-            "the follow-up endpoint's key leaked"
+            "the planning endpoint's key leaked"
         );
     }
 
-    /// With no follow-up tier named, the call runs on the ask endpoint — the
-    /// whole of it, including whether that endpoint takes a response format.
+    /// With no plan tier named, the call runs on the ask endpoint — the whole
+    /// of it, including whether that endpoint takes a response format.
     /// Assuming it does sends a schema to a server configured not to want one,
-    /// which 400s every ask's follow-up call and wastes it, silently.
+    /// which 400s every ask's planning call and wastes it, silently.
     #[test]
-    fn the_follow_up_fallback_carries_the_ask_tiers_structured_output_flag() {
+    fn the_plan_fallback_carries_the_ask_tiers_structured_output_flag() {
         let _guard = env_guard();
         let toml = TIERED.replace(
             "ceiling_param = \"max_completion_tokens\"",
             "ceiling_param = \"max_completion_tokens\"\nstructured_output = false",
         );
         let cfg = load_infer(&toml).unwrap();
-        assert!(cfg.infer.ask.as_ref().unwrap().follow_up_endpoint.is_none());
+        assert!(cfg.infer.ask.as_ref().unwrap().plan_endpoint.is_none());
         assert!(
-            !cfg.infer
-                .ask
-                .as_ref()
-                .unwrap()
-                .follow_up_on()
-                .structured_output,
+            !cfg.infer.ask.as_ref().unwrap().plan_on().structured_output,
             "the tier said no response format; the fallback endpoint said yes"
         );
         // And the default remains on, as it is for every tier.
         let cfg = load_infer(TIERED).unwrap();
+        assert!(cfg.infer.ask.as_ref().unwrap().plan_on().structured_output);
+    }
+
+    /// The fan-out is what asking means now, so the switch ships on. An
+    /// operator who wrote the old key meant to turn something on, and a rename
+    /// that silently reverted them to the default would be indistinguishable
+    /// from the feature never having worked.
+    #[test]
+    fn planning_ships_on_and_the_old_key_still_speaks() {
+        let _guard = env_guard();
+        let on = |toml: &str| load_infer(toml).unwrap().infer.ask.unwrap().plan;
+        assert!(on(TIERED), "the fan-out has to be the default");
+        assert!(!on(&format!("{TIERED}\nplan = false\n")));
         assert!(
-            cfg.infer
-                .ask
-                .as_ref()
-                .unwrap()
-                .follow_up_on()
-                .structured_output
+            !on(&format!("{TIERED}\nfollow_up = false\n")),
+            "the old key stopped being read"
         );
     }
 
-    /// A named follow-up tier infers its ceiling name the same way every role
-    /// does, and the warning that says so at startup has to cover it — that
-    /// endpoint is exactly the cheap local one that ignores an unknown name.
+    /// A named plan tier infers its ceiling name the same way every role does,
+    /// and the warning that says so at startup has to cover it — that endpoint
+    /// is exactly the cheap local one that ignores an unknown name.
     #[test]
-    fn a_follow_up_tier_guessing_its_ceiling_name_is_warned_about() {
+    fn a_plan_tier_guessing_its_ceiling_name_is_warned_about() {
         let _guard = env_guard();
         let toml = format!(
-            "{TIERED}\nfollow_up_tier = \"quick\"\n\
+            "{TIERED}\nplan_tier = \"quick\"\n\
              [infer.tiers.quick]\nbase_url = \"http://localhost:8001/v1\"\nmodel = \"small\"\n\
              context_tokens = 8192\nmax_output_tokens = 512\nreasoning_effort = \"none\"\n"
         );
         let cfg = load_infer(&toml).unwrap();
         let guessed = cfg.inferred_ceiling_params();
         assert!(
-            guessed.contains(&("infer.ask.follow_up_tier", "none")),
-            "the follow-up endpoint's guess went unreported: {guessed:?}"
+            guessed.contains(&("infer.ask.plan_tier", "none")),
+            "the planning endpoint's guess went unreported: {guessed:?}"
         );
         // Ask itself is on a tier that names the parameter, so it is not listed.
         assert!(
@@ -2421,12 +2468,12 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     /// must fail where the operator can see it, not on the first question
     /// somebody asks.
     #[test]
-    fn a_follow_up_tier_that_does_not_exist_is_refused_like_any_other() {
+    fn a_plan_tier_that_does_not_exist_is_refused_like_any_other() {
         let _guard = env_guard();
-        let err = load_infer(&format!("{TIERED}\nfollow_up_tier = \"efficent\"\n"))
+        let err = load_infer(&format!("{TIERED}\nplan_tier = \"efficent\"\n"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("follow_up_tier"), "name the key: {err}");
+        assert!(err.contains("plan_tier"), "name the key: {err}");
         assert!(
             err.contains("efficent"),
             "the error must name the typo: {err}"
