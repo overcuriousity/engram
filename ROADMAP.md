@@ -15,7 +15,7 @@ a ranked artifact back to its corpus lines; synthesis verified against what it
 must not alter; filter chips from facet counts; nearest neighbours in the
 detail pane; near-duplicate detection at capture; autonomous consolidation with
 complete pair coverage, merge-loss checks and undo; caveats on artifacts; text,
-image and PDF capture, the extracted markdown normalised so that unrenderable
+image and PDF capture, the extracted markdown normalised so that detached
 bullet glyphs and blank-line runs never reach the splitter; hybrid search
 inside Qdrant; the evaluation harness fed from judged real searches (`cargo
 test --test eval`, `/ui/judge`, `--export-eval`); Hebbian links learned from
@@ -202,8 +202,10 @@ own.
   switched on. Making it the default waits on someone wanting it enough to pay
   for it.
 - **Images in a source, shown where the source is read.** *(The text itself is
-  clean now: `core::pdf::normalise` folds private-use bullet glyphs into
-  markdown list markers and collapses blank-line runs, pinned by
+  clean now: `core::pdf::normalise` folds a detached bullet glyph — a symbol
+  font's private-use one or a real U+2022 — into a markdown list marker and
+  collapses blank-line runs, leaving indentation and every glyph that is not
+  standing in for a marker where they are, pinned by
   `tests/fixtures/bullet-list.pdf`.)* A PDF's figures are dropped by extraction,
   and the corpus page has no place for them anyway: it shows the photo of an
   image capture and the text of everything else. Showing
