@@ -395,6 +395,7 @@ mod startup_tests {
             activation: ActivationConfig::default(),
             promote: engram::config::PromoteConfig::default(),
             pursuit: engram::config::PursuitConfig::default(),
+            schedule: engram::config::ScheduleConfig::default(),
         }
     }
 
