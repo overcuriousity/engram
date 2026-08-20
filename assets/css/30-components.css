@@ -278,7 +278,8 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   .raw,
   .reasoning,
   .judge-full,
-  .split > :first-child {
+  .split > :first-child,
+  .split > :first-child > .card {
     mask-image: linear-gradient(to bottom, #000 calc(100% - var(--edge)), transparent);
     animation: scroll-edge linear both;
     animation-timeline: scroll(self);

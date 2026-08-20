@@ -400,11 +400,109 @@ body { overflow-x: hidden; }
    can move together — an artifact and the lines it came from are one thing
    read twice. Only where the split is actually side by side: stacked, they are
    one column and "in lockstep" would mean scrolling a thing off screen to move
-   the thing below it. */
+   the thing below it.
+
+   The box is the card, not the column. The column also holds Related and Seen
+   together, and those are not the artifact: with the scroll on the column,
+   reading down the neighbour list dragged the source panel along with it — a
+   pane that claims to show the lines this artifact came from, scrolled by a
+   list of other artifacts. The card scrolls, the neighbours sit under it, and
+   `app.js` binds lockstep to the card for the same reason.
+
+   The floor is what stops a long neighbour list from squeezing the artifact to
+   a sliver; past it the column scrolls as a whole. */
 @container shell (min-width: 60rem) {
-  .split > :first-child { max-height: min(60vh, 45rem); overflow: auto; }
+  .split > :first-child {
+    display: flex; flex-direction: column; overflow-y: auto;
+    max-height: min(60vh, 45rem);
+  }
+  /* The shares, when the column cannot hold both at their natural size. The
+     artifact is what the screen is for, so it shrinks last and by the least:
+     the neighbour lists carry the larger shrink factor and a scroll of their
+     own, and give way first. Both keep a floor — a list crushed to one clipped
+     row says less than no list at all, and an artifact crushed to a sliver is
+     the pane the page exists to show. */
+  .split > :first-child > .card { flex: 1 1 auto; min-height: 8rem; overflow-y: auto; }
+  .split > :first-child > .related { flex: 0 4 auto; min-height: 5rem; overflow-y: auto; }
+  .split > :first-child > .pane-label { flex: none; }
+
+  /* The right column carries the cap too, rather than the source table alone
+     inside it. With it on the table, the column stood one label taller than
+     the left and the two finished 24px apart on every screen that showed both
+     — including the standalone artifact page, which is not pinned to the
+     window and so cannot get the alignment from a shared row. The table takes
+     what is left after the label and any lineage under it. */
+  .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: min(60vh, 45rem);
+  }
+  .split > :nth-child(2) > .raw { flex: 1; min-height: 0; max-height: none; }
 }
 
 /* With the source hidden there is nothing left to stay in step with, so the
    artifact stops being a box that scrolls inside a page that also scrolls. */
-.regions.hide-source .split > :first-child { max-height: none; overflow: visible; }
+.regions.hide-source .split > :first-child {
+  display: block; max-height: none; overflow: visible;
+}
+.regions.hide-source .split > :first-child > .card {
+  min-height: 0; overflow: visible;
+}
+
+/* ── One height, for all three ────────────────────────────────────────────
+   The rail, the artifact and the source used to carry three ceilings in two
+   units — `40rem` on the rail, `min(60vh, 45rem)` on the other two — so their
+   bottoms met at exactly one window height (a 1066px viewport, where 60vh is
+   40rem) and drifted apart everywhere else. Measured at 1714×863 they ended at
+   864, 795 and 819.
+
+   The last of those three was not even a decision. The same cap sat on the
+   whole left column but on the source *table* alone on the right, so the
+   source's own label hung outside the budget and the two columns finished 24px
+   apart — an asymmetry in where the rule was attached, standing in for a
+   height nobody owned. And because every ceiling was a cap rather than a
+   height, a tall window left a band of nothing under all three.
+
+   None of that is a statement about how tall a pane should be. It is the three
+   shell widths again, one axis over: the row owns the height now, and each
+   pane scrolls inside a height it is given rather than one it declares. The
+   bottoms line up because there is only one bottom.
+
+   Only where all three regions are on screen. One-up is a page you scroll, and
+   pinning the single visible region to the viewport there would put the
+   results list in a box the size of the window it already fills. */
+@container shell (min-width: 60rem) {
+  .regions-rail-focus-source { grid-template-rows: auto minmax(0, 1fr); }
+  .regions-rail-focus-source > .region-rail,
+  .regions-rail-focus-source > .region-focus { align-self: stretch; min-height: 0; }
+
+  /* Every link in the chain from the region down to the two scrollers has to
+     pass the height on, and each needs `min-height: 0`: a flex item refuses to
+     shrink below its own content by default, and one unbroken link is enough
+     for a pane to grow past the window instead of scrolling inside it. */
+  .regions-rail-focus-source .rail { max-height: none; }
+  .regions-rail-focus-source > .region-focus { display: flex; flex-direction: column; }
+  .regions-rail-focus-source .pane > [data-terms] {
+    display: flex; flex-direction: column; flex: 1; min-height: 0;
+  }
+  .regions-rail-focus-source .split { flex: 1; min-height: 0; align-items: stretch; }
+  .regions-rail-focus-source .split > * { min-height: 0; }
+  .regions-rail-focus-source .split > :first-child { max-height: none; }
+
+  /* The right column becomes a column, so its label is inside the same budget
+     as the left one's rather than stacked on top of it — that 24px was the
+     whole left-to-right mismatch — and the table takes what is left after the
+     label and any lineage under it. */
+  .regions-rail-focus-source .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: none;
+  }
+  .regions-rail-focus-source .raw { max-height: none; flex: 1; min-height: 0; }
+
+  /* Hiding the source does not hand the artifact back to the page here: the
+     page is not what scrolls, so the card keeps its box and simply gets the
+     width the source gave up. */
+  .regions-rail-focus-source.hide-source .split > :first-child {
+    display: flex; overflow-y: auto;
+  }
+  .regions-rail-focus-source.hide-source .split > :first-child > .card {
+    min-height: 12rem; overflow-y: auto;
+  }
+}

@@ -22,6 +22,46 @@
   padding: 0 1rem 4rem;
 }
 
+/* The three-up workspace fills the window instead of ending wherever its
+   tallest pane happens to stop. `.shell` takes the space under the top row and
+   hands it to the region grid, which is what lets one height reach all three
+   panes at once — see "One height, for all three" in 40-search.css for why
+   they needed one.
+
+   Scoped with `:has` because it is a fact about the arrangement inside, not
+   about the shell: every other page is prose, and prose scrolls. `min-height`
+   rather than `height`, so a narrow window — where the grid is one column and
+   the panes are not pinned to anything — still grows and scrolls as it did.
+   The 4rem foot is the gap under a page that ends; a page that reaches the
+   bottom of the window does not have one. */
+body:has(.regions-rail-focus-source) {
+  display: flex; flex-direction: column; min-height: 100dvh;
+}
+/* `width` is not redundant beside `max-width` here. `.shell` centres itself
+   with `margin: 0 auto`, and an auto margin on the cross axis of a flex
+   container defeats `stretch` — the shell sized itself to its content and the
+   whole workspace collapsed to a column of wrapped text. */
+body:has(.regions-rail-focus-source) > .shell {
+  flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
+}
+body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 0; }
+
+/* `min-height` above is what lets a one-up window grow and scroll as it always
+   did. It is also not a height: with it alone the panes simply grew to their
+   content and the window's bottom meant nothing. This is the pin, and it needs
+   a definite height to divide.
+
+   62rem is `@container shell (max-width: 60rem)` written as a media query, and
+   the arithmetic is exact rather than approximate: `.shell` is `min(110rem,
+   100vw)` wide less its own `1rem` of padding on each side, so a 60rem
+   container is a 62rem viewport. It has to be a media query — `body` is
+   outside the container it would have to ask about. */
+@media (min-width: 62rem) {
+  body:has(.regions-rail-focus-source) { height: 100dvh; overflow: hidden; }
+  /* The foot under a page that ends. This one ends at the window. */
+  body:has(.regions-rail-focus-source) > .shell { padding-bottom: 1rem; }
+}
+
 .regions {
   display: grid;
   gap: 1rem;
