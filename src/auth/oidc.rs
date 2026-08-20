@@ -342,7 +342,12 @@ impl OidcClient {
             return Err(Error::Forbidden);
         }
         tracing::info!(%subject, "oidc sign-in");
-        Ok(Identity { subject, email })
+        Ok(Identity {
+            subject,
+            email,
+            // The session is created from this, after it returns.
+            session: None,
+        })
     }
 }
 

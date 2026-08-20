@@ -27,6 +27,8 @@ pub struct Config {
     pub pursuit: PursuitConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
+    #[serde(default)]
+    pub sitting: SittingConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -281,6 +283,29 @@ impl Default for ActivationConfig {
 /// stage rather than a setting — a priority the operator can set wrong presents
 /// as "the capture is hanging", with nothing anywhere saying why. What is left
 /// to configure is the one number that keeps priority from becoming starvation.
+/// The live sitting: what this session has touched, carried between the doors.
+///
+/// One key, because carrying changes no order and needs no permission. What
+/// moves ranking is priming, and that is what this switches.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct SittingConfig {
+    /// Let what this sitting has touched lift a result.
+    ///
+    /// Off until the harness says otherwise. It is the only part of the sitting
+    /// that moves an order, and the same query ranking differently in two
+    /// sittings is exactly what is disorienting about it — so it ships off, the
+    /// lift is bounded by the same budget activation's is, and rank 0 never
+    /// moves.
+    pub prime: bool,
+}
+
+impl Default for SittingConfig {
+    fn default() -> Self {
+        Self { prime: false }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ScheduleConfig {

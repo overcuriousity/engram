@@ -436,6 +436,55 @@ struct CaptureTemplate {
     /// while this is the join back to the question and the artifacts the answer
     /// was built from, and `capture_submit` turns it into stored provenance.
     prefill_ask: String,
+    /// The question this answer answered, in the operator's own words.
+    ///
+    /// The provenance already recorded it — `with_ask` carries the question and
+    /// the citations into the corpus metadata. What was missing was saying so
+    /// on the page: the box arrived holding an answer with no sign of what it
+    /// was an answer to, and the operator deciding whether to keep it is the
+    /// person who most needs to see the question. The line does not move; it is
+    /// only better documented.
+    prefill_question: String,
+}
+
+/// One artifact this sitting has been in, as the rail lists it.
+pub struct SittingItem {
+    pub id: String,
+    pub title: String,
+}
+
+/// How many of the sitting's touched artifacts a page shows.
+///
+/// Six, against a carried twenty. The rail is a way back to what you were just
+/// reading, not a history: a list long enough to need reading is a second set
+/// of results beside the real ones.
+const SITTING_RAIL: usize = 6;
+
+/// What this sitting has touched, most recent first, ready to render.
+///
+/// Empty for a cold sitting and for every door that has no session — which is
+/// the whole of what keeps this at the web door. An artifact deleted since is
+/// simply absent: the sitting holds ids and the store is the truth.
+async fn sitting_rail(st: &AppState, id: &Identity) -> Vec<SittingItem> {
+    let Some(sess) = &id.session else {
+        return Vec::new();
+    };
+    let carried =
+        st.core
+            .sittings
+            .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64);
+    let mut out = Vec::new();
+    for aid in carried.touched.iter().take(SITTING_RAIL) {
+        if let Ok(c) = st.core.store.get_artifact(aid).await
+            && c.in_results()
+        {
+            out.push(SittingItem {
+                title: title_of(&c),
+                id: c.id,
+            });
+        }
+    }
+    out
 }
 
 /// One hole in the base, as the capture page lists it.
@@ -497,6 +546,9 @@ struct SearchTemplate {
     /// The chip a deep link arrived with, so the form comes back selected
     /// rather than reset to "all".
     category: String,
+    /// What this sitting has been in. Absent on a cold sitting — an empty box
+    /// saying "nothing yet" is worse than no box.
+    sitting: Vec<SittingItem>,
 }
 
 #[derive(Template)]
@@ -856,8 +908,11 @@ struct AskTemplate {
     judge_pending: Option<i64>,
     /// Whether the ask door is open. See `state::ask_enabled`.
     ask_enabled: bool,
-    /// A question to prefill the box with — a gap's "ask again".
+    /// A question to prefill the box with — a gap's "ask again", or the query
+    /// this sitting was just searching for.
     q: String,
+    /// What this sitting has been in. See `SearchTemplate::sitting`.
+    sitting: Vec<SittingItem>,
 }
 
 #[derive(serde::Deserialize)]
@@ -943,9 +998,9 @@ async fn capture_page(
         Some(id) => st.core.store.ask_event(id).await?,
         None => None,
     };
-    let (prefill_text, prefill_ask) = match prefilled {
-        Some(ev) => (ev.answer, ev.id),
-        None => (String::new(), String::new()),
+    let (prefill_text, prefill_ask, prefill_question) = match prefilled {
+        Some(ev) => (ev.answer, ev.id, ev.question),
+        None => (String::new(), String::new(), String::new()),
     };
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
@@ -979,6 +1034,7 @@ async fn capture_page(
         loose,
         prefill_text,
         prefill_ask,
+        prefill_question,
     })
     .into_response())
 }
@@ -1062,7 +1118,7 @@ const FACET_LIMIT: usize = 12;
 
 async fn search_page(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // A vector store that cannot answer must not take the search page down with
@@ -1089,6 +1145,7 @@ async fn search_page(
         q: p.q,
         facets,
         category,
+        sitting: sitting_rail(&st, &id).await,
     })
     .into_response())
 }
@@ -1166,6 +1223,17 @@ async fn search_results(
     // Function words are dropped: a query phrased as a situation is mostly
     // stopwords, and highlighting every "to" marks the whole card.
     let terms = highlightable_terms(p.q.trim());
+    // What this sitting is working on. A typing burst folds into one entry
+    // here as it does in the log, so what is carried is the query that was
+    // meant rather than every prefix of it.
+    if let Some(sess) = &id.session {
+        st.core.sittings.queried(
+            sess,
+            p.q.trim(),
+            crate::store::now(),
+            st.core.pursuit.idle_secs as i64,
+        );
+    }
     let (hits, t) = st
         .core
         .search_with(
@@ -2515,17 +2583,36 @@ async fn verify_ui(
 
 async fn ask_page(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Query(p): Query<AskPrefill>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !st.core.asks() {
         return Err(Error::NotFound);
     }
+    // A query typed on the rail and then retyped into ask is the cost of two
+    // pages with nothing carried between them. Only when the box is empty: a
+    // question the operator arrived with — a gap's "ask again" — is never
+    // overwritten by what they searched for a minute ago.
+    let q = match p.q.trim().is_empty() {
+        true => match &id.session {
+            Some(sess) => st
+                .core
+                .sittings
+                .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64)
+                .queries
+                .first()
+                .cloned()
+                .unwrap_or_default(),
+            None => String::new(),
+        },
+        false => p.q,
+    };
     Ok(HtmlTemplate(AskTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
-        q: p.q,
+        q,
+        sitting: sitting_rail(&st, &id).await,
     })
     .into_response())
 }
@@ -3045,6 +3132,17 @@ async fn artifact_detail(
     // And the act the pursuit sweep reads: opened, or pivoted through.
     st.core
         .record_interaction(&cid, p.via.as_deref(), Some(&id.subject));
+    // The live half of the same act. Written here rather than inside
+    // `record_interaction` because this is where the session is known — and
+    // that is the whole of what keeps the sitting at the web door.
+    if let Some(sess) = &id.session {
+        st.core.sittings.touched(
+            sess,
+            &cid,
+            crate::store::now(),
+            st.core.pursuit.idle_secs as i64,
+        );
+    }
     if headers.contains_key("hx-request") {
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
@@ -6735,6 +6833,126 @@ mod tests {
         assert!(
             !page.contains(&format!("gap-search-{gap}")),
             "a covered gap is still open: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_query_typed_on_search_arrives_in_the_ask_box() {
+        // Two pages with nothing carried between them cost a retyped query
+        // every time. Nothing here changes an order.
+        let (app, cookie, core) = app_session_and_core().await;
+        get_body(
+            &app,
+            &cookie,
+            "/ui/search/results?q=how%20do%20I%20mount%20an%20E01",
+        )
+        .await;
+
+        let ask = get_body(&app, &cookie, "/ui/ask").await;
+        assert!(
+            ask.contains("how do I mount an E01"),
+            "the query was not carried: {ask}"
+        );
+        let _ = core;
+    }
+
+    #[tokio::test]
+    async fn a_question_the_operator_arrived_with_is_never_overwritten() {
+        // A gap's "ask again" is a question they chose. The sitting fills an
+        // empty box and nothing else.
+        let (app, cookie, _core) = app_session_and_core().await;
+        get_body(&app, &cookie, "/ui/search/results?q=something%20else").await;
+
+        let ask = get_body(&app, &cookie, "/ui/ask?q=the%20one%20I%20clicked").await;
+        assert!(ask.contains("the one I clicked"), "{ask}");
+        assert!(!ask.contains("something else"), "{ask}");
+    }
+
+    #[tokio::test]
+    async fn a_cold_sitting_renders_no_rail_at_all() {
+        // Absent, not empty: a box saying "nothing yet" is worse than no box.
+        let (app, cookie) = app_with_session().await;
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(!page.contains("This sitting"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn what_this_sitting_opened_is_a_way_back_to_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "mounting an E01".into(),
+                    corpus_span: None,
+                    title: Some("Mounting an E01".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+
+        let page = get_body(&app, &cookie, "/ui/search").await;
+        assert!(page.contains("This sitting"), "{page}");
+        assert!(page.contains("Mounting an E01"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_sitting_writes_no_activation() {
+        // The guard most likely to be lost to a refactor: the sitting is a
+        // *read* of what is happening. Writing activation from it would be a
+        // loop that reinforces itself, which is the failure mode this whole
+        // area is built to close.
+        let mut c = crate::core::test_support::test_core().await;
+        c.feedback.enabled = true;
+        let core = c.clone();
+        let (app, cookie) = app_with_cookie(c).await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "mounting an E01".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        // Whatever opening it records, record it now, before the sitting is
+        // asked for anything.
+        get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+        core.background.wait_idle().await;
+        let before = core.store.activation_of(&[a.clone()]).await.unwrap();
+
+        // Reading the sitting, repeatedly, from both pages.
+        for _ in 0..3 {
+            get_body(&app, &cookie, "/ui/search").await;
+        }
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.activation_of(&[a]).await.unwrap(),
+            before,
+            "reading the sitting moved an activation"
         );
     }
 

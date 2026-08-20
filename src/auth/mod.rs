@@ -11,6 +11,14 @@ use axum::http::request::Parts;
 pub struct Identity {
     pub subject: String,
     pub email: Option<String>,
+    /// The web session this request came in on, where there is one.
+    ///
+    /// `None` for a bearer token, and that absence is load-bearing: it is what
+    /// keeps the live sitting at the web door. An access token is not a
+    /// conversation, and two agent sessions sharing one token would share a
+    /// sitting — worse than having none. Giving those doors a real session
+    /// identity is a change to the doors.
+    pub session: Option<String>,
 }
 
 /// Sliding session lifetime, 30 days.
@@ -80,6 +88,7 @@ impl FromRequestParts<AppState> for Identity {
             return Ok(Identity {
                 subject: session.subject,
                 email: session.email,
+                session: Some(sid),
             });
         }
 

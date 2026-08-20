@@ -37,6 +37,12 @@
      written from — kept even if the operator rewrites every word above, because
      the claim it makes is about where the text came from, not what it says. #}
   {% if !prefill_ask.is_empty() %}
+  {# What this answer was an answer to. The provenance already records it; the
+     box used to arrive holding the answer with no sign of the question, and
+     the person deciding whether to keep it is the one who most needs to see
+     it. The operator still decides, and the trace still says a model wrote
+     the text. #}
+  <p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo;</p>
   <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
   <p class="muted" style="margin:0">
     From an answer engram wrote. Edit it as you like — saving is yours, and the

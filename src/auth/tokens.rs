@@ -69,6 +69,8 @@ pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
             return Ok(Identity {
                 subject: t.subject,
                 email: None,
+                // A token is not a conversation. See `Identity::session`.
+                session: None,
             });
         }
     }
