@@ -276,13 +276,6 @@ impl Default for ActivationConfig {
     }
 }
 
-/// What the queue does with work nobody is waiting on.
-///
-/// One key, because there is one thing to decide. `jobs.class` says whether
-/// somebody is standing in front of a unit, and that answer is a constant per
-/// stage rather than a setting — a priority the operator can set wrong presents
-/// as "the capture is hanging", with nothing anywhere saying why. What is left
-/// to configure is the one number that keeps priority from becoming starvation.
 /// The live sitting: what this session has touched, carried between the doors.
 ///
 /// One key, because carrying changes no order and needs no permission. What
@@ -310,6 +303,13 @@ impl Default for SittingConfig {
     }
 }
 
+/// What the queue does with work nobody is waiting on.
+///
+/// One key, because there is one thing to decide. `jobs.class` says whether
+/// somebody is standing in front of a unit, and that answer is a constant per
+/// stage rather than a setting — a priority the operator can set wrong presents
+/// as "the capture is hanging", with nothing anywhere saying why. What is left
+/// to configure is the one number that keeps priority from becoming starvation.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ScheduleConfig {
