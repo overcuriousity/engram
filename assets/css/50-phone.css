@@ -53,6 +53,34 @@
   nav.top > a:not(.brand), nav.top .spacer { display: none; }
   nav.top form { margin-left: auto; }
 
+  /* ── The search box moves to the thumb ────────────────────────────────
+     On Search the input is the application, and it was at the top of the
+     screen where a thumb does not reach. It takes the bottom; the tab bar
+     goes slimmer underneath it, and both clear the home indicator.
+
+     Scoped to the search regions on purpose. Capture and Housekeeping keep a
+     bar that scrolls with the page, because on those the input is not the
+     point — a fixed textarea would be a permanent third of the screen. */
+  .regions-rail-focus-source .region-bar {
+    position: fixed; left: 0; right: 0; z-index: 11;
+    bottom: calc(46px + env(safe-area-inset-bottom));
+    padding: 0.5rem max(0.75rem, env(safe-area-inset-left))
+             0.5rem max(0.75rem, env(safe-area-inset-right));
+    background: var(--color-bg-surface);
+    border-top: 1px solid var(--color-border);
+  }
+  /* Not thumb furniture. The bar has to stay one line; the hint that survives
+     the first keystroke and the facet row both belong to a page you are
+     reading, not to a box you are typing into with one hand. */
+  .regions-rail-focus-source .region-bar .hint,
+  .regions-rail-focus-source .region-bar .facets,
+  .regions-rail-focus-source .region-bar .keyhint,
+  .regions-rail-focus-source .region-bar .row { display: none; }
+
+  /* Clear of both bars, so the last result can be scrolled to. The shell's own
+     5.5rem clears the tab bar alone. */
+  .regions-rail-focus-source { padding-bottom: 4rem; }
+
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex;
     background: var(--color-bg-surface); border-top: 1px solid var(--color-border);
@@ -62,13 +90,13 @@
   .tabbar a {
     position: relative;
     flex: 1; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 2px; min-height: 52px; text-decoration: none;
+    justify-content: center; gap: 2px; min-height: 46px; text-decoration: none;
     font-size: 0.6875rem; color: var(--color-fg-muted);
   }
-  /* Over the icon, not beside the label: the tab is 52px tall and a number
+  /* Over the icon, not beside the label: the tab is 46px tall and a number
      would either shrink the label or push it off centre. */
   .tab-dot {
-    position: absolute; top: 8px; right: 50%; margin-right: -14px;
+    position: absolute; top: 5px; right: 50%; margin-right: -14px;
     width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
   }
   .tabbar a[aria-current="page"] { color: var(--color-accent); }
