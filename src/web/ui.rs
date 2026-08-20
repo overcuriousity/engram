@@ -19,6 +19,8 @@ use axum::routing::{get, post};
 pub struct RenderedResult {
     /// What the rail entry links to: the detail pane for this chunk.
     pub artifact_id: String,
+    /// Empty where the artifact has no title of its own. The rail then renders
+    /// no heading at all — see `render_hit`.
     pub title: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
@@ -1096,16 +1098,7 @@ async fn search_results(
     // The ranked answer and what it recalled are two lists on the page, and one
     // list here: an associated hit carries the id of the hit that recalled it,
     // and the title is looked up among the ranked ones rather than fetched.
-    let titles: std::collections::HashMap<String, String> = hits
-        .iter()
-        .filter(|h| h.via.is_none())
-        .map(|h| {
-            (
-                h.artifact_id.clone(),
-                h.title.clone().unwrap_or_else(|| "Untitled".into()),
-            )
-        })
-        .collect();
+    let titles = ranked_titles(&hits);
     let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
     let results: Vec<RenderedResult> = ranked
         .into_iter()
@@ -1138,6 +1131,20 @@ async fn search_results(
     Ok(res)
 }
 
+/// The ranked hits' titles, by artifact id, for the associated rows that name
+/// the hit that recalled them.
+///
+/// Untitled hits are left out rather than named "Untitled": a row reading
+/// `seen together with "Untitled"` says nothing and looks like it does.
+fn ranked_titles(
+    hits: &[crate::core::search::SearchResult],
+) -> std::collections::HashMap<String, String> {
+    hits.iter()
+        .filter(|h| h.via.is_none())
+        .filter_map(|h| Some((h.artifact_id.clone(), h.title.clone()?)))
+        .collect()
+}
+
 fn render_hit(
     position: usize,
     h: crate::core::search::SearchResult,
@@ -1145,7 +1152,10 @@ fn render_hit(
 ) -> RenderedResult {
     RenderedResult {
         artifact_id: h.artifact_id,
-        title: h.title.unwrap_or_else(|| "Untitled".into()),
+        // Empty, never "Untitled": a verbatim passage has no title by design,
+        // and a rail of "Untitled" headings is a column of a word that says
+        // nothing where a name would say something. The row shows its snippet.
+        title: h.title.unwrap_or_default(),
         html: markdown::render(&h.text),
         snippet: markdown::snippet(&h.text, 140),
         category: h.category,
@@ -4395,6 +4405,49 @@ mod tests {
             .await
             .unwrap();
         assert!(d.html.contains("<pre"), "{}", d.html);
+    }
+
+    #[test]
+    fn a_result_with_no_title_of_its_own_is_given_no_heading() {
+        // "Untitled" is a heading that says nothing and looks like one that
+        // says something. A verbatim passage has no title by design, and ten
+        // rows of "Untitled" is what the rail then reads as.
+        let hit = |title: Option<&str>, via: Option<&str>| crate::core::search::SearchResult {
+            artifact_id: "a".into(),
+            corpus_id: "s".into(),
+            title: title.map(str::to_string),
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            past_cliff: false,
+            via: via.map(str::to_string),
+            reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        };
+        let titles = super::ranked_titles(&[hit(None, None)]);
+        assert!(
+            titles.is_empty(),
+            "an untitled hit must not lend its name to what it recalled: {titles:?}"
+        );
+        let r = render_hit(0, hit(None, None), &titles);
+        assert!(r.title.is_empty(), "{:?}", r.title);
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![r],
+            associated: vec![render_hit(0, hit(None, Some("a")), &titles)],
+            all_weak: false,
+            terms: String::new(),
+        })
+        .unwrap();
+        assert!(!html.contains("Untitled"), "{html}");
+        assert!(!html.contains("rail-title"), "{html}");
     }
 
     fn rendered(via: Option<&str>, reason: Option<&str>) -> RenderedResult {

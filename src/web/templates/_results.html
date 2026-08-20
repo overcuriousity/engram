@@ -55,7 +55,12 @@
         <span class="badge" title="A model wrote this">model-written</span>
         {% endif %}
         {% endif %}
+        {# No heading where the artifact has no title: a verbatim passage has
+           none by design, and "Untitled" is a word that says nothing standing
+           where a name would say something. The snippet carries the row. #}
+        {% if !r.title.is_empty() %}
         <span class="rail-title">{{ r.title }}</span>
+        {% endif %}
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in
          full, so the card was echoing it — and the chips were what made the
@@ -88,7 +93,9 @@
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
        hx-target="#pane" hx-swap="innerHTML" hx-push-url="true">
       <div class="rail-head">
+        {% if !r.title.is_empty() %}
         <span class="rail-title">{{ r.title }}</span>
+        {% endif %}
       </div>
       {% if let Some(why) = r.reason %}
       <div class="rail-why">{{ why }}</div>
