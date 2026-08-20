@@ -145,6 +145,7 @@ async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
     assert_eq!(
         ids(SearchFilter {
             include_deprecated: true,
+            corpus_id: None,
             ..Default::default()
         })
         .await,
@@ -235,6 +236,7 @@ async fn filtered_search_uses_payload_indexes() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -248,6 +250,7 @@ async fn filtered_search_uses_payload_indexes() {
         category: Some("concept".into()),
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -290,6 +293,7 @@ async fn multiple_tags_are_an_and_not_an_or() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -669,6 +673,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     assert_eq!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &f)
@@ -682,6 +687,7 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     assert!(
         v.search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 5, &stale)
@@ -809,6 +815,7 @@ async fn a_filter_still_applies_to_both_halves_of_a_hybrid_query() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &sparse, 10, &f)
@@ -1020,6 +1027,7 @@ async fn scoring_leaves_the_filter_alone() {
         category: None,
         include_superseded: false,
         include_deprecated: false,
+        corpus_id: None,
     };
     let hits = v
         .search(&[1.0, 0.0, 0.0, 0.0], &Default::default(), 10, &f)
@@ -1611,6 +1619,7 @@ async fn a_superseded_point_leaves_search_and_can_come_back() {
             &SearchFilter {
                 include_superseded: true,
                 include_deprecated: false,
+                corpus_id: None,
                 ..Default::default()
             },
         )
