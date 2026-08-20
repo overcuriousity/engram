@@ -3528,6 +3528,32 @@ mod tests {
         .unwrap()
     }
 
+    fn answer_fixture(dropped: usize) -> String {
+        askama::Template::render(&AnswerTemplate {
+            answer: "<p>An answer.</p>".into(),
+            citations: vec![],
+            dropped,
+            truncated: false,
+            abstained: false,
+            unsupported: vec![],
+            event_id: None,
+            verdict_bar: String::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
+        // "18 excerpt(s) omitted for context budget" is the accounting, and
+        // the "(s)" is the plural nobody wrote out.
+        let html = answer_fixture(18);
+        assert!(!html.contains("excerpt(s)"), "{html}");
+        assert!(!html.contains("context budget"), "{html}");
+        assert!(html.contains("18 more excerpts did not fit"), "{html}");
+        let one = answer_fixture(1);
+        assert!(one.contains("1 more excerpt did not fit"), "{one}");
+    }
+
     #[test]
     fn an_ask_in_flight_offers_a_way_to_stop_it() {
         // Fifty seconds signalled by a small grey "thinking…" beside the
@@ -7328,7 +7354,7 @@ mod tests {
         // Absent, not empty: a box saying "nothing yet" is worse than no box.
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(!page.contains("This sitting"), "{page}");
+        assert!(!page.contains("Read just now"), "{page}");
     }
 
     #[tokio::test]
@@ -7358,7 +7384,7 @@ mod tests {
         get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
 
         let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(page.contains("This sitting"), "{page}");
+        assert!(page.contains("Read just now"), "{page}");
         assert!(page.contains("Mounting an E01"), "{page}");
     }
 
@@ -8151,7 +8177,10 @@ mod tests {
         }));
         let (app, cookie) = app_with_cookie(core).await;
         let html = done_html(&ask_over_sse(&app, &cookie, "what+is+alpha").await);
-        assert!(html.contains("unsupported literal(s)"), "no badge: {html}");
+        assert!(
+            html.contains("literal no excerpt supports"),
+            "no badge: {html}"
+        );
         assert!(
             html.contains(r#"<mark class="unsupported">wipefs --all /dev/sdX</mark>"#),
             "the invented command is not marked in the prose: {html}"

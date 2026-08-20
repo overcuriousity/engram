@@ -53,3 +53,14 @@
   cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted);
 }
 .reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
+
+/* The sitting rail had no rule at all: `_sitting.html` rendered `.sitting` and
+   the page fell back to a bare `<ul>`, bullets and browser indent included,
+   directly under the question. It is an aside — a way back to what you were
+   just reading — so it reads as one, and it must not grow into a second set of
+   results beside the real ones. */
+.sitting { margin: 0.5rem 0 0.25rem; }
+.sitting ul { list-style: none; margin: 0.25rem 0 0; padding: 0; }
+.sitting li { display: inline; }
+.sitting li:not(:last-child)::after { content: " · "; color: var(--color-fg-muted); }
+.sitting a { font-size: 0.8125rem; color: var(--color-fg-secondary); }

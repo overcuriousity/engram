@@ -6,7 +6,7 @@
    second set of results beside the real ones. #}
 {% if !sitting.is_empty() %}
 <div class="sitting">
-  <p class="pane-label">This sitting</p>
+  <p class="pane-label">Read just now</p>
   <ul>
     {% for s in sitting %}
     <li><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></li>

@@ -10,10 +10,15 @@
     {% if !unsupported.is_empty() %}
       <span class="card-meta"><span class="badge badge-warning"
         title="These appear in no cited excerpt. The model wrote them; the base does not hold them.">
-        {{ unsupported.len() }} unsupported literal(s)</span></span>
+        {{ unsupported.len() }} literal{% if unsupported.len() != 1 %}s{% endif %} no excerpt supports</span></span>
     {% endif %}
     {% if dropped > 0 %}
-      <span class="card-meta"><span class="badge badge-warning">{{ dropped }} excerpt(s) omitted for context budget</span></span>
+      {# In words a reader uses. "excerpt(s) omitted for context budget" is
+         the accounting behind it, which belongs where an operator can still
+         find it and not on the face of the badge. #}
+      <span class="card-meta"><span class="badge badge-warning"
+        title="They did not fit the model's context window, so the answer was written without them.">
+        {{ dropped }} more excerpt{% if dropped != 1 %}s{% endif %} did not fit</span></span>
     {% endif %}
   </div>
   <div class="md">{{ answer|safe }}</div>
