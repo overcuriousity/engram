@@ -494,6 +494,23 @@ min_engagement = 3.0
 # sweep whose runs thin out says the guess is wrong.
 age_after_mins = 60
 
+# ── The sitting ──────────────────────────────────────────────────────────────
+# What this session has touched, carried between search, ask and capture. In
+# memory only: it dies with the process, because a working memory that survives
+# a restart is a long-term memory and engram has one of those already. The web
+# door only — an access token is not a conversation.
+#
+# Carrying is always on and changes no order: a prefilled ask box, the question
+# an answer answered, a rail of what you have been in.
+[sitting]
+# Let what this sitting has touched lift a result.
+#
+# The only part of the sitting that moves an order, and the same query ranking
+# differently in two sittings is exactly what is disorienting about it — so it
+# is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
+# never moves, and a hit it lifted says so on the row.
+prime = false
+
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share
 # one GPU, so a per-role cooldown could not bound total load.

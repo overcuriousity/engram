@@ -79,11 +79,20 @@ pub struct Origin {
     /// The authenticated subject, for coalescing. `None` means unscoped, which
     /// folds only with other unscoped events from the same door.
     pub scope: Option<String>,
+    /// The live sitting this search belongs to, where there is one — a web
+    /// session id. `None` for every other door, which is what keeps the live
+    /// sitting out of the API and `/mcp`: an access token is not a
+    /// conversation. Read only by priming, and only when `sitting.prime` is on.
+    pub session: Option<String>,
 }
 
 impl From<Door> for Origin {
     fn from(door: Door) -> Self {
-        Origin { door, scope: None }
+        Origin {
+            door,
+            scope: None,
+            session: None,
+        }
     }
 }
 
@@ -93,7 +102,17 @@ impl Door {
         Origin {
             door: self,
             scope: Some(scope.into()),
+            session: None,
         }
+    }
+}
+
+impl Origin {
+    /// This search belongs to a live sitting. Only a door with a real session
+    /// identity may say so — see `Origin::session`.
+    pub fn in_sitting(mut self, session: Option<String>) -> Origin {
+        self.session = session;
+        self
     }
 }
 

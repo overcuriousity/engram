@@ -95,6 +95,12 @@ pub struct SearchResult {
     /// order is silent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
+    /// This sitting has already been in this artifact. Said beside `primed`,
+    /// because "you were just reading this" and "this is reached often" are
+    /// two different reasons to be higher up the list and the page should not
+    /// pass one off as the other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_sitting: bool,
     /// This hit sits past the cliff: the one step in this list's scores that
     /// accounts for more of the fall than the rest of the list together. See
     /// `cliff`. It still competed and still placed — nothing is reordered or
@@ -137,6 +143,7 @@ impl From<SearchHit> for SearchResult {
             last_verified_at: h.payload.last_verified_at,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: None,
             reason: None,
@@ -308,19 +315,37 @@ fn prime(
     activation: &HashMap<String, f64>,
     margin: f64,
     lift: usize,
+    sitting: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
     if lift == 0 || results.len() < 3 {
         return results;
     }
     let max = activation.values().copied().fold(0.0f64, f64::max);
-    if max <= 0.0 {
+    if max <= 0.0 && sitting.is_empty() {
         return results;
     }
     let n = results.len();
     // Normalised once, against the original list, and never touched again.
+    //
+    // The sitting enters here, as a value in the same scale, rather than as a
+    // second pass: one budget, one walk, one `lift`. A hit cannot be lifted
+    // `prime_lift` places for being accessible and then `prime_lift` again for
+    // having been read ten minutes ago — which is what two passes would do, and
+    // the second lift would be the one nobody bounded.
     let acts: Vec<f64> = results
         .iter()
-        .map(|r| activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max)
+        .map(|r| {
+            let act = match max > 0.0 {
+                true => activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max,
+                false => 0.0,
+            };
+            match sitting.contains(&r.artifact_id) {
+                // The top of the same normalised scale: what this sitting has
+                // been in is as accessible as anything in the base gets.
+                true => act.max(1.0),
+                false => act,
+            }
+        })
         .collect();
 
     // For each row, how many of its original predecessors — walked nearest
@@ -364,6 +389,7 @@ fn prime(
             // displaced by another row's climb did not move up, and
             // labelling it would say something untrue about it.
             r.primed = pos < i;
+            r.in_sitting = sitting.contains(&r.artifact_id);
             r
         })
         .collect()
@@ -689,6 +715,7 @@ impl Core {
                 last_verified_at: c.last_verified_at,
                 weak: false,
                 primed: false,
+                in_sitting: false,
                 past_cliff: false,
                 via: Some(l.via),
                 reason: l.reason,
@@ -950,11 +977,32 @@ impl Core {
         {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.activation_now(&ids).await;
+            // Off by default and empty when off: this is the only part of the
+            // sitting that moves an order, and the same query ranking
+            // differently in two sittings is what is disorienting about it.
+            // Held off the doors priming is already held off, for the same
+            // reasons, and off every door with no session for the reason in
+            // `Origin::session`.
+            let sitting: std::collections::HashSet<String> = match self.sitting.prime {
+                true => origin
+                    .session
+                    .as_deref()
+                    .map(|s| {
+                        self.sittings
+                            .read(s, now_secs(), self.pursuit.idle_secs as i64)
+                            .touched
+                            .into_iter()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                false => Default::default(),
+            };
             results = prime(
                 results,
                 &activation,
                 self.associate.prime_margin,
                 self.associate.prime_lift,
+                &sitting,
             );
         }
 
@@ -1891,6 +1939,7 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                in_sitting: false,
                 past_cliff: false,
                 via: None,
                 reason: None,
@@ -1911,7 +1960,13 @@ mod tests {
         // fused ranks and mean nothing across queries, while "moved up two
         // places" means the same thing every time — and can be tested here.
         let act = HashMap::from([("d".to_string(), 4.0)]);
-        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed, "the hit that moved must say so");
         assert!(!out[2].primed, "the hit it passed did not move up");
@@ -1920,15 +1975,59 @@ mod tests {
     #[test]
     fn the_most_active_hit_cannot_displace_an_exact_match() {
         let act = HashMap::from([("b".to_string(), 9.0)]);
-        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2);
+        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2, &Default::default());
         assert_eq!(order(&out), vec!["a", "b", "c"]);
         assert!(out.iter().all(|r| !r.primed));
     }
 
     #[test]
+    fn what_this_sitting_read_can_lift_a_hit() {
+        let sitting = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+        );
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed);
+        assert!(out[1].in_sitting, "the page cannot say why it moved");
+    }
+
+    #[test]
+    fn the_sitting_and_activation_share_one_budget() {
+        // Two passes would give a hit `prime_lift` places for being accessible
+        // and `prime_lift` again for having been read ten minutes ago — and the
+        // second lift would be the one nobody bounded. One walk, one `lift`.
+        let act = HashMap::from([("e".to_string(), 9.0)]);
+        let sitting = std::collections::HashSet::from(["e".to_string()]);
+        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2, &sitting);
+        assert_eq!(
+            order(&out),
+            vec!["a", "b", "e", "c", "d"],
+            "a hit in both moved further than one lift"
+        );
+    }
+
+    #[test]
+    fn the_sitting_cannot_displace_the_first_hit_either() {
+        // Rank 0 never moves, whatever the reason for moving would have been.
+        let sitting = std::collections::HashSet::from(["b".to_string(), "c".to_string()]);
+        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &sitting);
+        assert_eq!(order(&out)[0], "a");
+    }
+
+    #[test]
     fn a_lift_of_zero_turns_priming_off_entirely() {
         let act = HashMap::from([("d".to_string(), 4.0)]);
-        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 0);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &act,
+            0.5,
+            0,
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
     }
 
@@ -1937,7 +2036,13 @@ mod tests {
         // The margin is what keeps this from reshuffling every list: two hits
         // that are both somewhat active stay in the order the ranking gave.
         let act = HashMap::from([("c".to_string(), 4.0), ("d".to_string(), 3.6)]);
-        let out = prime(ranked(&["a", "b", "c", "d"]), &act, 0.5, 2);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+        );
         assert_eq!(
             order(&out),
             vec!["a", "c", "b", "d"],
@@ -1952,7 +2057,13 @@ mod tests {
         // else moves through the position it landed on. Five elements is
         // enough to expose that: `e` should climb exactly two, not three.
         let act = HashMap::from([("e".to_string(), 1.0)]);
-        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2);
+        let out = prime(
+            ranked(&["a", "b", "c", "d", "e"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
         let moved = order(&out).iter().position(|id| *id == "e").unwrap();
         assert_eq!(moved, 4 - 2, "e must climb exactly prime_lift positions");
@@ -1964,7 +2075,13 @@ mod tests {
         // Same shape, stretched to seven: the last row must still land
         // exactly `lift` positions up, at index 4 rather than index 1.
         let act = HashMap::from([("g".to_string(), 1.0)]);
-        let out = prime(ranked(&["a", "b", "c", "d", "e", "f", "g"]), &act, 0.5, 2);
+        let out = prime(
+            ranked(&["a", "b", "c", "d", "e", "f", "g"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+        );
         let moved = order(&out).iter().position(|id| *id == "g").unwrap();
         assert_eq!(moved, 4, "g must land at index 4, not be pulled to index 1");
         assert_eq!(6 - moved, 2, "the climb must equal prime_lift exactly");
@@ -2705,6 +2822,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: None,
             reason: None,
@@ -2810,6 +2928,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: None,
             reason: None,

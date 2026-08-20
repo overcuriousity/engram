@@ -327,6 +327,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,

@@ -46,6 +46,10 @@ pub struct RenderedResult {
     /// This hit moved up on activation. A small marker, because the claim is
     /// small: it passed a near-tie, it did not become a better match.
     pub primed: bool,
+    /// This sitting has already been in it. Said beside `primed` rather than
+    /// folded into it: "you were just reading this" and "this is reached
+    /// often" are two different reasons to be higher up a list.
+    pub in_sitting: bool,
     /// Past the point where this list's relevance falls off. Greyed, under a
     /// rule; the rank stays, because it did place — the claim withdrawn is
     /// "this is an answer", not "this is fifth". See `search::cliff`.
@@ -1251,7 +1255,11 @@ async fn search_results(
             // Scoped to the operator, because coalescing folds a keystroke into
             // the query it was an early spelling of, and two people typing at
             // once are not spelling the same thing.
-            crate::store::feedback::Door::Ui.by(id.subject),
+            crate::store::feedback::Door::Ui
+                .by(id.subject)
+                // The live sitting, for priming. Off unless `sitting.prime` is
+                // on, and impossible at any door with no session.
+                .in_sitting(id.session.clone()),
         )
         .await?;
 
@@ -1331,6 +1339,7 @@ fn render_hit(
         },
         weak: h.weak,
         primed: h.primed,
+        in_sitting: h.in_sitting,
         past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
@@ -4610,6 +4619,7 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: None,
             reason: None,
@@ -4705,6 +4715,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,
@@ -4742,6 +4753,7 @@ mod tests {
             rank: String::new(),
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
@@ -4856,6 +4868,7 @@ mod tests {
             rank: if weak { String::new() } else { "#1".into() },
             weak,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via_title: None,
             reason: None,
@@ -6905,6 +6918,63 @@ mod tests {
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(page.contains("This sitting"), "{page}");
         assert!(page.contains("Mounting an E01"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn with_priming_off_the_sitting_moves_no_result() {
+        // The default. Carrying ships on because it changes no order; this is
+        // the part that does, and it waits for the harness.
+        let mut c = crate::core::test_support::test_core().await;
+        c.feedback.enabled = true;
+        assert!(!c.sitting.prime, "priming must ship off");
+        let core = c.clone();
+        let (app, cookie) = app_with_cookie(c).await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let ids: Vec<String> = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &["alpha one", "alpha two", "alpha three", "alpha four"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                        ordinal: i as i64,
+                        text: (*t).into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(0),
+                        caveats: vec![],
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        crate::jobs::embed::run_corpus(&core, &src.id)
+            .await
+            .unwrap();
+
+        let before = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+        // Read the last one this list returns, then search again.
+        for id in &ids {
+            get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
+        }
+        let after = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
+
+        let rank_of = |html: &str| -> Vec<String> {
+            html.match_indices("/ui/artifacts/")
+                .map(|(i, _)| html[i + 14..i + 50].to_string())
+                .collect()
+        };
+        assert_eq!(
+            rank_of(&before),
+            rank_of(&after),
+            "the sitting moved a result with priming off"
+        );
     }
 
     #[tokio::test]
