@@ -190,6 +190,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unknown_path_is_behind_a_session_like_every_other_page() {
+        // The fallback took no `Identity`, so the one path nobody had routed
+        // was the one path that rendered the whole nav — `judge_pending`, a
+        // live count out of the base, included — to a visitor with no session.
+        let core = crate::core::test_support::test_core().await;
+        let app = crate::web::test_support::router(core, None);
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/nothing-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert!(
+            res.headers()["location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/auth/login"),
+            "an unknown path rendered rather than bouncing: {res:?}"
+        );
+
+        // And the API answer is unchanged: a caller with no credentials asking
+        // for a route that does not exist is told the route does not exist,
+        // not sent to an interactive login it cannot follow.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/nothing-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
+    }
+
+    #[tokio::test]
     async fn a_bounced_page_load_tells_the_login_where_it_was_going() {
         let core = crate::core::test_support::test_core().await;
         let app = crate::web::test_support::router(core, None);

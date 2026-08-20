@@ -3484,9 +3484,24 @@ struct NotFoundTemplate {
 /// Only for the pages: an agent asking `/api/v1` for a route that does not
 /// exist must not be handed an HTML document to parse, which is what a router
 /// fallback would do to every door at once.
-pub async fn not_found(State(st): State<AppState>, uri: axum::http::Uri) -> Response {
+///
+/// The page is behind a session like every other page. `Identity` is asked for
+/// optionally rather than required so that the `/api` answer above stays a 404
+/// for a caller with no credentials, but a browser with no session gets the
+/// same 401 the rest of the app gives it — which
+/// `redirect_unauthenticated_browsers` turns into the login. Without that, the
+/// one path nobody routed was the one path that rendered the whole nav,
+/// `judge_pending` — a live count out of the base — included.
+pub async fn not_found(
+    State(st): State<AppState>,
+    id: Option<Identity>,
+    uri: axum::http::Uri,
+) -> Response {
     if uri.path().starts_with("/api/") {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    if id.is_none() {
+        return crate::error::Error::Unauthorized.into_response();
     }
     let page = NotFoundTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
