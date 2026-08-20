@@ -621,6 +621,65 @@ struct ArtifactDetailPage {
     d: ArtifactDetail,
 }
 
+/// What a count in a sweep's `detail` is called on the page.
+///
+/// Keyed by stage as well as by field, because two sweeps both call a count
+/// `armed` and they are not the same thing. A field with no entry here is not
+/// rendered: the summary is a sentence about what happened, not a dump of every
+/// number a sweep returned.
+const SWEEP_WORDS: &[(&str, &str, &str)] = &[
+    ("associate", "events", "searches replayed"),
+    ("associate", "verdicts", "verdicts replayed"),
+    ("associate", "forgotten", "links forgotten"),
+    ("associate", "armed", "links sent to the judge"),
+    ("consolidate", "superseded", "artifacts merged"),
+    ("consolidate", "judged", "pairs sent to the judge"),
+    ("arm_dedupe", "armed", "duplicates sent to the judge"),
+    ("retention", "expired", "records expired"),
+    ("retention", "named", "gaps named"),
+    ("pursuit", "pursuits", "pursuits opened"),
+];
+
+/// One phrase of the last day: "412 links forgotten".
+struct SweepCount {
+    n: i64,
+    what: String,
+}
+
+/// One recorded run, as the history renders it.
+struct SweepRunRow {
+    when: String,
+    stage: String,
+    /// Empty unless it failed, in which case it is why.
+    error: String,
+    took: String,
+    /// The counts, already worded. Empty for a run that did nothing.
+    counts: Vec<SweepCount>,
+}
+
+/// Add up one run's `detail` into `totals`, keyed by the words it earns.
+fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return;
+    };
+    for (s, field, word) in SWEEP_WORDS {
+        if *s != stage {
+            continue;
+        }
+        let n = v
+            .get(field)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if n == 0 {
+            continue;
+        }
+        match totals.iter_mut().find(|(w, _)| w == word) {
+            Some((_, t)) => *t += n,
+            None => totals.push((word.to_string(), n)),
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "ops.html")]
 struct OpsTemplate {
@@ -659,6 +718,17 @@ struct OpsTemplate {
     /// Recent pursuits, only when the feature is on.
     pursuit_enabled: bool,
     pursuits: Vec<PursuitRow>,
+    /// What the sweeps did in the last twenty-four hours, added up. Not "last
+    /// night": units that reschedule themselves on their own periods do not
+    /// line up into one cycle, and there is no cycle identity to group them by.
+    last_day: Vec<SweepCount>,
+    /// Runs in the last day that failed. Said separately, because a summary of
+    /// what got done cannot report what did not.
+    last_day_failures: usize,
+    /// The runs themselves, newest first. What a single overwritten summary
+    /// could never give: whether this started yesterday or has been going
+    /// wrong for a week.
+    sweep_history: Vec<SweepRunRow>,
 }
 
 #[derive(Template)]
@@ -2085,6 +2155,53 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     } else {
         Vec::new()
     };
+    // What the memory did while nobody was looking. The last day as one
+    // sentence, and under it the runs themselves — which is the half a single
+    // overwritten summary could never give.
+    let day = st
+        .core
+        .store
+        .sweep_runs_since(crate::store::now() - 86_400, 500)
+        .await
+        .unwrap_or_default();
+    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
+    let mut totals: Vec<(String, i64)> = Vec::new();
+    for r in &day {
+        tally_sweep(&r.stage, &r.detail, &mut totals);
+    }
+    let last_day: Vec<SweepCount> = totals
+        .into_iter()
+        .map(|(what, n)| SweepCount { n, what })
+        .collect();
+    let sweep_history: Vec<SweepRunRow> = st
+        .core
+        .store
+        .sweep_history(TABLE_CAP)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let mut counts = Vec::new();
+            tally_sweep(&r.stage, &r.detail, &mut counts);
+            SweepRunRow {
+                when: fmt_time(r.started_at),
+                error: match r.outcome == "failed" {
+                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
+                        .ok()
+                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+                        .unwrap_or_else(|| "it failed".into()),
+                    false => String::new(),
+                },
+                took: fmt_duration((r.ended_at - r.started_at).max(0)),
+                stage: r.stage,
+                counts: counts
+                    .into_iter()
+                    .map(|(what, n)| SweepCount { n, what })
+                    .collect(),
+            }
+        })
+        .collect();
+
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
 
@@ -2145,6 +2262,9 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         generated,
         pursuit_enabled,
         pursuits,
+        last_day,
+        last_day_failures,
+        sweep_history,
     })
     .into_response())
 }
@@ -5370,6 +5490,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ops_says_what_the_sweeps_did_and_shows_the_runs() {
+        let (app, cookie, core) = app_session_and_core().await;
+        // Two runs of one sweep: the summary adds them up, the history keeps
+        // them apart. That difference is the whole reason both are there.
+        for _ in 0..2 {
+            core.store
+                .record_sweep_run(
+                    "associate",
+                    crate::store::now(),
+                    "ok",
+                    r#"{"events":0,"verdicts":0,"forgotten":206,"reopened":0,"armed":0}"#,
+                )
+                .await
+                .unwrap();
+        }
+        core.store
+            .record_sweep_run(
+                "consolidate",
+                crate::store::now(),
+                "failed",
+                r#"{"error":"the endpoint was down"}"#,
+            )
+            .await
+            .unwrap();
+
+        let html = get(&app, "/ui/ops", &cookie).await;
+        assert!(
+            html.contains("412 links forgotten"),
+            "the last day did not add the runs up: {html}"
+        );
+        assert!(html.contains("1 run failed"), "a failed run went unsaid");
+        assert!(
+            html.contains("the endpoint was down"),
+            "the history did not say why a run failed"
+        );
     }
 
     #[tokio::test]

@@ -24,6 +24,47 @@
   {% endif %}
 </p>
 
+{# The last day, not "last night". Units that reschedule themselves on their
+   own periods do not line up into one cycle, and grouping them by an invented
+   cycle identity would be inventing it. The history under the summary is the
+   half a single overwritten line could never give: whether a sweep started
+   going wrong yesterday or has been going wrong for a week. #}
+{% if !last_day.is_empty() || last_day_failures > 0 || !sweep_history.is_empty() %}
+<h3>The last day</h3>
+<p class="muted">
+  {% if last_day.is_empty() %}The sweeps ran and found nothing to do.{% else %}
+  {% for c in last_day %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
+  {% if last_day_failures > 0 %}
+  {{ last_day_failures }} run{% if last_day_failures != 1 %}s{% endif %} failed.
+  {% endif %}
+</p>
+{% if !sweep_history.is_empty() %}
+<table class="grid">
+  <thead><tr><th>When</th><th>Sweep</th><th>Did</th><th>Took</th></tr></thead>
+  <tbody>
+  {% for r in sweep_history %}
+    <tr>
+      <td>{{ r.when }}</td>
+      <td>{{ r.stage }}</td>
+      <td>
+        {% if !r.error.is_empty() %}
+        <span class="flag">failed</span>
+        <div class="muted row-sub">{{ r.error }}</div>
+        {% else if r.counts.is_empty() %}
+        <span class="muted">nothing to do</span>
+        {% else %}
+        {% for c in r.counts %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}
+        {% endif %}
+      </td>
+      <td class="muted">{{ r.took }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
 {% if !merged.is_empty() %}
 <h3>Merged</h3>
 <p class="muted">
