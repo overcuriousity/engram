@@ -106,8 +106,9 @@ impl Sittings {
     /// What this sitting has touched, or nothing if it has gone quiet.
     ///
     /// Expiry happens here and on write rather than on a timer: there is no
-    /// sweep to run and nothing to clean up, because a sitting nobody comes
-    /// back to is dropped by the next read that finds it stale.
+    /// sweep to run, because a sitting is dropped by the next read that finds
+    /// it stale — or, for the sitting nobody ever comes back to, by the next
+    /// write from any session at all. See `with`.
     pub fn read(&self, session: &str, at: i64, idle_secs: i64) -> Carried {
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(session) {
@@ -123,19 +124,27 @@ impl Sittings {
         }
     }
 
-    /// The whole of the locking, once. An entry idle for longer than
-    /// `idle_secs` is not extended, it is replaced — the same number that
-    /// already defines a sitting for the pursuit sweep, so the live definition
-    /// and the reconstructed one agree by construction.
+    /// The whole of the locking, once, and the whole of the expiry with it. An
+    /// entry idle for longer than `idle_secs` is not extended, it is dropped —
+    /// the same number that already defines a sitting for the pursuit sweep, so
+    /// the live definition and the reconstructed one agree by construction.
+    ///
+    /// Every entry, not only this session's, because expiring only the one
+    /// being touched leaves out the case that matters: a browser tab closed and
+    /// never opened again is a session no later read or write ever names, so
+    /// nothing would find it stale and the map would grow for the life of the
+    /// process, one abandoned sitting at a time. The lock is already held here,
+    /// so the walk costs one integer comparison per live session — and the map
+    /// is only ever large in exactly the case where the walk is worth doing.
+    /// This session's own stale entry goes the same way, which is what makes a
+    /// returning sitting a new one rather than a continued one.
     fn with(&self, session: &str, at: i64, idle_secs: i64, f: impl FnOnce(&mut Sitting)) {
         if session.is_empty() {
             return;
         }
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, s| at - s.last_at <= idle_secs);
         let entry = map.entry(session.to_string()).or_default();
-        if entry.last_at > 0 && at - entry.last_at > idle_secs {
-            *entry = Sitting::default();
-        }
         entry.last_at = at;
         f(entry);
     }
@@ -167,6 +176,25 @@ mod tests {
 
         assert!(!s.read("sess", 100 + IDLE, IDLE).is_cold());
         assert!(s.read("sess", 100 + IDLE + 1, IDLE).is_cold());
+    }
+
+    #[test]
+    fn a_sitting_nobody_comes_back_to_is_swept_by_somebody_elses_write() {
+        // The abandoned tab is the case expiring-on-touch cannot reach: no
+        // later read or write ever names that session, so nothing would find it
+        // stale and the map would grow for the life of the process.
+        let s = Sittings::default();
+        s.touched("gone", "a", 100, IDLE);
+        assert_eq!(s.inner.lock().unwrap().len(), 1);
+
+        s.touched("here", "b", 100 + IDLE + 1, IDLE);
+
+        let live = s.inner.lock().unwrap();
+        assert_eq!(
+            live.keys().collect::<Vec<_>>(),
+            vec!["here"],
+            "the session that went quiet must not outlive the process"
+        );
     }
 
     #[test]
