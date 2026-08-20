@@ -97,3 +97,16 @@
 .decide-cluster {
   margin: 0.9rem 0 0.2rem; font-size: 0.8125rem; color: var(--color-fg-muted);
 }
+
+/* Two sides side by side, because the decision is a comparison. Stacked where
+   there is no room for two columns — one above the other still compares; two
+   columns 12rem wide do not. */
+.decide-read { margin: 0.5rem 0; }
+.decide-read summary { cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted); }
+.decide-sides {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;
+}
+.decide-sides p { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--color-fg-secondary); }
+@container shell (max-width: 60rem) {
+  .decide-sides { grid-template-columns: 1fr; }
+}

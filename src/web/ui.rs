@@ -266,6 +266,12 @@ pub struct PairRow {
     /// times. Same rule as `disambiguate_labels`, same reason.
     pub a_opening: String,
     pub b_opening: String,
+    /// Enough of each side to decide by. The titles are links, but following
+    /// one leaves the queue and comes back to a card whose other half you now
+    /// have to remember — which is not a comparison, it is two readings with a
+    /// navigation between them.
+    pub a_excerpt: String,
+    pub b_excerpt: String,
     pub detail: Option<String>,
     /// The stored `detail` is exactly `"link"` — the judge's duplicate
     /// hand-off (§7), a provenance marker, not prose. The row renders a
@@ -2129,6 +2135,8 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 // clears the ones the page does not need.
                 a_opening: crate::web::markdown::stand_in_title(&a.text, 40),
                 b_opening: crate::web::markdown::stand_in_title(&b.text, 40),
+                a_excerpt: crate::web::markdown::snippet(&a.text, 400),
+                b_excerpt: crate::web::markdown::snippet(&b.text, 400),
                 a_id: p.a_id,
                 b_id: p.b_id,
                 detail,
@@ -3499,6 +3507,8 @@ mod tests {
             b_title: "SQLite-Datenbankeinstellungen und WAL".into(),
             a_opening: a_opening.into(),
             b_opening: "Einstellungen der SQLite-Datenbank".into(),
+            a_excerpt: "Auto Vacuum werden freie Pages in der Free Page List verwaltet".into(),
+            b_excerpt: "Einstellungen der SQLite-Datenbank koennen ueber Pragma".into(),
             detail: None,
             via_link: false,
             contradiction: true,
@@ -3506,6 +3516,33 @@ mod tests {
             keeps_a: false,
             keeps_b: false,
         }
+    }
+
+    #[test]
+    fn a_pair_card_carries_both_texts_to_read_in_place() {
+        // The titles were links, so reading either side meant leaving the
+        // queue and coming back to a card whose other half you now have to
+        // remember.
+        // `_decide.html` is only ever included, so it has no template struct
+        // of its own; this is one, standing in for the page that includes it.
+        #[derive(Template)]
+        #[template(path = "_decide.html")]
+        struct Decide {
+            pairs: Vec<PairCluster>,
+        }
+        let html = askama::Template::render(&Decide {
+            pairs: group_pairs(vec![pair_row_fixture("a1", "Auto Vacuum", "")]),
+        })
+        .unwrap();
+        assert!(html.contains("<details"), "{html}");
+        assert!(
+            html.contains("Auto Vacuum werden freie Pages"),
+            "the A side's text is not on the card: {html}"
+        );
+        assert!(
+            html.contains("Einstellungen der SQLite-Datenbank koennen"),
+            "the B side's text is not on the card: {html}"
+        );
     }
 
     #[test]

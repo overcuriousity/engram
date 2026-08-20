@@ -35,6 +35,16 @@
     <b>{% if p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
+  {# Both sides, readable where the decision is made. Closed by default: the
+     titles answer most cards on their own, and five open cards would be a page
+     of text above the buttons that clear it. #}
+  <details class="decide-read">
+    <summary>Read both</summary>
+    <div class="decide-sides">
+      <div><b>{{ p.a_title }}</b><p>{{ p.a_excerpt }}</p></div>
+      <div><b>{{ p.b_title }}</b><p>{{ p.b_excerpt }}</p></div>
+    </div>
+  </details>
   <div class="row">
     {# The judge's pick, when it has one, is the accented button rather than a
        separate action — a recommendation about which of these two to press,
