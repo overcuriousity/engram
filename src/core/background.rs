@@ -80,52 +80,120 @@ impl Background {
 
 /// The sweep's job target. A constant rather than a corpus id: consolidation
 /// looks at the whole collection, and the `UNIQUE(stage, target_id)` on `jobs`
-/// then guarantees at most one queued sweep however often the ticker fires.
+/// then guarantees at most one queued sweep however often it is armed.
 pub const CONSOLIDATE_TARGET: &str = "collection";
 
-/// Queue a consolidation sweep now and every `interval_hours` after.
+/// Every sweep that runs on a period, what switches it off, and how long it
+/// waits between runs.
 ///
-/// A timer rather than a trigger on write: a sweep after every capture would
-/// re-examine the whole collection for one new artifact, and the pairs it finds
-/// do not become interesting the instant they are written. The first tick fires
-/// immediately, so a restart picks the work up rather than waiting a day.
-pub fn spawn_consolidation_ticker(
-    core: crate::core::Core,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if !core.consolidate.enabled {
-            tracing::info!("consolidation sweep disabled");
-            return;
+/// One list, where five ticker preambles used to be. Each of those started
+/// separately, was gated separately, and knew about none of the others; what
+/// ran first on a given night was whichever interval happened to elapse first.
+/// A periodic unit re-arms itself `run_after` an interval out when it finishes,
+/// so `run_after` *is* the cursor recording when it last ran — already indexed,
+/// with no clock to hold and no meta key to keep.
+///
+/// This is also where every gate that used to be an early `return` now lives,
+/// and each one keeps its original condition exactly. Getting that wrong
+/// re-creates the bug `spawn_repair_ticker` exists to record: a pass that rides
+/// on another feature's switch stops when that feature is switched off, and
+/// nobody asked for that.
+///
+/// `Pursuit` is deliberately absent: it is armed by the association sweep on
+/// completion — replay before pursue — and keeps its own period as a floor, so
+/// it appears here too. See `periodic_period`.
+pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stage, &'static str)> {
+    use crate::store::jobs::Stage;
+    let mut out = Vec::new();
+    // Duplicate hygiene, and the judging that needs a model to do it with.
+    if core.consolidate.enabled && core.synthesizes() {
+        out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
+        // Zero units per tick is the off switch for the calls, not for the
+        // sweep that finds the pairs.
+        if core.consolidate.max_dedupe_per_tick > 0 {
+            out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
-        if !core.synthesizes() {
-            tracing::info!("no synthesizer; consolidation judging disabled");
-            return;
+    }
+    // Expiring and grouping. Behind neither consolidation nor association: an
+    // operator who switches duplicate hygiene off is not asking to keep their
+    // query log forever. With nothing to expire and nothing to group there is
+    // no unit at all, which is what the ticker's `return` used to say.
+    if core.feedback.retain_days > 0 || core.feedback.enabled {
+        out.push((Stage::Retention, CONSOLIDATE_TARGET));
+    }
+    if core.associating() {
+        out.push((Stage::Associate, ASSOCIATE_TARGET));
+        // Its own period as a floor. The association sweep arming it is what
+        // orders the two; this is what keeps pursuits running at the cadence
+        // they ran at before, rather than at the association sweep's.
+        if core.pursuit.enabled {
+            out.push((Stage::Pursuit, ASSOCIATE_TARGET));
         }
-        let period = std::time::Duration::from_secs(core.consolidate.interval_hours.max(1) * 3600);
-        let mut tick = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    if let Err(e) = core
-                        .store
-                        .enqueue(
-                            crate::store::jobs::Stage::Consolidate,
-                            "collection",
-                            CONSOLIDATE_TARGET,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "could not queue the consolidation sweep");
-                    }
+    }
+    out
+}
+
+/// How long this sweep waits between runs, or `None` if it is switched off.
+///
+/// The existing interval keys keep their names and their meanings and become
+/// each unit's own `run_after` step, so an operator who tuned
+/// `associate.interval_mins` finds it still doing what it did. The `max(1)` and
+/// the saturating multiply come with them: the operand is operator-typed, and a
+/// wrap here would turn a very long configured interval into a very short one.
+pub fn periodic_period(
+    core: &crate::core::Core,
+    stage: crate::store::jobs::Stage,
+) -> Option<std::time::Duration> {
+    use crate::store::jobs::Stage;
+    if !periodic_units(core).iter().any(|(s, _)| *s == stage) {
+        return None;
+    }
+    let secs = match stage {
+        Stage::Consolidate => core.consolidate.interval_hours.max(1).saturating_mul(3600),
+        Stage::ArmDedupe => core
+            .consolidate
+            .dedupe_interval_mins
+            .max(1)
+            .saturating_mul(60),
+        Stage::Retention => core.feedback.sweep_hours.max(1).saturating_mul(3600),
+        Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
+        // Shorter than the idle window, so a run of searches is grouped soon
+        // after it goes quiet.
+        Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// Arm every periodic unit that nothing is going to run.
+///
+/// The guard against the one failure mode a ticker does not have: a unit that
+/// dies between being claimed and re-arming itself would otherwise never run
+/// again. "Missing" means *not live* rather than *no row*, because a sweep
+/// closed without re-arming is just as gone as one that was deleted — and the
+/// two are indistinguishable from here, which is the point.
+///
+/// Armed to run now, not an interval out. This is also what arms them at boot,
+/// where the repair pass's first tick fires immediately, and a restart picking
+/// the work straight up is the behaviour the tickers had.
+pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
+    for (stage, target) in periodic_units(core) {
+        match core.store.live_job(stage, target).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(e) = core
+                    .store
+                    .arm_periodic(stage, "collection", target, 0)
+                    .await
+                {
+                    tracing::warn!(stage = stage.as_str(), error = %e, "could not arm a sweep");
                 }
             }
+            Err(e) => {
+                tracing::warn!(stage = stage.as_str(), error = %e, "could not look for a sweep")
+            }
         }
-        tracing::info!("consolidation ticker stopped");
-    })
+    }
 }
 
 /// How often the repair pass runs. A constant rather than a setting: this is
@@ -229,6 +297,10 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
             tracing::warn!(error = %e, "could not look for artifacts that were never related")
         }
     }
+    // A sweep that died between being claimed and re-arming itself would
+    // otherwise never run again — the one failure mode a ticker does not have,
+    // and the reason this pass stays outside the schedule.
+    arm_missing_periodic(core).await;
     // Priority without ageing is starvation: one long ingest would keep night
     // work off the workers for as long as it lasted. Here rather than in the
     // claim for the reason `age_background` gives — an inequality in the
@@ -258,199 +330,10 @@ pub(crate) async fn reconcile_stores_once(core: &crate::core::Core) {
     }
 }
 
-/// Enforce `feedback.retain_days` now and every `feedback.sweep_hours` after,
-/// and regroup the knowledge gaps on the same beat.
-///
-/// Its own ticker rather than a passenger on the consolidation sweep, which is
-/// where it used to live: an operator who switches duplicate hygiene off is not
-/// asking to keep their query log forever, and that is what the coupling
-/// quietly did. Runs even with capture disabled, so turning capture off also
-/// expires what it recorded while it was on. Grouping the gaps rides the same
-/// rhythm because it reads the same tables, and hours is the right cadence for
-/// something a person looks at when they next capture.
-pub fn spawn_retention_ticker(
-    core: crate::core::Core,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if core.feedback.retain_days <= 0 {
-            tracing::info!("captured searches and questions kept indefinitely");
-            // Nothing to expire, and with capture off nothing to group either:
-            // the ticker would wake every `sweep_hours` for the rest of the
-            // process to do nothing at all. The line above is the whole of what
-            // this task has to say, so it says it and stops.
-            if !core.feedback.enabled {
-                return;
-            }
-        }
-        let period = std::time::Duration::from_secs(core.feedback.sweep_hours.max(1) * 3600);
-        let mut tick = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    if core.feedback.retain_days > 0 {
-                        match core.store.expire_feedback(core.feedback.retain_days).await {
-                            Ok(n) if n > 0 => {
-                                tracing::info!(dropped = n, "expired captured searches and questions")
-                            }
-                            // A failed sweep is retried on the next tick; there is
-                            // nothing here worth taking the process down for.
-                            Err(e) => {
-                                tracing::warn!(error = %e, "could not expire captured searches")
-                            }
-                            _ => {}
-                        }
-                    }
-                    if core.feedback.enabled {
-                        match crate::jobs::gaps::sweep(&core).await {
-                            Ok(r) if r.named > 0 || r.removed > 0 => tracing::info!(
-                                clusters = r.clusters, named = r.named, removed = r.removed,
-                                "knowledge gaps regrouped"
-                            ),
-                            Err(e) => tracing::warn!(error = %e, "could not group knowledge gaps"),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        tracing::info!("retention ticker stopped");
-    })
-}
-
-/// Arm dedupe units at a steady rate, independent of the consolidation sweep.
-///
-/// Its own ticker rather than a passenger on that sweep, for the same reason
-/// retention got one: the pacing of model calls has nothing to do with the
-/// rhythm of duplicate *discovery*. The sweep runs daily because re-examining
-/// the whole collection more often buys nothing; the calls want a rate the
-/// hardware can actually sustain.
-///
-/// What it does not do is cap units in flight. A unit the queue cannot get
-/// through — a dead endpoint — would then block every other
-/// pair permanently, which is the head-of-line blocking the per-pair units were
-/// introduced to remove. `live_job` skips a pair whose unit is already queued,
-/// and the ordering in `pairs_to_judge` keeps a pair that keeps failing from
-/// starving the rest.
-pub fn spawn_dedupe_ticker(
-    core: crate::core::Core,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if !core.consolidate.enabled || core.consolidate.max_dedupe_per_tick == 0 {
-            tracing::info!("dedupe pass disabled");
-            return;
-        }
-        if !core.synthesizes() {
-            tracing::info!("no synthesizer; dedupe pass disabled");
-            return;
-        }
-        let period =
-            std::time::Duration::from_secs(core.consolidate.dedupe_interval_mins.max(1) * 60);
-        let mut tick = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    match crate::jobs::consolidate::arm_dedupe(&core).await {
-                        Ok(n) if n > 0 => tracing::info!(armed = n, "armed dedupe units"),
-                        // A failed tick is retried on the next one; there is
-                        // nothing here worth taking the process down for.
-                        Err(e) => tracing::warn!(error = %e, "could not arm dedupe units"),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        tracing::info!("dedupe ticker stopped");
-    })
-}
-
 /// The association sweep's job target. A constant rather than an artifact id:
 /// the sweep replays the whole log, and `UNIQUE(stage, target_id)` then bounds
 /// the queue to one of them however often the ticker fires.
 pub const ASSOCIATE_TARGET: &str = "collection";
-
-/// Queue an association sweep now and every `associate.interval_mins` after.
-///
-/// Its own ticker, like retention and dedupe: the rhythm of replaying a search
-/// log has nothing to do with the rhythm of duplicate discovery, and coupling
-/// the two is how switching one feature off silently switches another one off.
-///
-/// Returns before its loop when there is nothing to learn from — either the
-/// feature is off, or searches are not being recorded, which is the same thing.
-/// Queue the pursuit sweep on a period shorter than the idle window, so a run
-/// of searches is grouped soon after it goes quiet.
-pub fn spawn_pursuit_ticker(
-    core: crate::core::Core,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if !core.pursuit.enabled || !core.associating() {
-            tracing::info!("pursuit sweep disabled");
-            return;
-        }
-        let period = std::time::Duration::from_secs((core.pursuit.idle_secs / 2).max(60));
-        let mut tick = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    if let Err(e) = core
-                        .store
-                        .enqueue(crate::store::jobs::Stage::Pursuit, "collection", ASSOCIATE_TARGET)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "could not queue the pursuit sweep");
-                    }
-                }
-            }
-        }
-        tracing::info!("pursuit ticker stopped");
-    })
-}
-
-pub fn spawn_associate_ticker(
-    core: crate::core::Core,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if !core.associating() {
-            tracing::info!("association sweep disabled");
-            return;
-        }
-        // Saturating: the operand is operator-typed, and a wrap here would turn
-        // a very long configured interval into a very short one — a sweep
-        // hammering the queue is the opposite of what was asked for.
-        let period =
-            std::time::Duration::from_secs(core.associate.interval_mins.max(1).saturating_mul(60));
-        let mut tick = tokio::time::interval(period);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    if let Err(e) = core
-                        .store
-                        .enqueue(crate::store::jobs::Stage::Associate, "collection", ASSOCIATE_TARGET)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "could not queue the association sweep");
-                    }
-                }
-            }
-        }
-        tracing::info!("association ticker stopped");
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -459,8 +342,8 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn the_ticker_queues_exactly_one_sweep() {
-        // `jobs` is unique on (stage, target), so a ticker that fires while a
+    async fn the_consolidation_sweep_never_stacks_up_in_the_queue() {
+        // `jobs` is unique on (stage, target), so an arming that lands while a
         // sweep is still queued must collapse onto the same row rather than
         // stacking sweeps behind a slow one.
         let core = crate::core::test_support::test_core().await;
@@ -486,13 +369,14 @@ mod tests {
     async fn a_disabled_sweep_is_never_queued() {
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_consolidation_ticker(core.clone(), rx);
-        let _ = h.await;
-        assert!(
-            core.store.claim_job().await.unwrap().is_none(),
-            "a disabled sweep must not be queued"
-        );
+        arm_missing_periodic(&core).await;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            assert_ne!(
+                j.stage,
+                crate::store::jobs::Stage::Consolidate,
+                "a disabled sweep must not be armed"
+            );
+        }
     }
 
     #[tokio::test]
@@ -582,182 +466,67 @@ mod tests {
         );
     }
 
-    /// One captured search, aged past any plausible window.
-    async fn seed_old_event(core: &crate::core::Core) {
-        let id = core
-            .store
-            .record_search(
-                crate::store::feedback::NewEvent {
-                    query: "old".into(),
-                    door: crate::store::feedback::Door::Ui,
-                    scope: None,
-                    filters: "{}".into(),
-                    query_vec: vec![0.0],
-                    embed_model: "fake".into(),
-                    candidates: vec![],
-                    answered: false,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 40 * 86_400)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-    }
-
-    async fn captured(core: &crate::core::Core) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM search_events")
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap()
-    }
-
     #[tokio::test]
-    async fn retention_runs_with_consolidation_switched_off() {
-        // Retention used to ride on the consolidation sweep, so switching
-        // duplicate hygiene off silently kept the query log forever.
-        let mut core = crate::core::test_support::test_core().await;
-        core.consolidate.enabled = false;
-        core.feedback.enabled = true;
-        core.feedback.retain_days = 30;
-        seed_old_event(&core).await;
-
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_retention_ticker(core.clone(), rx);
-        for _ in 0..50 {
-            if captured(&core).await == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let _ = tx.send(true);
-        let _ = h.await;
-
-        assert_eq!(
-            captured(&core).await,
-            0,
-            "an event past the window outlived the retention ticker"
-        );
-    }
-
-    #[tokio::test]
-    async fn keeping_forever_expires_nothing() {
-        let core = crate::core::test_support::test_core().await; // retain_days defaults to 0
-        seed_old_event(&core).await;
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_retention_ticker(core.clone(), rx);
-        // Let the first tick land, then stop it. The ticker keeps running for
-        // the gap sweep, so it is stopped rather than awaited to its end.
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
-        let _ = tx.send(true);
-        let _ = h.await;
-        assert_eq!(captured(&core).await, 1, "`0` must keep them forever");
-    }
-
-    /// Nothing to expire and, with capture off, nothing to group either. The
-    /// task used to return here; it lost the `return` when the gap sweep moved
-    /// in, and went on waking every `sweep_hours` for the life of the process to
-    /// do nothing at all.
-    #[tokio::test]
-    async fn a_ticker_with_nothing_to_do_stops_instead_of_idling() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.feedback.retain_days = 0;
-        core.feedback.enabled = false;
-
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_retention_ticker(core.clone(), rx);
-        // No shutdown is sent: it has to end on its own account.
-        tokio::time::timeout(Duration::from_secs(2), h)
-            .await
-            .expect("the ticker sat waiting for a tick it has no work for")
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn the_ticker_groups_the_gaps_on_its_first_tick() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        // Two of them: one gap is not a group, and the sweep no longer spends a
-        // naming call restating a single question.
-        for q in ["mount an E01", "mounting E01 images"] {
-            let id = core
-                .store
-                .record_ask(crate::store::asks::NewAsk {
-                    question: q.into(),
-                    scope: None,
-                    filters: "{}".into(),
-                    query_vec: vec![1.0; 4],
-                    embed_model: core.embedder.model().to_string(),
-                    answer: "Not in the knowledge base.".into(),
-                    abstained: true,
-                    dropped: 0,
-                    truncated: false,
-                    citations: vec![],
-                })
-                .await
-                .unwrap();
-            core.store
-                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
-                .await
-                .unwrap();
-        }
-
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_retention_ticker(core.clone(), rx);
-        for _ in 0..50 {
-            if !core.store.cluster_keys().await.unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let _ = tx.send(true);
-        let _ = h.await;
-        assert_eq!(
-            core.store.cluster_keys().await.unwrap().len(),
-            1,
-            "the gap was never grouped"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_ticker_queues_a_sweep_as_soon_as_it_starts() {
-        // `tokio::time::interval` fires immediately on its first tick, which is
-        // what makes a restart pick consolidation up rather than waiting a day.
+    async fn the_sweeps_are_armed_to_run_now_when_the_process_starts() {
+        // The repair pass's first tick fires immediately, and this is what it
+        // does with it. Armed at `run_after = 0` and not an interval out: a
+        // restart picking the work straight up is the behaviour the tickers
+        // had, and waiting a day after every deploy is not.
         let core = crate::core::test_support::test_core().await;
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_consolidation_ticker(core.clone(), rx);
 
-        // Give the first tick a chance to land, then stop the ticker.
-        for _ in 0..50 {
-            if core
-                .store
-                .job_counts()
-                .await
-                .unwrap()
-                .iter()
-                .any(|(_, n)| *n > 0)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let _ = tx.send(true);
-        let _ = h.await;
+        arm_missing_periodic(&core).await;
 
         let j = core
             .store
             .claim_job()
             .await
             .unwrap()
-            .expect("the ticker queued nothing");
+            .expect("nothing was armed");
         assert_eq!(j.stage, crate::store::jobs::Stage::Consolidate);
         assert_eq!(j.target_id, CONSOLIDATE_TARGET);
+    }
+
+    #[tokio::test]
+    async fn arming_what_is_missing_never_stacks_a_sweep_up() {
+        // `jobs` is unique on (stage, target), so a repair pass running while a
+        // sweep is still queued collapses onto the same row rather than
+        // stacking sweeps behind a slow one.
+        let core = crate::core::test_support::test_core().await;
+        for _ in 0..3 {
+            arm_missing_periodic(&core).await;
+        }
+        let mut consolidations = 0;
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            if j.stage == crate::store::jobs::Stage::Consolidate {
+                consolidations += 1;
+            }
+        }
+        assert_eq!(consolidations, 1, "the sweep stacked up in the queue");
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_died_between_claim_and_rearm_is_armed_again() {
+        // The one failure mode a ticker does not have: a unit that is claimed
+        // and never re-arms itself would otherwise never run again. "Missing"
+        // is *not live* rather than *no row*, because a sweep closed without
+        // re-arming is just as gone as one that was deleted.
+        let core = crate::core::test_support::test_core().await;
+        arm_missing_periodic(&core).await;
+        let j = core.store.claim_job().await.unwrap().unwrap();
+        // Closed without re-arming: the sweep died between the claim and the
+        // one write that would have put it back.
+        core.store.complete_job(j.id).await.unwrap();
+
+        arm_missing_periodic(&core).await;
+
+        let mut stages = Vec::new();
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            stages.push(j.stage);
+        }
+        assert!(
+            stages.contains(&crate::store::jobs::Stage::Consolidate),
+            "a sweep closed without re-arming was never put back"
+        );
     }
 
     #[tokio::test]
@@ -785,50 +554,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_association_ticker_queues_a_sweep_as_soon_as_it_starts() {
-        // `tokio::time::interval` fires immediately on its first tick, which
-        // is what makes a restart pick the association sweep up rather than
-        // waiting out a full `interval_mins`.
+    async fn the_association_sweep_is_armed_when_the_process_starts() {
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.enabled = true;
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_associate_ticker(core.clone(), rx);
-        for _ in 0..50 {
-            if core
-                .store
-                .job_counts()
-                .await
-                .unwrap()
-                .iter()
-                .any(|(_, n)| *n > 0)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let _ = tx.send(true);
-        let _ = h.await;
 
-        let j = core
-            .store
-            .claim_job()
-            .await
-            .unwrap()
-            .expect("the ticker queued nothing");
-        assert_eq!(j.stage, crate::store::jobs::Stage::Associate);
-        assert_eq!(j.target_id, ASSOCIATE_TARGET);
-        assert!(core.store.claim_job().await.unwrap().is_none());
+        arm_missing_periodic(&core).await;
+
+        let mut stages = Vec::new();
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            stages.push((j.stage, j.target_id));
+        }
+        assert!(
+            stages.contains(&(
+                crate::store::jobs::Stage::Associate,
+                ASSOCIATE_TARGET.to_string()
+            )),
+            "the association sweep was never armed: {stages:?}"
+        );
     }
 
     #[tokio::test]
-    async fn no_recorded_searches_means_no_association_ticker_at_all() {
+    async fn no_recorded_searches_means_no_association_sweep_at_all() {
         // `associate.enabled` without `feedback.enabled` is a warning at startup
-        // and nothing else: there is nothing to learn from.
+        // and nothing else: there is nothing to learn from, so there is no unit
+        // — which is the list's job now that there is no ticker to return from.
         let core = crate::core::test_support::test_core().await; // feedback off
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        // Returns rather than looping, so awaiting it cannot hang.
-        let _ = spawn_associate_ticker(core.clone(), rx).await;
-        assert!(core.store.claim_job().await.unwrap().is_none());
+        assert!(
+            !periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == crate::store::jobs::Stage::Associate)
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_to_expire_and_nothing_to_group_is_no_retention_unit() {
+        // The ticker used to `return` here, and once lost the `return` and went
+        // on waking every `sweep_hours` for the life of the process to do
+        // nothing at all. A unit that is never armed cannot do that.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.retain_days = 0;
+        core.feedback.enabled = false;
+        assert!(
+            !periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == crate::store::jobs::Stage::Retention)
+        );
     }
 
     #[tokio::test]

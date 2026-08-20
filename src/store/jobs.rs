@@ -331,6 +331,63 @@ impl Store {
             .await
     }
 
+    /// Arm a periodic unit to run at `run_after`.
+    ///
+    /// What a self-rescheduling sweep does when it finishes: `run_after` is the
+    /// cursor recording when it last ran, and it is already indexed, so nothing
+    /// has to hold a clock and no meta key has to remember a period.
+    ///
+    /// Guarded on the row being closed, like every automatic arming: a sweep
+    /// already queued is already going to run, and pushing its `run_after` an
+    /// interval further out on every pass is how a sweep would recede forever.
+    pub async fn arm_periodic(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, 'pending', 0, ?, ?, 0, ?)
+             ON CONFLICT(stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = 0, run_after = excluded.run_after,
+               last_error = NULL, claimed_at = NULL,
+               created_at = excluded.created_at, class = excluded.class
+             WHERE jobs.state = 'done'",
+        )
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// This unit has just become worth running: let it go now.
+    ///
+    /// Two statements, because there are two cases and neither is the other's.
+    /// A unit sleeping on its own period has its `run_after` pulled forward —
+    /// and only that, so a sweep that keeps failing does not have its attempt
+    /// count wound back and reclaim the front of the queue every time something
+    /// arms it. A unit that is closed is armed outright.
+    ///
+    /// A unit a worker is already inside is left alone by both: it is running.
+    pub async fn arm_now(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE jobs SET run_after = 0
+              WHERE stage = ? AND target_id = ? AND state = 'pending' AND run_after > 0",
+        )
+        .bind(stage.as_str())
+        .bind(target_id)
+        .execute(&self.pool)
+        .await?;
+        self.rearm_idle_seq(stage, target_kind, target_id, 0).await
+    }
+
     /// The one upsert the three above differ only in the guard on.
     async fn upsert_job(
         &self,
