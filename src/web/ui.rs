@@ -4623,6 +4623,25 @@ mod tests {
     }
 
     #[test]
+    fn the_open_rail_card_keeps_a_line_of_itself() {
+        // The rail is the ranking as well as a list of links. A card
+        // collapsing to a bare stub when opened punched a hole in the ordering
+        // and lost the reader's place in it; the accent border and background
+        // were always what said which one was open.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            !css.contains(r#".rail-item[aria-selected="true"] .rail-snippet { display: none; }"#),
+            "the open card still erases its snippet"
+        );
+        // Demoted, not unreadable: 0.55 over the dark base is very likely
+        // under AA, and a result past the cliff is still a result.
+        assert!(
+            !css.contains(".rail-past { opacity: 0.55; }"),
+            "past-cliff results are still dimmed below the contrast floor"
+        );
+    }
+
+    #[test]
     fn every_page_anchors_to_the_same_left_edge() {
         // Three shell widths meant the content column moved under a brand that
         // did not, so navigating jolted — and on Search the query box lined up
