@@ -492,6 +492,14 @@ min_engagement = 3.0
 # one long ingest keeps night work off the workers for as long as it lasts.
 # The default is a guess; the sweep history on Ops is how you check it — a
 # sweep whose runs thin out says the guess is wrong.
+#
+# `0` does not switch ageing off, it makes every waiting unit old enough at
+# once: the two classes stop dividing anything and the queue behaves as it did
+# before priority existed. There is no way to switch ageing off, because a base
+# under constant capture with no ageing never runs its night work at all.
+#
+# At most twenty units are promoted per repair pass, so a backlog that built up
+# behind a slow endpoint cannot put itself in front of a capture all at once.
 age_after_mins = 60
 
 # ── The sitting ──────────────────────────────────────────────────────────────

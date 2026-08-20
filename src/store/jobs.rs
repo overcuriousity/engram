@@ -674,13 +674,26 @@ impl Store {
     /// A job that was never delayed has `run_after = 0`, so for everything that
     /// is not periodic the later stamp is `created_at` and this reads exactly as
     /// it did.
-    pub async fn age_background(&self, older_than: i64) -> Result<u64> {
+    /// At most `limit` rows move per call, oldest first. Background units
+    /// accumulate on their own — every `arm_dedupe` tick arms a batch of judge
+    /// units — and a slow judge endpoint leaves hundreds of them waiting past
+    /// the threshold. Promoting the whole backlog at once puts every one of
+    /// them ahead of a capture the operator has just pasted, since within a
+    /// class the order is `attempts, seq, id` and they were all armed first.
+    /// An aged unit going ahead of a fresh capture is the promise (§4.4) and
+    /// stays; the whole queue doing it at once is not.
+    pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE jobs SET class = 0
-              WHERE state = 'pending' AND class = 1
-                AND max(created_at, run_after) < ?",
+              WHERE id IN (
+                SELECT id FROM jobs
+                 WHERE state = 'pending' AND class = 1
+                   AND max(created_at, run_after) < ?
+                 ORDER BY max(created_at, run_after)
+                 LIMIT ?)",
         )
         .bind(older_than)
+        .bind(limit)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -828,7 +841,7 @@ mod tests {
             .await
             .unwrap();
 
-        let aged = s.age_background(now() - 3600).await.unwrap();
+        let aged = s.age_background(now() - 3600, 100).await.unwrap();
         assert_eq!(aged, 1);
 
         let first = s.claim_job().await.unwrap().unwrap();
@@ -842,6 +855,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(class, 0, "having aged must be durable, not recomputed");
+    }
+
+    #[tokio::test]
+    async fn only_so_many_units_may_age_on_one_pass() {
+        // Ageing lets a unit that has waited go ahead of a fresh capture, which
+        // is the promise. The whole backlog doing it at once is not: background
+        // units arm themselves — a judge endpoint that is slow for an hour
+        // leaves hundreds of them past the threshold — and within one class the
+        // order is `attempts, seq, id`, so every one of them was armed before
+        // the capture the operator just pasted and every one of them goes
+        // first. That is the head-of-line wait the class exists to end,
+        // arriving an hour late.
+        let s = Store::memory().await.unwrap();
+        for i in 0..5 {
+            s.enqueue(Stage::Relate, "artifact", &format!("a-{i}"))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'relate'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(s.age_background(now() - 3600, 2).await.unwrap(), 2);
+
+        let still: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE class = 1 AND stage = 'relate'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(still, 3, "the rest wait for the next pass");
+
+        // And they do get their turn.
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_oldest_units_age_first() {
+        // The cap is a cap on how many jump the queue, not a reason for the
+        // one that has waited longest to keep waiting.
+        let s = Store::memory().await.unwrap();
+        for i in 0..3 {
+            s.enqueue(Stage::Relate, "artifact", &format!("a-{i}"))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id = 'a-2'")
+            .bind(now() - 86_400)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id <> 'a-2'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(s.age_background(now() - 3600, 1).await.unwrap(), 1);
+
+        let aged: String =
+            sqlx::query_scalar("SELECT target_id FROM jobs WHERE class = 0 AND stage = 'relate'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(aged, "a-2", "the longest wait goes first");
     }
 
     #[tokio::test]
@@ -863,7 +942,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.age_background(now() - 3600).await.unwrap(),
+            s.age_background(now() - 3600, 100).await.unwrap(),
             0,
             "a unit that is not due yet has not been waiting"
         );
@@ -873,7 +952,7 @@ mod tests {
             .execute(&s.pool)
             .await
             .unwrap();
-        assert_eq!(s.age_background(now() - 3600).await.unwrap(), 1);
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -896,7 +975,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.age_background(now() - 3600).await.unwrap(),
+            s.age_background(now() - 3600, 100).await.unwrap(),
             0,
             "a sweep one minute past due has not waited an hour for a worker"
         );
@@ -907,7 +986,7 @@ mod tests {
             .execute(&s.pool)
             .await
             .unwrap();
-        assert_eq!(s.age_background(now() - 3600).await.unwrap(), 1);
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -931,7 +1010,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.age_background(now() - 3600).await.unwrap(),
+            s.age_background(now() - 3600, 100).await.unwrap(),
             0,
             "a unit that was just armed is not a unit that waited two hours"
         );

@@ -213,6 +213,18 @@ const REPAIR_INTERVAL_HOURS: u64 = 1;
 /// find, on almost every base, nothing.
 const STORE_DRIFT_INTERVAL_HOURS: u64 = 24;
 
+/// How many background units may be promoted on one repair tick.
+///
+/// A constant rather than a setting, and small on purpose. Ageing exists so
+/// that a unit which has waited goes ahead of a fresh capture (§4.4), and that
+/// stays true — but the queue fills on its own, and a slow judge endpoint can
+/// leave hundreds of units past the threshold at the same moment. Promoting
+/// all of them puts the whole backlog in front of something the operator just
+/// pasted, which is the head-of-line wait the class column exists to end.
+/// Twenty at a time keeps that wait bounded; the rest are still worked as
+/// background, and the next tick takes the next twenty.
+const AGE_PER_TICK: i64 = 20;
+
 /// Finish what a crash left half-done, now and every `REPAIR_INTERVAL_HOURS`,
 /// and compare the two stores every `STORE_DRIFT_INTERVAL_HOURS`.
 ///
@@ -308,8 +320,17 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // ordering costs the covering index — and here rather than on a sweep for
     // the reason everything else in this pass is here: it is what keeps the
     // schedule moving, so it cannot be scheduled by the thing it keeps moving.
-    let older_than = crate::store::now() - core.schedule.age_after_mins.max(0) * 60;
-    match core.store.age_background(older_than).await {
+    //
+    // Saturating for the same reason `periodic_period` is: `age_after_mins`
+    // comes out of `config.toml`, and a large enough value panics in debug and
+    // wraps in release, leaving an `older_than` that ages rows which have not
+    // waited at all. `0` is not a way to switch ageing off — it means every
+    // waiting unit is old enough, so the classes stop dividing anything, which
+    // is the behaviour from before the column existed. `config.example.toml`
+    // says so.
+    let older_than =
+        crate::store::now().saturating_sub(core.schedule.age_after_mins.max(0).saturating_mul(60));
+    match core.store.age_background(older_than, AGE_PER_TICK).await {
         Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
         Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
         _ => {}
