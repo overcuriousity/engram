@@ -250,7 +250,7 @@ the file — the loader warns if it finds one.
 | `infer.segment_tokens` | Window size when no synthesizer is configured. Default 4096. |
 | `infer.embed.chunk_tokens` | Passage size at `off`/`earned`. Default 384, clamped to the embedder. |
 | `infer.embed.*` | Embedding model: `base_url`, `model`, `dim`, `max_input_tokens`, `timeout_secs`, and the three prompt templates `query_template`, `document_template`, `document_template_untitled`. Defaults are EmbeddingGemma's; a symmetric model sets the three to `{text}` / `{title}\n{text}` / `{text}`. No tier — an embedding endpoint is a different shape of thing, not a cheaper model. |
-| `infer.ask.*` | Used only by `ask`: `tier`, `follow_up`, `follow_up_tier`. Any tier field may be overridden here. |
+| `infer.ask.*` | Used only by `ask`: `tier`, `plan`, `plan_tier`. Any tier field may be overridden here. |
 | `infer.rerank.*` | Optional. `style` is `tei`, `cohere` or `vllm`. Off by default. |
 | `infer.vision.*` | Optional. Reads captured images: `model`, `base_url`, `api_key`, `timeout_secs`, `max_output_tokens`, `ceiling_param`. `base_url` and `api_key` default to the synthesize role's, and `ceiling_param` is inherited with them. Off by default. |
 | `consolidate.*` | Duplicate hygiene: `enabled`, `near_dupe_min`, `review_min`, `auto_supersede`, `per_point`, `interval_hours`, `dedupe_interval_mins`, `max_dedupe_per_tick`. |
@@ -263,11 +263,14 @@ the file — the loader warns if it finds one.
 
 Eight worth knowing:
 
-- **`infer.ask.follow_up`** lets the model say once what it still needs and
-  retrieve a second time before answering. It costs one extra call per question
-  and ships **off**: a default here moves after the harness has run, not before.
-  `follow_up_tier` puts that call on a cheaper tier than the answer it feeds,
-  which is the whole reason tiers are named.
+- **`infer.ask.plan`** lets the model say once, after the first round, which
+  subjects the excerpts do not cover. Each becomes a search of its own, at most
+  three, all run at once and merged into one set of excerpts before it answers —
+  so a question spanning several subjects is retrieved for all of them rather
+  than answered from whichever one the single ranked list favoured. Never a
+  second plan, never a loop. It ships **on** and costs one extra call per
+  question; `plan_tier` puts that call on a cheaper tier than the answer it
+  feeds, which is the whole reason tiers are named.
 - **`tier` is required** on `infer.synthesize` and `infer.ask` when those
   tables are present. An endpoint is named once under `infer.tiers.<name>` and
   pointed at, so moving a role to another model is one word. At

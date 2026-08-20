@@ -9,15 +9,20 @@ use crate::core::search::SearchResult;
 /// blocking doors describing the same ask.
 #[derive(Debug, Clone)]
 pub enum AskEvent {
-    /// A retrieval round finished. `round` is 1, or 2 for the follow-up.
+    /// Retrieval finished. `round` is 1 for the question as it was asked, or 2
+    /// for the fanned-out rounds the plan named — however many of those there
+    /// were, they are packed once and reported once, because what the reader is
+    /// owed is what the model ends up seeing and there is one such list.
     Retrieved {
         round: u8,
         shown: usize,
         dropped: usize,
         cliff_at: Option<usize>,
     },
-    /// What the model said it still needed. Round 2 only.
-    Needs(String),
+    /// The subjects the model said were still missing, as the queries it named
+    /// for them. Round 2 only, and never empty — a plan with nothing in it is
+    /// not a round that happened.
+    Needs(Vec<String>),
     /// The excerpts the model will see. Emitted once, after the final
     /// retrieval and before the first token, so the rail is readable while the
     /// answer is still being written.

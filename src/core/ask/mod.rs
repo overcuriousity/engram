@@ -1,5 +1,5 @@
 pub mod check;
-mod follow_up;
+mod plan;
 mod retrieve;
 pub mod stream;
 
@@ -202,7 +202,7 @@ impl Core {
             }
 
             // Round one is over as far as anyone watching is concerned: what it
-            // retrieved is reported before the follow-up is asked anything, so a
+            // retrieved is reported before the planner is asked anything, so a
             // reader sees the first round land rather than a pause of unknown
             // cause.
             yield AskEvent::Retrieved {
@@ -212,98 +212,95 @@ impl Core {
                 cliff_at: first.cliff_at,
             };
 
-            // Exactly one extra round, and structurally so: one call site, no
-            // loop, and nothing downstream of here asks again. A second `Some`
-            // has nowhere to go — which is the point. "Let the model say once
-            // what it still needs" is the bounded version of a mechanism whose
-            // unbounded version is an agent, and an agent is not what this is.
+            // One plan, however many rounds it names, and structurally so: one
+            // call site, no loop, and nothing downstream of here plans again. A
+            // second plan has nowhere to go — which is the point. "Let the model
+            // say once what is missing" is the bounded version of a mechanism
+            // whose unbounded version is an agent, and an agent is not what this
+            // is.
             //
-            // `needed_query` returns `None` the moment no follow-up model is
+            // `needed_queries` returns empty the moment no planning model is
             // wired, so with the feature off this costs one `Option` check and
             // no call at all.
-            if let Some(need) = follow_up::needed_query(&core, &req.q, &blocks[..kept]).await {
-                yield AskEvent::Needs(need.clone());
-                match core.retrieve_round(&req, &need, false).await {
-                    Ok(second) => {
-                        // Round one's ranked hits, round two's, then every
-                        // neighbour either round reached — deduped by artifact.
-                        // The order is the packing priority, and a neighbour has
-                        // to stay the first thing the budget drops.
-                        let merged = retrieve::merge_rounds(hits.clone(), second.hits);
+            let queries = plan::needed_queries(&core, &req.q, &blocks[..kept]).await;
+            if !queries.is_empty() {
+                yield AskEvent::Needs(queries.clone());
 
-                        // Packed again over the whole merged list rather than
-                        // appended to what round one packed: the second round's
-                        // excerpts have to fit the same window as the first, and
-                        // the only honest way to know what fits is to pack it.
-                        let mut merged_blocks = core.excerpts(&merged.hits).await;
-                        let merged_kept =
-                            pack_by_budget(&merged_blocks, &core.counter, budget);
-                        core.stitch_passages(
-                            &merged.hits[..merged_kept],
-                            &mut merged_blocks[..merged_kept],
-                        )
-                        .await;
+                // Every planned query at once. They are independent searches
+                // against the same store, so running them in sequence would
+                // charge the reader one embedding round trip per subject for no
+                // reason. `PLAN_MAX_QUERIES` caps the plan and so caps this.
+                let extra = core.fan_out(&req, &queries).await;
 
-                        // A re-pack that fits nothing leaves round one standing.
-                        // The prompt cannot be empty because the follow-up found
-                        // nothing extra to say.
-                        if merged_kept > 0 {
-                            for id in second.retrieved {
-                                if !retrieved.contains(&id) {
-                                    retrieved.push(id);
-                                }
+                // Round one's hits are the first part, so round-robin starts
+                // with the question as it was actually asked.
+                let mut parts = vec![retrieve::Part::of(hits.clone(), ranked)];
+                let mut fanned_retrieved: Vec<String> = Vec::new();
+                for round in extra {
+                    fanned_retrieved.extend(round.retrieved);
+                    parts.push(retrieve::Part::of(round.hits, round.ranked));
+                }
+
+                // Nothing came back at all: every planned round failed. Round
+                // one still stands, and the page is told how the fan-out ended
+                // rather than left with "looking further…" on screen for the
+                // rest of the answer.
+                if parts.len() == 1 {
+                    tracing::warn!("ask: every planned round failed; answering from the first");
+                    yield AskEvent::Retrieved { round: 2, shown: kept, dropped, cliff_at: None };
+                } else {
+                    let merged = retrieve::merge(parts);
+
+                    // Packed again over the whole merged list rather than
+                    // appended to what round one packed: the fanned-out
+                    // excerpts have to fit the same window as the first, and
+                    // the only honest way to know what fits is to pack it.
+                    let mut merged_blocks = core.excerpts(&merged.hits).await;
+                    let merged_kept = pack_by_budget(&merged_blocks, &core.counter, budget);
+                    core.stitch_passages(
+                        &merged.hits[..merged_kept],
+                        &mut merged_blocks[..merged_kept],
+                    )
+                    .await;
+
+                    // A re-pack that fits nothing leaves round one standing.
+                    // The prompt cannot be empty because the fan-out found
+                    // nothing extra to say.
+                    if merged_kept > 0 {
+                        for id in fanned_retrieved {
+                            if !retrieved.contains(&id) {
+                                retrieved.push(id);
                             }
-                            hits = merged.hits;
-                            ranked = merged.ranked;
-                            blocks = merged_blocks;
-                            kept = merged_kept;
-                            dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
-                            // `shown` here can be *lower* than round one's,
-                            // and that is the priority working rather than a
-                            // regression: a hit round two asked for packs ahead
-                            // of round one's neighbours, so a window that held
-                            // three speculative excerpts may hold one hit
-                            // instead. Reporting the smaller number is honest —
-                            // those neighbours are no longer in the prompt.
-                            yield AskEvent::Retrieved {
-                                round: 2,
-                                shown: kept,
-                                dropped,
-                                cliff_at: second.cliff_at,
-                            };
-                        } else {
-                            tracing::info!("ask: the second round fit nothing the first had not");
-                            // Still reported, with round one's numbers. `Needs`
-                            // has already told the page a second search is
-                            // happening; ending without a matching `Retrieved`
-                            // would leave "looking further…" on screen for the
-                            // rest of the answer, describing something that
-                            // finished. A round that changed nothing is an
-                            // outcome, not an absence.
-                            yield AskEvent::Retrieved {
-                                round: 2,
-                                shown: kept,
-                                dropped,
-                                cliff_at: second.cliff_at,
-                            };
                         }
+                        hits = merged.hits;
+                        ranked = merged.ranked;
+                        blocks = merged_blocks;
+                        kept = merged_kept;
+                        dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
+                    } else {
+                        tracing::info!("ask: the fan-out fit nothing the first round had not");
                     }
-                    // A follow-up that fails must never fail the ask: the
-                    // operator asked a question, not for a retrieval strategy.
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "ask: the second retrieval failed; answering from the first"
-                        );
-                        // Same reasoning as above: the page was told to expect a
-                        // second round, so it is told how it ended.
-                        yield AskEvent::Retrieved {
-                            round: 2,
-                            shown: kept,
-                            dropped,
-                            cliff_at: None,
-                        };
-                    }
+
+                    // Reported either way, and with round one's numbers when
+                    // the re-pack changed nothing. `Needs` has already told the
+                    // page a wider search is happening; ending without a
+                    // matching `Retrieved` would leave "looking further…" on
+                    // screen describing something that finished. A fan-out that
+                    // changed nothing is an outcome, not an absence.
+                    //
+                    // `shown` here can be *lower* than round one's, and that is
+                    // the priority working rather than a regression: a hit a
+                    // planned round asked for packs ahead of round one's
+                    // neighbours, so a window that held three speculative
+                    // excerpts may hold one hit instead. Reporting the smaller
+                    // number is honest — those neighbours are no longer in the
+                    // prompt.
+                    //
+                    // No cliff. Each round cut at its own before it got here and
+                    // the merged list is several rankings interleaved, so there
+                    // is no one position in it where relevance fell off; naming
+                    // one would be inventing it.
+                    yield AskEvent::Retrieved { round: 2, shown: kept, dropped, cliff_at: None };
                 }
             }
 
@@ -400,17 +397,59 @@ impl Core {
         }
     }
 
+    /// Every planned query at once, in plan order.
+    ///
+    /// Concurrent because the rounds are independent searches against the same
+    /// store: run in sequence, a three-subject question would charge the reader
+    /// three embedding round trips end to end for work that shares nothing.
+    /// The width is bounded by `PLAN_MAX_QUERIES`, which is what the plan itself
+    /// is capped at — one number, so the fan-out can never run wider than the
+    /// plan can name.
+    ///
+    /// Awaited in the order they were spawned rather than as they finish,
+    /// because that order is the plan's, and the plan's order is what the merge
+    /// reads as priority. Completion order would make the packing priority a
+    /// race between endpoints.
+    ///
+    /// A round that fails is dropped with a warning and the rest stand. Failing
+    /// the ask because one of several extra searches failed would trade an
+    /// answer for a strictly better answer's absence — the operator asked a
+    /// question, not for a retrieval strategy.
+    async fn fan_out(&self, req: &AskRequest, queries: &[String]) -> Vec<Round> {
+        let spawned: Vec<_> = queries
+            .iter()
+            .map(|q| {
+                let (core, req, q) = (self.clone(), req.clone(), q.clone());
+                tokio::spawn(async move { core.retrieve_round(&req, &q, false).await })
+            })
+            .collect();
+
+        let mut out = Vec::with_capacity(spawned.len());
+        for (task, q) in spawned.into_iter().zip(queries) {
+            match task.await {
+                Ok(Ok(round)) => out.push(round),
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, query = %q, "ask: a planned round failed")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, query = %q, "ask: a planned round never finished")
+                }
+            }
+        }
+        out
+    }
+
     /// One retrieval round: search, cut at the cliff, reach sideways.
     ///
-    /// Both rounds come through here, so the second one is retrieved on exactly
-    /// the terms the first was. A second copy of this path would be a second
-    /// definition of what an excerpt is allowed to be, and the round that used
-    /// the stale copy would be the one nobody was watching.
+    /// Every round comes through here, so a planned one is retrieved on exactly
+    /// the terms the verbatim question was. A second copy of this path would be
+    /// a second definition of what an excerpt is allowed to be, and the round
+    /// that used the stale copy would be the one nobody was watching.
     ///
-    /// `deliberate` is false for the follow-up: marking a search is a claim
-    /// that a person meant it, and the follow-up query is one the model wrote.
-    /// Letting it mark would have the base's activation shaped by its own
-    /// guesses about what it needs.
+    /// `deliberate` is false for every planned round: marking a search is a
+    /// claim that a person meant it, and a planned query is one the model
+    /// wrote. Letting it mark would have the base's activation shaped by the
+    /// model's own guesses about what it needs.
     async fn retrieve_round(&self, req: &AskRequest, q: &str, deliberate: bool) -> Result<Round> {
         // No per-source cap: an answer often lives in one document, and
         // withholding its paragraphs to keep the citation list varied would
@@ -1012,20 +1051,18 @@ mod tests {
         }
     }
 
-    /// A seeded core whose follow-up model answers `reply`, plus the handle to
-    /// count what it was asked. `None` is the shipped default: no follow-up
-    /// model at all.
-    async fn core_with_follow_up(reply: Option<&str>) -> (Core, std::sync::Arc<Counting>) {
+    /// A seeded core whose planning model answers `reply`, plus the handle to
+    /// count what it was asked. `None` wires no planner at all.
+    async fn core_with_planner(reply: Option<&str>) -> (Core, std::sync::Arc<Counting>) {
         let mut core = test_core().await;
         let model = Counting::saying(reply.unwrap_or_default());
-        core.follow_up =
-            reply.map(|_| model.clone() as std::sync::Arc<dyn crate::infer::Completer>);
+        core.planner = reply.map(|_| model.clone() as std::sync::Arc<dyn crate::infer::Completer>);
         seed(&core, 3, 4).await;
         (core, model)
     }
 
-    /// Every `Retrieved` round and every `Needs`, in the order they were
-    /// emitted.
+    /// Every `Retrieved` round and every query any `Needs` named, in the order
+    /// they were emitted.
     async fn rounds_and_needs(core: &Core) -> (Vec<u8>, Vec<String>) {
         let (mut rounds, mut needs) = (vec![], vec![]);
         let s = core.ask_events(&req("chunk"), Door::Api);
@@ -1033,72 +1070,93 @@ mod tests {
         while let Some(ev) = s.next().await {
             match ev.unwrap() {
                 AskEvent::Retrieved { round, .. } => rounds.push(round),
-                AskEvent::Needs(q) => needs.push(q),
+                AskEvent::Needs(queries) => needs.extend(queries),
                 _ => {}
             }
         }
         (rounds, needs)
     }
 
-    /// Off by default, and "off" must mean no call at all — asserted on a
-    /// counting fake rather than inferred from the answer looking the same.
+    /// "Off" must mean no call at all — asserted on a counting fake rather than
+    /// inferred from the answer looking the same.
     ///
     /// The counting model is the *answer* model here, which is the tempting
-    /// wrong implementation: `follow_up_tier` falls back to the ask role's own
+    /// wrong implementation: `plan_tier` falls back to the ask role's own
     /// endpoint, and a fallback read at call time rather than at config time
     /// would spend an ask-endpoint call on every question with the feature
     /// switched off.
     #[tokio::test]
-    async fn follow_up_off_makes_no_extra_call() {
+    async fn planning_off_makes_no_extra_call() {
         let mut core = test_core().await;
         let model = Counting::saying("fake answer");
         core.completer = Some(model.clone());
         seed(&core, 3, 4).await;
-        assert!(core.follow_up.is_none(), "the default wired a follow-up");
+        assert!(core.planner.is_none(), "the test core wired a planner");
 
         core.ask(&req("chunk"), Door::Api).await.unwrap();
 
         assert_eq!(
             model.calls(),
             1,
-            "with the follow-up off, the only model call is the answer"
+            "with planning off, the only model call is the answer"
         );
     }
 
     /// On, and the model says it has enough: still exactly one retrieval.
     #[tokio::test]
-    async fn a_null_need_skips_the_second_retrieval() {
-        let (core, model) = core_with_follow_up(Some(r#"{"need": null}"#)).await;
+    async fn an_empty_plan_skips_the_fan_out() {
+        let (core, model) = core_with_planner(Some(r#"{"need": []}"#)).await;
         let (rounds, needs) = rounds_and_needs(&core).await;
         assert_eq!(rounds, vec![1]);
         assert!(needs.is_empty(), "nothing was needed, so nothing was said");
         assert_eq!(model.calls(), 1, "asked once, and once is the whole budget");
     }
 
-    /// On, and the model names something: exactly two retrievals and never
-    /// three. Bounded means bounded — and this fake answers with a need every
-    /// time it is asked, so a loop would run until the base ran out of
-    /// patience rather than stopping itself.
+    /// On, and the model names something: one fan-out and never a second.
+    /// Bounded means bounded — and this fake answers with a need every time it
+    /// is asked, so a loop would run until the base ran out of patience rather
+    /// than stopping itself.
     #[tokio::test]
-    async fn a_named_need_retrieves_exactly_once_more_and_never_twice() {
-        let (core, model) = core_with_follow_up(Some(r#"{"need": "ticker interval"}"#)).await;
+    async fn a_plan_is_asked_for_once_and_never_planned_again() {
+        let (core, model) = core_with_planner(Some(r#"{"need": ["ticker interval"]}"#)).await;
         let (rounds, needs) = rounds_and_needs(&core).await;
-        assert_eq!(rounds, vec![1, 2], "exactly one extra round, never a loop");
+        assert_eq!(rounds, vec![1, 2], "exactly one fan-out, never a loop");
         assert_eq!(needs, vec!["ticker interval".to_string()]);
         assert_eq!(
             model.calls(),
             1,
-            "a second round that asks again is a third round waiting to happen"
+            "a plan that plans again is a third round waiting to happen"
         );
     }
 
-    /// The excerpts the model sees are one list, not two concatenated: an
-    /// artifact already in front of it is a wasted excerpt, not a stronger one.
-    /// Both rounds retrieve the same small base here, so everything the second
-    /// one found is a duplicate of something the first did.
+    /// A plan naming several subjects is one round of retrieval per subject and
+    /// still one plan. The cap belongs to the parser, so a model that names
+    /// more subjects than the fan-out may run cannot widen it from the wire.
     #[tokio::test]
-    async fn the_second_round_merges_deduped_by_artifact() {
-        let (core, _) = core_with_follow_up(Some(r#"{"need": "filler"}"#)).await;
+    async fn a_plan_naming_several_subjects_fans_out_to_all_of_them_at_once() {
+        let (core, model) =
+            core_with_planner(Some(r#"{"need": ["one", "two", "three", "four"]}"#)).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(
+            rounds,
+            vec![1, 2],
+            "the fan-out is reported once, not per query"
+        );
+        assert_eq!(
+            needs,
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            "the plan ran wider than `PLAN_MAX_QUERIES` allows"
+        );
+        assert_eq!(model.calls(), 1);
+    }
+
+    /// The excerpts the model sees are one list, not several concatenated: an
+    /// artifact already in front of it is a wasted excerpt, not a stronger one.
+    /// Every round retrieves the same small base here, so everything the
+    /// planned ones found is a duplicate of something the first did.
+    #[tokio::test]
+    async fn the_fan_out_merges_deduped_by_artifact() {
+        let (core, _) = core_with_planner(Some(r#"{"need": ["filler", "chunk filler"]}"#)).await;
         let out = core.ask(&req("chunk"), Door::Api).await.unwrap();
         let mut ids: Vec<&str> = out
             .citations
@@ -1112,12 +1170,12 @@ mod tests {
     }
 
     /// The prompt forbids repeating the question back; nothing but this
-    /// enforces it. An echo is a search whose results round one already holds,
-    /// followed by a re-pack that can take round-one neighbours out of the
+    /// enforces it. An echo is a search whose results the first round already
+    /// holds, followed by a re-pack that can take its neighbours out of the
     /// prompt in exchange for nothing.
     #[tokio::test]
-    async fn a_need_that_is_the_question_back_is_not_worth_a_second_round() {
-        let (core, model) = core_with_follow_up(Some(r#"{"need": "CHUNK "}"#)).await;
+    async fn a_planned_query_that_is_the_question_back_is_not_worth_a_round() {
+        let (core, model) = core_with_planner(Some(r#"{"need": ["CHUNK "]}"#)).await;
         let (rounds, needs) = rounds_and_needs(&core).await;
         assert_eq!(rounds, vec![1], "the question was searched for twice");
         assert!(needs.is_empty());
@@ -1126,6 +1184,17 @@ mod tests {
             1,
             "the call still happened; only its answer was refused"
         );
+    }
+
+    /// One echoed query beside a useful one is one useful round. Refusing the
+    /// whole plan over its first entry would throw away retrieval the model
+    /// asked for and was right to ask for.
+    #[tokio::test]
+    async fn an_echoed_query_is_dropped_without_taking_the_rest_of_the_plan_with_it() {
+        let (core, _) = core_with_planner(Some(r#"{"need": ["chunk", "filler"]}"#)).await;
+        let (rounds, needs) = rounds_and_needs(&core).await;
+        assert_eq!(rounds, vec![1, 2], "the surviving query never ran");
+        assert_eq!(needs, vec!["filler".to_string()]);
     }
 
     /// Embeds on one word each way, so two queries can retrieve two disjoint
@@ -1146,9 +1215,10 @@ mod tests {
                     let mut v = vec![0f32; crate::core::test_support::TEST_DIM];
                     v[0] = t.contains("alpha") as u8 as f32;
                     v[1] = t.contains("beta") as u8 as f32;
+                    v[2] = t.contains("gamma") as u8 as f32;
                     // Never the zero vector: a cosine against nothing is not a
                     // ranking, it is a division the store would have to guess at.
-                    v[2] = (v[0] == 0.0 && v[1] == 0.0) as u8 as f32;
+                    v[3] = (v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0) as u8 as f32;
                     v
                 })
                 .collect())
@@ -1169,19 +1239,16 @@ mod tests {
         }
     }
 
-    /// One corpus, three `alpha` artifacts then three `beta` ones, adjacent in
-    /// that order — so a search for one term ranks three, the cliff cuts the
-    /// other three, and the reach sideways from the last hit pulls exactly one
-    /// `beta` neighbour in.
-    async fn seed_two_topics(core: &Core) {
+    /// One corpus of `topics.len()` × 3 artifacts, each topic's three adjacent
+    /// and the topics in the order given — so a search for one term ranks that
+    /// topic's three, the cliff cuts the rest, and the reach sideways from the
+    /// last hit pulls in a neighbour from whatever follows.
+    async fn seed_topics(core: &Core, topics: &[&str]) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let new: Vec<NewArtifact> = (0..6)
+        let new: Vec<NewArtifact> = (0..topics.len() as i64 * 3)
             .map(|i| NewArtifact {
                 ordinal: i,
-                text: match i < 3 {
-                    true => format!("alpha topic {i} filler filler"),
-                    false => format!("beta topic {i} filler filler"),
-                },
+                text: format!("{} topic {i} filler filler", topics[i as usize / 3]),
                 corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("reference".into()),
@@ -1200,21 +1267,21 @@ mod tests {
     ///
     /// Round one ranks the three `alpha` artifacts, the cliff cuts the three
     /// `beta` ones, and adjacency reaches exactly one of them back as a
-    /// neighbour. The model then asks for `beta`, and round two ranks all
+    /// neighbour. The plan then asks for `beta`, and that round ranks all
     /// three — including the one round one had only reached.
     ///
     /// `dropped` is the assertion that matters. Every artifact retrieved is in
     /// front of the model by the end, so nothing was dropped; a merge that let
-    /// round one's `via` keep the promoted artifact in the speculative tail
-    /// would leave it below the seam, counted as a hit the ranking lost while
-    /// it sat in the prompt — and packed as the first thing a tighter window
-    /// would throw away.
+    /// round one's `via` keep that artifact in the speculative tail would leave
+    /// it below the seam, counted as a hit the ranking lost while it sat in the
+    /// prompt — and packed as the first thing a tighter window would throw
+    /// away.
     #[tokio::test]
-    async fn a_second_round_shows_what_the_first_rounds_cliff_cut() {
+    async fn a_planned_round_shows_what_the_first_rounds_cliff_cut() {
         let mut core = test_core().await;
         core.embedder = std::sync::Arc::new(Keyed);
-        core.follow_up = Some(Counting::saying(r#"{"need": "beta"}"#));
-        seed_two_topics(&core).await;
+        core.planner = Some(Counting::saying(r#"{"need": ["beta"]}"#));
+        seed_topics(&core, &["alpha", "beta"]).await;
 
         let (mut rounds, mut shown) = (vec![], vec![]);
         let s = core.ask_events(&req("alpha"), Door::Api);
@@ -1231,7 +1298,7 @@ mod tests {
         assert_eq!(rounds, vec![1, 2]);
         assert!(
             shown[0] < 6,
-            "round one already had everything, so round two proves nothing: {shown:?}"
+            "round one already had everything, so the fan-out proves nothing: {shown:?}"
         );
 
         let out = core.ask(&req("alpha"), Door::Api).await.unwrap();
@@ -1240,23 +1307,74 @@ mod tests {
             .iter()
             .map(|c| c.artifact_id.as_str())
             .collect();
-        assert_eq!(ids.len(), 6, "the second round did not add its half");
+        assert_eq!(ids.len(), 6, "the planned round did not add its half");
         assert_eq!(
             out.dropped, 0,
             "an artifact the model was shown was reported missing"
         );
     }
 
-    /// A follow-up that fails must never fail the ask: the operator asked a
-    /// question, not for a retrieval strategy.
+    /// The reason the fan-out exists, end to end. A question whose subject the
+    /// base holds three separate halves of: round one ranks `alpha`, the cliff
+    /// cuts `beta` and `gamma`, and one plan names both of them. Two rounds run
+    /// at once and their hits interleave, so the model ends up seeing all three
+    /// subjects rather than whichever one the single ranked list favoured.
+    ///
+    /// A `Some(query)` follow-up could only ever have recovered one of the two.
     #[tokio::test]
-    async fn a_failed_follow_up_leaves_the_ask_a_single_round() {
+    async fn a_plan_naming_two_subjects_puts_both_of_them_in_front_of_the_model() {
+        let mut core = test_core().await;
+        core.embedder = std::sync::Arc::new(Keyed);
+        core.planner = Some(Counting::saying(r#"{"need": ["beta", "gamma"]}"#));
+        seed_topics(&core, &["alpha", "beta", "gamma"]).await;
+
+        let out = core.ask(&req("alpha"), Door::Api).await.unwrap();
+        let seen: String = out.citations.iter().map(|c| c.text.as_str()).collect();
+        for topic in ["alpha", "beta", "gamma"] {
+            assert!(
+                seen.contains(topic),
+                "the fan-out left `{topic}` out of the prompt"
+            );
+        }
+        assert_eq!(
+            out.dropped, 0,
+            "an artifact a planned round retrieved was reported missing"
+        );
+    }
+
+    /// One planned round failing does not take the others with it: the fan-out
+    /// returns what came back and the ask answers from it. Failing the whole
+    /// question because one of several extra searches failed would trade an
+    /// answer for a strictly better answer's absence.
+    ///
+    /// Driven through `fan_out` rather than through a plan, because the empty
+    /// query that makes `search_with` fail is one `parse_plan` drops before it
+    /// ever reaches a round — going in through the planner would assert nothing
+    /// but the parser's filtering.
+    #[tokio::test]
+    async fn a_planned_round_that_fails_leaves_the_rest_of_the_fan_out_standing() {
+        let mut core = test_core().await;
+        core.embedder = std::sync::Arc::new(Keyed);
+        seed_topics(&core, &["alpha", "beta"]).await;
+
+        let queries = ["".to_string(), "beta".to_string()];
+        let rounds = core.fan_out(&req("alpha"), &queries).await;
+
+        assert_eq!(rounds.len(), 1, "the failure took the good round with it");
+        let seen: String = rounds[0].hits.iter().map(|h| h.text.as_str()).collect();
+        assert!(seen.contains("beta"), "the wrong round survived");
+    }
+
+    /// A planning call that fails must never fail the ask: the operator asked
+    /// a question, not for a retrieval strategy.
+    #[tokio::test]
+    async fn a_failed_plan_leaves_the_ask_a_single_round() {
         struct Failing;
         #[async_trait::async_trait]
         impl crate::infer::Completer for Failing {
             async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
                 Err(Error::Inference {
-                    role: "follow_up",
+                    role: "plan",
                     detail: "the endpoint is loading".into(),
                 })
             }
@@ -1268,7 +1386,7 @@ mod tests {
             }
         }
         let mut core = test_core().await;
-        core.follow_up = Some(std::sync::Arc::new(Failing));
+        core.planner = Some(std::sync::Arc::new(Failing));
         seed(&core, 3, 4).await;
 
         let (rounds, needs) = rounds_and_needs(&core).await;
@@ -1277,15 +1395,15 @@ mod tests {
         assert_eq!(
             core.ask(&req("chunk"), Door::Api).await.unwrap().answer,
             "fake answer",
-            "a failed follow-up cost the answer that was already retrievable"
+            "a failed plan cost the answer that was already retrievable"
         );
     }
 
-    /// Prose where JSON was asked for means "no second round" rather than
-    /// "search for whatever that was".
+    /// Prose where JSON was asked for means "no fan-out" rather than "search
+    /// for whatever that was".
     #[tokio::test]
-    async fn an_unparsable_follow_up_leaves_the_ask_a_single_round() {
-        let (core, _) = core_with_follow_up(Some("I would look for the ticker interval")).await;
+    async fn an_unparsable_plan_leaves_the_ask_a_single_round() {
+        let (core, _) = core_with_planner(Some("I would look for the ticker interval")).await;
         let (rounds, needs) = rounds_and_needs(&core).await;
         assert_eq!(rounds, vec![1]);
         assert!(needs.is_empty());

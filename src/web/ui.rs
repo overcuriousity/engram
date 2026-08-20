@@ -2467,7 +2467,9 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
                 "cliff_at": cliff_at,
             }),
         ),
-        Needs(what) => ("needs", serde_json::json!({ "text": what })),
+        // A list rather than a string: the page joins it, so the separator is
+        // one decision made where the sentence is written rather than here.
+        Needs(what) => ("needs", serde_json::json!({ "queries": what })),
         Citations(hits) => (
             "citations",
             serde_json::json!({ "rail": rail_fragment(hits)? }),
@@ -6960,12 +6962,12 @@ mod tests {
 
     /// The driver listens for every frame the server sends.
     ///
-    /// A frame nobody handles fails silently and only for whoever turned the
-    /// feature on: `follow_up` ships off, so the second round's frames never
-    /// fire on a default install, and an ask page that drops them would look
-    /// perfect right up until the first operator enabled it. The names are
-    /// pulled from `sse_event`'s own source rather than listed here, so adding
-    /// an event without a handler fails this test instead of shipping.
+    /// A frame nobody handles fails silently and only on the asks that send it:
+    /// the fan-out's frames fire only when a plan named something, so an ask
+    /// page that drops them would look perfect on every question the base
+    /// already covered. The names are pulled from `sse_event`'s own source
+    /// rather than listed here, so adding an event without a handler fails this
+    /// test instead of shipping.
     #[tokio::test]
     async fn the_stream_driver_handles_every_event_the_server_names() {
         let ui = include_str!("ui.rs");
