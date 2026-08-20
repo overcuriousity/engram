@@ -24,7 +24,10 @@ pub struct SweepReport {
 }
 
 pub async fn sweep(core: &Core) -> Result<SweepReport> {
-    let open = core.store.open_gaps(core.embedder.model()).await?;
+    let open = core
+        .store
+        .open_gaps(core.embedder.model(), core.weak_below)
+        .await?;
     // Measured from the base's own recorded queries rather than taken from the
     // constant, and only when there is something to group: `link_threshold`
     // reads a sample of every stored query vector, which is work worth nothing
@@ -202,7 +205,11 @@ mod tests {
             },
             "the lone 'FAT entries' gap is not a group and costs no call"
         );
-        let (rows, loose) = core.store.gap_rows(core.embedder.model()).await.unwrap();
+        let (rows, loose) = core
+            .store
+            .gap_rows(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].members.len(), 3);
         assert!(rows[0].label == "Fake topic" && rows[0].labelled_by == "model");
@@ -229,7 +236,11 @@ mod tests {
         nothing_here(&core, "mount an E01", vec![1.0, 0.0]).await;
         nothing_here(&core, "FAT entries", vec![0.0, 1.0]).await;
         assert_eq!(sweep(&core).await.unwrap(), SweepReport::default());
-        let (rows, loose) = core.store.gap_rows(core.embedder.model()).await.unwrap();
+        let (rows, loose) = core
+            .store
+            .gap_rows(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
         assert!(rows.is_empty());
         assert_eq!(loose.len(), 2);
     }
@@ -244,7 +255,11 @@ mod tests {
         nothing_here(&core, "E01 mount read only", vec![1.0]).await;
         let r = sweep(&core).await.unwrap();
         assert_eq!((r.clusters, r.named), (1, 0));
-        let (rows, _) = core.store.gap_rows(core.embedder.model()).await.unwrap();
+        let (rows, _) = core
+            .store
+            .gap_rows(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
         assert_eq!(rows[0].labelled_by, "terms");
         assert!(rows[0].label.contains("e01"), "{}", rows[0].label);
 
@@ -253,7 +268,12 @@ mod tests {
         }));
         assert_eq!(sweep(&core).await.unwrap().named, 1);
         assert_eq!(
-            core.store.gap_rows(core.embedder.model()).await.unwrap().0[0].label,
+            core.store
+                .gap_rows(core.embedder.model(), core.weak_below)
+                .await
+                .unwrap()
+                .0[0]
+                .label,
             "Image mounting"
         );
     }
@@ -319,7 +339,7 @@ mod tests {
         let after = sweep(&core).await.unwrap();
         assert!(
             core.store
-                .open_gaps(core.embedder.model())
+                .open_gaps(core.embedder.model(), core.weak_below)
                 .await
                 .unwrap()
                 .capped,
@@ -332,7 +352,11 @@ mod tests {
             "the key this pass replaced was kept alongside the one that replaced it"
         );
 
-        let (rows, _) = core.store.gap_rows(core.embedder.model()).await.unwrap();
+        let (rows, _) = core
+            .store
+            .gap_rows(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
         let mut seen = std::collections::HashSet::new();
         for r in &rows {
             for m in &r.members {

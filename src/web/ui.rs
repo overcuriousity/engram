@@ -939,7 +939,11 @@ async fn capture_page(
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
     let (gaps, loose) = if st.core.feedback.enabled {
-        let (rows, loose) = st.core.store.gap_rows(st.core.embedder.model()).await?;
+        let (rows, loose) = st
+            .core
+            .store
+            .gap_rows(st.core.embedder.model(), st.core.weak_below)
+            .await?;
         (
             rows.into_iter()
                 .map(|r| GapGroup {

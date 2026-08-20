@@ -10,6 +10,20 @@ use sqlx::Row;
 pub enum GapKind {
     Ask,
     Search,
+    /// A recorded search where nothing came close: every candidate's similarity
+    /// under `vector.weak_below`, which is what the rail was already saying at
+    /// the time in as many words.
+    ///
+    /// Distance rather than behaviour. The first draft of this counted a search
+    /// after which nothing was opened, and that was wrong twice over: not
+    /// clicking a result can mean the list was useless or that the titles alone
+    /// told the operator what they needed, and the two readings are opposite;
+    /// and an open is only recorded when pursuits *and* feedback are on, so on
+    /// most installs every search in the log looks abandoned. A distance needs
+    /// no interaction data, works whatever else is switched on, and can be
+    /// computed over the existing log retroactively. It is also the more honest
+    /// claim: not *you gave up*, but *the base held nothing near this*.
+    Unmatched,
 }
 
 impl GapKind {
@@ -17,12 +31,14 @@ impl GapKind {
         match self {
             GapKind::Ask => "ask",
             GapKind::Search => "search",
+            GapKind::Unmatched => "unmatched",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "ask" => Some(GapKind::Ask),
             "search" => Some(GapKind::Search),
+            "unmatched" => Some(GapKind::Unmatched),
             _ => None,
         }
     }
@@ -139,6 +155,36 @@ macro_rules! search_gaps_sql {
     };
 }
 
+/// A search nothing came close to answering.
+///
+/// The similarity is not a column on `search_events` — it is on the candidate
+/// rows, one per result — so the test is an aggregate rather than a read.
+/// `MAX(...)` over no rows is `NULL`, and `NULL < ?` is not true, so a search
+/// that recorded no candidates is *not* a gap. That looks like an oversight and
+/// is not one: "nothing came close" is a claim about what was measured, and
+/// nothing was.
+///
+/// A search already judged `gap` is left out, or it would be two gaps: the same
+/// row, said twice, in two different words.
+///
+/// The guard this needs already exists. A typing burst folds into one event by
+/// `feedback.coalesce_secs`, so what is measured is the finished query and not
+/// its first two letters.
+macro_rules! unmatched_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT e.id, e.query AS text",
+            $cols,
+            " FROM search_events e
+              WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
+                AND (e.verdict IS NULL OR e.verdict <> 'gap')
+                AND (SELECT MAX(c.similarity) FROM search_candidates c
+                      WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?
+              ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
+        )
+    };
+}
+
 /// How many stored query vectors the linkage calibration reads, per table.
 ///
 /// Every recorded search and question counts, not only the gaps: what
@@ -160,7 +206,7 @@ impl Store {
     /// order to `gap_label_prompt`, which keeps the first twelve. A group with a
     /// dozen questions in it named itself from those and never saw a search gap,
     /// however recent.
-    pub async fn open_gaps(&self, embed_model: &str) -> Result<OpenGaps> {
+    pub async fn open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<OpenGaps> {
         // `(judged_at, GapVec)`: the sort key is not part of what the caller
         // gets, only of the order it gets it in.
         let mut out: Vec<(i64, GapVec)> = Vec::new();
@@ -212,7 +258,31 @@ impl Store {
         let searches_capped = (out.len() - asks) as i64 > MAX_OPEN_GAPS;
         out.truncate(asks + MAX_OPEN_GAPS as usize);
         let searches = out.len() - asks;
-        let capped = asks_capped || searches_capped;
+        for r in sqlx::query(unmatched_gaps_sql!(
+            ", e.query_vec, e.created_at AS judged_at"
+        ))
+        .bind(embed_model)
+        .bind(weak_below)
+        .bind(MAX_OPEN_GAPS + 1)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            out.push((
+                r.get("judged_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Unmatched,
+                        id: r.get("id"),
+                        text: r.get("text"),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
+        }
+        let unmatched_capped = (out.len() - asks - searches) as i64 > MAX_OPEN_GAPS;
+        out.truncate(asks + searches + MAX_OPEN_GAPS as usize);
+        let unmatched = out.len() - asks - searches;
+        let capped = asks_capped || searches_capped || unmatched_capped;
         // The same key each half was already read by, applied across both:
         // whole-second `judged_at`, ties broken by a uuid v7 id, so a second's
         // worth of gaps is still ordered by when they were recorded.
@@ -223,6 +293,7 @@ impl Store {
                 cap = MAX_OPEN_GAPS,
                 asks,
                 searches,
+                unmatched,
                 "more open gaps than one pass reads; the oldest are left out of this one"
             );
         }
@@ -234,7 +305,7 @@ impl Store {
     /// The page shows a gap's words, its kind and its id and nothing else, and
     /// it is the page the app opens on. Reading the vectors for it decoded four
     /// million floats per load to throw all of them away.
-    pub async fn open_gap_refs(&self, embed_model: &str) -> Result<Vec<Gap>> {
+    pub async fn open_gap_refs(&self, embed_model: &str, weak_below: f32) -> Result<Vec<Gap>> {
         let mut out = Vec::new();
         for (sql, kind) in [
             (ask_gaps_sql!(""), GapKind::Ask),
@@ -252,6 +323,21 @@ impl Store {
                     text: r.get("text"),
                 });
             }
+        }
+        // One more bind than the other two, so it is read on its own rather
+        // than joining the loop above.
+        for r in sqlx::query(unmatched_gaps_sql!(""))
+            .bind(embed_model)
+            .bind(weak_below)
+            .bind(MAX_OPEN_GAPS)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            out.push(Gap {
+                kind: GapKind::Unmatched,
+                id: r.get("id"),
+                text: r.get("text"),
+            });
         }
         Ok(out)
     }
@@ -294,7 +380,11 @@ impl Store {
                     .execute(&self.pool)
                     .await?
             }
-            GapKind::Search => {
+            // The same column `Search` writes, and correctly so: it is the same
+            // row, dismissed for the same reason. A search dismissed as
+            // unmatched is not offered again if it is later judged a gap
+            // either — the operator has already said this one is answered.
+            GapKind::Search | GapKind::Unmatched => {
                 sqlx::query("UPDATE search_events SET dismissed_at = ? WHERE id = ?")
                     .bind(now())
                     .bind(id)
@@ -375,8 +465,12 @@ impl Store {
     /// cluster names yet (judged since the last sweep). A member that has been
     /// dismissed since the sweep is simply absent from its row; a row left with
     /// no members is not returned.
-    pub async fn gap_rows(&self, embed_model: &str) -> Result<(Vec<GapRow>, Vec<Gap>)> {
-        let open = self.open_gap_refs(embed_model).await?;
+    pub async fn gap_rows(
+        &self,
+        embed_model: &str,
+        weak_below: f32,
+    ) -> Result<(Vec<GapRow>, Vec<Gap>)> {
+        let open = self.open_gap_refs(embed_model, weak_below).await?;
         // Indexed once, not scanned per member. Resolving with a linear `find`
         // and then a `retain` over the whole list cost two passes over every
         // open gap for every member of every cluster — a million moves at the
@@ -471,6 +565,99 @@ mod tests {
         id
     }
 
+    /// A recorded search with candidates at the given similarities. No verdict:
+    /// nobody judged it, which is the case `Unmatched` exists for.
+    async fn search_with(store: &Store, q: &str, sims: &[f32]) -> String {
+        store
+            .record_search(
+                NewEvent {
+                    query: q.into(),
+                    door: Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0],
+                    embed_model: "fake".into(),
+                    candidates: sims
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| crate::store::feedback::NewCandidate {
+                            artifact_id: format!("a-{i}"),
+                            score: *s,
+                            similarity: Some(*s),
+                            shown: true,
+                        })
+                        .collect(),
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_search_nothing_came_close_to_is_a_gap() {
+        let store = Store::memory().await.unwrap();
+        let far = search_with(&store, "mount an E01", &[0.20, 0.11]).await;
+        // One hit above the line is enough: something came close, and the base
+        // is not being asked about a hole.
+        search_with(&store, "grep a pcap", &[0.51, 0.10]).await;
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+
+        let unmatched: Vec<&str> = gaps
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Unmatched)
+            .map(|g| g.gap.id.as_str())
+            .collect();
+        assert_eq!(unmatched, vec![far.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn a_search_that_measured_nothing_is_not_a_gap() {
+        // `MAX(...)` over no candidate rows is NULL, and NULL is not under the
+        // line. "Nothing came close" is a claim about what was measured.
+        let store = Store::memory().await.unwrap();
+        search_with(&store, "mount an E01", &[]).await;
+
+        assert!(
+            store
+                .open_gaps("fake", 0.35)
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .all(|g| g.gap.kind != GapKind::Unmatched)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_judged_a_gap_is_not_also_an_unmatched_one() {
+        // The same row, said twice, in two different words.
+        let store = Store::memory().await.unwrap();
+        let id = search_with(&store, "mount an E01", &[0.10]).await;
+        store.judge(&id, Verdict::Gap).await.unwrap();
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        let mine: Vec<GapKind> = gaps
+            .iter()
+            .filter(|g| g.gap.id == id)
+            .map(|g| g.gap.kind)
+            .collect();
+        assert_eq!(mine, vec![GapKind::Search]);
+    }
+
+    #[tokio::test]
+    async fn dismissing_an_unmatched_search_closes_it() {
+        let store = Store::memory().await.unwrap();
+        let id = search_with(&store, "mount an E01", &[0.10]).await;
+        assert!(!store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
+
+        store.dismiss_gap(GapKind::Unmatched, &id).await.unwrap();
+
+        assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
+    }
+
     #[tokio::test]
     async fn open_gaps_are_the_unanswered_questions_and_the_gap_searches_under_this_model() {
         let store = Store::memory().await.unwrap();
@@ -494,7 +681,7 @@ mod tests {
             .unwrap();
         store.judge_ask(&right, AskVerdict::Right).await.unwrap();
         nothing_here(&store, "no vector", vec![]).await;
-        let gaps = store.open_gaps("fake").await.unwrap().gaps;
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
         // Newest first across both kinds. Judged inside the same second, so the
         // uuid v7 ids break the tie — and being time-ordered they break it the
         // same way the stamps would have: the search was recorded second.
@@ -508,7 +695,7 @@ mod tests {
         );
         assert!(
             store
-                .open_gaps("other-model")
+                .open_gaps("other-model", 0.35)
                 .await
                 .unwrap()
                 .gaps
@@ -516,7 +703,7 @@ mod tests {
         );
 
         // The display path reads the same gaps and no vectors.
-        let refs = store.open_gap_refs("fake").await.unwrap();
+        let refs = store.open_gap_refs("fake", 0.35).await.unwrap();
         assert_eq!(
             refs.iter().map(|g| g.text.as_str()).collect::<Vec<_>>(),
             vec!["q1", "s1"]
@@ -532,7 +719,7 @@ mod tests {
         for i in 0..MAX_OPEN_GAPS + 1 {
             nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
         }
-        let open = store.open_gaps("fake").await.unwrap();
+        let open = store.open_gaps("fake", 0.35).await.unwrap();
         assert_eq!(open.gaps.len() as i64, MAX_OPEN_GAPS);
         assert_eq!(
             open.gaps[0].gap.text,
@@ -545,7 +732,7 @@ mod tests {
              pass as a set of dismissals otherwise"
         );
         assert_eq!(
-            store.open_gap_refs("fake").await.unwrap().len() as i64,
+            store.open_gap_refs("fake", 0.35).await.unwrap().len() as i64,
             MAX_OPEN_GAPS,
             "the display path is bounded by the same cap"
         );
@@ -561,7 +748,7 @@ mod tests {
         for i in 0..MAX_OPEN_GAPS {
             nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
         }
-        let open = store.open_gaps("fake").await.unwrap();
+        let open = store.open_gaps("fake", 0.35).await.unwrap();
         assert_eq!(open.gaps.len() as i64, MAX_OPEN_GAPS);
         assert!(!open.capped, "nothing was left out of this pass");
     }
@@ -572,9 +759,9 @@ mod tests {
         let a = nothing_here(&store, "q1", vec![1.0]).await;
         let s = gap_search(&store, "s1", vec![1.0]).await;
         store.dismiss_gap(GapKind::Ask, &a).await.unwrap();
-        assert_eq!(store.open_gaps("fake").await.unwrap().gaps.len(), 1);
+        assert_eq!(store.open_gaps("fake", 0.35).await.unwrap().gaps.len(), 1);
         store.dismiss_gap(GapKind::Search, &s).await.unwrap();
-        assert!(store.open_gaps("fake").await.unwrap().gaps.is_empty());
+        assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
         assert!(matches!(
             store.dismiss_gap(GapKind::Ask, "nope").await,
             Err(Error::NotFound)
@@ -596,7 +783,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let (rows, loose) = store.gap_rows("fake").await.unwrap();
+        let (rows, loose) = store.gap_rows("fake", 0.35).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Mounting");
         assert_eq!(rows[0].members.len(), 2);
@@ -607,9 +794,14 @@ mod tests {
 
         // Dismissing a member thins the row; dismissing both removes it.
         store.dismiss_gap(GapKind::Ask, &a).await.unwrap();
-        assert_eq!(store.gap_rows("fake").await.unwrap().0[0].members.len(), 1);
+        assert_eq!(
+            store.gap_rows("fake", 0.35).await.unwrap().0[0]
+                .members
+                .len(),
+            1
+        );
         store.dismiss_gap(GapKind::Ask, &b).await.unwrap();
-        assert!(store.gap_rows("fake").await.unwrap().0.is_empty());
+        assert!(store.gap_rows("fake", 0.35).await.unwrap().0.is_empty());
     }
 
     #[tokio::test]
