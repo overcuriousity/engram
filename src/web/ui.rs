@@ -259,6 +259,13 @@ pub struct PairRow {
     pub a_title: String,
     pub b_id: String,
     pub b_title: String,
+    /// Each side's opening words, said beside its title only when that title
+    /// is shared with another row on the page. Three artifacts genuinely
+    /// titled "LevelDB: Funktionsweise und forensische Analyse" turned one
+    /// cluster of questions into what looked like one question asked three
+    /// times. Same rule as `disambiguate_labels`, same reason.
+    pub a_opening: String,
+    pub b_opening: String,
     pub detail: Option<String>,
     /// The stored `detail` is exactly `"link"` — the judge's duplicate
     /// hand-off (§7), a provenance marker, not prose. The row renders a
@@ -1381,8 +1388,56 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
         .map(|(l, _)| l.to_string())
         .collect();
     for r in rows.iter_mut() {
-        if collides.contains(&r.label) && !r.opening.is_empty() && r.opening != r.label {
-            r.label = format!("{} · {}", r.label, r.opening);
+        // Kept beside the label rather than folded into it. Appending it was
+        // the whole of this repair, and the row then truncated the appended
+        // half away — `.qtitle` is one `nowrap` line — so six captures still
+        // read `HOCHSCHULE MITTWEIDA · HOCHSCH…` and the column that exists to
+        // tell them apart still could not. A field of its own has somewhere to
+        // wrap to.
+        if !(collides.contains(&r.label) && !r.opening.is_empty() && r.opening != r.label) {
+            r.opening.clear();
+        }
+    }
+}
+
+/// The same repair as `disambiguate_labels`, for the pair cards.
+///
+/// A pair names two artifacts, so a page of pairs has two columns of titles
+/// that can collide, and on the deployment they did: three of five cards read
+/// `… vs LevelDB: Funktionsweise und forensische Analyse` because three
+/// distinct artifacts carried that one name. Each side keeps its opening words
+/// only where its title is shared, for the reason the queue keeps them — a
+/// suffix on a name that needs no suffix is noise.
+fn disambiguate_pair_titles(rows: &mut [PairRow]) {
+    // By distinct artifact, never by how often a title appears. One artifact
+    // against three others — which is what a cluster looks like from here —
+    // puts its name on three rows without anything colliding: it is the same
+    // artifact each time, and a qualifier on it would say that three rows are
+    // about different things when they are about one. A title collides when
+    // two different ids carry it.
+    let mut ids: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+        std::collections::HashMap::new();
+    for r in rows.iter() {
+        ids.entry(r.a_title.as_str())
+            .or_default()
+            .insert(r.a_id.as_str());
+        ids.entry(r.b_title.as_str())
+            .or_default()
+            .insert(r.b_id.as_str());
+    }
+    let collides: std::collections::HashSet<String> = ids
+        .into_iter()
+        .filter(|(_, seen)| seen.len() > 1)
+        .map(|(t, _)| t.to_string())
+        .collect();
+    for r in rows.iter_mut() {
+        let a_collides = collides.contains(&r.a_title);
+        let b_collides = collides.contains(&r.b_title);
+        if !(a_collides && !r.a_opening.is_empty() && r.a_opening != r.a_title) {
+            r.a_opening.clear();
+        }
+        if !(b_collides && !r.b_opening.is_empty() && r.b_opening != r.b_title) {
+            r.b_opening.clear();
         }
     }
 }
@@ -2067,6 +2122,10 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 percent: (p.score * 100.0).round() as i64,
                 a_title: title_of(&a),
                 b_title: title_of(&b),
+                // Kept whether or not it is shown; `disambiguate_pair_titles`
+                // clears the ones the page does not need.
+                a_opening: crate::web::markdown::stand_in_title(&a.text, 40),
+                b_opening: crate::web::markdown::stand_in_title(&b.text, 40),
                 a_id: p.a_id,
                 b_id: p.b_id,
                 detail,
@@ -2086,6 +2145,7 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     // artifacts have since gone missing — skipped above — is not announced as
     // something waiting that never appears.
     let more = (waiting - pairs.len() as i64).max(0);
+    disambiguate_pair_titles(&mut pairs);
     Ok((pairs, more))
 }
 
@@ -3316,6 +3376,108 @@ mod tests {
         }
     }
 
+    fn queue_row_fixture(label: &str, opening: &str) -> QueueRow {
+        QueueRow {
+            label: label.into(),
+            opening: opening.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_disambiguated_row_shows_the_part_that_distinguishes_it() {
+        // `disambiguate_labels` appended the opening words and `.qtitle`
+        // truncated them away, so six rows still read "HOCHSCHULE MITTWEIDA ·
+        // HOCHSCH…" and the one column that exists to tell captures apart
+        // still could not. The opening needs an element of its own.
+        let mut rows = vec![
+            queue_row_fixture(
+                "HOCHSCHULE MITTWEIDA",
+                "Fachbereich Angewandte Computer- und Biowissenschaften",
+            ),
+            queue_row_fixture(
+                "HOCHSCHULE MITTWEIDA",
+                "Ein Verfahren zur Sicherung fluechtiger Daten",
+            ),
+            queue_row_fixture("SQLite und WAL", "Pragma-Abfragen"),
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(
+            rows[0].label, "HOCHSCHULE MITTWEIDA",
+            "the label keeps its own name; the opening is said beside it"
+        );
+        assert!(!rows[0].opening.is_empty(), "nothing tells row 0 apart");
+        assert!(
+            rows[2].opening.is_empty(),
+            "a unique label needs no opening beside it: {:?}",
+            rows[2].opening
+        );
+        let html = askama::Template::render(&QueueTemplate {
+            rows,
+            active: false,
+        })
+        .unwrap();
+        assert!(html.contains("qtitle-opening"), "{html}");
+        assert!(html.contains("Fachbereich Angewandte"), "{html}");
+    }
+
+    fn pair_row_fixture(a_id: &str, a_title: &str, a_opening: &str) -> PairRow {
+        PairRow {
+            id: 1,
+            percent: 90,
+            a_id: a_id.into(),
+            a_title: a_title.into(),
+            b_id: "b".into(),
+            b_title: "SQLite-Datenbankeinstellungen und WAL".into(),
+            a_opening: a_opening.into(),
+            b_opening: "Einstellungen der SQLite-Datenbank".into(),
+            detail: None,
+            via_link: false,
+            contradiction: true,
+            obsolete_title: None,
+            keeps_a: false,
+            keeps_b: false,
+        }
+    }
+
+    #[test]
+    fn pair_rows_sharing_a_title_are_disambiguated_too() {
+        // Three artifacts on the deployment were titled "LevelDB:
+        // Funktionsweise und forensische Analyse", so one cluster of
+        // questions read as the same question asked three times.
+        let mut rows = vec![
+            // Two different artifacts that synthesis gave one name.
+            pair_row_fixture(
+                "a1",
+                "LevelDB: Funktionsweise",
+                "Der Aufbau der Datenlagerung",
+            ),
+            pair_row_fixture("a2", "LevelDB: Funktionsweise", "Die Extraktion der Keys"),
+            pair_row_fixture(
+                "a3",
+                "Auto Vacuum und die Free Page List",
+                "Freie Pages werden",
+            ),
+        ];
+        disambiguate_pair_titles(&mut rows);
+        assert!(!rows[0].a_opening.is_empty(), "nothing tells row 0 apart");
+        assert_ne!(
+            (&rows[0].a_title, &rows[0].a_opening),
+            (&rows[1].a_title, &rows[1].a_opening),
+            "still identical"
+        );
+        assert!(
+            rows[2].a_opening.is_empty(),
+            "a unique title needs no opening beside it: {:?}",
+            rows[2].a_opening
+        );
+        assert!(
+            rows[0].b_opening.is_empty(),
+            "every row's B side is one artifact under one name — appearing three \
+             times is a cluster, not a collision"
+        );
+    }
+
     #[test]
     fn the_artifact_pane_does_not_call_a_passage_chunk_fifty_six() {
         // "Chunk 56" is a position in the ingest, not a name for anything a
@@ -3994,7 +4156,7 @@ mod tests {
         let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/queue", &cookie).await;
         assert!(
-            html.contains(">document</a>"),
+            html.contains(">document</span>"),
             "the row has no title to click: {html}"
         );
     }
@@ -5156,11 +5318,18 @@ mod tests {
             },
         ];
         disambiguate_labels(&mut rows);
-        assert_eq!(rows[0].label, "HOCHSCHULE MITTWEIDA · Kapitel 1 Einleitung");
-        assert_eq!(rows[1].label, "HOCHSCHULE MITTWEIDA · Kapitel 5 Malware");
-        // A label that was already unique is left alone: the suffix is a
-        // repair, not a decoration.
+        // The label keeps its own name and the opening is kept beside it,
+        // rather than being folded into it. Appended, it was cut off by the
+        // one `nowrap` line the row gives a title — so this repair ran on the
+        // deployment and six rows still read the same six words.
+        assert_eq!(rows[0].label, "HOCHSCHULE MITTWEIDA");
+        assert_eq!(rows[0].opening, "Kapitel 1 Einleitung");
+        assert_eq!(rows[1].label, "HOCHSCHULE MITTWEIDA");
+        assert_eq!(rows[1].opening, "Kapitel 5 Malware");
+        // A label that was already unique is left alone: the opening beside it
+        // is a repair, not a decoration.
         assert_eq!(rows[2].label, "Configure auditd");
+        assert!(rows[2].opening.is_empty());
     }
 
     #[test]

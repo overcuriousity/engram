@@ -14,7 +14,15 @@
   {% for r in rows %}
   <div class="qrow">
     {% if r.in_flight %}<span class="qdot" aria-hidden="true"></span>{% endif %}
-    <a class="qtitle {% if r.unnamed %}pending{% endif %}" href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+    {# The opening words on a line of their own, and only where the label they
+       belong to is shared with another row. Inside the link, so the whole of
+       what names a capture is the same target; outside `.qtitle`, so the
+       truncation that keeps one label on one line cannot cut off the half
+       that says which capture this is. #}
+    <a class="qname {% if r.unnamed %}pending{% endif %}" href="/ui/corpora/{{ r.id }}">
+      <span class="qtitle">{{ r.label }}</span>
+      {% if !r.opening.is_empty() %}<span class="qtitle-opening">{{ r.opening }}</span>{% endif %}
+    </a>
     <span class="qmeta">
       {% if let Some(p) = r.progress %}
         <span class="badge badge-accent">segmenting {{ p }}</span>

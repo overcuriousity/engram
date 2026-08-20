@@ -20,8 +20,10 @@
      through repeated co-retrieval, not cosine — so `percent` would read as a
      measured similarity that was never computed. #}
   <div class="decide-head">
-    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> vs
-    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a> —
+    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a>{% if !p.a_opening.is_empty() %}
+    <span class="decide-opening">{{ p.a_opening }}</span>{% endif %} vs
+    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>{% if !p.b_opening.is_empty() %}
+    <span class="decide-opening">{{ p.b_opening }}</span>{% endif %} —
     <b>{% if p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
