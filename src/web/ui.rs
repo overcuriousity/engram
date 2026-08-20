@@ -178,6 +178,12 @@ pub struct ArtifactDetail {
     /// artifact was drawn from. Falls back to the plain source page for an
     /// artifact with no recorded span — a restored one, for instance.
     pub source_at_lines: String,
+    /// The next passage of the same document, when this one stops in the
+    /// middle of a sentence. A segmentation boundary landing mid-clause is not
+    /// a thing the pane can prevent, but leaving the reader at "…Einsatz von"
+    /// with the rest of the sentence visible in the column beside it and no
+    /// way onward is.
+    pub continues_at: Option<String>,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -2225,6 +2231,29 @@ fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
         .collect()
 }
 
+/// Whether a passage stops in the middle of a sentence.
+///
+/// The pane rendered "…der bereits vorgestellte Einsatz von" and stopped,
+/// while the source column beside it showed the rest — a segmentation boundary
+/// landing mid-clause, with nothing on the artifact saying it had. This cannot
+/// know whether a boundary was semantic; it can tell that a sentence did not
+/// finish, which is the only claim the link it drives makes.
+///
+/// A closing bracket or quote after the stop counts as the stop: "…(siehe
+/// unten)" ends a sentence as much as the period would. A table row or a list
+/// marker does not — that passage ended where its structure ended, not
+/// mid-thought.
+fn ends_mid_sentence(text: &str) -> bool {
+    let t = text.trim_end();
+    let t = t.trim_end_matches([')', ']', '"', '»', '\'', '“', '”']);
+    match t.chars().last() {
+        None => false,
+        // A table row or a fence closes on its own punctuation.
+        Some('|') | Some('`') => false,
+        Some(c) => !matches!(c, '.' | '!' | '?' | ':' | ';' | '…'),
+    }
+}
+
 /// The API tokens, formatted for a table.
 async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
     Ok(st
@@ -3240,7 +3269,21 @@ pub(crate) async fn build_artifact_detail(
         (None, _) => String::new(),
     };
     let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
+    // Only asked when the passage actually stops mid-sentence: the query is a
+    // second lookup per pane, and most passages end where a sentence does.
+    let continues_at = match (&c.corpus_id, ends_mid_sentence(&c.text)) {
+        (Some(cid), true) => core
+            .store
+            .adjacent_artifacts(cid, c.ordinal)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| n.ordinal > c.ordinal)
+            .map(|n| n.id),
+        _ => None,
+    };
     Ok(ArtifactDetail {
+        continues_at,
         related,
         seen_together,
         orphaned_source,
@@ -3540,6 +3583,24 @@ mod tests {
             verdict_bar: String::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_passage_that_stops_mid_sentence_is_known_to_have_stopped() {
+        // The pane ended "…der bereits vorgestellte Einsatz von" while the
+        // source column beside it showed the rest of the sentence. The pane
+        // cannot know whether a boundary was semantic; it can tell that a
+        // sentence did not finish.
+        assert!(ends_mid_sentence(
+            "Die erste Vorkehrung ist der bereits vorgestellte Einsatz von"
+        ));
+        assert!(!ends_mid_sentence("Das ist der ganze Satz."));
+        assert!(!ends_mid_sentence("Ist das der ganze Satz?"));
+        assert!(!ends_mid_sentence("Ein Listenpunkt:"));
+        // A passage ending in a fenced block or a table row has not stopped
+        // mid-sentence; it has stopped where its structure ended.
+        assert!(!ends_mid_sentence("| ext4 | ja |"));
+        assert!(!ends_mid_sentence(""));
     }
 
     #[test]
@@ -3972,6 +4033,45 @@ mod tests {
             d.slice_label.starts_with("line ") || d.slice_label.starts_with("lines "),
             "{}",
             d.slice_label
+        );
+    }
+
+    #[tokio::test]
+    async fn a_passage_cut_mid_sentence_points_at_the_one_that_carries_the_rest() {
+        // The pane ended "…der bereits vorgestellte Einsatz von" and offered
+        // nothing onward, while the source column beside it showed the rest of
+        // the sentence.
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest(
+                "Die erste Vorkehrung ist der bereits vorgestellte Einsatz von\n\n\
+                 Hardware-Schreibschutzadaptern, wo immer es möglich ist.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(all.len() > 1, "the fixture produced one passage, not two");
+
+        let first = all.iter().min_by_key(|c| c.ordinal).unwrap();
+        let d = super::build_artifact_detail(&core, &first.id, "")
+            .await
+            .unwrap();
+        assert!(
+            d.continues_at.is_some(),
+            "no way onward from a cut sentence: {:?}",
+            first.text
+        );
+
+        let last = all.iter().max_by_key(|c| c.ordinal).unwrap();
+        let d = super::build_artifact_detail(&core, &last.id, "")
+            .await
+            .unwrap();
+        assert!(
+            d.continues_at.is_none(),
+            "the last passage ends on a period and has nothing after it"
         );
     }
 

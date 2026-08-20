@@ -151,6 +151,12 @@
                            f.querySelector('textarea').focus()">edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {# The passage stopped mid-sentence, so the window it was cut from did.
+           The source column beside this already shows the rest of the line;
+           this is the way to the artifact that carries it. #}
+        {% if let Some(next) = d.continues_at %}
+        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}">continues in the next passage →</a></p>
+        {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
            the source states. Shown but deliberately not embedded. #}

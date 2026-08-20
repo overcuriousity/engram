@@ -524,3 +524,7 @@ body { overflow-x: hidden; }
     min-height: 12rem; overflow-y: auto;
   }
 }
+
+/* Said under the passage it belongs to, quietly: it is a way onward, not a
+   warning that something is wrong. */
+.continues { margin: 0.5rem 0 0; font-size: 0.8125rem; }
