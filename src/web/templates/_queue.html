@@ -43,8 +43,12 @@
         <span>{{ r.artifact_count }} artifacts ·
           <span class="qcov-low"
                 title="Some of this capture never reached an artifact — it was read before engram recorded which lines each artifact came from, so the loss cannot be placed">{{ r.coverage }} covered</span></span>
+      {# Coverage speaks when it is not whole and stays quiet when it is. Ten
+         rows all reading "100% covered" is a column that says nothing, and it
+         crowded out the one number on the row that differs. The two branches
+         above are the case worth saying. #}
       {% else %}
-        <span>{{ r.artifact_count }} artifacts · {{ r.coverage }} covered</span>
+        <span>{{ r.artifact_count }} artifacts</span>
       {% endif %}
       <span class="qtime">{{ r.created }}</span>
     </span>

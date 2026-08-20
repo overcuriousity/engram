@@ -62,9 +62,15 @@ pub struct RenderedResult {
     pub reason: Option<String>,
 }
 
+#[derive(Default)]
 pub struct QueueRow {
     pub id: String,
     pub label: String,
+    /// The capture's opening words, kept whether or not synthesis has named it.
+    /// Never rendered on its own: it is what tells two rows apart when
+    /// synthesis gave them the same name. Empty for a photo, or for a PDF whose
+    /// extraction has not landed.
+    pub opening: String,
     pub status: String,
     pub badge: &'static str,
     pub artifact_count: i64,
@@ -1184,6 +1190,35 @@ fn render_hit(
 /// Ten rather than everything: an index of every corpus was a page nobody read,
 /// and anything older than the last handful is found by searching for what it
 /// says rather than by scrolling a list of what it is called.
+/// Recent lists ten captures, and synthesis names a capture by lifting a
+/// heading out of it. A heading repeats across every document that carries it,
+/// so six rows read `HOCHSCHULE MITTWEIDA` and named nothing — the one column
+/// that exists to tell captures apart could not.
+///
+/// Where a label is not unique in the list, the capture's opening words are
+/// appended, because that is the one thing that differs between them. Three
+/// rows are left alone: one whose label was already unique, because the suffix
+/// is a repair rather than a decoration; one with no opening words to offer,
+/// because `document · document` tells no one anything; and one already called
+/// by its opening words, because a label repeated back to itself is worse than
+/// the collision.
+fn disambiguate_labels(rows: &mut [QueueRow]) {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in rows.iter() {
+        *counts.entry(r.label.as_str()).or_insert(0) += 1;
+    }
+    let collides: std::collections::HashSet<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(l, _)| l.to_string())
+        .collect();
+    for r in rows.iter_mut() {
+        if collides.contains(&r.label) && !r.opening.is_empty() && r.opening != r.label {
+            r.label = format!("{} · {}", r.label, r.opening);
+        }
+    }
+}
+
 async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let mut rows = Vec::new();
     for s in st.core.store.list_corpora(10, 0).await? {
@@ -1214,6 +1249,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // thing that tells three captures pasted in a row apart. `unnamed`
             // is what says the name is still coming; the label itself is not
             // the place to say it.
+            opening: markdown::snippet(&s.raw_text, 60),
             label: s.title_hint.clone().unwrap_or_else(|| {
                 if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
                     "photo".into()
@@ -1236,6 +1272,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             id: s.id,
         });
     }
+    disambiguate_labels(&mut rows);
     let active = rows.iter().any(|r| r.in_flight);
     Ok(HtmlTemplate(QueueTemplate { rows, active }).into_response())
 }
@@ -4751,6 +4788,78 @@ mod tests {
     }
 
     #[test]
+    fn colliding_capture_labels_get_told_apart() {
+        // Synthesis names a capture by lifting a heading out of it, and a
+        // heading repeats across every document that carries it: six rows read
+        // HOCHSCHULE MITTWEIDA and the column that exists to tell captures
+        // apart could not. The opening words are the one thing that differs.
+        let mut rows = vec![
+            QueueRow {
+                label: "HOCHSCHULE MITTWEIDA".into(),
+                opening: "Kapitel 1 Einleitung".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "HOCHSCHULE MITTWEIDA".into(),
+                opening: "Kapitel 5 Malware".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "Configure auditd".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "HOCHSCHULE MITTWEIDA · Kapitel 1 Einleitung");
+        assert_eq!(rows[1].label, "HOCHSCHULE MITTWEIDA · Kapitel 5 Malware");
+        // A label that was already unique is left alone: the suffix is a
+        // repair, not a decoration.
+        assert_eq!(rows[2].label, "Configure auditd");
+    }
+
+    #[test]
+    fn a_collision_with_no_opening_words_is_left_alone() {
+        // A photo, or a PDF whose extraction has not landed, has no opening
+        // words — and "document · document" tells no one anything.
+        let mut rows = vec![
+            QueueRow {
+                label: "document".into(),
+                opening: String::new(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "document".into(),
+                opening: String::new(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "document");
+        assert_eq!(rows[1].label, "document");
+    }
+
+    #[test]
+    fn a_label_is_not_repeated_back_to_itself() {
+        // An untitled capture is already called by its opening words. Appending
+        // them would render "auditctl -w /etc · auditctl -w /etc".
+        let mut rows = vec![
+            QueueRow {
+                label: "auditctl -w /etc".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+            QueueRow {
+                label: "auditctl -w /etc".into(),
+                opening: "auditctl -w /etc".into(),
+                ..Default::default()
+            },
+        ];
+        disambiguate_labels(&mut rows);
+        assert_eq!(rows[0].label, "auditctl -w /etc");
+    }
+
+    #[test]
     fn a_primed_hit_says_why_it_arrived() {
         // primed, loose and model-written already reached the rail as chips
         // scattered across the header, each with its explanation hidden in a
@@ -5920,7 +6029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_settled_recent_row_states_artifacts_and_coverage_the_same_way() {
+    async fn a_settled_row_states_its_count_and_mentions_coverage_only_when_it_is_short() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core
             .ingest("alpha line\n\nbravo line", "web", None)
@@ -5935,8 +6044,16 @@ mod tests {
 
         let frag = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
-            frag.contains("artifacts · ") && frag.contains(" covered"),
-            "a settled row states both, in one shape: {frag}"
+            frag.contains("artifacts"),
+            "a settled row states its count: {frag}"
+        );
+        // Ten rows all reading "100% covered" is a column that says nothing,
+        // and it crowded out the one number on the row that differs. Coverage
+        // speaks when it is short — see the low-coverage test below — and stays
+        // quiet when it is whole.
+        assert!(
+            !frag.contains(" covered"),
+            "a fully covered row announced a number that is the same on every row: {frag}"
         );
         assert!(
             !frag.contains("badge-warning"),
