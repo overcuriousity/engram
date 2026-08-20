@@ -63,21 +63,22 @@ impl Store {
     /// already has it. Changing a column means changing `schema.sql` and
     /// recreating the database.
     ///
-    /// Which is exactly why it checks afterwards. `CREATE TABLE IF NOT EXISTS`
+    /// Which is exactly why it checks first. `CREATE TABLE IF NOT EXISTS`
     /// leaves an existing table as it is, columns and all, so adding a column
     /// to `schema.sql` without recreating the base changes nothing here and
     /// fails much later, inside a request, with a bare `ColumnNotFound` that
     /// names no cause. Nothing is altered to fix that — recreating is still the
     /// answer — but it is said here, at boot, with the columns named.
+    ///
+    /// The check runs *before* the file rather than after it because the file
+    /// is not inert on an old base. It drops a superseded index by name and
+    /// creates its replacement over a column such a base does not have, and
+    /// `raw_sql` runs statements one after another with no transaction around
+    /// them: applied first, the drop commits, the create fails with the bare
+    /// `no such column` this message exists to replace, and the base is left
+    /// with neither index. Read first, nothing has happened yet.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
-
-        sqlx::raw_sql(SCHEMA)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-
-        self.backfill_job_class().await?;
 
         let mut missing = Vec::new();
         for (table, columns) in schema_columns(SCHEMA) {
@@ -91,6 +92,12 @@ impl Store {
                 .iter()
                 .map(|r| r.get::<String, _>("name"))
                 .collect();
+            // No columns at all means no such table — a fresh base, or a table
+            // this schema adds. That is not a base that is behind; it is one
+            // the statement below is about to create.
+            if have.is_empty() {
+                continue;
+            }
             for c in columns {
                 if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
                     missing.push(format!("{table}.{c}"));
@@ -104,6 +111,13 @@ impl Store {
                 missing.join(", ")
             )));
         }
+
+        sqlx::raw_sql(SCHEMA)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+
+        self.backfill_job_class().await?;
         Ok(())
     }
 
@@ -240,6 +254,59 @@ mod tests {
         assert!(
             before.iter().any(|(_, n)| n == "artifacts"),
             "the schema must actually have been applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_base_older_than_the_schema_is_named_before_anything_is_touched() {
+        // The check runs before the file, not after it. `schema.sql` drops a
+        // superseded index by name and creates its replacement over `class` —
+        // so applying it to a base without that column would commit the drop,
+        // fail the create with a bare `no such column`, and leave the base with
+        // neither index and no idea why it would not boot.
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        // A `jobs` table as it was before the column existed, and the index the
+        // schema means to replace.
+        sqlx::raw_sql(
+            "CREATE TABLE jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL,
+               target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+               run_after INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+               claimed_at INTEGER, created_at INTEGER NOT NULL DEFAULT 0,
+               seq INTEGER NOT NULL DEFAULT 0, UNIQUE(stage, target_id));
+             CREATE INDEX idx_jobs_claim2 ON jobs(state, attempts, seq, id, run_after);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = Store {
+            pool,
+            capture: Default::default(),
+        };
+
+        let err = store.migrate().await.unwrap_err().to_string();
+        assert!(
+            err.contains("older than the schema") && err.contains("jobs.class"),
+            "the operator has to be told which column is missing, not shown \
+             a bare column error from the middle of the file: {err}"
+        );
+        let indexes: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert!(
+            indexes.iter().any(|(n,)| n == "idx_jobs_claim2"),
+            "a refused migration must not have dropped the index the old \
+             binary still claims through: {indexes:?}"
         );
     }
 
