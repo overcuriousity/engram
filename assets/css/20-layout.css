@@ -1,15 +1,77 @@
 /* The shell, the top row and the phone's tab bar — the frame every page is
    drawn inside, and nothing that belongs to one page. */
 
-.shell { max-width: 60rem; margin: 0 auto; padding: 0 1rem 4rem; }
-/* The reading measure is right for prose and wrong for a table or a three-pane
-   workspace. Those pages opt out by name rather than every page growing: a
-   capture textarea 110rem wide is a worse place to paste a chapter, not a
-   better one. */
-.shell-wide { max-width: 110rem; }
-/* The one thing on Search that stays narrow. A full-width search box reads as a
-   form to fill in; a narrow one reads as a question to ask. */
-.shell-wide #filters { max-width: 48rem; margin-inline: auto; }
+/* ── The region grid ─────────────────────────────────────────────────────
+   Four regions — bar, rail, focus, source — and a page says which of them it
+   uses. It never says how wide it is. `rail` and `focus` begin in the same
+   grid columns on every page, so the single left anchor is a property of the
+   model rather than a correction laid over three pages that disagreed: Capture
+   centred itself in 60rem, Search centred a 48rem filter block inside 110rem,
+   Housekeeping ran full bleed, and the content column moved under a brand that
+   did not.
+
+   Container queries rather than media queries. The workspace answers to the
+   space it is actually in, which is what a half-width desktop window needs —
+   and what the back link appearing at 60rem rather than at the phone
+   breakpoint was already working around. */
+.shell {
+  container-type: inline-size;
+  container-name: shell;
+  max-width: 110rem;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+.regions {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+  grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
+}
+
+/* A grid child defaults to `min-width: auto`, which resolves to min-content:
+   one unwrappable line of source widens its column instead of scrolling inside
+   it, and takes the document's width with it. */
+.regions > * { min-width: 0; }
+
+.region-bar { grid-column: 1 / -1; }
+.region-rail { grid-column: rail; }
+.region-focus { grid-column: focus; }
+/* Earns its place only at three-up. Below that the artifact carries it. */
+.region-source { display: none; }
+
+/* One region. Two of them, and the difference is what the region holds rather
+   than how wide the page fancies being — which is the distinction the three
+   old shell widths were a clumsy proxy for.
+
+   Prose is the default, because most pages are prose: a capture textarea
+   110rem wide is a worse place to paste a chapter, not a better one. A table
+   is not prose and has no measure — it is as wide as its columns need.
+
+   Both start at the shell's left edge, and so does the rail. That is the whole
+   anchor: the inner grid is never centred, only the shell is. */
+.regions-focus { grid-template-columns: minmax(0, 68rem); }
+.regions-focus > * { grid-column: 1 / -1; }
+.regions-table { grid-template-columns: minmax(0, 1fr); }
+.regions-table > * { grid-column: 1 / -1; }
+
+/* Three-up. */
+@container shell (min-width: 90rem) {
+  .regions-rail-focus-source {
+    grid-template-columns: [rail] 20rem [focus] minmax(0, 1fr) [source] minmax(0, 1.2fr);
+  }
+  .regions-rail-focus-source .region-source { display: block; grid-column: source; }
+}
+
+/* One-up: one region, the rest a navigation away. This is the phone, and it is
+   equally a half-width desktop window — which is the whole reason it is a
+   container query and not a device breakpoint. */
+@container shell (max-width: 60rem) {
+  .regions { grid-template-columns: minmax(0, 1fr); }
+  .regions > * { grid-column: 1 / -1; }
+  .regions.has-selection .region-rail { display: none; }
+}
+
 /* Full-bleed, so the rule under the header runs the width of the window
    instead of stopping at whatever measure the page below happens to use. The
    row inside it takes the wider of the two measures: it lines up with content

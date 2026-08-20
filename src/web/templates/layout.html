@@ -69,10 +69,14 @@
     </nav>
   </header>
   {% endblock %}
-  {# The reading measure is the default and most pages want it. A page whose
-     content is a table or a three-pane workspace says so by name. #}
-  <div class="{% block shell_class %}shell{% endblock %}">
-    {% block content %}{% endblock %}
+  {# A page says which regions it uses. It never says how wide it is: the grid
+     puts rail and focus in the same columns everywhere, and the viewport
+     decides only how many regions are visible at once. Prose in one column is
+     the default, because most pages are that. #}
+  <div class="shell">
+    <div class="regions {% block regions %}regions-focus{% endblock %}">
+      {% block content %}{% endblock %}
+    </div>
   </div>
   {# On a phone the destinations move under the thumb and the top row keeps
      only identity. Hidden above 40rem, where the top row does the same job.

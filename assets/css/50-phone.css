@@ -13,12 +13,17 @@
 .tabbar { display: none; }
 .back { display: none; }
 
-/* Paired with `.workspace.has-selection .rail { display: none }` above, which
-   is what makes a back link necessary — so it has to appear at the same width
-   that hides the rail, not at the phone breakpoint. Between the two, a
+/* Paired with `.regions.has-selection .region-rail { display: none }`, which
+   is what makes a back link necessary — so it has to appear at exactly the
+   width that hides the rail, not at the phone breakpoint. Between the two, a
    half-screen desktop window opened a result, lost the list, and offered
-   nothing on the page to get back to it. */
-@media (max-width: 60rem) {
+   nothing on the page to get back to it.
+
+   A container query, and for the same reason: the rule it is paired with is
+   one. A media query here would be off by the shell's own padding, which is
+   a narrow band of window widths where the list disappears and nothing on the
+   page brings it back — the very bug this block exists to prevent. */
+@container shell (max-width: 60rem) {
   .back {
     display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
     margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);

@@ -12,7 +12,7 @@
    one unwrappable line of source then widens the column instead of scrolling
    inside `.raw`, and takes the document's width with it. `.pane` had this; its
    siblings did not, so the source pane escaped to the right at every width. */
-.workspace > *, .split > *, .rail-head { min-width: 0; }
+.split > *, .rail-head { min-width: 0; }
 .raw { max-width: 100%; }
 /* Titles and snippets are prose, not source: they break rather than push. */
 .rail-title, .rail-snippet, .card-title { overflow-wrap: anywhere; }
@@ -72,13 +72,10 @@ body { overflow-x: hidden; }
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
 
-.workspace { display: grid; grid-template-columns: 22rem 1fr; gap: 1rem; align-items: start; }
-@media (max-width: 60rem) {
-  .workspace { grid-template-columns: 1fr; }
-  /* One region at a time on a narrow screen: the rail is the list, and
-     opening a chunk replaces it. */
-  .workspace.has-selection .rail { display: none; }
-}
+/* The grid itself lives in 20-layout.css now: the rail beside the artifact is
+   the region model rather than a layout this one page invented, and the
+   one-region-at-a-time rule that used to live here is `.regions.has-selection`
+   under a container query. */
 
 .rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
 .rail-item {

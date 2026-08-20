@@ -1,6 +1,6 @@
 {% extends "layout.html" %}
 {% block title %}Search — engram{% endblock %}
-{% block shell_class %}shell shell-wide{% endblock %}
+{% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `keyup` only
@@ -13,6 +13,7 @@
    `#filters` and dropped the rest as a syntax error nobody sees. `submit` is
    listed so htmx cancels it: a single-field form submits implicitly on Enter,
    and a full page load would throw away the open pane. #}
+<div class="region-bar">
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
       hx-trigger="change from:#kind-chips,
                   keyup changed delay:250ms from:input[name=q],
@@ -73,11 +74,16 @@
 <div class="row" style="margin:0.5rem 0 1rem">
   <span id="search-spinner" class="spinner">searching…</span>
 </div>
-
-<div class="workspace">
-  <div id="rail" class="rail" role="listbox" aria-label="Results"></div>
-  <div id="pane" class="pane">
-    <p class="muted">Pick a result to see it beside the lines it came from.</p>
-  </div>
 </div>
+
+<div id="rail" class="region-rail rail" role="listbox" aria-label="Results"></div>
+<div id="pane" class="region-focus pane">
+  {# Before a search there is no rail beside this, so the sentence used to sit
+     in a column that did not exist yet — stranded in empty space, pointing at
+     a list nobody had asked for. It says what the page is for until there is
+     something to point at. #}
+  <p class="muted empty">Search to see an artifact here, beside the lines it
+    came from.</p>
+</div>
+<div id="source" class="region-source"></div>
 {% endblock %}

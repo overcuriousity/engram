@@ -4,15 +4,15 @@
      60rem, where the rail is still on screen beside this — the same width that
      hides it, not the phone breakpoint.
 
-     Inside the workspace the rail is only hidden by a class, so back is "show
+     Inside the region grid the rail is only hidden by a class, so back is "show
      the list again" rather than a navigation: dropping the class puts the
      results back exactly as they were, and `history.back()` follows to undo
      the URL the click pushed. The plain href is what runs on the standalone
-     artifact page, which has no workspace and no results to return to —
+     artifact page, which has no rail and no results to return to —
      `/ui/search` cannot carry the query, because what this page is given is
      the stripped highlight terms rather than what was typed. #}
   <a class="back" href="/ui/search"
-     onclick="var w = document.querySelector('.workspace');
+     onclick="var w = document.querySelector('.regions');
               if (!w) return true;
               w.classList.remove('has-selection'); history.back(); return false;">← Results</a>
 

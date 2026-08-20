@@ -4623,6 +4623,25 @@ mod tests {
     }
 
     #[test]
+    fn every_page_anchors_to_the_same_left_edge() {
+        // Three shell widths meant the content column moved under a brand that
+        // did not, so navigating jolted — and on Search the query box lined up
+        // with nothing else on its own page. A page now declares which regions
+        // it uses and never declares a width; the grid puts `rail` and `focus`
+        // in the same columns everywhere, which is what makes the anchor
+        // single.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            !css.contains("shell-wide"),
+            "shell-wide still sets a per-page width"
+        );
+        assert!(
+            css.contains(".regions-rail-focus-source"),
+            "the three-up region tier is missing"
+        );
+    }
+
+    #[test]
     fn a_primed_hit_gets_a_small_marker() {
         let mut r = ranked(false);
         r.primed = true;
@@ -6687,23 +6706,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tabular_pages_use_the_wide_measure_and_reading_pages_do_not() {
+    async fn a_page_declares_what_it_holds_rather_than_how_wide_it_is() {
+        // The three shell widths are gone. What is left is a statement about
+        // content: a rail beside an artifact beside its source, prose at a
+        // reading measure, or a table that is as wide as its columns need.
+        // Every one of them starts at the shell's left edge, which is what
+        // stops the content column moving as you navigate.
         let (app, cookie) = app_with_session().await;
 
         let search = get_body(&app, &cookie, "/ui/search").await;
         assert!(
-            search.contains(r#"class="shell shell-wide""#),
-            "search is a three-pane page and must not be held at the reading measure: {search}"
+            search.contains("regions-rail-focus-source"),
+            "search is a three-region page: {search}"
         );
 
         let ops = get_body(&app, &cookie, "/ui/ops").await;
-        assert!(ops.contains(r#"class="shell shell-wide""#), "{ops}");
+        assert!(
+            ops.contains("regions-table"),
+            "housekeeping is a table and has no reading measure: {ops}"
+        );
 
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains(r#"class="shell""#) && !capture.contains("shell-wide"),
+            capture.contains("regions-focus"),
             "capture is prose and keeps the reading measure: {capture}"
         );
+
+        // No page says how wide it is any more.
+        for (uri, body) in [
+            ("/ui/search", &search),
+            ("/ui/ops", &ops),
+            ("/ui/capture", &capture),
+        ] {
+            assert!(!body.contains("shell-wide"), "{uri} still declares a width");
+        }
     }
 
     #[tokio::test]
