@@ -362,8 +362,51 @@
     } catch (e) {}
   }
 
+  // Follows the system until it is touched; a remembered two-state switch from
+  // then on. The pre-paint script in the head is what applies a stored choice
+  // before anything is drawn — this only has to keep the button honest and
+  // move the status-bar colour with it.
+  function themeToggle() {
+    var btn = document.querySelector('[data-theme-toggle]');
+    if (!btn) return;
+    var label = btn.querySelector('[data-theme-label]');
+
+    function current() {
+      var set = document.documentElement.getAttribute('data-theme');
+      if (set) return set;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function paint() {
+      var now = current();
+      // Names the destination, not the state: a button called "Dark" while the
+      // page is dark reads as a label rather than as something to press.
+      label.textContent = now === 'dark' ? 'Light' : 'Dark';
+      // An installed app frames the page in this colour. Left alone, a light
+      // page keeps a dark status bar and looks broken on a phone. The two
+      // media-scoped tags in the head answer the system, not the choice, so
+      // the choice needs one of its own.
+      var meta = document.querySelector('meta[name="theme-color"]:not([media])');
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.setAttribute('name', 'theme-color');
+        document.head.appendChild(meta);
+      }
+      meta.setAttribute('content', now === 'dark' ? '#0e1015' : '#f8f6f1');
+    }
+
+    btn.addEventListener('click', function () {
+      var next = current() === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('engram.theme', next); } catch (e) {}
+      paint();
+    });
+    paint();
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    themeToggle();
     keyHint();
     restoreReading();
     askDriver();

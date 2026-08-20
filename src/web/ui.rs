@@ -4623,13 +4623,48 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_theme_beats_the_system_preference() {
+        // The light palette has been in the stylesheet since the port from
+        // Vestigo and nobody has ever seen it: it activated only on
+        // prefers-color-scheme. A choice has to override the system in both
+        // directions, or it is not a choice.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            css.contains(r#":root[data-theme="dark"]"#),
+            "an explicit dark choice cannot beat a light system"
+        );
+        assert!(
+            css.contains(r#":root:not([data-theme="light"])"#),
+            "the system dark block does not yield to an explicit light choice"
+        );
+    }
+
+    #[test]
+    fn the_theme_is_applied_before_the_first_paint() {
+        // A deferred script runs after the first paint and a stylesheet cannot
+        // know a stored choice, so either way the wrong theme flashes on every
+        // load — on a phone, brightly. The inline script has to come before the
+        // stylesheet it is correcting.
+        let layout = include_str!("templates/layout.html");
+        let script = layout.find("engram.theme").expect("no pre-paint script");
+        let sheet = layout.find("/assets/app.css").expect("no stylesheet link");
+        assert!(
+            script < sheet,
+            "the theme is applied after the stylesheet loads, which is the flash"
+        );
+    }
+
+    #[test]
     fn headings_are_headings_and_labels_are_labels() {
         // h3 was restyled globally into a small uppercase muted label, which is
         // why no page had hierarchy: the element that would carry it had been
         // spent on a style. Every <h3> in the templates was a real heading —
         // Recent, Merged, Pursuits, API tokens — wearing a label's clothes.
         let css = include_str!("../../assets/app.css");
-        assert!(css.contains(".label {"), "no .label class to carry the old h3 style");
+        assert!(
+            css.contains(".label {"),
+            "no .label class to carry the old h3 style"
+        );
         assert!(
             !css.contains("h3 { font-size: 0.8125rem"),
             "h3 is still restyled as a label"

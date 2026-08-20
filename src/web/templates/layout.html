@@ -3,6 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Inline, and before the stylesheet. A stylesheet cannot know a stored
+     choice and a deferred script runs after the first paint, so either way the
+     wrong theme flashes on every load — on a phone, brightly. Small enough to
+     cost nothing, and wrapped because a browser with storage disabled must
+     still render a page. #}
+  <script>
+    try {
+      var t = localStorage.getItem('engram.theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
   <title>{% block title %}engram{% endblock %}</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   {# Installable as an app. iOS reads the touch icon and its own meta tags
@@ -63,6 +74,13 @@
         <span class="badge badge-accent">{{ n }}</span>{% endif %}</a>
       {% endif %}
       <span class="spacer"></span>
+      {# The light palette has been in the stylesheet since the port and nobody
+         has ever seen it, because it activated only on prefers-color-scheme.
+         The label names where the button goes, not where it is. #}
+      <button class="btn btn-ghost btn-sm" type="button" data-theme-toggle
+              aria-label="Switch between dark and light">
+        <span data-theme-label>Theme</span>
+      </button>
       <form method="post" action="/auth/logout" style="display:inline">
         <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
       </form>
