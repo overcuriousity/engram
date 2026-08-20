@@ -75,16 +75,10 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // Housekeeping about housekeeping: the account is trimmed by the unit that
-    // already decides what is past keeping.
-    match core.store.trim_sweep_runs().await {
-        Ok(n) if n > 0 => tracing::info!(dropped = n, "trimmed the sweep history"),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not trim the sweep history");
-            failure.get_or_insert(e);
-        }
-        _ => {}
-    }
+    // The sweep history is trimmed by the repair pass, not here. This unit is
+    // behind `feedback`, and an operator with capture off keeps no retention
+    // unit at all — while the sweeps that do run keep writing a row apiece.
+    // See `background::repair_once`.
 
     match failure {
         Some(e) => Err(e),

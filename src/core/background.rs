@@ -99,9 +99,10 @@ pub const CONSOLIDATE_TARGET: &str = "collection";
 /// on another feature's switch stops when that feature is switched off, and
 /// nobody asked for that.
 ///
-/// `Pursuit` is deliberately absent: it is armed by the association sweep on
-/// completion — replay before pursue — and keeps its own period as a floor, so
-/// it appears here too. See `periodic_period`.
+/// `Pursuit` is here despite being armed by the association sweep on completion
+/// — replay before pursue. That arming is what *orders* the two; the period it
+/// keeps here is a floor under it, and the row is what the repair pass needs to
+/// find in order to recover a pursuit that died mid-run. See `periodic_period`.
 pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stage, &'static str)> {
     use crate::store::jobs::Stage;
     let mut out = Vec::new();
@@ -313,6 +314,17 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
         Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
         _ => {}
     }
+    // Housekeeping about housekeeping. It rode on the retention unit, which is
+    // behind `feedback`: an operator with capture off and `retain_days` at its
+    // default has no retention unit at all, while the sweeps that do run — the
+    // dedupe arming every fifteen minutes, consolidation every day — keep
+    // writing a row apiece into a table nothing was left to trim. The same
+    // mistake this whole pass exists to record, one table further in.
+    match core.store.trim_sweep_runs().await {
+        Ok(n) if n > 0 => tracing::info!(dropped = n, "trimmed the sweep history"),
+        Err(e) => tracing::warn!(error = %e, "could not trim the sweep history"),
+        _ => {}
+    }
 }
 
 /// Compare what SQLite says exists against what the vector store holds.
@@ -463,6 +475,41 @@ mod tests {
                 .live_job(crate::store::jobs::Stage::Relate, &ids[0])
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_history_is_trimmed_with_capture_switched_off() {
+        // The trim rode on the retention unit, and that unit does not exist
+        // when `feedback` is off and nothing is being retained — while the
+        // dedupe arming and consolidation keep running, and keep writing a row
+        // apiece into a table nothing was left to trim.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = false;
+        core.feedback.retain_days = 0;
+        assert!(
+            !periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == crate::store::jobs::Stage::Retention),
+            "this base still has the unit that used to do the trimming"
+        );
+        let over = crate::store::sweeps::MAX_RUNS + 5;
+        for i in 0..over {
+            core.store
+                .record_sweep_run("consolidate", crate::store::now() - (over - i), "ok", "{}")
+                .await
+                .unwrap();
+        }
+
+        repair_once(&core).await;
+
+        assert_eq!(
+            core.store
+                .sweep_history(crate::store::sweeps::MAX_RUNS + 10)
+                .await
+                .unwrap()
+                .len() as i64,
+            crate::store::sweeps::MAX_RUNS,
         );
     }
 

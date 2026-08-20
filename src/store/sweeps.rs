@@ -12,9 +12,10 @@ use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
 
-/// How many runs are kept. Trimmed by the retention unit, which is already the
-/// unit that decides what is past keeping. Housekeeping about housekeeping does
-/// not get a policy key.
+/// How many runs are kept. Trimmed by the repair pass, which is behind no
+/// setting: a trim that rode on the retention unit stopped whenever capture was
+/// switched off, and the sweeps that kept running kept writing rows.
+/// Housekeeping about housekeeping does not get a policy key.
 pub const MAX_RUNS: i64 = 2000;
 
 /// One recorded run.
