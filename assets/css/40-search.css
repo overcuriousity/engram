@@ -282,3 +282,25 @@ body { overflow-x: hidden; }
   color: var(--color-fg-secondary);
 }
 .keyhint button { margin-left: auto; }
+
+/* ── A fresh list arrives ────────────────────────────────────────────────── */
+
+/* A replaced rail appeared all at once, which reads as a flicker rather than
+   as an answer. The stagger is short and capped at the first six: past that
+   the delay would outlast the reading of the first result, and a list still
+   arriving cannot be scanned.
+
+   The cliff divider is deliberately not in this. Its whole job is to stay put
+   while the things either side of it change. */
+@media (prefers-reduced-motion: no-preference) {
+  .rail-item { animation: rail-in 160ms ease-out both; }
+  .rail-item:nth-child(2) { animation-delay: 20ms; }
+  .rail-item:nth-child(3) { animation-delay: 40ms; }
+  .rail-item:nth-child(4) { animation-delay: 60ms; }
+  .rail-item:nth-child(5) { animation-delay: 80ms; }
+  .rail-item:nth-child(6) { animation-delay: 100ms; }
+}
+@keyframes rail-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}

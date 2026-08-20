@@ -92,3 +92,31 @@ nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-prima
 nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var(--color-bg-active); }
 .spacer { flex: 1; }
 
+
+/* ── Motion ──────────────────────────────────────────────────────────────
+   One rule: motion explains what moved, and never decorates.
+
+   Anything that should be understood as the same thing across a change is
+   named here, so the browser tweens it rather than repainting it. Everything
+   unnamed cross-fades, which is the right default for content that genuinely
+   was replaced. */
+/* Navigating between two pages that share this grid should look like the
+   content changing, not like the window being replaced. An at-rule rather than
+   the old meta tag, and browsers without it simply navigate. */
+@view-transition { navigation: auto; }
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-group(*) { animation-duration: 180ms; }
+  .topbar { view-transition-name: topbar; }
+  .region-rail { view-transition-name: rail; }
+  .region-focus { view-transition-name: focus; }
+}
+
+/* `navigation: auto` is not inside the query above — an at-rule cannot be —
+   so the transition would still run at the browser's own duration for someone
+   who asked not to see motion. This is what actually turns it off. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+}
