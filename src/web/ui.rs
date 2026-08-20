@@ -418,7 +418,9 @@ struct CaptureTemplate {
     ask_enabled: bool,
     /// Decisions waiting on a person, shown where the work arrives rather than
     /// on a page you have to remember to visit. Empty renders nothing at all.
-    pairs: Vec<PairRow>,
+    /// Grouped, because one artifact against three others is one decision and
+    /// arrived as three — see `group_pairs`.
+    pairs: Vec<PairCluster>,
     /// How many more are behind the ones shown. Said once under the list, so a
     /// short list does not read as an empty queue when it is a capped one.
     more_pairs: i64,
@@ -1008,6 +1010,7 @@ async fn capture_page(
     Query(p): Query<CapturePrefill>,
 ) -> Result<Response> {
     let (pairs, more_pairs) = pair_rows(&st).await?;
+    let pairs = group_pairs(pairs);
     // A prefill that names an ask nobody recorded is not an error worth a page
     // for: the box is simply empty, which is what an ordinary visit looks like.
     let prefilled = match &p.from_ask {
@@ -2147,6 +2150,71 @@ async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     let more = (waiting - pairs.len() as i64).max(0);
     disambiguate_pair_titles(&mut pairs);
     Ok((pairs, more))
+}
+
+/// One decision, however many pairs it takes to state it.
+pub struct PairCluster {
+    pub pairs: Vec<PairRow>,
+    /// How many distinct artifacts the cluster names, so the card can say what
+    /// it is asking about before the rows do.
+    pub members: usize,
+}
+
+/// Group the open pairs into the clusters they actually describe.
+///
+/// The same disjoint-set `jobs::consolidate` runs before it settles anything,
+/// and for the same reason it gives: resolving pairs one at a time does not
+/// work, and the way it fails is quiet. Here the failure is the operator's
+/// rather than the base's — one artifact against three others arrived as three
+/// separate questions, 90%, 90% and 88% alike, and answering one of them left
+/// the other two on the page looking identical to the one just answered.
+///
+/// Order is the incoming order, which is `PAIR_STATES`' priority: the cluster
+/// containing the most urgent pair leads, and within a cluster the rows keep
+/// the order they were read in.
+fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
+    let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
+        let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
+        if p == x {
+            return p;
+        }
+        let root = find(parent, &p);
+        parent.insert(x.to_string(), root.clone());
+        root
+    }
+    for r in &pairs {
+        let (ra, rb) = (find(&mut parent, &r.a_id), find(&mut parent, &r.b_id));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_root: std::collections::HashMap<String, Vec<PairRow>> =
+        std::collections::HashMap::new();
+    for r in pairs {
+        let root = find(&mut parent, &r.a_id);
+        if !by_root.contains_key(&root) {
+            order.push(root.clone());
+        }
+        by_root.entry(root).or_default().push(r);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|root| {
+            let pairs = by_root.remove(&root)?;
+            let members: std::collections::HashSet<&str> = pairs
+                .iter()
+                .flat_map(|r| [r.a_id.as_str(), r.b_id.as_str()])
+                .collect();
+            Some(PairCluster {
+                members: members.len(),
+                pairs,
+            })
+        })
+        .collect()
 }
 
 /// The API tokens, formatted for a table.
@@ -3438,6 +3506,46 @@ mod tests {
             keeps_a: false,
             keeps_b: false,
         }
+    }
+
+    #[test]
+    fn pairs_that_share_an_artifact_are_one_card() {
+        // The deployment showed one artifact against three others as three
+        // separate questions, 90%, 90% and 88% alike — the same decision
+        // asked three times, where answering one did not retire the others.
+        let p = |id: i64, a: &str, b: &str| PairRow {
+            id,
+            a_id: a.into(),
+            b_id: b.into(),
+            ..pair_row_fixture(a, "t", "")
+        };
+        let grouped = group_pairs(vec![
+            p(1, "a", "b"),
+            p(2, "a", "c"),
+            p(3, "a", "d"),
+            p(4, "x", "y"),
+        ]);
+        assert_eq!(grouped.len(), 2, "{} groups", grouped.len());
+        assert_eq!(grouped[0].pairs.len(), 3);
+        assert_eq!(grouped[0].members, 4, "one artifact against three others");
+        assert_eq!(grouped[1].pairs.len(), 1);
+        assert_eq!(grouped[1].members, 2);
+    }
+
+    #[test]
+    fn a_chain_of_pairs_is_one_cluster_even_without_a_shared_artifact() {
+        // a–b and b–c name no artifact in common, but resolving them
+        // separately is what leaves A pointing at an artifact that is itself
+        // hidden — the dead end `jobs::consolidate` documents.
+        let p = |id: i64, a: &str, b: &str| PairRow {
+            id,
+            a_id: a.into(),
+            b_id: b.into(),
+            ..pair_row_fixture(a, "t", "")
+        };
+        let grouped = group_pairs(vec![p(1, "a", "b"), p(2, "b", "c")]);
+        assert_eq!(grouped.len(), 1, "the chain was split");
+        assert_eq!(grouped[0].members, 3);
     }
 
     #[test]

@@ -91,3 +91,9 @@
    only where the title is shared with another row on the page — see
    `disambiguate_pair_titles`. */
 .decide-opening { color: var(--color-fg-muted); font-size: 0.8125rem; }
+
+/* What a run of cards is about, said once above them. A cluster of two needs
+   no such line — the two titles on the card are the whole of it. */
+.decide-cluster {
+  margin: 0.9rem 0 0.2rem; font-size: 0.8125rem; color: var(--color-fg-muted);
+}
