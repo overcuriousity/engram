@@ -34,7 +34,38 @@
 }
 
 @media (max-width: 40rem) {
+  /* ── No container here ────────────────────────────────────────────────
+     `container-type: inline-size` computes to `contain: layout style
+     inline-size`, and layout containment makes `.shell` the containing block
+     for every fixed descendant inside it — and a stacking context at
+     z-index auto, under the tab bar. The search bar below is fixed and is
+     inside `.shell`, so it anchored to the page box rather than to the
+     viewport: it scrolled away with the results, which is the opposite of
+     what putting it under the thumb is for.
+
+     Dropping the container costs nothing at this width. Both `@container
+     shell (max-width: 60rem)` blocks are unconditionally true on a screen
+     this narrow, so they are restated below as plain rules; the three
+     `min-width: 60rem`/`90rem` blocks never applied here in the first place.
+     Above 40rem the shell is a container again and the queries do the work.
+
+     `container-type: normal` is on `.shell` below, with the rest of what this
+     width does to it. The restated rules sit after `.regions-focus` in source
+     order, which is what the container block they replace relied on —
+     container queries add no specificity of their own. */
+  .regions { grid-template-columns: minmax(0, 1fr); }
+  .regions > * { grid-column: 1 / -1; }
+  .regions.has-selection .region-rail { display: none; }
+  .back {
+    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
+    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
+    font-size: 0.875rem; font-weight: 500; text-decoration: none;
+    color: var(--color-fg-secondary);
+  }
+  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+
   .shell {
+    container-type: normal;
     padding-bottom: 5.5rem;                        /* clear of the tab bar */
     /* Landscape on a notched phone puts the cutout beside the page, not
        above it. */
@@ -60,7 +91,12 @@
 
      Scoped to the search regions on purpose. Capture and Housekeeping keep a
      bar that scrolls with the page, because on those the input is not the
-     point — a fixed textarea would be a permanent third of the screen. */
+     point — a fixed textarea would be a permanent third of the screen.
+
+     Fixed against the viewport only because `.shell` stops being a container
+     at this width — see the block at the top of this media query. z-index
+     above the tab bar's 10, and both are now in the same stacking context
+     for that to mean anything. */
   .regions-rail-focus-source .region-bar {
     position: fixed; left: 0; right: 0; z-index: 11;
     bottom: calc(46px + env(safe-area-inset-bottom));

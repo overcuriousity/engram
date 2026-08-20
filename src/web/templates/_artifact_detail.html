@@ -10,11 +10,18 @@
      the URL the click pushed. The plain href is what runs on the standalone
      artifact page, which has no rail and no results to return to —
      `/ui/search` cannot carry the query, because what this page is given is
-     the stripped highlight terms rather than what was typed. #}
+     the stripped highlight terms rather than what was typed.
+
+     The test is for the rail, not for the grid: every page is inside a
+     `.regions` now, so asking for that one found it on the standalone page too
+     and the plain href never ran — the link swallowed the click and popped a
+     history entry that was not there. What tells the two apart is whether
+     there is a list to go back to. #}
   <a class="back" href="/ui/search"
-     onclick="var w = document.querySelector('.regions');
-              if (!w) return true;
-              w.classList.remove('has-selection'); history.back(); return false;">← Results</a>
+     onclick="var r = document.querySelector('.region-rail');
+              if (!r) return true;
+              r.closest('.regions').classList.remove('has-selection');
+              history.back(); return false;">← Results</a>
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">

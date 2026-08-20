@@ -19,9 +19,17 @@
    embedding, one vector search, never a generation. The embedding measured
    ~92ms p50 against the real endpoint with uncached prompts, so the answer is
    already on its way before the pause would have ended — and embeddings are
-   the axis this project treats as free. #}
+   the axis this project treats as free.
+
+   `hx-sync="this:replace"` because of that halving, not despite it: two
+   requests from the same box are only ordered by luck, and the slower one
+   lands last. A cold endpoint on the first keystroke and a warm one on the
+   third is enough to leave the rail showing results for a prefix of what is
+   in the box — and nothing on screen says so. Replace aborts the request in
+   flight, so the answer shown is always the answer to the last thing typed. #}
 <div class="region-bar">
 <form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
+      hx-sync="this:replace"
       hx-trigger="change from:#kind-chips,
                   keyup changed delay:120ms from:input[name=q],
                   search from:input[name=q],
@@ -97,7 +105,7 @@
      in a column that did not exist yet — stranded in empty space, pointing at
      a list nobody had asked for. It says what the page is for until there is
      something to point at. #}
-  <p class="muted empty">Search to see an artifact here, beside the lines it
+  <p class="muted">Search to see an artifact here, beside the lines it
     came from.</p>
 </div>
 {% endblock %}

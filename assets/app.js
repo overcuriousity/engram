@@ -525,16 +525,28 @@
   }
 
   // The other half of the command bar's paste. Claimed once and cleared, so a
-  // later visit to Capture does not refill a box you emptied on purpose.
+  // later visit to Capture does not refill a box you emptied on purpose —
+  // which means clearing it even when the box already has something in it and
+  // the paste is dropped. Clearing only on the path that used it left the text
+  // in storage to be injected on some later visit, the one thing this is
+  // supposed to prevent.
   function claimPaste() {
     var box = document.querySelector('textarea[name="text"]');
-    if (!box || box.value) return;
+    if (!box) return;
     var text = null;
     try {
       text = sessionStorage.getItem('engram.paste');
       if (text) sessionStorage.removeItem('engram.paste');
     } catch (e) { return; }
-    if (text) { box.value = text; box.focus(); }
+    if (!text || box.value) return;
+    box.value = text;
+    // Assigning `value` fires nothing, and the segment-and-cost hint on the
+    // capture page is bound to `input`. The command bar only routes here for a
+    // paste past PASTE characters — exactly the multi-segment case the hint
+    // exists to warn about — so without this it stayed hidden for every paste
+    // that needed it.
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.focus();
   }
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -643,8 +655,13 @@
       // "back", or typing a query you thought better of would throw away the
       // results behind it.
       if (typing()) { document.activeElement.blur(); return; }
+      // `.back` is in the DOM wherever an artifact is, and `display: none`
+      // above 60rem — and on the standalone artifact page at every width.
+      // Testing for existence alone made Escape a browser Back on a wide
+      // window, where the list is already on screen and there is no region to
+      // step out of. `offsetParent` is null exactly when it is not rendered.
       var back = document.querySelector('.back');
-      if (back) { e.preventDefault(); back.click(); }
+      if (back && back.offsetParent !== null) { e.preventDefault(); back.click(); }
       return;
     }
     if (typing()) return;
@@ -659,7 +676,12 @@
     // this hides that half and gives the prose the whole column. Off by
     // default: showing an artifact beside the lines it came from is the point
     // of the page, and s is for the times you have already checked.
-    if (e.key === 's' && document.querySelector('.split')) {
+    //
+    // Gated on the source itself rather than on the split around it. A merged
+    // artifact has no `.raw` — its second half is the lineage — so the split
+    // was there, the key fired, and `s` hid a merge's provenance under a word
+    // that says source.
+    if (e.key === 's' && document.querySelector('.raw')) {
       e.preventDefault();
       regions.classList.toggle('hide-source');
       return;

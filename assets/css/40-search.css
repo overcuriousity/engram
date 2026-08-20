@@ -275,6 +275,11 @@ body { overflow-x: hidden; }
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   margin: 0 0 0.75rem; font-size: 0.75rem; color: var(--color-fg-muted);
 }
+/* The row ships `hidden` and app.js decides. An author `display` beats the
+   UA's `[hidden]` rule whatever its specificity, so without this the hint was
+   on every load — including on a touch screen, where there are no keys to
+   teach — and "Got it" set an attribute that changed nothing. */
+.keyhint[hidden] { display: none; }
 .keyhint kbd {
   font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
   padding: 0 5px; border: 1px solid var(--color-border);
@@ -317,10 +322,17 @@ body { overflow-x: hidden; }
    beside it cannot answer.
 
    Only at three-up. Below that the rail is already the whole column or already
-   hidden, and a 3rem spine would be neither. */
+   hidden, and a 3rem spine would be neither.
+
+   Two columns, not three. The source is not a grid column here any more than
+   it is anywhere else — it is the second half of the `.split` inside focus —
+   so a third track named `source` sat empty and the pane took a fraction of
+   the width the narrowed rail had just given up. What `r` frees goes to focus
+   entire, which is what "gives the width to the artifact and its source"
+   means. */
 @container shell (min-width: 90rem) {
   .regions.reading {
-    grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr) [source] minmax(0, 1.2fr);
+    grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr);
   }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
@@ -344,7 +356,11 @@ body { overflow-x: hidden; }
    The source is the second half of the split, so it is the second half that
    goes. Targeted by position rather than by `:last-child`, because a merged
    artifact renders no source at all — and `:last-child` would then be the
-   artifact itself, hidden by the key meant to give it more room. */
+   artifact itself, hidden by the key meant to give it more room.
+
+   That same merge is why the key is gated on `.raw` rather than on `.split`:
+   with no source in it, the second half of the split is the lineage, and `s`
+   hid a merge's provenance under a word that says source. */
 .regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
 .regions.hide-source .split > :nth-child(2) { display: none; }
 
