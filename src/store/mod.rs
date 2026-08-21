@@ -105,6 +105,39 @@ impl Store {
                 }
             }
         }
+        // One exception to "recreate it", and deliberately a list rather than
+        // a rule.
+        //
+        // The doctrine above is about columns that change *meaning* — a type,
+        // a constraint, a default that rewrites what existing rows say. It is
+        // the right doctrine and it is not what `artifacts.updated_at` is: a
+        // column added beside the others, `NOT NULL DEFAULT 0`, that no row
+        // needs to have been written with. Against that, "recreate the base"
+        // means re-ingesting every artifact to gain a stamp, which is a price
+        // nobody would pay and so a column nobody would add.
+        //
+        // Named one at a time on purpose. A general "ALTER in anything
+        // additive" would make this boot path guess, and the guess would be
+        // wrong the first time a column's default is not what its old rows
+        // should say. Everything not on this list still recreates.
+        const ADDITIVE: [(&str, &str, &str); 1] = [(
+            "artifacts",
+            "updated_at",
+            "ALTER TABLE artifacts ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+        )];
+        for (table, column, ddl) in ADDITIVE {
+            let key = format!("{table}.{column}");
+            let Some(i) = missing.iter().position(|m| *m == key) else {
+                continue;
+            };
+            sqlx::raw_sql(ddl)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            tracing::info!(column = %key, "added a column this schema expects");
+            missing.remove(i);
+        }
+
         if !missing.is_empty() {
             return Err(crate::error::Error::Store(format!(
                 "this database is older than the schema: {} missing. \
@@ -233,6 +266,55 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_base_without_updated_at_gains_the_column_instead_of_being_refused() {
+        // `artifacts.updated_at` is additive: a column beside the others with a
+        // default no existing row needs to have been written with. Refusing the
+        // base for it meant "re-ingest every artifact you own to gain a
+        // stamp", which is a price nobody pays and so a column nobody adds.
+        // Everything not on the ADDITIVE list still recreates, which is the
+        // line `a_base_older_than_the_schema_is_named_before_anything_is_touched`
+        // holds.
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        let store = Store {
+            pool,
+            capture: Default::default(),
+        };
+        // A base as it was before the column existed: the real schema, with
+        // the column taken back off. Hand-writing a cut-down `artifacts` would
+        // only test a table this application does not have.
+        store.migrate().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO corpora (id, raw_text, origin, content_hash, status, created_at, updated_at)
+                  VALUES ('c', 'hours', 'web', 'h', 'ready', 1, 1);
+             INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
+                  VALUES ('a', 'c', 0, 'hours', 1);
+             ALTER TABLE artifacts DROP COLUMN updated_at;",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.migrate().await.unwrap();
+        // The row that was already there kept its text and gained the default.
+        let (text, stamp): (String, i64) =
+            sqlx::query_as("SELECT text, updated_at FROM artifacts WHERE id = 'a'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(text, "hours", "the row was rewritten");
+        assert_eq!(stamp, 0, "a stamp nobody has set is not a claim about when");
+        // And again, because migrate runs on every connect.
+        store.migrate().await.unwrap();
+    }
 
     #[tokio::test]
     async fn applying_the_schema_twice_changes_nothing() {

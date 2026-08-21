@@ -1547,6 +1547,7 @@ impl Config {
                     .list_separator(","),
             )
             .build()?;
+        Self::refuse_removed_keys(&raw)?;
         let mut cfg: Config = raw.try_deserialize()?;
         cfg.normalize();
         cfg.validate()?;
@@ -1555,6 +1556,48 @@ impl Config {
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
         Ok(cfg)
+    }
+
+    /// Keys that used to mean something, and no longer exist.
+    ///
+    /// Refused rather than ignored, and refused rather than folded into
+    /// `[learn]`. Deserialization drops what it does not recognise, so an
+    /// upgraded base whose file still says `[feedback] enabled = false` would
+    /// parse without complaint and start recording again — the one key whose
+    /// whole purpose was to say "keep none of this" turned into a key that
+    /// says nothing. Silence is the wrong answer to that.
+    ///
+    /// An alias would be the other answer, and it cannot be written: the three
+    /// old flags were independent, so `feedback.enabled = true` beside
+    /// `pursuit.enabled = false` has no single `[learn]` value that means what
+    /// the file meant. Naming them and stopping is what leaves the decision
+    /// with the person who wrote them.
+    ///
+    /// This is `migrate`'s rule for a database that is behind the schema,
+    /// applied to the file: read first, say what is wrong, change nothing.
+    fn refuse_removed_keys(raw: &config::Config) -> Result<(), ConfigError> {
+        // `[learn]` is the replacement for all three: recording, the links
+        // learned from it, and the pursuits that read both.
+        const REMOVED: [(&str, &str); 3] = [
+            ("feedback.enabled", "[learn] enabled"),
+            ("associate.enabled", "[learn] enabled"),
+            ("pursuit.enabled", "[learn] enabled"),
+        ];
+        let found: Vec<String> = REMOVED
+            .iter()
+            .filter(|(key, _)| raw.get::<config::Value>(key).is_ok())
+            .map(|(key, now)| format!("  {key} — see {now}"))
+            .collect();
+        if found.is_empty() {
+            return Ok(());
+        }
+        Err(ConfigError::Invalid(format!(
+            "this config sets keys that no longer exist:\n{}\nRemove them, or set [learn] to \
+             what you mean. They were three switches over one faculty and are one switch now; \
+             an upgrade cannot guess which of them you meant, and ignoring them would turn a \
+             setting that says \"keep none of this\" into a setting that says nothing.",
+            found.join("\n")
+        )))
     }
 
     /// Values that would make a feature quietly useless, put back rather than
@@ -2021,15 +2064,37 @@ mod tests {
     }
 
     #[test]
+    fn a_key_that_no_longer_exists_stops_the_start_rather_than_being_ignored() {
+        // Deserialization drops what it does not recognise, so this file used
+        // to load in silence — and `[feedback] enabled = false` is the one key
+        // whose entire purpose is to say "keep none of this". Ignored, it
+        // became a key that said nothing, and an upgrade turned recording back
+        // on for the operator who had most explicitly refused it.
+        let dir = tempfile::tempdir().unwrap();
+        for key in ["[feedback]\nenabled = false", "[pursuit]\nenabled = false"] {
+            let p = write(&dir, &format!("{MINIMAL}\n{key}\n"));
+            let err = Config::load(Some(&p)).unwrap_err().to_string();
+            assert!(
+                err.contains("no longer exist") && err.contains("[learn]"),
+                "a removed key loaded without saying so: {err}"
+            );
+        }
+        // `true` is refused as well. It is not a safe no-op to leave lying in a
+        // file: the next person to read it would take it for the live switch.
+        let p = write(&dir, &format!("{MINIMAL}\n[associate]\nenabled = true\n"));
+        assert!(Config::load(Some(&p)).is_err());
+        // And a file that has been brought up to date loads.
+        let p = write(&dir, &format!("{MINIMAL}\n[learn]\nenabled = false\n"));
+        assert!(!Config::load(Some(&p)).unwrap().learn.enabled);
+    }
+
+    #[test]
     fn a_zero_candidate_pool_is_put_back_to_the_default() {
         // Zero would store an empty pool for every captured search: nothing to
         // choose on any card, so every judgement is forced through "none of
         // these" and recorded as a find that never happened.
         let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            &dir,
-            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 0\n"),
-        );
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 0\n"));
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,
@@ -2045,10 +2110,7 @@ mod tests {
         // search — not just the depth of the pool stored behind it. Four digits
         // here silently made every API call a four-digit vector fetch.
         let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            &dir,
-            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 2000\n"),
-        );
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 2000\n"));
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,

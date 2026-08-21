@@ -546,7 +546,7 @@ mod tests {
                 at,
                 bundle: raw.clone(),
                 device_key: device_key(&parse_bundle(&raw)),
-                local_hour: Some(t.hour as i64),
+                local_hour: Some(t.hour as f64),
                 weekday: Some(t.weekday as i64),
                 tz: bundle.tz.clone(),
             })

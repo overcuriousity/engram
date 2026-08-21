@@ -119,7 +119,14 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     // operator who switches duplicate hygiene off is not asking to keep their
     // query log forever. With nothing to expire and nothing to group there is
     // no unit at all, which is what the ticker's `return` used to say.
-    if core.feedback.retain_days > 0 || core.learn.enabled || core.recommends() {
+    // `recommend.enabled` and not `recommends()`: the second is `&& learn`,
+    // and switching learning off is precisely when the situations already
+    // written down most need to keep ageing out. Gating the ageing on the same
+    // key as the collecting means an operator who turns the feature off freezes
+    // a 400-day window at rest for ever, which is the opposite of what they
+    // asked for. The unit is armed by the key that says the feature exists on
+    // this base; whether it is currently learning does not enter into it.
+    if core.feedback.retain_days > 0 || core.learn.enabled || core.recommend.enabled {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
     }
     // Learning which situations recur for which artifact. Behind its own gate
@@ -562,6 +569,9 @@ mod tests {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = false;
         core.feedback.retain_days = 0;
+        // The offer too: it has a retention window of its own, and a base
+        // where it exists is a base with something left to expire.
+        core.recommend.enabled = false;
         assert!(
             !periodic_units(&core)
                 .iter()
@@ -716,10 +726,31 @@ mod tests {
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.retain_days = 0;
         core.learn.enabled = false;
+        core.recommend.enabled = false;
         assert!(
             !periodic_units(&core)
                 .iter()
                 .any(|(s, _)| *s == crate::store::jobs::Stage::Retention)
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_learning_off_does_not_freeze_the_situations_already_written() {
+        // The ageing used to ride `recommends()`, which is `recommend && learn`
+        // — so an operator who switched learning off got no retention unit at
+        // all, and the 400-day window over `context_events` and
+        // `interaction_events` stopped moving with everything collected so far
+        // still in it. Turning a thing off is when its data most needs to leave.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.retain_days = 0;
+        core.learn.enabled = false;
+        core.recommend.enabled = true;
+        assert!(!core.recommends(), "learning is off");
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == crate::store::jobs::Stage::Retention),
+            "nothing is left to age out what the offer wrote while it was on"
         );
     }
 

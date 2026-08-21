@@ -30,7 +30,8 @@ pub struct ContextEvent {
     /// The bundle as received, JSON.
     pub bundle: String,
     pub device_key: Option<String>,
-    pub local_hour: Option<i64>,
+    /// The fractional local hour — 14.9 for 14:55, as the encoder reads it.
+    pub local_hour: Option<f64>,
     pub weekday: Option<i64>,
     pub tz: Option<String>,
 }
@@ -251,7 +252,7 @@ mod tests {
             at,
             bundle: r#"{"tz":"Europe/Berlin"}"#.into(),
             device_key: Some("phone".into()),
-            local_hour: Some(15),
+            local_hour: Some(15.0),
             weekday: Some(4),
             tz: Some("Europe/Berlin".into()),
         }

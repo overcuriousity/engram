@@ -373,6 +373,12 @@ max_dedupe_per_tick = 5
 # third was a warning, which is how you find out they were one setting written
 # three times. The sections below keep their thresholds; this is the switch.
 #
+# The three old keys are refused at startup rather than ignored. Deserialization
+# drops what it does not recognise, and `[feedback] enabled = false` is a key
+# whose whole purpose was to say "keep none of this" — ignored, it would have
+# said nothing, and an upgrade would have turned recording back on for the
+# operator who had most explicitly refused it.
+#
 # On by default. Everything downstream of it moves only while the log is being
 # written, so off is the deliberate act. Nothing here leaves the machine, Ops
 # forgets all of it on one press, and off means nothing is recorded in the
@@ -498,7 +504,10 @@ min_engagement = 3.0
 # model call and no embedding on this path, ever.
 #
 # On, and behind [learn] as well: the situations it clusters are opens recorded
-# in the same log everything else here reads. A weekly pattern needs weeks, so a
+# in the same log everything else here reads. Forgetting on Settings takes them
+# in both places they live — the rows and the centroids on the points — and the
+# 400-day window over them keeps ageing whether or not [learn] is on, because
+# switching a thing off is when its data most needs to leave. A weekly pattern needs weeks, so a
 # young base sees the bottom rung — a card drawn at random, claiming nothing —
 # until it has something to say.
 [recommend]

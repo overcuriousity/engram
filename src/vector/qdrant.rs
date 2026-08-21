@@ -48,15 +48,15 @@ const REINDEX_BATCH: usize = 256;
 const READY_ATTEMPTS: u32 = 5;
 const READY_BACKOFF: Duration = Duration::from_millis(200);
 
-/// A chunk carrying this tag is boosted past the decay curve. A tag rather than
-/// a column: `PATCH /api/v1/artifacts/{id}` already edits tags without
-/// re-embedding, and the payload index that makes it filterable already exists.
 /// The context multivector: one element per learned situation, scored with
 /// `max_sim`. Not the multivector the roadmap cut — that was ColBERT-style
 /// late-interaction reranking, one reduced-width vector per *token* and
 /// thousands per artifact. This is two to five per artifact.
 pub const CTX: &str = "ctx";
 
+/// A chunk carrying this tag is boosted past the decay curve. A tag rather than
+/// a column: `PATCH /api/v1/artifacts/{id}` already edits tags without
+/// re-embedding, and the payload index that makes it filterable already exists.
 pub const PINNED_TAG: &str = "pinned";
 
 const SECONDS_PER_DAY: u64 = 86_400;

@@ -139,15 +139,24 @@ impl Core {
         let ids: Vec<String> = hits.iter().map(|h| h.payload.artifact_id.clone()).collect();
         let clusters = self.store.context_clusters_of(&ids).await?;
 
-        // The argmax, over the **full** vector — that is what reproduces the
-        // store's choice, because that is what `max_sim` scored. The rung comes
-        // from `context_score`, which slices the `scope` block off: the two
-        // numbers answer different questions and live on different scales.
-        let mut best: Option<(
+        // Ranked by the **full** vector — that is what reproduces the store's
+        // choice, because that is what `max_sim` scored. The rung comes from
+        // `context_score`, which slices the `scope` block off: the two numbers
+        // answer different questions and live on different scales.
+        //
+        // Every candidate, in that order, and not only the argmax. The two
+        // numbers disagreeing is not an edge case here — `scope` is weighted
+        // 10 against a total under 5, so it dominates the ranking and barely
+        // participates in the gate. A thin cluster could take the top of the
+        // list on the strength of the block the gate does not read, fail the
+        // gate on the blocks it does, and drop the whole page to a random card
+        // while an established Friday-afternoon pattern sat second and would
+        // have passed. The first candidate that clears its rung is the offer.
+        let mut ranked: Vec<(
             &crate::vector::SearchHit,
             &crate::store::context::StoredCluster,
             f32,
-        )> = None;
+        )> = Vec::new();
         for hit in &hits {
             let Some(mine) = clusters.get(&hit.payload.artifact_id) else {
                 continue;
@@ -178,14 +187,15 @@ impl Core {
                 {
                     continue;
                 }
-                let full = cosine(&now, &c.centroid);
-                if best.is_none_or(|(_, _, b)| full > b) {
-                    best = Some((hit, c, full));
-                }
+                ranked.push((hit, c, cosine(&now, &c.centroid)));
             }
         }
+        // Descending, and stable underneath: two clusters on the same full
+        // cosine keep the store's own order rather than swapping between page
+        // views.
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2));
 
-        if let Some((hit, cluster, _)) = best {
+        for (hit, cluster, _) in &ranked {
             let score = context_score(&now, &cluster.centroid);
             // Established, or seen only once or twice. A thin cluster has to
             // match the situation *better* before anything is said, which is
@@ -286,8 +296,8 @@ impl Core {
     /// through `background` rather than a bare `tokio::spawn`.
     ///
     /// The raw string is stored whole, including the fields the encoder does
-    /// not read today; the denormalised columns are what the sweep reads on
-    /// every row.
+    /// not read today. The denormalised columns are for a person reading the
+    /// table with `sqlite3`; the sweep re-derives all three from the bundle.
     pub fn record_context_event(&self, raw: &str, bundle: &Bundle, scope: Option<&str>) {
         if !self.recommends() {
             return;
@@ -300,7 +310,7 @@ impl Core {
             at,
             bundle: raw.to_string(),
             device_key: crate::core::context::device_key(bundle),
-            local_hour: Some(t.hour as i64),
+            local_hour: Some(t.hour as f64),
             weekday: Some(t.weekday as i64),
             tz: bundle.tz.clone(),
         };
@@ -346,6 +356,45 @@ impl Core {
                 tracing::warn!(error = %e, "could not record what was offered");
             }
         });
+    }
+}
+
+impl Core {
+    /// Clear the learned situations out of the index.
+    ///
+    /// The rows in `context_clusters` are the bookkeeping; the centroids
+    /// themselves are a named vector on each artifact's point, and a `DELETE`
+    /// in SQLite does not reach them. Without this, Forget would leave the
+    /// averaged situations — a device, an hour, a weekday — sitting in Qdrant
+    /// after the person asked to be rid of them. They would no longer produce
+    /// an offer, because the read path filters every hit through the rows that
+    /// are now gone, but "inert" is not "deleted" and the button does not
+    /// promise inert.
+    ///
+    /// Called before the rows go, because the rows are what says which points
+    /// carry a set. Failing here is reported and does not stop the delete: a
+    /// vector store that is down must not be able to block a person from
+    /// forgetting what is in SQLite.
+    pub async fn forget_situations(&self) -> u64 {
+        let ids = match self.store.artifacts_with_context_clusters().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list the points carrying situations");
+                return 0;
+            }
+        };
+        let mut cleared = 0;
+        for id in &ids {
+            match self.vectors.set_context_vectors(id, Vec::new()).await {
+                Ok(()) => cleared += 1,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    artifact = %id,
+                    "could not clear the situations on a point"
+                ),
+            }
+        }
+        cleared
     }
 }
 
@@ -466,6 +515,42 @@ mod tests {
             .unwrap();
     }
 
+    /// Give `aid` one cluster whose centroid is written by hand, so a test can
+    /// place a candidate at a chosen full cosine and a chosen `context_score`
+    /// — the two numbers the ladder reads, which the encoder always moves
+    /// together and which have to be separable to test what happens when they
+    /// disagree.
+    async fn learn_raw(
+        core: &Core,
+        aid: &str,
+        scope: &str,
+        centroid: Vec<f32>,
+        weight: f64,
+        events: i64,
+    ) {
+        core.store
+            .replace_context_clusters(
+                aid,
+                &[crate::store::context::StoredCluster {
+                    scope: Some(scope.into()),
+                    artifact_id: aid.into(),
+                    slot: 0,
+                    centroid: centroid.clone(),
+                    weight,
+                    events,
+                    last_at: FRIDAY,
+                    encoder_version: encoder_version(&core.recommend.weights),
+                    representative: serde_json::json!({ "at": FRIDAY, "bundle": {} }).to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .set_context_vectors(aid, vec![centroid])
+            .await
+            .unwrap();
+    }
+
     /// One artifact with a vector point behind it. `created_at` is 0 and
     /// nothing has been shown, so `resurface` will also return it — which is
     /// what the bottom rung needs.
@@ -580,7 +665,7 @@ mod tests {
                 at,
                 bundle: raw.clone(),
                 device_key: crate::core::context::device_key(b),
-                local_hour: Some(t.hour as i64),
+                local_hour: Some(t.hour as f64),
                 weekday: Some(t.weekday as i64),
                 tz: b.tz.clone(),
             })
@@ -1000,5 +1085,83 @@ mod tests {
 
         core.offer(Some("alice"), &phone()).await.unwrap();
         assert_eq!(embedder.calls(), before, "not one embedding call");
+    }
+
+    #[tokio::test]
+    async fn a_candidate_that_fails_its_rung_does_not_take_the_others_down_with_it() {
+        // The ladder reads two numbers that are not the same number. The full
+        // cosine ranks — it is what `max_sim` scored — and `context_score`,
+        // which slices `scope` off, decides the rung. `scope` is weighted 10
+        // against a block total under 5, so it dominates the first and barely
+        // enters the second, and the two can disagree about which candidate is
+        // best.
+        //
+        // This used to be an argmax and a single gate: whichever cluster won
+        // the ranking was the only one ever tested, and if it failed, the page
+        // fell to the random card — with an established situation sitting
+        // second that would have passed. A pattern replaced by a card claiming
+        // nothing is the worst rung the ladder can produce.
+        let core = core_at(FRIDAY).await;
+        let now = encode(
+            FRIDAY,
+            Some("alice"),
+            &Bundle::default(),
+            &core.recommend.weights,
+        );
+        let dims = crate::core::context::SCOPE_DIMS;
+
+        // Thin, and nothing outside `scope`. It takes the top of the ranking on
+        // the strength of the block the gate does not read, and scores 0 on the
+        // blocks it does — so `Tentative`, which needs a *strong* match, is
+        // refused.
+        let mut thin = vec![0.0; now.len()];
+        thin[..dims].copy_from_slice(&now[..dims]);
+
+        // Established, and a real half-match on the blocks that decide the
+        // rung: `Similar` at `weak_at`. Its extra length outside `scope` costs
+        // it the ranking against the candidate that has none.
+        let rest = &now[dims..];
+        let norm = rest.iter().map(|v| v * v).sum::<f32>().sqrt();
+        // The device block, which an empty bundle leaves at zero — so this is a
+        // direction the current situation has nothing in.
+        let free = crate::core::context::BLOCKS
+            .iter()
+            .find(|b| b.name == "device")
+            .unwrap()
+            .at;
+        let mut firm = vec![0.0; now.len()];
+        firm[..dims].copy_from_slice(&now[..dims]);
+        for i in dims..now.len() {
+            firm[i] = now[i] / norm;
+        }
+        firm[free] += 3f32.sqrt();
+
+        let a = seed_artifact(&core, "a coincidence").await;
+        let b = seed_artifact(&core, "recycling centre").await;
+        learn_raw(&core, &a, "alice", thin.clone(), 1.0, 1).await;
+        learn_raw(&core, &b, "alice", firm.clone(), 6.0, 6).await;
+
+        // The premise: the thin one ranks first, and the firm one is the only
+        // one that clears a rung. Asserted rather than assumed — if the
+        // encoder's weights move, this test must fail loudly rather than pass
+        // for a reason it was not written for.
+        assert!(
+            cosine(&now, &thin) > cosine(&now, &firm),
+            "the thin cluster no longer wins the ranking"
+        );
+        assert!(context_score(&now, &thin) < core.recommend.strong_at);
+        let firm_score = context_score(&now, &firm);
+        assert!(
+            firm_score >= core.recommend.weak_at && firm_score < core.recommend.strong_at,
+            "the firm cluster is not a Similar: {firm_score}"
+        );
+
+        let offer = core
+            .offer(Some("alice"), &Bundle::default())
+            .await
+            .unwrap()
+            .expect("an offer");
+        assert_eq!(offer.rung, Rung::Similar, "fell through to the floor");
+        assert_eq!(offer.artifact_id, b, "offered the candidate that failed");
     }
 }

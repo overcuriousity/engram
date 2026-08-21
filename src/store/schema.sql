@@ -502,8 +502,16 @@ CREATE TABLE IF NOT EXISTS context_events (
   -- session and origin by a hardened browser, so every day would look like a
   -- new device.
   device_key  TEXT,
-  -- Denormalised because the sweep reads them on every row.
-  local_hour  INTEGER,
+  -- Denormalised for whoever opens this table with `sqlite3`: "what does my
+  -- Friday afternoon look like" should not require decoding a JSON bundle per
+  -- row. The sweep does not read them — it re-derives all three through the
+  -- encoder, which is the only reader that must agree with itself.
+  --
+  -- REAL, not INTEGER: the encoder keeps the fractional hour on purpose, so
+  -- that 14:55 costs almost nothing against a 15:00 pattern. Truncating here
+  -- would make 14:05 and 14:55 the same row and quietly disagree with the
+  -- vector beside it.
+  local_hour  REAL,
   weekday     INTEGER,
   tz          TEXT
 );

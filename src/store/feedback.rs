@@ -708,9 +708,30 @@ impl Store {
             .execute(&self.pool)
             .await?
             .rows_affected();
+        // The situations those page views happened in, and the profiles built
+        // from them. Both, and not one: the clusters are derived, but a
+        // centroid *is* the situations that formed it — a device, an hour, a
+        // weekday, averaged — so deleting the events and keeping the profiles
+        // would leave the offer still saying "Pattern · weekday, hour, device"
+        // out of data the person just asked to be rid of. The centroids also
+        // live on the points, which a DELETE here cannot reach —
+        // `Core::forget_situations` clears those first, and the caller that
+        // has a vector store runs the two together.
+        let situations = sqlx::query("DELETE FROM context_events")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        let profiles = sqlx::query("DELETE FROM context_clusters")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         // Pursuits and what was opened are the same kind of record — what a
         // person did — and go with one press.
-        Ok(searches + self.purge_asks().await? + self.purge_pursuits().await?)
+        Ok(searches
+            + situations
+            + profiles
+            + self.purge_asks().await?
+            + self.purge_pursuits().await?)
     }
 
     /// Recorded searches with `from < created_at <= to`, oldest first, with
@@ -1252,6 +1273,82 @@ mod tests {
         let id = seed(&store, "only one", &["a"]).await;
         store.judge_hit(&id, "a").await.unwrap();
         assert!(store.next_pending().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn forgetting_takes_the_situations_and_the_profiles_built_from_them() {
+        // The button says forget. It used to leave `context_events` — a device
+        // fingerprint, an hour, a weekday and a battery reading per page view,
+        // kept for 400 days — and `context_clusters`, which is those same
+        // situations averaged. So the offer went on saying "Pattern · weekday,
+        // hour, device · like 08.08., 15:04" out of data the person had just
+        // asked to be rid of, which is the one outcome the button exists to
+        // prevent.
+        let store = Store::memory().await.unwrap();
+        seed(&store, "when is the recycling centre open", &["a"]).await;
+        store
+            .record_context(&crate::store::context::ContextEvent {
+                id: 0,
+                scope: Some("alice".into()),
+                at: 1_000,
+                bundle: r#"{"tz":"Europe/Berlin","battery_level":0.4}"#.into(),
+                device_key: Some("phone".into()),
+                local_hour: Some(15.0),
+                weekday: Some(4),
+                tz: Some("Europe/Berlin".into()),
+            })
+            .await
+            .unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "opening hours".into(),
+                    corpus_span: None,
+                    title: Some("hours".into()),
+                    category: None,
+                    tags: Vec::new(),
+                    segment_idx: None,
+                    caveats: Vec::new(),
+                }],
+            )
+            .await
+            .unwrap();
+        let aid = a[0].id.clone();
+        store
+            .replace_context_clusters(
+                &aid,
+                &[crate::store::context::StoredCluster {
+                    scope: Some("alice".into()),
+                    artifact_id: aid.clone(),
+                    slot: 0,
+                    centroid: vec![0.5; 53],
+                    weight: 3.0,
+                    events: 3,
+                    last_at: 1_000,
+                    encoder_version: 1,
+                    representative: r#"{"at":1000,"bundle":{}}"#.into(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        store.purge_feedback().await.unwrap();
+
+        assert!(
+            store.context_events_since(0).await.unwrap().is_empty(),
+            "the situations survived the button that says forget"
+        );
+        assert!(
+            store
+                .artifacts_with_context_clusters()
+                .await
+                .unwrap()
+                .is_empty(),
+            "the profiles built from them survived"
+        );
     }
 
     #[tokio::test]

@@ -1281,6 +1281,13 @@ pub struct OfferView {
     pub rec: String,
     /// The raw bundle and the contribution numbers, for the `<details>`.
     pub detail: String,
+    /// The rung's machine name — `pattern`, `similar`, `tentative`, `random`.
+    /// What the impression confirmation posts back, and what `Rung::parse`
+    /// reads at the other end.
+    pub kind: String,
+    /// The winning cluster's slot as text, or empty on the random card, which
+    /// has no cluster.
+    pub slot: String,
 }
 
 #[derive(Template, Default)]
@@ -1322,19 +1329,61 @@ async fn context_offer(
             None
         });
 
-    if let Some(o) = &offer {
-        st.core.record_recommendation(
-            &o.artifact_id,
-            "recommended_shown",
-            o.rung.as_str(),
-            o.slot,
-            Some(&id.subject),
-        );
-    }
+    // Nothing is recorded here. This function *computes* an offer; whether a
+    // person was ever shown one is a different fact, and only the browser
+    // knows it — the fetch races the first keystroke, so an answer that
+    // arrives after the box has been typed in is dropped client-side and was
+    // never on screen. Recording at this point counted those, and they are not
+    // a random sample: a visit that goes straight to typing is exactly a visit
+    // where nothing would have been clicked. That is a structural zero
+    // folded into the denominator of the one number the block weights are
+    // meant to be fitted against later. `/ui/context/seen` is the other half.
     Ok(HtmlTemplate(ContextTemplate {
         offer: offer.map(offer_view),
     })
     .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct SeenForm {
+    artifact_id: String,
+    rung: String,
+    slot: Option<i64>,
+}
+
+/// The browser confirming an offer actually reached the screen.
+///
+/// Posted by `app.js` after the fragment is swapped in and not dismissed, and
+/// it is what writes `recommended_shown`. The pair it forms with
+/// `recommended_open` is the hit rate on Ops, so both halves have to mean what
+/// they say: shown is shown.
+///
+/// Everything in the form comes from a page and a page can be made to say
+/// anything, so nothing is trusted. The rung goes through `Rung::parse` — the
+/// same gate the open marker passes, and for the same reason: an unrecognised
+/// word would appear on Ops as a fifth rung of a four-rung ladder. The
+/// artifact must exist. Neither failure is worth a status code, because
+/// nothing is waiting on the answer.
+async fn context_seen(
+    State(st): State<AppState>,
+    id: Identity,
+    Form(f): Form<SeenForm>,
+) -> Result<Response> {
+    use crate::core::recommend::Rung;
+    let Some(rung) = Rung::parse(&f.rung) else {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    };
+    if st.core.store.get_artifact(&f.artifact_id).await.is_err() {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    }
+    st.core.record_recommendation(
+        &f.artifact_id,
+        "recommended_shown",
+        rung.as_str(),
+        f.slot,
+        Some(&id.subject),
+    );
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
 fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
@@ -1385,6 +1434,12 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
             Some(s) => format!("?rec={s}&rung={}", o.rung.as_str()),
             None => format!("?rung={}", o.rung.as_str()),
         },
+        // The machine name of the rung, and the slot as text. Not for reading —
+        // these are what the browser posts back to confirm the offer reached
+        // the screen, and they are the same two values the link carries on a
+        // click, so the shown and the open agree about what was offered.
+        kind: o.rung.as_str().to_string(),
+        slot: o.slot.map(|s| s.to_string()).unwrap_or_default(),
         id: o.artifact_id,
         title: o.title,
         detail: o.detail,
@@ -2823,10 +2878,13 @@ async fn undo_merge_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-/// Forget every captured search and every recorded question.
+/// Forget every captured search, every recorded question, and every situation.
 ///
 /// Judgements go with them: a verdict is a statement about a query, and one
-/// whose query no longer exists records nothing. Accepted settings and their
+/// whose query no longer exists records nothing. The situations a page view
+/// was made in go too, in both places they live — the rows in SQLite and the
+/// centroids on the points — because a profile is the situations that formed
+/// it, and a button that says "forget" may not leave the average behind. Accepted settings and their
 /// history stay, because they describe how the application is configured now.
 ///
 /// Both tables, because one switch records both and `expire_feedback` ages both
@@ -2834,10 +2892,13 @@ async fn undo_merge_ui(
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
 async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    // The index first, while the rows still say which points carry a set.
+    let cleared = st.core.forget_situations().await;
     let n = st.core.store.purge_feedback().await?;
     tracing::info!(
         dropped = n,
-        "captured searches and questions deleted by the operator"
+        points_cleared = cleared,
+        "captured searches, questions and situations deleted by the operator"
     );
     // Back to the page the button is on. The route keeps its /ui/ops prefix —
     // the two pages split, the endpoints did not.
@@ -3859,6 +3920,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
         .route("/ui/context", post(context_offer))
+        .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
         // An installed PWA may still hold /ui/browse as its start URL, and a
         // bookmark outlives the page it pointed at.
@@ -5458,6 +5520,16 @@ mod tests {
             "the card links like an ordinary result: {body}"
         );
 
+        // The browser confirming the card reached the screen. The fragment
+        // above computed it; only this says anybody saw it.
+        app.clone()
+            .oneshot(form(
+                "/ui/context/seen",
+                &cookie,
+                &format!("artifact_id={aid}&rung=random"),
+            ))
+            .await
+            .unwrap();
         get(&app, &format!("/ui/artifacts/{aid}?rung=random"), &cookie).await;
         drain().await;
         // A shown and an open, and both of them on the random rung: that pair
@@ -5470,6 +5542,38 @@ mod tests {
             rows.iter()
                 .all(|r| r.detail.as_deref().unwrap_or_default().contains("random")),
             "Ops cannot tell which rung: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_a_page_made_up_records_nothing() {
+        // The impression now comes from the browser, which means it comes from
+        // whatever anyone chooses to post. Both halves go into `offer_rates`'
+        // `GROUP BY rung` — a made-up rung would appear on Ops as a fifth rung
+        // of a four-rung ladder, and a made-up artifact would put a shown
+        // against something that was never offered and cannot ever be clicked,
+        // which is a zero in the denominator of the hit rate for ever.
+        let (app, cookie, store, aid) = app_recommending().await;
+
+        for body in [
+            format!("artifact_id={aid}&rung=excellent"),
+            "artifact_id=no-such-artifact&rung=random".to_string(),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form("/ui/context/seen", &cookie, &body))
+                .await
+                .unwrap();
+            // Nothing is waiting on the answer, so neither is an error — but
+            // neither is a row.
+            assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        }
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(
+            rows.is_empty(),
+            "a page wrote its own row into the hit rate: {rows:?}"
         );
     }
 
@@ -5558,6 +5662,33 @@ mod tests {
             "the card explains nothing: {body}"
         );
         assert!(!body.contains("Pattern"), "{body}");
+        // The fragment carries what the confirmation posts back, so the shown
+        // and the open agree about what was offered.
+        assert!(
+            body.contains(r#"data-rec-rung="random""#),
+            "the browser cannot say what it was shown: {body}"
+        );
+        drain().await;
+
+        // Computing an offer is not showing one. Until the browser says it
+        // reached the screen, nothing is recorded: this fetch races the first
+        // keystroke, and the answer that loses is dropped without ever being
+        // seen. Counting those put a population that cannot click into the
+        // denominator of the one number the weights would be fitted against.
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(
+            !rows.iter().any(|r| r.kind == "recommended_shown"),
+            "an offer nobody has confirmed seeing is already counted: {rows:?}"
+        );
+
+        app.clone()
+            .oneshot(form(
+                "/ui/context/seen",
+                &cookie,
+                &format!("artifact_id={aid}&rung=random"),
+            ))
+            .await
+            .unwrap();
         drain().await;
 
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();

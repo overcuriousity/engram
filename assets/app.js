@@ -694,6 +694,27 @@
     if (area) area.remove();
   }
 
+  // The other half of the impression. The server computes an offer without
+  // knowing whether anyone saw it — this fragment races the first keystroke,
+  // and the answer that loses is dropped above without ever being on screen.
+  // Counting those as shown put a population that structurally cannot click
+  // into the denominator of the hit rate on Ops, which is the number the block
+  // weights are supposed to be fitted against one day. So the browser says so,
+  // and only the browser can.
+  //
+  // Nothing waits on this and nothing is done with the answer: a confirmation
+  // that fails to send costs one row of an instrument, not a page.
+  function confirmOffer(area) {
+    if (!area) return;
+    var id = area.getAttribute('data-rec-id');
+    var rung = area.getAttribute('data-rec-rung');
+    if (!id || !rung) return;
+    var body = new URLSearchParams({ artifact_id: id, rung: rung });
+    var slot = area.getAttribute('data-rec-slot');
+    if (slot) body.set('slot', slot);
+    fetch('/ui/context/seen', { method: 'POST', body: body }).catch(function () {});
+  }
+
   function contextOffer() {
     var box = document.querySelector('input[name=q]');
     if (!box) return;
@@ -733,7 +754,10 @@
       // The offer's own fetch can land after the first keystroke has already
       // dismissed it. Swapping it back in then would be exactly the flicker the
       // removal exists to prevent.
-      if (e.target.id === 'context-offer' && offerDismissed) dropOffer();
+      if (e.target.id === 'context-offer') {
+        if (offerDismissed) dropOffer();
+        else confirmOffer(e.target);
+      }
       enhance(e.target);
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
