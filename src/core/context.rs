@@ -95,9 +95,684 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
+/// One named span of the context vector.
+///
+/// Named because the explanation falls out of the naming: each block is scored
+/// separately at read time, so "weekday, hour, device" is three lookups in this
+/// table rather than three sentences somebody had to write. A new block brings
+/// its label and is done.
+#[derive(Debug, Clone, Copy)]
+pub struct Block {
+    /// The config key its weight is read under. See `BlockWeights::of`.
+    pub name: &'static str,
+    /// What the line under the offer prints. No sentences and no values in
+    /// prose — generated prose per block was the first draft and was cut,
+    /// because it coupled every new dimension to a sentence template.
+    pub label: &'static str,
+    pub at: usize,
+    pub dims: usize,
+}
+
+/// The layout, in order. `scope` leads because `context_score` slices it off by
+/// taking everything after it, which only works while it is first.
+///
+/// Circular where there is a circle, one-hot where there is not. The hour is a
+/// circle, so 23:30 and 00:30 are an hour apart. The weekday is *not* a useful
+/// circle — "Friday is three from Tuesday" means nothing, and the pattern is
+/// exactly Friday — so it is one-hot, with a separate weak weekday/weekend
+/// block for the part that genuinely is gradual.
+pub const BLOCKS: [Block; 11] = [
+    Block {
+        name: "scope",
+        label: "who",
+        at: 0,
+        dims: 8,
+    },
+    Block {
+        name: "time_of_day",
+        label: "hour",
+        at: 8,
+        dims: 2,
+    },
+    Block {
+        name: "weekday",
+        label: "weekday",
+        at: 10,
+        dims: 7,
+    },
+    Block {
+        name: "weekend",
+        label: "weekend",
+        at: 17,
+        dims: 2,
+    },
+    Block {
+        name: "device",
+        label: "device",
+        at: 19,
+        dims: 8,
+    },
+    Block {
+        name: "viewport",
+        label: "screen",
+        at: 27,
+        dims: 4,
+    },
+    Block {
+        name: "locale",
+        label: "language",
+        at: 31,
+        dims: 8,
+    },
+    Block {
+        name: "network",
+        label: "network",
+        at: 39,
+        dims: 4,
+    },
+    Block {
+        name: "power",
+        label: "battery",
+        at: 43,
+        dims: 3,
+    },
+    Block {
+        name: "environment",
+        label: "surroundings",
+        at: 46,
+        dims: 5,
+    },
+    Block {
+        name: "month_cycle",
+        label: "month",
+        at: 51,
+        dims: 2,
+    },
+];
+
+/// Fixed at collection creation, so a new block invalidates every stored
+/// centroid. That is what `ENCODER_VERSION` and whole-bundle storage are for:
+/// the sweep rebuilds from the raw bundles rather than losing the history.
+pub const CTX_DIM: usize = 53;
+
+/// The width of the leading `scope` block. See `context_score`.
+pub const SCOPE_DIMS: usize = 8;
+
+/// Bumped whenever `BLOCKS` changes in any way — a width, an order, or what a
+/// slot means. A stored cluster carrying a different one is skipped by the read
+/// path and rebuilt by the next sweep; explaining a hit with the wrong block is
+/// worse than explaining nothing.
+pub const ENCODER_VERSION: i64 = 1;
+
+/// What the browser said about the situation, as received.
+///
+/// Every field optional, because every field is optional in a browser: the
+/// Battery API does not exist on the desktop, `connection` is Chromium-only,
+/// and a hardened browser withholds several. Absent is not zero — see `encode`.
+///
+/// Deliberately **not** collected: canvas, WebGL, font enumeration, plugin
+/// lists. Not out of squeamishness — they are the wrong tool. Those are what
+/// identify a device across a population, and here the population is one
+/// authenticated person, so they are constant and say nothing about *which
+/// situation* this is. They are also randomised per session and origin by a
+/// hardened browser, so a device identity built on them would rotate and every
+/// day would look like a new device.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Bundle {
+    /// IANA, from `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+    pub tz: Option<String>,
+    pub tz_offset_mins: Option<i32>,
+    pub language: Option<String>,
+    /// The full preference list. Stored, not encoded — see the module note on
+    /// fields the encoder ignores.
+    pub languages: Vec<String>,
+    pub viewport_w: Option<f32>,
+    pub viewport_h: Option<f32>,
+    pub screen_w: Option<f32>,
+    pub screen_h: Option<f32>,
+    pub dpr: Option<f32>,
+    /// `dark` | `light`.
+    pub color_scheme: Option<String>,
+    pub platform: Option<String>,
+    /// The UA client hint's brand, or the family parsed from the UA string.
+    pub ua_family: Option<String>,
+    pub cores: Option<f32>,
+    pub memory_gb: Option<f32>,
+    pub touch: Option<bool>,
+    /// `portrait` | `landscape`.
+    pub orientation: Option<String>,
+    /// 0.0..1.0.
+    pub battery_level: Option<f32>,
+    pub charging: Option<bool>,
+    /// `wifi` | `cellular` | `wired` | anything else.
+    pub network: Option<String>,
+    pub audio_outputs: Option<u32>,
+}
+
+/// A bundle from whatever the browser posted.
+///
+/// Lenient on purpose: nothing a browser sends may take a page view down, and
+/// an empty bundle is a working one — the weekday and the hour come from the
+/// server's own clock and still stand. Unknown fields are dropped here but the
+/// raw string is what `context_events.bundle` stores, so nothing is lost.
+pub fn parse_bundle(raw: &str) -> Bundle {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// What machine this is, over the fields that do not move.
+///
+/// Platform, browser family, screen, cores, memory, language — and nothing the
+/// situation changes. A phone that rotates, unplugs or joins a different
+/// network is the same phone; a key that moved with any of those would make
+/// every session look like a new device and no pattern could ever form.
+///
+/// `None` when the browser said nothing identifying at all, which `encode`
+/// gives its own slot rather than treating as an absence.
+pub fn device_key(b: &Bundle) -> Option<String> {
+    let parts = [
+        b.platform.clone(),
+        b.ua_family.clone(),
+        b.screen_w.map(|v| v.to_string()),
+        b.screen_h.map(|v| v.to_string()),
+        b.cores.map(|v| v.to_string()),
+        b.memory_gb.map(|v| v.to_string()),
+        b.language.clone(),
+    ];
+    if parts.iter().all(Option::is_none) {
+        return None;
+    }
+    let joined = parts
+        .iter()
+        .map(|p| p.as_deref().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("|");
+    Some(format!("{:016x}", fnv1a(&joined)))
+}
+
+/// FNV-1a, written out rather than reached for.
+///
+/// `DefaultHasher` is seeded per process, so a bucket chosen with it would move
+/// on every restart and every stored centroid would be indexed under a slot
+/// that no longer means what it meant. This is stable across runs, machines and
+/// releases, which is the only property being asked of it.
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in s.as_bytes() {
+        h ^= *byte as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn bucket(s: &str, n: usize) -> usize {
+    (fnv1a(s) % n as u64) as usize
+}
+
+/// One situation as a vector.
+///
+/// Each block is filled with raw values, **normalised to length 1, then scaled
+/// by its weight**. That order is the whole design: a block contributes exactly
+/// its weight however many dimensions it uses, which is what puts the weighting
+/// back into config as named numbers instead of leaving it hidden in how the
+/// encoding happened to be written.
+///
+/// A block whose values are all zero is left at zero rather than normalised —
+/// dividing by nothing is how absence turns into a manufactured direction.
+pub fn encode(
+    at: i64,
+    scope: Option<&str>,
+    b: &Bundle,
+    w: &crate::config::BlockWeights,
+) -> Vec<f32> {
+    let t = local_time(at, b.tz.as_deref(), b.tz_offset_mins);
+    let mut v = vec![0.0f32; CTX_DIM];
+
+    for block in BLOCKS {
+        let slot = &mut v[block.at..block.at + block.dims];
+        fill(block.name, slot, &t, scope, b);
+        scale(slot, w.of(block.name));
+    }
+    v
+}
+
+/// Raw values into one block's slots. Every arm either fills or leaves zeros;
+/// leaving zeros is how "the browser did not say" is expressed.
+fn fill(name: &str, s: &mut [f32], t: &LocalTime, scope: Option<&str>, b: &Bundle) {
+    use std::f32::consts::TAU;
+    match name {
+        "scope" => {
+            // Hashed into buckets rather than looked up in a registry: there is
+            // no list of every subject that has ever searched, and one bucket
+            // shared by two people is a collision per-user collections remove
+            // rather than a bug to work around here.
+            if let Some(sc) = scope {
+                s[bucket(sc, s.len())] = 1.0;
+            }
+        }
+        "time_of_day" => {
+            let a = TAU * t.hour / 24.0;
+            s[0] = a.sin();
+            s[1] = a.cos();
+        }
+        "weekday" => s[(t.weekday as usize).min(6)] = 1.0,
+        "weekend" => {
+            let idx = usize::from(t.weekday >= 5);
+            s[idx] = 1.0;
+        }
+        "device" => match device_key(b) {
+            // The last slot is "nothing identifying was sent" — a state, not an
+            // absence. A hardened browser is a situation that recurs, unlike a
+            // battery that does not exist.
+            Some(k) => s[bucket(&k, s.len() - 1)] = 1.0,
+            None => {
+                let last = s.len() - 1;
+                s[last] = 1.0;
+            }
+        },
+        "viewport" => {
+            // Logs *centred* on a thousand pixels, not raw. Raw logs put every
+            // screen ever built between 6.5 and 8, so any two of them scored
+            // 0.999 against each other and the block said nothing. Centred, a
+            // phone in portrait and a desktop in landscape point in genuinely
+            // different directions.
+            if let (Some(vw), Some(vh)) = (b.viewport_w, b.viewport_h)
+                && vw > 0.0
+                && vh > 0.0
+            {
+                s[0] = (vw / 1000.0).ln();
+                s[1] = (vh / 1000.0).ln();
+                s[2] = (vw / vh).ln();
+                s[3] = b.dpr.filter(|d| *d > 0.0).map(f32::ln).unwrap_or(0.0);
+            }
+        }
+        "locale" => {
+            // Two halves in one block, four slots each: what language this
+            // browser is in, and what zone it is in. They move together — a
+            // trip changes both — and neither is worth a weight of its own.
+            let half = s.len() / 2;
+            if let Some(l) = &b.language {
+                s[bucket(l, half)] = 1.0;
+            }
+            if let Some(z) = &b.tz {
+                s[half + bucket(z, half)] = 1.0;
+            }
+        }
+        "network" => {
+            // Four named states including unknown, so a browser that does not
+            // expose `connection` is grouped with the others that do not rather
+            // than with none of them.
+            let idx = match b.network.as_deref() {
+                Some("wifi") => 0,
+                Some("cellular") => 1,
+                Some("wired" | "ethernet") => 2,
+                _ => 3,
+            };
+            s[idx] = 1.0;
+        }
+        "power" => {
+            // All three zero when there is no Battery API at all. A desktop
+            // must not read as agreeing with a phone that happens to sit at
+            // whatever default would otherwise have been invented here.
+            if let Some(level) = b.battery_level {
+                match b.charging {
+                    Some(true) => s[0] = 1.0,
+                    Some(false) => s[1] = 1.0,
+                    None => {}
+                }
+                s[2] = level.clamp(0.0, 1.0);
+            }
+        }
+        "environment" => {
+            match b.color_scheme.as_deref() {
+                Some("dark") => s[0] = 1.0,
+                Some("light") => s[1] = 1.0,
+                _ => {}
+            }
+            if b.touch == Some(true) {
+                s[2] = 1.0;
+            }
+            // One signed slot rather than two, because the three states are
+            // portrait, landscape and "did not say" — and zero is already the
+            // third.
+            s[3] = match b.orientation.as_deref() {
+                Some("portrait") => 1.0,
+                Some("landscape") => -1.0,
+                _ => 0.0,
+            };
+            if let Some(n) = b.audio_outputs {
+                s[4] = (n.min(4) as f32) / 4.0;
+            }
+        }
+        "month_cycle" => {
+            let a = TAU * (t.day.saturating_sub(1)) as f32 / t.days_in_month.max(1) as f32;
+            s[0] = a.sin();
+            s[1] = a.cos();
+        }
+        // Unreachable while `BLOCKS` and this match are edited together, and a
+        // block silently left at zero is the safe way to be wrong: it
+        // contributes nothing rather than contributing noise.
+        _ => {}
+    }
+}
+
+/// Normalise to length 1, then scale. A block that is all zeros stays all
+/// zeros — there is no direction to normalise, and inventing one is exactly
+/// what "absent is not zero-valued" forbids.
+fn scale(s: &mut [f32], weight: f32) {
+    if weight == 0.0 {
+        s.fill(0.0);
+        return;
+    }
+    let n = s.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n == 0.0 {
+        return;
+    }
+    let k = weight / n;
+    for x in s.iter_mut() {
+        *x *= k;
+    }
+}
+
+/// How well the situation matches, ignoring who is asking.
+///
+/// The `scope` block decides *which* artifact may be offered — it is what keeps
+/// a foreign cluster from ever winning `max_sim`, at weight 10 against a total
+/// of under 5 — and that same dominance would drag every same-scope full cosine
+/// above 0.95, leaving `strong_at` and `weak_at` four hundredths apart. So the
+/// choice is made on the full vector and the rung is decided here. Two
+/// questions, two scales.
+pub fn context_score(now: &[f32], cluster: &[f32]) -> f32 {
+    if now.len() < SCOPE_DIMS || cluster.len() < SCOPE_DIMS {
+        return 0.0;
+    }
+    crate::vector::cosine(&now[SCOPE_DIMS..], &cluster[SCOPE_DIMS..])
+}
+
+/// What each named block contributed, largest first.
+///
+/// `w_b * cos(block_now, block_cluster)`. Because blocks are named and
+/// separately normalised, the per-dimension breakdown that a weighted sum of
+/// named terms would have produced by construction falls out of the vector as a
+/// by-product — which is the answer to the one thing that approach did better.
+///
+/// These do **not** sum to `context_score`, and are not meant to: the score is
+/// one cosine over the whole vector and each of these is a cosine over a slice,
+/// with a different denominator. They rank which blocks decided it, which is
+/// what the line under the offer needs and all it claims.
+///
+/// `scope` is excluded. It is always either a perfect match or a rejection, so
+/// it would lead every list while explaining nothing.
+pub fn contributions(
+    now: &[f32],
+    cluster: &[f32],
+    w: &crate::config::BlockWeights,
+) -> Vec<(&'static str, f32)> {
+    let mut out: Vec<(&'static str, f32)> = BLOCKS
+        .iter()
+        .filter(|b| b.name != "scope")
+        .filter(|b| now.len() >= b.at + b.dims && cluster.len() >= b.at + b.dims)
+        .map(|b| {
+            let a = &now[b.at..b.at + b.dims];
+            let c = &cluster[b.at..b.at + b.dims];
+            (b.label, w.of(b.name) * crate::vector::cosine(a, c))
+        })
+        .collect();
+    // Ties break on the label, so which of two equally strong blocks is named
+    // first does not depend on the order `BLOCKS` happens to be written in.
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn weights() -> crate::config::BlockWeights {
+        crate::config::BlockWeights::default()
+    }
+
+    /// A bundle a phone in Berlin would send.
+    fn phone() -> Bundle {
+        Bundle {
+            tz: Some("Europe/Berlin".into()),
+            tz_offset_mins: Some(120),
+            language: Some("de-DE".into()),
+            viewport_w: Some(390.0),
+            viewport_h: Some(844.0),
+            screen_w: Some(390.0),
+            screen_h: Some(844.0),
+            dpr: Some(3.0),
+            color_scheme: Some("dark".into()),
+            platform: Some("Android".into()),
+            ua_family: Some("Chrome".into()),
+            cores: Some(8.0),
+            memory_gb: Some(4.0),
+            touch: Some(true),
+            orientation: Some("portrait".into()),
+            battery_level: Some(0.4),
+            charging: Some(false),
+            network: Some("cellular".into()),
+            audio_outputs: Some(1),
+            ..Default::default()
+        }
+    }
+
+    fn slice_of<'a>(v: &'a [f32], name: &str) -> &'a [f32] {
+        let b = BLOCKS.iter().find(|b| b.name == name).unwrap();
+        &v[b.at..b.at + b.dims]
+    }
+
+    fn norm(v: &[f32]) -> f32 {
+        v.iter().map(|x| x * x).sum::<f32>().sqrt()
+    }
+
+    // 2026-08-21T13:52:00Z, a Friday. 15:52 in Berlin.
+    const FRIDAY: i64 = FRIDAY_1352_UTC;
+
+    #[test]
+    fn the_layout_adds_up() {
+        // The one invariant everything else rests on: a block that overlaps its
+        // neighbour would silently mix two meanings into one dimension, and
+        // every recommendation after it would be explained by the wrong block.
+        let mut at = 0;
+        for b in BLOCKS {
+            assert_eq!(b.at, at, "{} starts where the last block ended", b.name);
+            at += b.dims;
+        }
+        assert_eq!(at, CTX_DIM);
+        assert_eq!(BLOCKS[0].name, "scope");
+        assert_eq!(BLOCKS[0].dims, SCOPE_DIMS);
+    }
+
+    #[test]
+    fn half_past_eleven_at_night_is_near_half_past_midnight() {
+        // The hour is a circle, so the two are an hour apart rather than
+        // twenty-three. A one-hot hour would have called them maximally
+        // different, which is the whole reason this block is an angle.
+        let late = encode(FRIDAY - 2 * 3600 - 22 * 60, None, &phone(), &weights());
+        let early = encode(FRIDAY - 3600 - 22 * 60, None, &phone(), &weights());
+        let c = crate::vector::cosine(
+            slice_of(&late, "time_of_day"),
+            slice_of(&early, "time_of_day"),
+        );
+        assert!(c > 0.96, "23:30 against 00:30 scored {c}");
+    }
+
+    #[test]
+    fn five_past_three_costs_almost_nothing_against_a_three_o_clock_pattern() {
+        let at_three = encode(FRIDAY - 52 * 60, None, &phone(), &weights());
+        let five_past = encode(FRIDAY - 47 * 60, None, &phone(), &weights());
+        let c = crate::vector::cosine(
+            slice_of(&at_three, "time_of_day"),
+            slice_of(&five_past, "time_of_day"),
+        );
+        assert!(c > 0.999, "15:00 against 15:05 scored {c}");
+    }
+
+    #[test]
+    fn a_seven_slot_block_contributes_exactly_its_weight() {
+        // The rule the whole design rests on. Seven one-hot slots for the
+        // weekday do not outweigh two for the hour because there are seven of
+        // them: each block is normalised and *then* scaled.
+        let v = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let w = weights();
+        assert!((norm(slice_of(&v, "weekday")) - w.weekday).abs() < 1e-5);
+        assert!((norm(slice_of(&v, "time_of_day")) - w.time_of_day).abs() < 1e-5);
+        assert!((norm(slice_of(&v, "scope")) - w.scope).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_block_switched_off_contributes_nothing() {
+        let mut w = weights();
+        w.month_cycle = 0.0;
+        let v = encode(FRIDAY, None, &phone(), &w);
+        assert_eq!(norm(slice_of(&v, "month_cycle")), 0.0);
+    }
+
+    #[test]
+    fn a_missing_value_zeroes_its_block_rather_than_inventing_a_default() {
+        // The Battery API does not exist on the desktop. An invented default
+        // would manufacture similarity between every desktop and every phone
+        // that happened to sit at that level.
+        let mut b = phone();
+        b.battery_level = None;
+        b.charging = None;
+        let v = encode(FRIDAY, None, &b, &weights());
+        assert_eq!(norm(slice_of(&v, "power")), 0.0, "power says nothing");
+        assert!(
+            norm(slice_of(&v, "weekday")) > 0.0,
+            "and nothing else changed"
+        );
+    }
+
+    #[test]
+    fn a_block_that_says_nothing_scores_zero_rather_than_opposed() {
+        // Two desktops with no battery must not read as *agreeing* about the
+        // battery, and must not read as disagreeing either. `cosine` returns
+        // 0.0 for a zero vector, which is the answer that means "no opinion".
+        let mut b = phone();
+        b.battery_level = None;
+        b.charging = None;
+        let v = encode(FRIDAY, None, &b, &weights());
+        let c = contributions(&v, &v, &weights());
+        let power = c.iter().find(|(n, _)| *n == "battery").unwrap();
+        assert_eq!(power.1, 0.0);
+    }
+
+    #[test]
+    fn an_unidentifiable_device_is_a_state_rather_than_an_absence() {
+        // Unlike the battery, "this browser tells us nothing about itself" is
+        // itself stable and recurring, so it gets a slot of its own — a
+        // hardened browser is a situation, not a gap.
+        let bare = Bundle::default();
+        assert!(device_key(&bare).is_none());
+        let v = encode(FRIDAY, None, &bare, &weights());
+        assert!((norm(slice_of(&v, "device")) - weights().device).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_device_key_is_stable_and_ignores_the_situation() {
+        // It hashes what the machine *is*, never what it is doing: a phone that
+        // rotates or unplugs is the same phone. A key that moved would make
+        // every session look like a new device and no pattern could ever form.
+        let mut later = phone();
+        later.orientation = Some("landscape".into());
+        later.battery_level = Some(0.9);
+        later.viewport_w = Some(844.0);
+        assert_eq!(device_key(&phone()), device_key(&later));
+
+        let mut other = phone();
+        other.platform = Some("macOS".into());
+        assert_ne!(device_key(&phone()), device_key(&other));
+    }
+
+    #[test]
+    fn two_people_in_the_same_situation_are_still_far_apart() {
+        // Until each person has their own collection, the `scope` block is the
+        // only thing keeping one person's situations from being offered to
+        // another. It is load-bearing and this is the test that says so.
+        let alice = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let bob = encode(FRIDAY, Some("bob"), &phone(), &weights());
+        let same = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        assert!(
+            crate::vector::cosine(&alice, &bob) < crate::vector::cosine(&alice, &same),
+            "a foreign scope must never win max_sim"
+        );
+    }
+
+    #[test]
+    fn the_rung_is_scored_without_the_scope_block() {
+        // The scope block decides *who* may be offered something. If it counted
+        // towards the rung too, it would drag every same-scope score above 0.95
+        // and `strong_at` and `weak_at` would have to live four hundredths
+        // apart. Two different jobs, two different scales.
+        let friday_phone = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let mut desktop = phone();
+        desktop.platform = Some("macOS".into());
+        desktop.ua_family = Some("Firefox".into());
+        desktop.touch = Some(false);
+        desktop.orientation = Some("landscape".into());
+        desktop.network = Some("wired".into());
+        desktop.color_scheme = Some("light".into());
+        desktop.language = Some("en-GB".into());
+        desktop.viewport_w = Some(1920.0);
+        desktop.viewport_h = Some(1080.0);
+        desktop.screen_w = Some(2560.0);
+        desktop.screen_h = Some(1440.0);
+        desktop.dpr = Some(2.0);
+        desktop.battery_level = None;
+        desktop.charging = None;
+        // A Monday morning at a desk: nothing about the situation agrees.
+        let monday_desk = encode(
+            FRIDAY + 3 * 86_400 - 8 * 3600,
+            Some("alice"),
+            &desktop,
+            &weights(),
+        );
+
+        assert!(
+            crate::vector::cosine(&friday_phone, &monday_desk) > 0.9,
+            "scope alone carries it, which is the problem being solved"
+        );
+        let s = context_score(&friday_phone, &monday_desk);
+        assert!(s < 0.4, "and the situation does not agree at all, got {s}");
+    }
+
+    #[test]
+    fn the_reason_names_the_blocks_that_decided_it() {
+        let a = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let c = contributions(&a, &a, &weights());
+        assert!(
+            !c.iter().any(|(n, _)| *n == "who"),
+            "scope explains nothing"
+        );
+        assert_eq!(c.len(), BLOCKS.len() - 1);
+        for pair in c.windows(2) {
+            assert!(
+                pair[0].1 >= pair[1].1,
+                "sorted, so the top three are the top three"
+            );
+        }
+        // Every block carries a `&'static str` and nothing generates prose.
+        assert!(BLOCKS.iter().all(|b| !b.label.is_empty()));
+    }
+
+    #[test]
+    fn a_bundle_that_is_not_json_is_an_empty_one_rather_than_an_error() {
+        // The bundle comes from a browser, and nothing a browser sends may take
+        // a page view down. An empty bundle zeroes the blocks it would have
+        // filled; the weekday and the hour still stand.
+        let b = parse_bundle("}{ not json");
+        assert!(b.tz.is_none());
+        let v = encode(FRIDAY, Some("alice"), &b, &weights());
+        assert_eq!(v.len(), CTX_DIM);
+        assert!(norm(slice_of(&v, "weekday")) > 0.0);
+    }
 
     #[test]
     fn a_fixed_clock_does_not_move() {
