@@ -1,5 +1,6 @@
 pub mod ask;
 pub mod background;
+pub mod context;
 pub mod extract;
 pub mod fetch;
 pub mod gaps;
@@ -119,6 +120,10 @@ pub struct Core {
     /// Writes that run off the request path. Shared by every clone of `Core`,
     /// so draining one drains them all.
     pub background: Arc<Background>,
+    /// Where this feature reads the time. `System` in the binary; the
+    /// recommendation tests set a fixed one so a seventh Friday at 14:52
+    /// exists on demand. Nothing else in the tree reads it.
+    pub clock: crate::core::context::Clock,
     /// Shared by every clone of `Core`, like the background queue.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
     /// Thresholds and budgets for duplicate hygiene. Read on the capture path
@@ -223,6 +228,7 @@ impl Core {
             chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
+            clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
             weak_below: cfg.vector.weak_below,
@@ -378,6 +384,7 @@ pub mod test_support {
             chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
+            clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
             // The fake embedder's vectors are not a semantic space, so a

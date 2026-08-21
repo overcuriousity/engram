@@ -747,9 +747,11 @@ impl Store {
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE artifacts
-             SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1
+             SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1,
+                 updated_at = ?
              WHERE corpus_id = ?",
         )
+        .bind(super::now())
         .bind(corpus_id)
         .execute(&self.pool)
         .await?;
@@ -787,10 +789,11 @@ impl Store {
             sqlx::query(
                 "UPDATE artifacts
                  SET title = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1
+                     embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
             )
             .bind(title)
+            .bind(super::now())
             .bind(id)
             .execute(&self.pool)
             .await?,
@@ -802,10 +805,11 @@ impl Store {
             sqlx::query(
                 "UPDATE artifacts
                  SET text = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1
+                     embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
             )
             .bind(text)
+            .bind(super::now())
             .bind(id)
             .execute(&self.pool)
             .await?,
@@ -1459,6 +1463,37 @@ mod tests {
         s.insert_artifacts(&src.id, &[nc(0, "x")]).await.unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.artifacts_for_corpus(&src.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn editing_an_artifact_stamps_when_it_changed() {
+        // The one question the base could not previously answer about itself.
+        // `created_at` says when it arrived and `last_verified_at` says when
+        // someone vouched for it; neither says whether the text on screen is
+        // the text that was captured.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let c = s
+            .insert_artifacts(&src.id, &[nc(0, "before")])
+            .await
+            .unwrap()
+            .remove(0);
+
+        let before: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 0, "a fresh row has never been edited");
+
+        s.update_artifact_text(&c.id, "after").await.unwrap();
+
+        let after: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert!(after > 0, "an edit says when it happened");
     }
 
     #[tokio::test]

@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- Bumped on every edit. An embed job carries the revision it read, so a
   -- chunk edited mid-embed is not reported as indexed.
   embed_rev        INTEGER NOT NULL DEFAULT 0,
+  -- Bumped in the same UPDATE that bumps `embed_rev`. Unrelated to
+  -- recommendation, and the one question the base could not previously answer
+  -- about itself: when did this artifact last change. `created_at` answers when
+  -- it arrived, and `last_verified_at` answers when someone vouched for it;
+  -- neither says whether the text on screen is the text that was captured.
+  updated_at       INTEGER NOT NULL DEFAULT 0,
   -- Which window of the corpus produced it. Artifacts are replaced per
   -- window, so a retry of one window cannot disturb the others.
   segment_idx      INTEGER,
