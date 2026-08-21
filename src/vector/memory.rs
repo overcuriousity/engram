@@ -11,12 +11,18 @@ use std::sync::RwLock;
 /// tested without running Qdrant.
 pub struct MemoryVectors {
     points: RwLock<HashMap<String, VectorPoint>>,
+    /// The `ctx` multivector per artifact, held apart from the point rather
+    /// than on it. A field on `VectorPoint` would put a context set in every
+    /// signature that carries a point — the embed job's, the reindex's — for
+    /// the sake of one caller that writes it and one that reads it.
+    ctx: RwLock<HashMap<String, Vec<Vec<f32>>>>,
 }
 
 impl MemoryVectors {
     pub fn new() -> Self {
         Self {
             points: RwLock::new(HashMap::new()),
+            ctx: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -398,17 +404,82 @@ impl VectorStore for MemoryVectors {
         Ok(hits)
     }
 
+    async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()> {
+        let mut w = self.ctx.write().unwrap();
+        if vectors.is_empty() {
+            w.remove(artifact_id);
+        } else {
+            w.insert(artifact_id.to_string(), vectors);
+        }
+        Ok(())
+    }
+
+    async fn context_query(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>> {
+        let points = self.points.read().unwrap();
+        let ctx = self.ctx.read().unwrap();
+        let mut hits: Vec<SearchHit> = ctx
+            .iter()
+            // An artifact with a set but no point cannot be offered: there is
+            // no payload to render it from. That is the sweep having run
+            // against an artifact whose embedding has not, not an error.
+            .filter_map(|(id, set)| points.get(id).map(|p| (p, set)))
+            .filter(|(p, _)| {
+                let status = status_of(&p.payload);
+                (filter.include_superseded || status != ArtifactStatus::Superseded)
+                    && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
+            })
+            .map(|(p, set)| SearchHit {
+                payload: p.payload.clone(),
+                // `max_sim`: the best of the artifact's situations, which is
+                // what makes a set worth more than a mean.
+                score: set
+                    .iter()
+                    .map(|c| cosine(vector, c))
+                    .fold(f32::NEG_INFINITY, f32::max),
+                // Not a query-to-document similarity, and calling it one would
+                // invite it into a ranking it has no business in.
+                similarity: None,
+            })
+            .collect();
+        // Ties break on the id, so a HashMap's iteration order never decides
+        // what is offered.
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.payload.artifact_id.cmp(&b.payload.artifact_id))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
         let mut w = self.points.write().unwrap();
+        // The context set goes with the point. A set outliving its payload
+        // would keep answering `context_query` with an artifact that is gone.
+        let mut c = self.ctx.write().unwrap();
         for id in artifact_ids {
             w.remove(id);
+            c.remove(id);
         }
         Ok(())
     }
 
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
         let mut w = self.points.write().unwrap();
-        w.retain(|_, p| p.payload.corpus_id != corpus_id);
+        let mut c = self.ctx.write().unwrap();
+        w.retain(|id, p| {
+            let keep = p.payload.corpus_id != corpus_id;
+            if !keep {
+                c.remove(id);
+            }
+            keep
+        });
         Ok(())
     }
 
@@ -443,6 +514,170 @@ mod tests {
                 provenance: None,
             },
         }
+    }
+
+    /// Superseded and deprecated included, so a test asserting the ordinary
+    /// path is not silently asserting the filter instead.
+    fn wide() -> SearchFilter {
+        SearchFilter {
+            include_superseded: true,
+            include_deprecated: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_artifact_matches_on_its_nearest_situation_not_its_average() {
+        // Friday afternoon *and* Monday morning. Their mean is a situation that
+        // never happened, and a store that scored the mean would answer neither.
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 1.0], &[], "procedure")])
+            .await
+            .unwrap();
+        v.set_context_vectors("a", vec![vec![1.0, 0.0], vec![0.0, 1.0]])
+            .await
+            .unwrap();
+
+        let friday = v.context_query(&[1.0, 0.0], 5, &wide()).await.unwrap();
+        assert_eq!(friday.len(), 1);
+        assert!((friday[0].score - 1.0).abs() < 1e-5);
+
+        let monday = v.context_query(&[0.0, 1.0], 5, &wide()).await.unwrap();
+        assert!((monday[0].score - 1.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn an_artifact_with_no_situations_is_not_a_candidate() {
+        // The candidate set is "anything ever opened", and that is expressed by
+        // the absence of a set rather than by a filter.
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s1", vec![1.0, 0.0], &[], "procedure"),
+            point("b", "s1", vec![1.0, 0.0], &[], "procedure"),
+        ])
+        .await
+        .unwrap();
+        v.set_context_vectors("a", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+
+        let out = v.context_query(&[1.0, 0.0], 5, &wide()).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].payload.artifact_id, "a");
+    }
+
+    #[tokio::test]
+    async fn an_empty_write_removes_the_set_and_leaves_the_point() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "procedure")])
+            .await
+            .unwrap();
+        v.set_context_vectors("a", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+        v.set_context_vectors("a", vec![]).await.unwrap();
+
+        assert!(
+            v.context_query(&[1.0, 0.0], 5, &wide())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(v.count().await.unwrap(), 1, "the point is still there");
+    }
+
+    #[tokio::test]
+    async fn a_hidden_artifact_is_never_offered() {
+        // The same rule search obeys: superseded and deprecated are out.
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "procedure")])
+            .await
+            .unwrap();
+        v.set_context_vectors("a", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+        v.set_lifecycle("a", ArtifactStatus::Superseded, Some("b"))
+            .await
+            .unwrap();
+
+        let out = v
+            .context_query(&[1.0, 0.0], 5, &SearchFilter::default())
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn results_come_back_best_first_and_capped() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("near", "s1", vec![1.0, 0.0], &[], "procedure"),
+            point("far", "s1", vec![1.0, 0.0], &[], "procedure"),
+        ])
+        .await
+        .unwrap();
+        v.set_context_vectors("near", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+        v.set_context_vectors("far", vec![vec![0.2, 1.0]])
+            .await
+            .unwrap();
+
+        let out = v.context_query(&[1.0, 0.0], 1, &wide()).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].payload.artifact_id, "near");
+    }
+
+    #[tokio::test]
+    async fn a_set_on_an_artifact_with_no_point_is_not_an_error() {
+        // An artifact whose embedding never ran has nothing to attach a set to.
+        // The sweep must not fail over one.
+        let v = MemoryVectors::new();
+        v.set_context_vectors("nobody", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+        assert!(
+            v.context_query(&[1.0, 0.0], 5, &wide())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_an_artifact_takes_its_situations_with_it() {
+        // A set outliving its point would keep answering `context_query` with
+        // a payload that is gone.
+        let v = MemoryVectors::new();
+        v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "procedure")])
+            .await
+            .unwrap();
+        v.set_context_vectors("a", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+
+        v.delete_artifacts(&["a".to_string()]).await.unwrap();
+        assert!(
+            v.context_query(&[1.0, 0.0], 5, &wide())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // And the same when a whole corpus goes.
+        v.upsert(vec![point("b", "s2", vec![1.0, 0.0], &[], "procedure")])
+            .await
+            .unwrap();
+        v.set_context_vectors("b", vec![vec![1.0, 0.0]])
+            .await
+            .unwrap();
+        v.delete_by_corpus("s2").await.unwrap();
+        assert!(
+            v.context_query(&[1.0, 0.0], 5, &wide())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

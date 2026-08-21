@@ -51,6 +51,12 @@ const READY_BACKOFF: Duration = Duration::from_millis(200);
 /// A chunk carrying this tag is boosted past the decay curve. A tag rather than
 /// a column: `PATCH /api/v1/artifacts/{id}` already edits tags without
 /// re-embedding, and the payload index that makes it filterable already exists.
+/// The context multivector: one element per learned situation, scored with
+/// `max_sim`. Not the multivector the roadmap cut — that was ColBERT-style
+/// late-interaction reranking, one reduced-width vector per *token* and
+/// thousands per artifact. This is two to five per artifact.
+pub const CTX: &str = "ctx";
+
 pub const PINNED_TAG: &str = "pinned";
 
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -209,7 +215,19 @@ fn verified_payload(at: i64, reset_hits: bool) -> Value {
 /// The schema every generation is created with.
 fn collection_body(dim: usize) -> Value {
     json!({
-        "vectors": { DENSE: { "size": dim, "distance": "Cosine" } },
+        "vectors": {
+            DENSE: { "size": dim, "distance": "Cosine" },
+            CTX: {
+                "size": crate::core::context::CTX_DIM,
+                "distance": "Cosine",
+                "multivector_config": { "comparator": "max_sim" },
+                // No index, an exact scan. The candidates are only artifacts
+                // ever opened, at 53 dimensions, and an HNSW graph would be
+                // rebuilt on every sweep write to beat a scan it cannot beat at
+                // that size.
+                "hnsw_config": { "m": 0 },
+            },
+        },
         "sparse_vectors": { SPARSE: { "modifier": "idf" } },
     })
 }
@@ -312,6 +330,32 @@ fn dense_of(vector: &Value) -> Option<&Value> {
         Value::Object(m) => m.get(DENSE),
         _ => None,
     }
+}
+
+/// A stored point's context set, when it is still readable under the running
+/// encoder.
+///
+/// `None` covers three cases that a rebuild treats alike: no set at all, a
+/// pre-alias point with a single unnamed vector, and a set written under an
+/// older layout. The last is why the width is checked rather than trusted — a
+/// changed `BLOCKS` changes `CTX_DIM`, and copying the old numbers into the new
+/// space would give every artifact a profile assembled from the wrong blocks.
+/// Discarded, and the next sweep rebuilds from the raw bundles.
+fn ctx_of(vector: &Value) -> Option<Vec<Vec<f32>>> {
+    let set = vector.as_object()?.get(CTX)?.as_array()?;
+    if set.is_empty() {
+        return None;
+    }
+    set.iter()
+        .map(|e| {
+            let row: Vec<f32> = e
+                .as_array()?
+                .iter()
+                .map(|x| x.as_f64().map(|f| f as f32))
+                .collect::<Option<_>>()?;
+            (row.len() == crate::core::context::CTX_DIM).then_some(row)
+        })
+        .collect()
 }
 
 /// Every Qdrant response is wrapped in this. `result` is absent on failures,
@@ -854,6 +898,13 @@ impl QdrantVectors {
                 let mut vector = json!({ DENSE: dense });
                 if let Some(sp) = sparse_body(&sparse_of_payload(&p.payload)) {
                     vector[SPARSE] = sp;
+                }
+                // Copied when the dimension matches, skipped when it does not.
+                // No embedding call in either case — a context vector is
+                // assembled from a bundle, and the bundles are all still in
+                // `context_events`.
+                if let Some(set) = ctx_of(&p.vector) {
+                    vector[CTX] = json!(set);
                 }
                 batch.push(json!({
                     "id": p.id,
@@ -1732,6 +1783,66 @@ impl VectorStore for QdrantVectors {
         Ok(hits_of(res))
     }
 
+    async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()> {
+        let id = point_uuid(artifact_id);
+        // `points/vectors`, never `upsert`. A point write replaces the entire
+        // payload — see the comment on `upsert` — and clearing `status` puts
+        // every artifact the sweep hid straight back into search, on every
+        // sweep run. This endpoint does not touch payload at all.
+        let (path, body) = match vectors.is_empty() {
+            true => (
+                format!(
+                    "/collections/{}/points/vectors/delete?wait=true",
+                    self.alias
+                ),
+                json!({ "points": [id], "vector": [CTX] }),
+            ),
+            false => (
+                format!("/collections/{}/points/vectors?wait=true", self.alias),
+                json!({ "points": [{ "id": id, "vector": { CTX: vectors } }] }),
+            ),
+        };
+        // Absent is not a failure, for the same reason `set_lifecycle` gives:
+        // an artifact whose embedding never ran has no point, and a sweep that
+        // errored on one would take the whole run down over an artifact that
+        // has nothing to attach a set to.
+        let _: Option<Value> = self
+            .call_absent_point_as_none(Method::POST, &path, Some(body))
+            .await?;
+        Ok(())
+    }
+
+    async fn context_query(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>> {
+        let mut body = json!({
+            "query": vector,
+            "using": CTX,
+            "limit": limit,
+            "with_payload": true,
+        });
+        if let Some(f) = build_filter(filter) {
+            body["filter"] = f;
+        }
+        // No recency stage and no pinning over this. Those exist to reorder a
+        // ranked list of answers to a question; there is no question here, and
+        // an artifact captured today is not a better answer to "it is Friday
+        // afternoon" than one captured last year.
+        let res: QueryResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/query", self.alias),
+                Some(body),
+            )
+            .await?;
+        // `hits_of` leaves `similarity` unset, which is correct here: `max_sim`
+        // is not a query-to-document similarity.
+        Ok(hits_of(res))
+    }
+
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
         if artifact_ids.is_empty() {
             return Ok(());
@@ -1837,6 +1948,63 @@ impl VectorStore for QdrantVectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_collection_carries_a_context_multivector() {
+        let body = collection_body(768);
+        assert_eq!(body["vectors"][CTX]["size"], crate::core::context::CTX_DIM);
+        assert_eq!(body["vectors"][CTX]["distance"], "Cosine");
+        assert_eq!(
+            body["vectors"][CTX]["multivector_config"]["comparator"],
+            "max_sim"
+        );
+        // No HNSW, an exact scan. Right here rather than thrifty: the
+        // candidates are only artifacts ever opened — hundreds to a few
+        // thousand at 53 dimensions — and an index would be rebuilt on every
+        // sweep write to beat a scan it cannot beat at that size.
+        assert_eq!(body["vectors"][CTX]["hnsw_config"]["m"], 0);
+        // And nothing else moved.
+        assert_eq!(body["vectors"][DENSE]["size"], 768);
+        assert_eq!(body["sparse_vectors"][SPARSE]["modifier"], "idf");
+    }
+
+    #[test]
+    fn a_context_set_is_copied_by_a_rebuild_when_it_still_fits() {
+        let dim = crate::core::context::CTX_DIM;
+        let stored = json!({ DENSE: [1.0, 2.0], CTX: [vec![0.5; dim], vec![0.25; dim]] });
+        let copied = ctx_of(&stored).unwrap();
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].len(), dim);
+    }
+
+    #[test]
+    fn a_context_set_from_an_older_layout_is_dropped_rather_than_copied() {
+        // A changed encoder layout changes CTX_DIM. The old sets are discarded
+        // and the next sweep rebuilds them from the raw bundles in
+        // `context_events` — which costs no embedding call either way.
+        let stored = json!({ DENSE: [1.0, 2.0], CTX: [[0.5, 0.5, 0.5]] });
+        assert!(ctx_of(&stored).is_none());
+    }
+
+    #[test]
+    fn a_point_with_no_context_set_reindexes_without_one() {
+        assert!(ctx_of(&json!({ DENSE: [1.0, 2.0] })).is_none());
+        // A pre-alias point with one unnamed vector.
+        assert!(ctx_of(&json!([1.0, 2.0])).is_none());
+        // And an empty set is the same as none, not a set of nothing.
+        assert!(ctx_of(&json!({ DENSE: [1.0], CTX: [] })).is_none());
+    }
+
+    #[test]
+    fn the_offer_excludes_hidden_artifacts_by_must_not() {
+        // `must_not` rather than a positive match, for the reason `build_filter`
+        // gives: a point carrying no `status` key at all reads as active, and a
+        // positive clause would drop every hand-written one.
+        let f = build_filter(&SearchFilter::default()).unwrap();
+        assert!(f.get("must").is_none());
+        let not = f["must_not"].as_array().unwrap();
+        assert_eq!(not.len(), 2);
+    }
 
     #[tokio::test]
     async fn neighbours_reports_an_unreachable_store_rather_than_no_neighbours() {
