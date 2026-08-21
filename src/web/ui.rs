@@ -384,6 +384,7 @@ fn sweep_label(stage: &str) -> &str {
         "generate" => "Answering gaps",
         "retention" => "Retention",
         "arm_dedupe" => "Arming dedupe",
+        "context" => "Learning situations",
         other => other,
     }
 }

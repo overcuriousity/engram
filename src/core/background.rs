@@ -122,6 +122,12 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     if core.feedback.retain_days > 0 || core.feedback.enabled || core.recommends() {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
     }
+    // Learning which situations recur for which artifact. Behind its own gate
+    // and nothing else's: it reads the interaction log, which is not something
+    // an operator switches off by switching off duplicate hygiene.
+    if core.recommends() {
+        out.push((Stage::Context, CONSOLIDATE_TARGET));
+    }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Its own period as a floor. The association sweep arming it is what
@@ -157,6 +163,7 @@ pub fn periodic_period(
             .max(1)
             .saturating_mul(60),
         Stage::Retention => core.feedback.sweep_hours.max(1).saturating_mul(3600),
+        Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon
         // after it goes quiet.
@@ -384,6 +391,40 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn the_context_sweep_is_armed_only_when_the_offer_is_on() {
+        use crate::store::jobs::Stage;
+        let mut core = crate::core::test_support::test_core().await;
+        assert!(
+            !periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Context),
+            "off by default"
+        );
+        assert_eq!(periodic_period(&core, Stage::Context), None);
+
+        core.recommend.enabled = true;
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Context)
+        );
+        assert_eq!(
+            periodic_period(&core, Stage::Context),
+            Some(Duration::from_secs(
+                crate::jobs::context::INTERVAL_HOURS * 3600
+            ))
+        );
+        // And it drags the retention unit along with it: `context_events` has
+        // its own window, and the trim rides that unit.
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Retention),
+            "nothing else would expire a recorded situation"
+        );
+    }
 
     #[tokio::test]
     async fn the_consolidation_sweep_never_stacks_up_in_the_queue() {

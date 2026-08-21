@@ -1,5 +1,6 @@
 pub mod associate;
 pub mod consolidate;
+pub mod context;
 pub mod dedupe;
 pub mod describe;
 pub mod embed;
@@ -114,7 +115,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Associate
             | Stage::Pursuit
             | Stage::Retention
-            | Stage::ArmDedupe,
+            | Stage::ArmDedupe
+            | Stage::Context,
             _,
         ) => run_accounted(core, job.stage).await,
     };
@@ -233,6 +235,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
         Stage::Consolidate => consolidate::run(core).await.and_then(detail),
         Stage::Associate => associate::run(core).await.and_then(detail),
         Stage::Retention => retention::run(core).await.and_then(detail),
+        Stage::Context => context::run(core).await.and_then(detail),
         Stage::Pursuit => pursuit::run(core)
             .await
             .and_then(|n| detail(serde_json::json!({ "pursuits": n }))),

@@ -64,13 +64,19 @@ pub enum Stage {
     /// arms judgements, it is not one — and local, since the call belongs to
     /// the units it arms.
     ArmDedupe,
+    /// The periodic context sweep: reads the interaction log, agglomerates the
+    /// situations each artifact was opened in, and writes the surviving
+    /// centroids to the vector store. Local work and no call — the whole point
+    /// of this faculty is that the learning is a sweep and the read is one
+    /// vector query.
+    Context,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 16] = [
+    pub const ALL: [Stage; 17] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -87,6 +93,7 @@ impl Stage {
         Stage::Generate,
         Stage::Retention,
         Stage::ArmDedupe,
+        Stage::Context,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -107,6 +114,7 @@ impl Stage {
             Stage::Generate => "generate",
             Stage::Retention => "retention",
             Stage::ArmDedupe => "arm_dedupe",
+            Stage::Context => "context",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -139,7 +147,8 @@ impl Stage {
             | Stage::Pursuit
             | Stage::Generate
             | Stage::Retention
-            | Stage::ArmDedupe => 1,
+            | Stage::ArmDedupe
+            | Stage::Context => 1,
         }
     }
 
@@ -161,6 +170,7 @@ impl Stage {
             "generate" => Some(Stage::Generate),
             "retention" => Some(Stage::Retention),
             "arm_dedupe" => Some(Stage::ArmDedupe),
+            "context" => Some(Stage::Context),
             _ => None,
         }
     }
