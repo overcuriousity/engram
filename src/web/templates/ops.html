@@ -115,8 +115,8 @@
 <p class="muted">
   Artifacts written from a pursuit: what was asked, and what was engaged with
   while the base did not answer. Each supersedes nothing — what it was written
-  from stays in results beside it. Deprecating one hides it; it can be
-  reactivated from the deprecated list.
+  from stays in results beside it. Hiding one takes it out of results and
+  keeps it; the list below puts it back.
 </p>
 <table class="grid">
   <thead><tr><th>Artifact</th><th>Written because</th><th>Written from</th><th></th></tr></thead>
@@ -140,7 +140,7 @@
       </td>
       <td>
         <form method="post" action="/ui/ops/artifacts/{{ g.id }}/deprecate">
-          <button class="btn btn-sm" type="submit">Deprecate</button>
+          <button class="btn btn-sm" type="submit">Hide</button>
         </form>
       </td>
     </tr>
@@ -169,8 +169,10 @@
 {% endif %}
 
 {% if !deprecated.is_empty() %}
-<h3>Deprecated</h3>
-<p class="muted">Flagged stale with no specific replacement. Still stored and still readable; kept out of results only.</p>
+<h3>Hidden as stale</h3>
+<p class="muted">Flagged stale, with no specific replacement. Search does not
+  return them and Ask does not read from them; each is still stored and still
+  readable by its own link. Reactivate puts one back in results.</p>
 <table class="grid">
   <thead><tr><th>Artifact</th><th></th></tr></thead>
   <tbody>
@@ -215,8 +217,8 @@
           </form>
           <form method="post" action="/ui/ops/artifacts/{{ s.id }}/deprecate">
             <button class="btn-icon" type="submit"
-                    title="Deprecate — hide from results, keep the artifact"
-                    aria-label="Deprecate: hide from results, keep the artifact">
+                    title="Hide from results — the artifact is kept, and this can be undone"
+                    aria-label="Hide from results: the artifact is kept, and this can be undone">
               {% include "_icon_hide.html" %}
             </button>
           </form>
@@ -307,6 +309,6 @@
 {# One sentence for everything that is empty. Five headings each answered
    "None." made a base with nothing wrong with it look like a backlog. #}
 {% if deprecated.is_empty() && stale.is_empty() && superseded.is_empty() && merged.is_empty() && parked.is_empty() && retrying.is_empty() %}
-<p class="muted">Nothing deprecated, nothing hidden, nothing waiting on a decision, nothing retrying.</p>
+<p class="muted">Nothing hidden, nothing waiting on a decision, nothing retrying.</p>
 {% endif %}
 {% endblock %}

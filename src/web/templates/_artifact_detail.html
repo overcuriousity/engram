@@ -60,11 +60,14 @@
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>
     <div>
-      <b>Deprecated</b>
-      <div>Flagged stale, with no specific replacement. Still stored and still
-        readable; kept out of results only.</div>
+      <b>Hidden as stale</b>
+      <div>Flagged stale, with no specific replacement. Search will not return
+        it and Ask will not read from it; it is still stored, and this link
+        still works. Reactivate puts it back in results.</div>
       <div class="chips">
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/reactivate?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
           <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Reactivate</button>
         </form>
@@ -119,7 +122,7 @@
        stores and cannot be undone. Nothing else deletes an artifact — see
        `Core::heal_store_drift`. #}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
-          onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
+          onsubmit="return confirm('Delete this artifact for good? It goes from both stores, anything written from it loses it as a source, and none of that can be undone. Hide keeps the artifact and only takes it out of results.')">
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete permanently" aria-label="Delete artifact permanently">
         {% include "_icon_trash.html" %}<span>Delete</span>

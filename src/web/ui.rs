@@ -6693,8 +6693,8 @@ mod tests {
         // is where they are asserted now.
         // An empty base says so once, instead of answering five headings with
         // "None."
-        assert!(html.contains("Nothing deprecated"));
-        assert!(!html.contains("<h3>Deprecated</h3>"));
+        assert!(html.contains("Nothing hidden"));
+        assert!(!html.contains("<h3>Hidden as stale</h3>"));
     }
 
     #[tokio::test]
