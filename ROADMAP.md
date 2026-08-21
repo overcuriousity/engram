@@ -33,7 +33,10 @@ recommendation under the search box, learned from the situations an artifact
 was opened in — the browser's time zone and local time, the device, the
 viewport, the network and the power state, clustered per artifact and stored as
 a `ctx` multivector scored with `max_sim`, with the blocks that decided each
-offer named beneath it and shown-against-clicked broken down by rung on Ops.
+offer named beneath it and shown-against-clicked broken down by rung on Ops. A
+situation seen once or twice is offered too, saying so in words — "Twice
+before" — and held to a stricter match than an established one; with nothing
+learned about the situation a card is drawn at random and claims nothing.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.

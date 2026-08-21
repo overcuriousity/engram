@@ -1,4 +1,9 @@
-{# A `div` rather than a `p` for the reason line: `details` and `pre` are flow
+{# The reason line is absent entirely on the random card. A card drawn at
+   random explains nothing, and printing a rung name beside it would be the
+   area claiming a reason it does not have — which is how this becomes
+   furniture within a fortnight.
+
+   A `div` rather than a `p` for the reason line: `details` and `pre` are flow
    content, and a `p` may only hold phrasing content — so a browser closes the
    paragraph before the `details` and leaves a stray empty one behind, which is
    not the DOM the stylesheet is written against.
@@ -22,6 +27,7 @@
 <div id="context-offer" class="offer">
 {% if let Some(o) = offer %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
+  {% if !o.rung.is_empty() %}
   <div class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
     {# `serde_json` over the raw bundle plus the contribution numbers, inside a
        `<details>`. No formatting code, and it satisfies "the parameters must be
@@ -33,5 +39,6 @@
       <pre class="mono">{{ o.detail }}</pre>
     </details>
   </div>
+  {% endif %}
 {% endif %}
 </div>

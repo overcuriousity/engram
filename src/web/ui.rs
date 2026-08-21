@@ -1267,8 +1267,11 @@ async fn search_page(
 pub struct OfferView {
     pub id: String,
     pub title: String,
-    /// One of four fixed strings. See `Rung::line`.
-    pub rung: &'static str,
+    /// What the line leads with. Fixed wording for the two established rungs;
+    /// for a thin one it is the count in words, because "Twice before" is the
+    /// honest thing to say about two occurrences and "Pattern" is not. Empty
+    /// on the random card, which claims nothing.
+    pub rung: String,
     /// The blocks that decided it, joined. Empty on the lower two rungs.
     pub blocks: String,
     /// `08.08., 15:04`, or empty.
@@ -1312,7 +1315,7 @@ async fn context_offer(
     // what it was yesterday, which is empty.
     let offer = st
         .core
-        .offer(Some(&id.subject), &bundle, id.session.as_deref())
+        .offer(Some(&id.subject), &bundle)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "could not build a recommendation");
@@ -1335,8 +1338,23 @@ async fn context_offer(
 }
 
 fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
+    use crate::core::recommend::Rung;
     OfferView {
-        rung: o.rung.line(),
+        rung: match o.rung {
+            Rung::Pattern => "Pattern".to_string(),
+            Rung::Similar => "Similar to".to_string(),
+            // The count, in words a person reads. `weight` is the decayed
+            // number the ranking uses and nobody can read 1.9 and know it means
+            // twice — so the undecayed count is stored alongside it and said
+            // out loud here.
+            Rung::Tentative => match o.events {
+                0 | 1 => "Once before".to_string(),
+                2 => "Twice before".to_string(),
+                n => format!("{n} times before"),
+            },
+            // Nothing about the situation produced it, so nothing is claimed.
+            Rung::Random => String::new(),
+        },
         blocks: o.blocks.join(", "),
         // The device's own reading of when this happened, in the zone it
         // happened in. One date format, and the whole of the third part of the
@@ -5209,6 +5227,88 @@ mod tests {
         }
     }
 
+    /// The same base, plus one established situation matching the bundle the
+    /// tests post — so the reason line actually renders.
+    async fn app_with_a_learned_situation() -> (axum::Router, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "when the recycling centre is open".into(),
+                    corpus_span: None,
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; 8],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: aid.clone(),
+                    corpus_id: src.id.clone(),
+                    text: "when the recycling centre is open".into(),
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    created_at: 0,
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+
+        // The centroid is this very situation, so the offer lands on `Pattern`.
+        let at = crate::store::now();
+        let bundle = crate::core::context::Bundle {
+            tz: Some("Europe/Berlin".into()),
+            ..Default::default()
+        };
+        let v = crate::core::context::encode(at, Some("user-1"), &bundle, &core.recommend.weights);
+        core.store
+            .replace_context_clusters(
+                &aid,
+                &[crate::store::context::StoredCluster {
+                    scope: Some("user-1".into()),
+                    artifact_id: aid.clone(),
+                    slot: 0,
+                    centroid: v.clone(),
+                    weight: 6.0,
+                    events: 6,
+                    last_at: at,
+                    encoder_version: crate::core::context::ENCODER_VERSION,
+                    representative: serde_json::json!({ "at": at, "bundle": bundle }).to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .set_context_vectors(&aid, vec![v])
+            .await
+            .unwrap();
+
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        (app, cookie, aid)
+    }
+
     #[tokio::test]
     async fn a_page_view_is_recorded_even_when_nothing_is_offered() {
         // The endpoint has two jobs and does the first unconditionally. A base
@@ -5298,14 +5398,19 @@ mod tests {
         // content, so a `p` here is closed by the parser before the `details`
         // and leaves a stray empty paragraph behind — a DOM the stylesheet is
         // not written against, with the Details control on its own line.
-        let (app, cookie, _store, _aid) = app_recommending().await;
+        let (app, cookie, _aid) = app_with_a_learned_situation().await;
         let body = crate::web::test_support::body_of(
             app.clone()
-                .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+                .oneshot(form(
+                    "/ui/context",
+                    &cookie,
+                    "bundle=%7B%22tz%22%3A%22Europe%2FBerlin%22%7D",
+                ))
                 .await
                 .unwrap(),
         )
         .await;
+        assert!(body.contains("Pattern"), "no reason line at all: {body}");
         assert!(body.contains(r#"<div class="muted offer-why">"#), "{body}");
         assert!(
             !body.contains("<p class=\"muted offer-why\">"),
@@ -5328,11 +5433,15 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_of(res).await;
-        assert!(body.contains("Not seen in a long time"), "{body}");
         assert!(body.contains(&aid), "{body}");
-        // Nothing was matched, so nothing is named — the bottom rung does not
-        // borrow a pattern's wording.
-        assert!(!body.contains(" · weekday"), "{body}");
+        // Nothing about the situation produced it, so nothing is claimed: no
+        // rung name, no blocks, no reason line at all. A card with a sentence
+        // under it would be the area borrowing authority it does not have.
+        assert!(
+            !body.contains("offer-why"),
+            "the card explains nothing: {body}"
+        );
+        assert!(!body.contains("Pattern"), "{body}");
         drain().await;
 
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();
@@ -5342,7 +5451,7 @@ mod tests {
             .collect();
         assert_eq!(shown.len(), 1);
         assert!(
-            shown[0].detail.as_deref().unwrap().contains("forgotten"),
+            shown[0].detail.as_deref().unwrap().contains("random"),
             "{:?}",
             shown[0].detail
         );

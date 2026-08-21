@@ -27,39 +27,42 @@ pub const NAMED_BLOCKS: usize = 3;
 
 /// Which rung of the ladder the offer rests on.
 ///
-/// Something is always shown, and the wording says what it rests on.
-/// `Forgotten` is deliberately not phrased like a pattern: the distance between
-/// "Fridays around 15:00" and "not seen in a long time" is the whole honesty of
-/// this feature, and blurring it makes the area furniture within a fortnight.
+/// Two questions decide it, not one. *How well does the situation match* —
+/// which separates `Pattern` from `Similar` — and *how often has it happened*,
+/// which separates both from `Tentative`. The second used to be thrown away
+/// after the sweep applied it as a cutoff, and throwing it away is what made a
+/// thing done twice indistinguishable from a thing done twenty times.
+///
+/// `Random` is the floor, and it is not a claim. Nothing about the situation
+/// produced it, so nothing is printed beside it: it exists because a base that
+/// has not learned anything yet should still have something to look at, and
+/// saying "here is a card, no reason" is the honest way to do that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     Pattern,
     Similar,
-    Sitting,
-    Forgotten,
+    /// A real situation, seen once or twice. Held to a higher bar on the match
+    /// than `Similar` is, because there is less behind it.
+    Tentative,
+    Random,
 }
 
 impl Rung {
-    /// For the recorded row, and for the Ops breakdown.
+    /// For the recorded row, and for the Ops breakdown. Fixed buckets, unlike
+    /// the wording, which varies with the count.
     pub fn as_str(&self) -> &'static str {
         match self {
             Rung::Pattern => "pattern",
             Rung::Similar => "similar",
-            Rung::Sitting => "sitting",
-            Rung::Forgotten => "forgotten",
+            Rung::Tentative => "tentative",
+            Rung::Random => "random",
         }
     }
 
-    /// The four fixed strings the page prints. No prose is generated anywhere
-    /// on this path — a new block in the encoder brings its own label and needs
-    /// no sentence written for it.
-    pub fn line(&self) -> &'static str {
-        match self {
-            Rung::Pattern => "Pattern",
-            Rung::Similar => "Similar to",
-            Rung::Sitting => "Touched in this sitting",
-            Rung::Forgotten => "Not seen in a long time",
-        }
+    /// Whether this rung explains itself at all. `Random` does not, and the
+    /// page prints no line beside it.
+    pub fn is_explained(&self) -> bool {
+        !matches!(self, Rung::Random)
     }
 }
 
@@ -70,11 +73,13 @@ pub struct Offer {
     pub artifact_id: String,
     pub title: String,
     pub rung: Rung,
-    /// The winning cluster, for the recorded row. `None` on the two rungs that
-    /// matched no situation.
+    /// The winning cluster, for the recorded row. `None` on the random card.
     pub slot: Option<i64>,
+    /// How many events the winning cluster was built from. Zero on the random
+    /// card. What `Tentative` puts into words.
+    pub events: i64,
     /// The blocks that decided it, largest contribution first, at most
-    /// `NAMED_BLOCKS`. Empty on the lower two rungs, which matched nothing.
+    /// `NAMED_BLOCKS`. Empty on the random card, which matched nothing.
     pub blocks: Vec<&'static str>,
     /// The representative event's stamp. What "like 08.08., 15:04" prints.
     pub at: Option<i64>,
@@ -93,12 +98,7 @@ impl Core {
     /// here because Qdrant's `max_sim` yields the maximum and not which element
     /// produced it — and the display needs the element, both to quote it and to
     /// name the blocks that decided it.
-    pub async fn offer(
-        &self,
-        scope: Option<&str>,
-        bundle: &Bundle,
-        session: Option<&str>,
-    ) -> Result<Option<Offer>> {
+    pub async fn offer(&self, scope: Option<&str>, bundle: &Bundle) -> Result<Option<Offer>> {
         if !self.recommends() {
             return Ok(None);
         }
@@ -170,12 +170,16 @@ impl Core {
 
         if let Some((hit, cluster, _)) = best {
             let score = context_score(&now, &cluster.centroid);
-            let rung = if score >= self.recommend.strong_at {
-                Some(Rung::Pattern)
-            } else if score >= self.recommend.weak_at {
-                Some(Rung::Similar)
-            } else {
-                None
+            // Established, or seen only once or twice. A thin cluster has to
+            // match the situation *better* before anything is said, which is
+            // what keeps a single accident from being offered as if it meant
+            // something.
+            let firm = cluster.weight >= self.recommend.firm_at;
+            let rung = match (firm, score) {
+                (true, s) if s >= self.recommend.strong_at => Some(Rung::Pattern),
+                (true, s) if s >= self.recommend.weak_at => Some(Rung::Similar),
+                (false, s) if s >= self.recommend.strong_at => Some(Rung::Tentative),
+                _ => None,
             };
             if let Some(rung) = rung {
                 let all = contributions(&now, &cluster.centroid, &self.recommend.weights);
@@ -186,6 +190,7 @@ impl Core {
                     title: title_of(&hit.payload),
                     rung,
                     slot: Some(cluster.slot),
+                    events: cluster.events,
                     blocks: all.iter().take(NAMED_BLOCKS).map(|(l, _)| *l).collect(),
                     at: rep.get("at").and_then(serde_json::Value::as_i64),
                     at_tz: rep
@@ -194,6 +199,8 @@ impl Core {
                         .map(str::to_string),
                     detail: serde_json::json!({
                         "score": score,
+                        "events": cluster.events,
+                        "weight": cluster.weight,
                         "bundle": bundle,
                         "representative": rep,
                         "contributions": all
@@ -206,47 +213,35 @@ impl Core {
             }
         }
 
-        // Nothing in `ctx`, but this sitting is open. A way back to what was
-        // just being read is not a claim about a pattern, and the wording does
-        // not make one.
-        if let Some(sess) = session {
-            let carried = self
-                .sittings
-                .read(sess, now_at, self.pursuit.idle_secs as i64);
-            for aid in &carried.touched {
-                if let Ok(a) = self.store.get_artifact(aid).await
-                    && a.in_results()
-                {
-                    return Ok(Some(Offer {
-                        artifact_id: a.id.clone(),
-                        title: a.title.clone().unwrap_or_else(|| first_line(&a.text)),
-                        rung: Rung::Sitting,
-                        slot: None,
-                        blocks: Vec::new(),
-                        at: None,
-                        at_tz: None,
-                        detail: serde_json::json!({ "bundle": bundle }).to_string(),
-                    }));
-                }
-            }
-        }
-
-        // The bottom rung, which *is* `resurface` — and says so.
-        let forgotten = self.resurface(1).await.unwrap_or_default();
-        Ok(forgotten.into_iter().next().map(|r| Offer {
-            title: r
-                .title
-                .clone()
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| first_line(&r.text)),
-            artifact_id: r.artifact_id,
-            rung: Rung::Forgotten,
-            slot: None,
-            blocks: Vec::new(),
-            at: None,
-            at_tz: None,
-            detail: serde_json::json!({ "bundle": bundle }).to_string(),
-        }))
+        // The floor: something to look at while the base has nothing to say
+        // about this situation. Drawn at random and claimed to be nothing —
+        // no blocks, no stamp, no line under it.
+        //
+        // Deliberately not `resurface`. That answers "what has been forgotten",
+        // which on a base anyone has just started using is nothing at all, and
+        // it stamps what it draws as seen — draining the pool the search page's
+        // own resurfacing lives on, one page view at a time.
+        Ok(self
+            .store
+            .random_artifact()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not draw a card");
+                None
+            })
+            .map(|(id, title, text)| Offer {
+                artifact_id: id,
+                title: title
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| first_line(&text)),
+                rung: Rung::Random,
+                slot: None,
+                events: 0,
+                blocks: Vec::new(),
+                at: None,
+                at_tz: None,
+                detail: serde_json::json!({ "bundle": bundle }).to_string(),
+            }))
     }
 }
 
@@ -398,8 +393,22 @@ mod tests {
         }
     }
 
-    /// Give `aid` one learned situation, at `at`, in both stores.
+    /// Give `aid` one established situation, at `at`, in both stores.
     async fn learn(core: &Core, aid: &str, scope: &str, at: i64, b: &Bundle) {
+        learn_n(core, aid, scope, at, b, 6.0, 6).await;
+    }
+
+    /// The same, with the weight and the count said explicitly — so a test can
+    /// build a situation that is real but thin.
+    async fn learn_n(
+        core: &Core,
+        aid: &str,
+        scope: &str,
+        at: i64,
+        b: &Bundle,
+        weight: f64,
+        events: i64,
+    ) {
         let v = encode(at, Some(scope), b, &core.recommend.weights);
         core.store
             .replace_context_clusters(
@@ -409,7 +418,8 @@ mod tests {
                     artifact_id: aid.into(),
                     slot: 0,
                     centroid: v.clone(),
-                    weight: 6.0,
+                    weight,
+                    events,
                     last_at: at,
                     encoder_version: ENCODER_VERSION,
                     representative: serde_json::json!({ "at": at, "bundle": b }).to_string(),
@@ -505,7 +515,7 @@ mod tests {
         seventh.clock = Clock::Fixed(FRIDAY - 8 * 60);
 
         let offer = seventh
-            .offer(Some("alice"), &phone(), None)
+            .offer(Some("alice"), &phone())
             .await
             .unwrap()
             .unwrap();
@@ -574,11 +584,7 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core
-            .offer(Some("alice"), &phone(), None)
-            .await
-            .unwrap()
-            .unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
         assert_eq!(
             offer.artifact_id, from_store[0].payload.artifact_id,
             "the local argmax reproduces the store's"
@@ -592,11 +598,7 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
 
-        let offer = core
-            .offer(Some("alice"), &phone(), None)
-            .await
-            .unwrap()
-            .unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Pattern);
         assert_eq!(offer.slot, Some(0));
         assert_eq!(offer.title, "recycling centre");
@@ -617,11 +619,7 @@ mod tests {
         other.orientation = Some("landscape".into());
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400 - 4 * 3600, &other).await;
 
-        let offer = core
-            .offer(Some("alice"), &phone(), None)
-            .await
-            .unwrap()
-            .unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Similar, "blocks: {:?}", offer.blocks);
     }
 
@@ -641,7 +639,7 @@ mod tests {
         // it like one.
         for n in 0..20 {
             let who = format!("person-{n}");
-            let offer = core.offer(Some(&who), &phone(), None).await.unwrap();
+            let offer = core.offer(Some(&who), &phone()).await.unwrap();
             assert!(
                 offer
                     .as_ref()
@@ -678,7 +676,7 @@ mod tests {
             "the store has nothing else to return, so it returns alice's"
         );
 
-        let offer = core.offer(Some("bob"), &phone(), None).await.unwrap();
+        let offer = core.offer(Some("bob"), &phone()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "and the read path cut it anyway: {offer:?}"
@@ -686,50 +684,133 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_nothing_learned_the_ladder_falls_to_what_this_sitting_touched() {
+    async fn a_situation_seen_twice_says_twice_rather_than_pattern() {
+        // The middle ground. Two occurrences are a real thing that happened and
+        // worth offering, and calling them a pattern would be a claim the
+        // evidence does not carry. The line says the number instead.
         let core = core_at(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        core.sittings.touched("sess-1", &aid, FRIDAY, 900);
+        // Weight below `firm_at`, which at the default half-life is what two
+        // weekly repetitions come to.
+        learn_n(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone(), 1.9, 2).await;
 
-        let offer = core
-            .offer(Some("alice"), &phone(), Some("sess-1"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(offer.rung, Rung::Sitting);
-        assert_eq!(offer.artifact_id, aid);
-        assert!(
-            offer.blocks.is_empty(),
-            "nothing was matched, so nothing is named"
-        );
-        assert_eq!(offer.slot, None);
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        assert_eq!(offer.rung, Rung::Tentative);
+        assert_eq!(offer.events, 2, "and it knows how many");
+        assert_eq!(offer.slot, Some(0), "still a real cluster");
+        assert!(!offer.blocks.is_empty(), "and it still says what matched");
     }
 
     #[tokio::test]
-    async fn with_no_sitting_either_it_falls_to_what_has_been_forgotten() {
-        // Deliberately not phrased like a pattern. This rung *is* `resurface`,
-        // and it says so.
+    async fn a_thin_situation_is_held_to_a_higher_bar_than_an_established_one() {
+        // With less behind it, the situation has to match *better* before
+        // anything is said at all. Otherwise one accident on a Tuesday would be
+        // offered every Tuesday after it.
         let core = core_at(FRIDAY).await;
-        let _aid = seed_artifact(&core, "recycling centre").await;
+        let aid = seed_artifact(&core, "recycling centre").await;
+        // A middling match — the kind that earns `Similar` when established.
+        let mut other = phone();
+        other.network = Some("wifi".into());
+        other.orientation = Some("landscape".into());
+        learn_n(
+            &core,
+            &aid,
+            "alice",
+            FRIDAY - 7 * 86_400 - 4 * 3600,
+            &other,
+            1.0,
+            1,
+        )
+        .await;
+
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        assert_eq!(
+            offer.rung,
+            Rung::Random,
+            "a middling match on one event is not worth a sentence"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_nothing_learned_a_card_is_drawn_and_claims_nothing() {
+        // The floor. Something to look at while the base has nothing to say
+        // about the situation — and nothing printed beside it, because nothing
+        // about the situation produced it.
+        let core = core_at(FRIDAY).await;
+        let aid = seed_artifact(&core, "recycling centre").await;
+
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        assert_eq!(offer.rung, Rung::Random);
+        assert_eq!(offer.artifact_id, aid);
+        assert!(!offer.rung.is_explained(), "no line is printed beside it");
+        assert!(offer.blocks.is_empty());
+        assert_eq!(offer.slot, None);
+        assert_eq!(offer.events, 0);
+        assert!(offer.at.is_none(), "nothing to quote");
+    }
+
+    #[tokio::test]
+    async fn the_card_works_on_a_base_nobody_has_used_yet() {
+        // The whole reason this is not `resurface`: that one answers "older
+        // than thirty days and unshown for thirty days", which on a base
+        // somebody started this morning is nothing at all — empty in exactly
+        // the moment this rung exists for.
+        let core = core_at(FRIDAY).await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "captured five minutes ago".into(),
+                    corpus_span: None,
+                    title: Some("brand new".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
 
         let offer = core
-            .offer(Some("alice"), &phone(), None)
+            .offer(Some("alice"), &phone())
             .await
             .unwrap()
+            .expect("a fresh base still has something to show");
+        assert_eq!(offer.title, "brand new");
+        assert_eq!(offer.rung, Rung::Random);
+    }
+
+    #[tokio::test]
+    async fn drawing_a_card_does_not_mark_anything_as_seen() {
+        // `resurface` stamps what it draws, which is right for a list somebody
+        // asked for and wrong for something that fires on every page view: it
+        // would drain the pool the search page's own resurfacing lives on, one
+        // page view at a time.
+        let core = core_at(FRIDAY).await;
+        let aid = seed_artifact(&core, "recycling centre").await;
+        for _ in 0..5 {
+            core.offer(Some("alice"), &phone()).await.unwrap();
+        }
+        core.background.wait_idle().await;
+
+        let payloads = core
+            .vectors
+            .payloads_of(std::slice::from_ref(&aid))
+            .await
             .unwrap();
-        assert_eq!(offer.rung, Rung::Forgotten);
-        assert!(offer.rung.line().contains("long"), "{}", offer.rung.line());
+        assert!(
+            payloads[&aid].last_seen_at.is_none(),
+            "five page views must not count as having read it"
+        );
     }
 
     #[tokio::test]
     async fn an_empty_base_is_offered_nothing_rather_than_a_lie() {
         let core = core_at(FRIDAY).await;
-        assert!(
-            core.offer(Some("alice"), &phone(), None)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(core.offer(Some("alice"), &phone()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -739,12 +820,7 @@ mod tests {
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
         core.recommend.enabled = false;
 
-        assert!(
-            core.offer(Some("alice"), &phone(), None)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(core.offer(Some("alice"), &phone()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -767,7 +843,7 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone(), None).await.unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "got {offer:?}"
@@ -788,7 +864,7 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone(), None).await.unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.rung != Rung::Pattern),
             "got {offer:?}"
@@ -804,11 +880,7 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
 
-        let offer = core
-            .offer(Some("alice"), &phone(), None)
-            .await
-            .unwrap()
-            .unwrap();
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
         let d: serde_json::Value = serde_json::from_str(&offer.detail).unwrap();
         assert_eq!(d["bundle"]["tz"], "Europe/Berlin");
         assert!(d["contributions"].is_object());
@@ -830,7 +902,7 @@ mod tests {
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
         let before = embedder.calls();
 
-        core.offer(Some("alice"), &phone(), None).await.unwrap();
+        core.offer(Some("alice"), &phone()).await.unwrap();
         assert_eq!(embedder.calls(), before, "not one embedding call");
     }
 }

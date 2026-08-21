@@ -65,6 +65,10 @@ pub struct Member {
 pub struct Cluster {
     pub centroid: Vec<f32>,
     pub weight: f64,
+    /// How many events went into it, undecayed. `weight` says how much this
+    /// still counts; this says how often it happened, which is what the line
+    /// under the offer can put in words a person reads.
+    pub events: usize,
     pub last_at: i64,
     /// `{"at": <unix>, "bundle": {…}}` for the member nearest the centroid.
     pub representative: String,
@@ -187,6 +191,7 @@ pub fn agglomerate(
                 .unwrap_or_else(|| r#"{"at":0,"bundle":{}}"#.to_string());
             Cluster {
                 centroid: c.centroid,
+                events: c.members.len(),
                 weight: c.weight,
                 last_at: c.last_at,
                 representative,
@@ -375,6 +380,7 @@ pub async fn run(core: &Core) -> Result<Report> {
                 slot: slot as i64,
                 centroid: c.centroid.clone(),
                 weight: c.weight,
+                events: c.events as i64,
                 last_at: c.last_at,
                 encoder_version: crate::core::context::ENCODER_VERSION,
                 representative: c.representative.clone(),

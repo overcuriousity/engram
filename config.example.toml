@@ -500,14 +500,20 @@ cluster_merge_at = 0.82
 max_clusters = 5
 # A pattern that stops fades rather than standing for ever.
 half_life_days = 45.0
-# A cluster lighter than this is dropped. Also what protects against the single
-# accident: one event never reaches it.
-min_weight = 2.0
-# Score at or above which the offer is called a pattern, and above which it is
-# called a resemblance. Below the second, the ladder falls through to what this
-# sitting has touched, and then to what has been forgotten. Scored without the
-# `scope` block, which decides *who* may be offered something rather than how
-# well the situation matches.
+# A cluster lighter than this is dropped. Low enough that a single recent event
+# survives: a thing done twice is worth saying so about, it is just not worth
+# calling a pattern.
+min_weight = 0.9
+# Weight at or above which a situation is spoken of as established. Below it the
+# offer says how many times it has happened instead — "Twice before" — and
+# demands a strong match before saying anything at all, because there is less
+# behind it. At the default half-life this is the third repetition.
+firm_at = 2.5
+# Score at or above which an established situation is called a pattern, and
+# above which it is called a resemblance. Below both, a card is drawn at random
+# with no reason printed beside it — something to look at while the base has
+# nothing to say about the situation. Scored without the `scope` block, which
+# decides *who* may be offered something rather than how well it matches.
 strong_at = 0.75
 weak_at = 0.45
 # What an open of something this offered counts for, back into the profile.

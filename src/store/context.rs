@@ -43,6 +43,8 @@ pub struct StoredCluster {
     pub slot: i64,
     pub centroid: Vec<f32>,
     pub weight: f64,
+    /// How many events this was built from, undecayed. See the column comment.
+    pub events: i64,
     pub last_at: i64,
     pub encoder_version: i64,
     pub representative: String,
@@ -109,6 +111,29 @@ impl Store {
             .rows_affected())
     }
 
+    /// One active artifact, drawn at random.
+    ///
+    /// The bottom of the ladder, and deliberately *not* `resurface`. That one
+    /// answers "what has been forgotten" — older than thirty days and unshown
+    /// for thirty days — so on a base anyone has just started using it returns
+    /// nothing at all, which is the one moment this is for. It also stamps what
+    /// it draws as seen, which would quietly drain the pool the search page's
+    /// own resurfacing lives on.
+    ///
+    /// This asks a simpler question and has no side effect: something to look
+    /// at, while the base has nothing to say about the situation. Nothing is
+    /// claimed about it, and the page prints no reason beside it.
+    pub async fn random_artifact(&self) -> Result<Option<(String, Option<String>, String)>> {
+        let row = sqlx::query(
+            "SELECT id, title, text FROM artifacts
+              WHERE status = 'active' AND superseded_by IS NULL
+              ORDER BY RANDOM() LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.get("id"), r.get("title"), r.get("text"))))
+    }
+
     /// Every artifact that currently has a profile.
     ///
     /// What the sweep needs in order to *clear* one: an artifact whose every
@@ -145,15 +170,16 @@ impl Store {
         for c in clusters {
             sqlx::query(
                 "INSERT INTO context_clusters
-                     (scope, artifact_id, slot, centroid, weight, last_at,
-                      encoder_version, representative)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (scope, artifact_id, slot, centroid, weight, events,
+                      last_at, encoder_version, representative)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&c.scope)
             .bind(artifact_id)
             .bind(c.slot)
             .bind(vec_to_blob(&c.centroid))
             .bind(c.weight)
+            .bind(c.events)
             .bind(c.last_at)
             .bind(c.encoder_version)
             .bind(&c.representative)
@@ -183,7 +209,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT scope, artifact_id, slot, centroid, weight, last_at,
+            "SELECT scope, artifact_id, slot, centroid, weight, events, last_at,
                     encoder_version, representative
                FROM context_clusters
               WHERE artifact_id IN ({holes})
@@ -203,6 +229,7 @@ impl Store {
                     slot: r.get("slot"),
                     centroid: blob_to_vec(&r.get::<Vec<u8>, _>("centroid")),
                     weight: r.get("weight"),
+                    events: r.get("events"),
                     last_at: r.get("last_at"),
                     encoder_version: r.get("encoder_version"),
                     representative: r.get("representative"),
@@ -381,6 +408,7 @@ mod tests {
             slot,
             centroid: vec![1.0, 0.0],
             weight,
+            events: 3,
             last_at: 1_000,
             encoder_version: 1,
             representative: r#"{"at":1000,"bundle":{}}"#.into(),

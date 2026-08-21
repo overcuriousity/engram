@@ -524,6 +524,11 @@ CREATE TABLE IF NOT EXISTS context_clusters (
   slot            INTEGER NOT NULL,
   centroid        BLOB NOT NULL,
   weight          REAL NOT NULL,
+  -- How many events this cluster was built from, undecayed. `weight` answers
+  -- "how much does this still count", which is the right question for ranking
+  -- and the wrong one for the line under the offer: nobody can read 1.9 and
+  -- know it means twice. This is what the wording says out loud.
+  events          INTEGER NOT NULL DEFAULT 0,
   last_at         INTEGER NOT NULL,
   -- What layout `centroid` was written under. A reader that does not recognise
   -- it skips the cluster rather than explaining a hit with the wrong blocks.

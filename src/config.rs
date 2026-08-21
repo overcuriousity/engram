@@ -403,9 +403,20 @@ pub struct RecommendConfig {
     pub max_clusters: usize,
     /// A pattern that stops fades rather than standing for ever.
     pub half_life_days: f64,
-    /// A cluster below this is dropped. Also what protects against the single
-    /// accident: one event never reaches it.
+    /// A cluster below this is dropped.
+    ///
+    /// Low enough that a single recent event survives, because a thing done
+    /// twice is worth saying so about — it just is not worth calling a
+    /// pattern. What separates the two is `firm_at`, and what protects against
+    /// the single accident is that a thin cluster has to match the situation
+    /// *better* before anything is offered at all.
     pub min_weight: f64,
+    /// Weight at or above which a cluster is spoken of as established.
+    ///
+    /// Below it the offer says how many times it has happened instead —
+    /// "Twice before" — and demands a strong situational match before saying
+    /// anything. At the default half-life this is the third repetition.
+    pub firm_at: f64,
     /// Context score — the vector with its `scope` block sliced off — at or
     /// above which the offer is called a pattern.
     ///
@@ -432,7 +443,8 @@ impl Default for RecommendConfig {
             cluster_merge_at: 0.82,
             max_clusters: 5,
             half_life_days: 45.0,
-            min_weight: 2.0,
+            min_weight: 0.9,
+            firm_at: 2.5,
             strong_at: 0.75,
             weak_at: 0.45,
             self_weight: 0.0,
