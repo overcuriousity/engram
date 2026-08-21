@@ -59,6 +59,22 @@ impl Rung {
         }
     }
 
+    /// The inverse, for the one place a rung arrives as text: the marker the
+    /// offer link carries back on the open. A viewer can type anything into a
+    /// query string, and the value goes straight into the recorded row and from
+    /// there into `offer_rates`' `GROUP BY rung` — so an unrecognised word
+    /// would appear on Ops as a rung of the ladder, beside the four that exist.
+    /// Anything not written by `as_str` is not a rung.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pattern" => Some(Rung::Pattern),
+            "similar" => Some(Rung::Similar),
+            "tentative" => Some(Rung::Tentative),
+            "random" => Some(Rung::Random),
+            _ => None,
+        }
+    }
+
     /// Whether this rung explains itself at all. `Random` does not, and the
     /// page prints no line beside it.
     pub fn is_explained(&self) -> bool {

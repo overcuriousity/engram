@@ -1795,6 +1795,14 @@ impl VectorStore for QdrantVectors {
         // swallowed, so the sweep wrote its clusters to SQLite, reported `ok`,
         // and left the index with no `ctx` set at all. Nothing but running it
         // against a real Qdrant would have caught that.
+        //
+        // The bodies do not match either. The update names its vectors under
+        // `vector`, singular, mapped by name; the delete takes `vectors`,
+        // plural, a list of the names to drop. Writing the update's spelling
+        // into the delete leaves the required field missing, and Qdrant answers
+        // 400 rather than ignoring it — which took the whole sweep down on the
+        // ordinary path, since every artifact decayed below `min_weight` is
+        // cleared through here.
         let (method, path, body) = match vectors.is_empty() {
             true => (
                 Method::POST,
@@ -1802,7 +1810,7 @@ impl VectorStore for QdrantVectors {
                     "/collections/{}/points/vectors/delete?wait=true",
                     self.alias
                 ),
-                json!({ "points": [id], "vector": [CTX] }),
+                json!({ "points": [id], "vectors": [CTX] }),
             ),
             false => (
                 Method::PUT,
@@ -2361,6 +2369,39 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn clearing_a_context_set_names_the_vector_the_way_the_delete_takes_it() {
+        // The update and the delete do not spell it the same way, and the
+        // difference is not cosmetic: `vectors` is required on the delete, so
+        // sending the update's `vector` leaves it missing and Qdrant answers
+        // 400 rather than ignoring the field it does not know. That is the
+        // ordinary path — every artifact whose profile decayed below
+        // `min_weight` is cleared through here — so the whole sweep died on it
+        // and the stale centroids stayed in the index, still being offered.
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let id = "0192abcd-0000-7000-8000-000000000000";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points/vectors/delete"))
+            .and(body_json(
+                json!({ "points": [point_uuid(id)], "vectors": [CTX] }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "status": "completed" }, "status": "ok"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        against(&server)
+            .await
+            .set_context_vectors(id, Vec::new())
+            .await
+            .expect("an empty set is a delete, and the delete takes `vectors`");
     }
 
     #[tokio::test]

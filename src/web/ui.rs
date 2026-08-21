@@ -3710,11 +3710,23 @@ async fn artifact_detail(
     // system taught itself. Keyed on the rung and not on the slot: the floor of
     // the ladder carries no slot, and it is the rung with no evidence behind it
     // at all — the last one that should be teaching the profile.
-    match p.rung.as_deref() {
-        Some(rung) => {
-            st.core
-                .record_recommendation(&cid, "recommended_open", rung, p.rec, Some(&id.subject))
-        }
+    //
+    // The marker is checked against the ladder rather than taken as written:
+    // it arrives in a query string, and an unrecognised word would be recorded
+    // as the rung it claims and counted on Ops as a row of its own. A link
+    // carrying one is not an open under a rung, so it is an ordinary open.
+    match p
+        .rung
+        .as_deref()
+        .and_then(crate::core::recommend::Rung::parse)
+    {
+        Some(rung) => st.core.record_recommendation(
+            &cid,
+            "recommended_open",
+            rung.as_str(),
+            p.rec,
+            Some(&id.subject),
+        ),
         None => st
             .core
             .record_interaction(&cid, p.via.as_deref(), Some(&id.subject)),
@@ -5458,6 +5470,41 @@ mod tests {
             rows.iter()
                 .all(|r| r.detail.as_deref().unwrap_or_default().contains("random")),
             "Ops cannot tell which rung: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rung_the_ladder_does_not_have_is_an_ordinary_open() {
+        // The marker rides in the query string, so its value is whatever the
+        // viewer sends. Taken as written it went into the recorded row and from
+        // there into `offer_rates`' `GROUP BY rung`, which is to say anyone
+        // could add rows to the Ops breakdown by editing a URL — beside the
+        // four rungs that exist, in the one table the block weights would be
+        // fitted against.
+        let (app, cookie, store, aid) = app_recommending().await;
+        get(
+            &app,
+            &format!("/ui/artifacts/{aid}?rung=excellent"),
+            &cookie,
+        )
+        .await;
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["opened"],
+            "an invented rung was recorded as an offer: {rows:?}"
+        );
+        assert!(
+            store
+                .offer_rates(0)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| crate::core::recommend::Rung::parse(&r.rung).is_some()),
+            "Ops lists a rung the ladder does not have"
         );
     }
 

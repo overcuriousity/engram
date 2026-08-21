@@ -22,6 +22,8 @@ pub struct Report {
     pub removed: usize,
     /// Situations dropped for being past `store::context::RETAIN_DAYS`.
     pub contexts: u64,
+    /// Interactions dropped for being past the same window.
+    pub interactions: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -95,6 +97,28 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "could not expire recorded situations");
+            failure.get_or_insert(e);
+        }
+    }
+
+    // Interactions ride the situations' window, not the query log's: the two
+    // are read as a pair by the context sweep, and one kept past the other
+    // profiles nothing. Behind no key for the same reason the line above is —
+    // an operator who turned the offer off still wants the rows it wrote while
+    // it was on to leave.
+    match core
+        .store
+        .expire_interactions(crate::store::context::RETAIN_DAYS)
+        .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(dropped = n, "expired recorded interactions");
+            }
+            report.interactions = n;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not expire recorded interactions");
             failure.get_or_insert(e);
         }
     }

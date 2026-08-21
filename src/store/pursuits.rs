@@ -211,6 +211,28 @@ impl Store {
             .collect())
     }
 
+    /// Drop interactions past keeping.
+    ///
+    /// The table had no sweep at all, only the manual `purge_pursuits`, while
+    /// the situations it is read beside got `context::RETAIN_DAYS` from the
+    /// start. That was survivable while a row meant an open; it stopped being
+    /// so when the offer began writing a `recommended_shown` per page view, so
+    /// the table grew with browsing rather than with use — and the context
+    /// sweep reads the whole window into memory every six hours.
+    ///
+    /// The same window as the situations, and for the same reason: the sweep
+    /// pairs the two, and an interaction kept past the situation it happened in
+    /// profiles nothing. Nothing else reads further back — `offer_rates` asks
+    /// for a month, and the pursuit sweep works from a cursor.
+    pub async fn expire_interactions(&self, retain_days: i64) -> Result<u64> {
+        let cutoff = crate::store::now() - retain_days * 86_400;
+        Ok(sqlx::query("DELETE FROM interaction_events WHERE at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     /// A new pursuit, `open`. Returns its id.
     ///
     /// Idempotent by identity rather than by insertion order: the id is the
@@ -361,6 +383,53 @@ mod tests {
         let got = s.interactions_between(0, 100).await.unwrap();
         assert_eq!(got[2].kind, "dwell");
         assert_eq!(got[2].detail.as_deref(), Some("45"));
+    }
+
+    #[tokio::test]
+    async fn interactions_past_the_window_are_dropped_and_the_rest_are_kept() {
+        // The table had no sweep of any kind. That was survivable while a row
+        // meant somebody opened something; it stopped being so when the offer
+        // began writing a `recommended_shown` per search-page view, because the
+        // context sweep reads the whole window into memory every six hours and
+        // the window had no end.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let a = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let now = crate::store::now();
+        let retain = crate::store::context::RETAIN_DAYS;
+        let old = now - (retain + 1) * 86_400;
+        let recent = now - 86_400;
+        s.record_interaction(&a, "opened", None, Some("u1"), old)
+            .await
+            .unwrap();
+        s.record_recommendation(&a, "recommended_shown", "{}", Some("u1"), old)
+            .await
+            .unwrap();
+        s.record_interaction(&a, "opened", None, Some("u1"), recent)
+            .await
+            .unwrap();
+
+        assert_eq!(s.expire_interactions(retain).await.unwrap(), 2);
+        let got = s.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].at, recent);
     }
 
     #[tokio::test]
