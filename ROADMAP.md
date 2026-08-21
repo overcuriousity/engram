@@ -28,7 +28,12 @@ as a paste the operator approves; one bounded round of planned retrieval behind
 `[infer.ask] plan`, fanning out to a search per uncovered subject; named model
 tiers, so a role picks a model by what the call is worth; judged questions with
 a second harness — citation recall, abstention, faithfulness by literals and by
-claim check; knowledge gaps grouped and named on the capture page.
+claim check; knowledge gaps grouped and named on the capture page; a
+recommendation under the search box, learned from the situations an artifact
+was opened in — the browser's time zone and local time, the device, the
+viewport, the network and the power state, clustered per artifact and stored as
+a `ctx` multivector scored with `max_sim`, with the blocks that decided each
+offer named beneath it and shown-against-clicked broken down by rung on Ops.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -336,6 +341,30 @@ to trust.
   and an artifact cannot currently tell the operator what earned it, or what it
   has ever answered. Last of the three, and the one that makes the other two
   worth reading.
+
+- **The offer's hit rate is on Ops.** Built. Shown against clicked, by rung,
+  over the last thirty days. The block weights the recommendation rests on are
+  chosen, not measured, and this is the instrument that would let them be
+  fitted — fitting them before the data exists would be guessing with extra
+  steps. It is here for the reason `[sitting] prime` is still `false`: a
+  default nobody can see the effect of never moves.
+
+- **Dropping the `scope` block.** Not built, and it waits on per-user
+  collections rather than on anyone's judgement. At weight 10 against a total
+  under 5, that block is what keeps one person's situations from being ranked
+  first for another; the read path cuts foreign clusters exactly, so the block
+  is a ranking aid rather than the guarantee, but it stays until each user has
+  their own collection. Then it goes to 0 and nothing else about the encoder
+  changes.
+
+- **Learned block weights.** Not built. Once the shown/clicked rate has months
+  behind it, the weights in `[recommend.weights]` can be fitted to it. Until
+  then they are the defaults in the design record, and the honest description
+  of them is "chosen".
+
+- **Conjunctions across scopes.** Not built. The context vector can hold
+  "on the phone the hour matters, at the desk it does not"; nothing yet learns
+  which of those conjunctions are real.
 
 ## [Core Platform & Tooling]
 

@@ -473,6 +473,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn six_fridays_and_the_seventh_offers_it_before_it_is_asked_for() {
+        // The whole feature in one test, and the example it was asked for:
+        // seed six Fridays, set the clock to the seventh at 14:52, send the
+        // phone bundle, and assert the artifact comes back at rung Pattern with
+        // weekday, hour and device named. Nothing here calls a model or an
+        // embedder — every step is the production path with a fixed clock in
+        // it, and the sweep is the real one.
+        let core = core_at(FRIDAY).await;
+        let aid = seed_artifact(&core, "recycling centre opening hours").await;
+        let noise = seed_artifact(&core, "invoice template").await;
+
+        // Six Fridays at 15:00 on the phone, opening the recycling centre.
+        for w in 1..=6 {
+            let at = FRIDAY - w * 7 * 86_400;
+            seen_and_opened(&core, &aid, at, &phone()).await;
+        }
+        // And six Tuesday mornings at a desk, opening something else — so the
+        // answer is a choice rather than the only candidate.
+        for w in 1..=6 {
+            let at = FRIDAY - w * 7 * 86_400 - 3 * 86_400 - 7 * 3600;
+            seen_and_opened(&core, &noise, at, &desk()).await;
+        }
+
+        let learned = crate::jobs::context::run(&core).await.unwrap();
+        assert_eq!(learned.events, 12);
+        assert_eq!(learned.profiled, 2, "both situations were learned");
+
+        // The seventh Friday, eight minutes before the usual hour.
+        let mut seventh = core.clone();
+        seventh.clock = Clock::Fixed(FRIDAY - 8 * 60);
+
+        let offer = seventh
+            .offer(Some("alice"), &phone(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            offer.artifact_id, aid,
+            "the Friday thing, not the Tuesday one"
+        );
+        assert_eq!(offer.title, "recycling centre opening hours");
+        assert_eq!(offer.rung, Rung::Pattern);
+        assert!(offer.blocks.contains(&"weekday"), "{:?}", offer.blocks);
+        assert!(offer.blocks.contains(&"hour"), "{:?}", offer.blocks);
+        assert!(offer.blocks.contains(&"device"), "{:?}", offer.blocks);
+        // And it quotes a Friday that actually happened.
+        let at = offer.at.expect("a representative event");
+        assert!(
+            (1..=6).any(|w| at == FRIDAY - w * 7 * 86_400),
+            "quoted {at}, which is not one of the six"
+        );
+    }
+
+    /// One page view and the open that followed it, at `at`.
+    async fn seen_and_opened(core: &Core, aid: &str, at: i64, b: &Bundle) {
+        let raw = serde_json::to_string(b).unwrap();
+        let t = crate::core::context::local_time(at, b.tz.as_deref(), None);
+        core.store
+            .record_context(&crate::store::context::ContextEvent {
+                id: 0,
+                scope: Some("alice".into()),
+                at,
+                bundle: raw.clone(),
+                device_key: crate::core::context::device_key(b),
+                local_hour: Some(t.hour as i64),
+                weekday: Some(t.weekday as i64),
+                tz: b.tz.clone(),
+            })
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(aid, "opened", None, Some("alice"), at + 5)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn the_reason_explains_the_artifact_that_was_offered() {
         // If the local recomputation and the store disagree, the line explains a
         // different artifact than the one shown — which is the one dishonesty
