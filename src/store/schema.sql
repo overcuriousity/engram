@@ -407,7 +407,10 @@ CREATE TABLE IF NOT EXISTS gap_clusters (
 -- comes back.
 CREATE TABLE IF NOT EXISTS gap_coverage (
   -- The `GapKind` and the id of the row it came from: an ask event, a search
-  -- event, a pursuit. Not a foreign key, because it names one of three tables.
+  -- event, a pursuit. Not a foreign key, because it names one of three tables
+  -- — so nothing cascades from the row it points at, and retention deletes
+  -- those rows routinely. `Store::trim_gap_coverage`, on the repair pass, is
+  -- the collection this cannot have declaratively.
   kind        TEXT NOT NULL,
   gap_id      TEXT NOT NULL,
   corpus_id   TEXT NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,

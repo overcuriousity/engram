@@ -163,6 +163,17 @@ macro_rules! ask_gaps_sql {
     };
 }
 
+/// A search someone judged a hole in the base.
+///
+/// Coverage of *either* search kind closes it, for the same reason
+/// `dismiss_gap` writes one `dismissed_at` for both: `search` and `unmatched`
+/// are two readings of one row, not two rows. A search the base could not
+/// answer is picked up as `unmatched` on its own, a capture covers it as
+/// `unmatched`, and the operator then marks that same search a gap from the
+/// results bar — with only `kind = 'search'` excluded here, a stored capture
+/// that already answers it puts it back on the capture page as a fresh hole.
+/// The other direction cannot happen: `unmatched` is `verdict IS NULL`, so a
+/// judged search never enters by that door.
 macro_rules! search_gaps_sql {
     ($cols:literal) => {
         concat!(
@@ -172,7 +183,8 @@ macro_rules! search_gaps_sql {
               WHERE verdict = 'gap' AND dismissed_at IS NULL
                 AND embed_model = ? AND vec_dim > 0
                 AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'search' AND gap_id = search_events.id)
+                                 WHERE kind IN ('search', 'unmatched')
+                                   AND gap_id = search_events.id)
               ORDER BY judged_at DESC, id DESC LIMIT ?"
         )
     };
@@ -547,8 +559,10 @@ impl Store {
             };
             let text: Option<String> = r.get("text");
             // The source row can be gone — a search expired by retention, a
-            // pursuit purged. The coverage row outlives it and says nothing
-            // useful without it, so it is skipped rather than rendered blank.
+            // pursuit purged — and the coverage row outlives it until
+            // `trim_gap_coverage` collects it on the next repair pass. In that
+            // window it says nothing useful, so it is skipped rather than
+            // rendered blank.
             let Some(text) = text else { continue };
             out.entry(r.get::<String, _>("corpus_id"))
                 .or_default()
@@ -562,6 +576,39 @@ impl Store {
                 });
         }
         Ok(out)
+    }
+
+    /// Coverage rows whose gap no longer exists, dropped.
+    ///
+    /// `gap_id` names one of three tables, so it cannot be a foreign key and
+    /// nothing cascades from the row it points at — while the rows it points at
+    /// are deleted routinely: `expire_feedback` ages out searches and questions
+    /// on the retention promise, `purge_feedback` takes the lot on one press.
+    /// What was left behind was a row per gap ever covered, kept for the life
+    /// of the base, and `gaps_covered_by_each` quietly skipping every one of
+    /// them because the join came back with no text.
+    ///
+    /// A sweep rather than a delete beside each of those, because the same
+    /// orphan arrives by more routes than there are call sites — a purge, an
+    /// expiry, a pursuit deleted by hand — and one statement that asks what is
+    /// actually orphaned cannot be the one that forgets a route.
+    ///
+    /// The cascades on `corpus_id` and `artifact_id` are untouched and still do
+    /// their half: delete the capture that closed a gap and the gap comes back.
+    pub async fn trim_gap_coverage(&self) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM gap_coverage
+              WHERE (kind = 'ask'
+                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_coverage.gap_id))
+                 OR (kind IN ('search', 'unmatched')
+                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = gap_coverage.gap_id))
+                 OR (kind = 'pursuit'
+                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = gap_coverage.gap_id))
+                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit')",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Undo a coverage: the gap is open again, and the judgement behind it was
@@ -964,6 +1011,97 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["mount an E01".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_covered_search_stays_covered_when_it_is_later_judged_a_gap() {
+        // One row, two readings. A capture answers the search while it is
+        // `unmatched`; the operator then marks that same search a gap from the
+        // results bar. It must not come back as a hole the base has already
+        // been given an answer to.
+        let store = Store::memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
+                                  created_at, updated_at)
+             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
+             VALUES ('art-1', 'corpus-a', 0, 'text', 0)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let id = search_with(&store, "mount an E01", &[0.10]).await;
+        store
+            .cover_gap(GapKind::Unmatched, &id, "corpus-a", "art-1", 0.8)
+            .await
+            .unwrap();
+        assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
+
+        store.judge(&id, Verdict::Gap).await.unwrap();
+
+        assert!(
+            store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty(),
+            "a capture already answered this search; judging it reopened it"
+        );
+        // And undoing the coverage still brings it back, under the kind it is
+        // now judged as.
+        store.uncover_gap(GapKind::Unmatched, &id).await.unwrap();
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].gap.kind, GapKind::Search);
+    }
+
+    #[tokio::test]
+    async fn coverage_of_a_gap_that_is_gone_is_collected() {
+        // Retention deletes the search; nothing deletes the row saying a
+        // capture answered it, because `gap_id` cannot be a foreign key.
+        let store = Store::memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
+                                  created_at, updated_at)
+             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
+             VALUES ('art-1', 'corpus-a', 0, 'text', 0)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let kept = search_with(&store, "mount an E01", &[0.10]).await;
+        let expired = search_with(&store, "grep a pcap", &[0.10]).await;
+        for id in [&kept, &expired] {
+            store
+                .cover_gap(GapKind::Unmatched, id, "corpus-a", "art-1", 0.8)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM search_events WHERE id = ?")
+            .bind(&expired)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(store.trim_gap_coverage().await.unwrap(), 1);
+
+        let left: Vec<String> = sqlx::query("SELECT gap_id FROM gap_coverage")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get("gap_id"))
+            .collect();
+        assert_eq!(left, vec![kept], "the coverage of a gap that still exists");
+        // And a second pass has nothing left to do.
+        assert_eq!(store.trim_gap_coverage().await.unwrap(), 0);
     }
 
     #[tokio::test]

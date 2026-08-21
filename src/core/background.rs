@@ -341,6 +341,17 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // dedupe arming every fifteen minutes, consolidation every day — keep
     // writing a row apiece into a table nothing was left to trim. The same
     // mistake this whole pass exists to record, one table further in.
+    // A coverage row outlives what it covers. `gap_id` names one of three
+    // tables, so it is deliberately not a foreign key and nothing cascades onto
+    // it — while retention deletes searches and questions on a promise, and a
+    // purge takes every one of them. The rows left behind were kept for the
+    // life of the base and read back as nothing at all, `gaps_covered_by_each`
+    // skipping each one because the join found no text to show.
+    match core.store.trim_gap_coverage().await {
+        Ok(n) if n > 0 => tracing::info!(dropped = n, "dropped coverage of gaps that are gone"),
+        Err(e) => tracing::warn!(error = %e, "could not drop coverage of gaps that are gone"),
+        _ => {}
+    }
     match core.store.trim_sweep_runs().await {
         Ok(n) if n > 0 => tracing::info!(dropped = n, "trimmed the sweep history"),
         Err(e) => tracing::warn!(error = %e, "could not trim the sweep history"),
