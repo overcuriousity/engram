@@ -119,17 +119,30 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     // operator who switches duplicate hygiene off is not asking to keep their
     // query log forever. With nothing to expire and nothing to group there is
     // no unit at all, which is what the ticker's `return` used to say.
-    if core.feedback.retain_days > 0 || core.feedback.enabled {
+    // `recommend.enabled` and not `recommends()`: the second is `&& learn`,
+    // and switching learning off is precisely when the situations already
+    // written down most need to keep ageing out. Gating the ageing on the same
+    // key as the collecting means an operator who turns the feature off freezes
+    // a 400-day window at rest for ever, which is the opposite of what they
+    // asked for. The unit is armed by the key that says the feature exists on
+    // this base; whether it is currently learning does not enter into it.
+    if core.feedback.retain_days > 0 || core.learn.enabled || core.recommend.enabled {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
+    }
+    // Learning which situations recur for which artifact. Behind its own gate
+    // and nothing else's: it reads the interaction log, which is not something
+    // an operator switches off by switching off duplicate hygiene.
+    if core.recommends() {
+        out.push((Stage::Context, CONSOLIDATE_TARGET));
     }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Its own period as a floor. The association sweep arming it is what
         // orders the two; this is what keeps pursuits running at the cadence
-        // they ran at before, rather than at the association sweep's.
-        if core.pursuit.enabled {
-            out.push((Stage::Pursuit, ASSOCIATE_TARGET));
-        }
+        // they ran at before, rather than at the association sweep's. No second
+        // condition of its own any more — a pursuit runs behind `[learn]`, and
+        // `associating()` is `[learn]`.
+        out.push((Stage::Pursuit, ASSOCIATE_TARGET));
     }
     out
 }
@@ -157,6 +170,7 @@ pub fn periodic_period(
             .max(1)
             .saturating_mul(60),
         Stage::Retention => core.feedback.sweep_hours.max(1).saturating_mul(3600),
+        Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon
         // after it goes quiet.
@@ -386,6 +400,42 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    async fn the_context_sweep_is_armed_only_when_the_offer_is_on() {
+        use crate::store::jobs::Stage;
+        let mut core = crate::core::test_support::test_core().await;
+        assert!(
+            !periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Context),
+            "off by default"
+        );
+        assert_eq!(periodic_period(&core, Stage::Context), None);
+
+        core.recommend.enabled = true;
+
+        core.learn.enabled = true;
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Context)
+        );
+        assert_eq!(
+            periodic_period(&core, Stage::Context),
+            Some(Duration::from_secs(
+                crate::jobs::context::INTERVAL_HOURS * 3600
+            ))
+        );
+        // And it drags the retention unit along with it: `context_events` has
+        // its own window, and the trim rides that unit.
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Retention),
+            "nothing else would expire a recorded situation"
+        );
+    }
+
+    #[tokio::test]
     async fn the_consolidation_sweep_never_stacks_up_in_the_queue() {
         // `jobs` is unique on (stage, target), so an arming that lands while a
         // sweep is still queued must collapse onto the same row rather than
@@ -517,8 +567,11 @@ mod tests {
         // dedupe arming and consolidation keep running, and keep writing a row
         // apiece into a table nothing was left to trim.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = false;
+        core.learn.enabled = false;
         core.feedback.retain_days = 0;
+        // The offer too: it has a retention window of its own, and a base
+        // where it exists is a base with something left to expire.
+        core.recommend.enabled = false;
         assert!(
             !periodic_units(&core)
                 .iter()
@@ -635,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn the_association_sweep_is_armed_when_the_process_starts() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
 
         arm_missing_periodic(&core).await;
 
@@ -654,10 +707,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_recorded_searches_means_no_association_sweep_at_all() {
-        // `associate.enabled` without `feedback.enabled` is a warning at startup
-        // and nothing else: there is nothing to learn from, so there is no unit
-        // — which is the list's job now that there is no ticker to return from.
-        let core = crate::core::test_support::test_core().await; // feedback off
+        // With `[learn]` off nothing is recorded, so there is nothing to learn
+        // from and there is no unit — which is the list's job now that there is
+        // no ticker to return from.
+        let core = crate::core::test_support::test_core().await; // `[learn]` off
         assert!(
             !periodic_units(&core)
                 .iter()
@@ -672,11 +725,32 @@ mod tests {
         // nothing at all. A unit that is never armed cannot do that.
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.retain_days = 0;
-        core.feedback.enabled = false;
+        core.learn.enabled = false;
+        core.recommend.enabled = false;
         assert!(
             !periodic_units(&core)
                 .iter()
                 .any(|(s, _)| *s == crate::store::jobs::Stage::Retention)
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_learning_off_does_not_freeze_the_situations_already_written() {
+        // The ageing used to ride `recommends()`, which is `recommend && learn`
+        // — so an operator who switched learning off got no retention unit at
+        // all, and the 400-day window over `context_events` and
+        // `interaction_events` stopped moving with everything collected so far
+        // still in it. Turning a thing off is when its data most needs to leave.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.retain_days = 0;
+        core.learn.enabled = false;
+        core.recommend.enabled = true;
+        assert!(!core.recommends(), "learning is off");
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == crate::store::jobs::Stage::Retention),
+            "nothing is left to age out what the offer wrote while it was on"
         );
     }
 

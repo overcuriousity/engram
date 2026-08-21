@@ -20,6 +20,10 @@ pub struct Report {
     pub clusters: usize,
     pub named: usize,
     pub removed: usize,
+    /// Situations dropped for being past `store::context::RETAIN_DAYS`.
+    pub contexts: u64,
+    /// Interactions dropped for being past the same window.
+    pub interactions: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -53,7 +57,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    if core.feedback.enabled {
+    if core.learn.enabled {
         match crate::jobs::gaps::sweep(core).await {
             Ok(r) => {
                 if r.named > 0 || r.removed > 0 {
@@ -72,6 +76,50 @@ pub async fn run(core: &Core) -> Result<Report> {
                 tracing::warn!(error = %e, "could not group knowledge gaps");
                 failure.get_or_insert(e);
             }
+        }
+    }
+
+    // Its own window, and behind no key. A weekly pattern needs weeks, and
+    // `feedback.retain_days` defaults to keeping for ever but is an operator
+    // switch — an operator who shortens their query log is not asking the base
+    // to forget what Friday afternoon looks like. Runs whenever this unit runs,
+    // which is why `periodic_units` also arms it for `recommend.enabled`.
+    match core
+        .store
+        .expire_context_events(crate::store::context::RETAIN_DAYS)
+        .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(dropped = n, "expired recorded situations");
+            }
+            report.contexts = n;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not expire recorded situations");
+            failure.get_or_insert(e);
+        }
+    }
+
+    // Interactions ride the situations' window, not the query log's: the two
+    // are read as a pair by the context sweep, and one kept past the other
+    // profiles nothing. Behind no key for the same reason the line above is —
+    // an operator who turned the offer off still wants the rows it wrote while
+    // it was on to leave.
+    match core
+        .store
+        .expire_interactions(crate::store::context::RETAIN_DAYS)
+        .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(dropped = n, "expired recorded interactions");
+            }
+            report.interactions = n;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not expire recorded interactions");
+            failure.get_or_insert(e);
         }
     }
 
@@ -131,7 +179,7 @@ mod tests {
         // own unit now, and it stays its own unit.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         seed_old_event(&core).await;
 
@@ -152,7 +200,7 @@ mod tests {
         // into `sweep_runs` as `ok` with no counts — and the `failed` flag, the
         // stated reason that history exists, could never fire for this sweep.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         // The expiry's table, taken out from under it.
         sqlx::query("DROP TABLE search_events")
@@ -182,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn the_unit_groups_the_gaps() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         // Two of them: one gap is not a group, and the sweep no longer spends a
         // naming call restating a single question.
         for q in ["mount an E01", "mounting E01 images"] {
@@ -223,7 +271,7 @@ mod tests {
         // reads the rows expiring removes, and naming a cluster around a search
         // deleted a second later is a call spent on nothing.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         seed_old_event(&core).await;
 

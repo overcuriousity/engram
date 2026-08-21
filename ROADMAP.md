@@ -28,7 +28,15 @@ as a paste the operator approves; one bounded round of planned retrieval behind
 `[infer.ask] plan`, fanning out to a search per uncovered subject; named model
 tiers, so a role picks a model by what the call is worth; judged questions with
 a second harness — citation recall, abstention, faithfulness by literals and by
-claim check; knowledge gaps grouped and named on the capture page.
+claim check; knowledge gaps grouped and named on the capture page; a
+recommendation under the search box, learned from the situations an artifact
+was opened in — the browser's time zone and local time, the device, the
+viewport, the network and the power state, clustered per artifact and stored as
+a `ctx` multivector scored with `max_sim`, with the blocks that decided each
+offer named beneath it and shown-against-clicked broken down by rung on Ops. A
+situation seen once or twice is offered too, saying so in words — "Twice
+before" — and held to a stricter match than an established one; with nothing
+learned about the situation a card is drawn at random and claims nothing.
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.
@@ -337,6 +345,30 @@ to trust.
   has ever answered. Last of the three, and the one that makes the other two
   worth reading.
 
+- **The offer's hit rate is on Ops.** Built. Shown against clicked, by rung,
+  over the last thirty days. The block weights the recommendation rests on are
+  chosen, not measured, and this is the instrument that would let them be
+  fitted — fitting them before the data exists would be guessing with extra
+  steps. It is here for the reason `[sitting] prime` is still `false`: a
+  default nobody can see the effect of never moves.
+
+- **Dropping the `scope` block.** Not built, and it waits on per-user
+  collections rather than on anyone's judgement. At weight 10 against a total
+  under 5, that block is what keeps one person's situations from being ranked
+  first for another; the read path cuts foreign clusters exactly, so the block
+  is a ranking aid rather than the guarantee, but it stays until each user has
+  their own collection. Then it goes to 0 and nothing else about the encoder
+  changes.
+
+- **Learned block weights.** Not built. Once the shown/clicked rate has months
+  behind it, the weights in `[recommend.weights]` can be fitted to it. Until
+  then they are the defaults in the design record, and the honest description
+  of them is "chosen".
+
+- **Conjunctions across scopes.** Not built. The context vector can hold
+  "on the phone the hour matters, at the desk it does not"; nothing yet learns
+  which of those conjunctions are real.
+
 ## [Core Platform & Tooling]
 
 - **One text surface for the whole web UI, as the panel now has.** Capture,
@@ -354,15 +386,18 @@ to trust.
   three pages fold into `/ui/search` and the others become deep links to it.
   What has to be answered there and not here: where the rail, the filter chips
   and the judged-verdict bar live when the box is doing all three jobs.
-- **One dial instead of eight gates.** `feedback.enabled`, `[associate]`,
-  `[activation]`, `[pursuit]`, `[promote]` and `[consolidate]` are separate
-  switches over one faculty, and they depend on each other in ways only the
-  config comments admit: a pursuit needs feedback, promotion reads an
-  activation that only moves while searches are recorded, priming exists only
-  to be fed by activation. An operator who switches one off silently switches
-  off two more. A named mode — off, learning, full — setting a coherent bundle,
-  with the individual keys still there for whoever wants them, is an afternoon,
-  and it is what makes the rest of this list configurable at all.
+- **One dial instead of eight gates.** Three of them are gone: `[learn]` is now
+  the single switch over recording, association and pursuits, and the sections
+  below it keep their thresholds and no switch of their own. That was the half
+  of this item where the flags were not really independent — two of their
+  combinations were refused at startup and a third was a warning, which is how
+  you find out a setting has been written three times. What is left is the half
+  where they are genuinely different questions: `[activation]`, `[promote]` and
+  `[consolidate]` still depend on each other in ways only the config comments
+  admit — promotion reads an activation that only moves while `[learn]` is on,
+  and priming exists only to be fed by activation. A named mode — off,
+  learning, full — setting a coherent bundle across those, with the individual
+  keys still there for whoever wants them, is what would finish it.
 - **A CLI.** PDF capture is built: `docling` reads an uploaded PDF into markdown
   in `Stage::Extract`, locally and without a model, and the corpus is text like
   any other from there. Spans into it are line spans labelled `extraction`, not

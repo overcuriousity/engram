@@ -389,11 +389,11 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
     // sweep will not arm more (`run` returns early), but a unit armed before
     // the flag flipped is still sitting in the queue when this runs.
     //
-    // `associating()` and not `associate.enabled`: switching search recording
-    // off switches this layer off too — that is what the predicate means, and
-    // every other surface (priming, association, the detail pane, Ops) already
-    // reads it. A verdict written after that switch would name a relation on a
-    // page that no longer shows one.
+    // `associating()`, which is `[learn]`: switching the layer off switches
+    // this off with it — that is what the predicate means, and every other
+    // surface (priming, association, the detail pane, Ops) already reads it. A
+    // verdict written after that switch would name a relation on a page that no
+    // longer shows one.
     if !core.associating() {
         return Ok(());
     }
@@ -623,7 +623,7 @@ mod tests {
     }
 
     async fn on(core: &mut Core) {
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
     }
 
     #[tokio::test]
@@ -1138,10 +1138,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_queued_unit_spends_no_call_once_search_recording_is_switched_off() {
-        // `associating()`, not `associate.enabled`: turning capture off turns
-        // this whole layer off — priming, association and the pane all read
-        // that predicate — and a verdict written afterwards would name a
-        // relation on a page that no longer shows one.
+        // `associating()`: turning `[learn]` off turns this whole layer off —
+        // priming, association and the pane all read that predicate — and a
+        // verdict written afterwards would name a relation on a page that no
+        // longer shows one.
         let mut core = test_core().await;
         on(&mut core).await;
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
@@ -1153,7 +1153,7 @@ mod tests {
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
             .await
             .unwrap();
-        core.feedback.enabled = false;
+        core.learn.enabled = false;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_unit_already_queued_when_the_feature_is_switched_off_spends_no_call() {
-        // The sweep will not arm more once `associate.enabled` is false — see
+        // The sweep will not arm more once `[learn]` is off — see
         // `the_sweep_does_nothing_at_all_while_nothing_is_recorded` — but a unit
         // already in the queue when the operator disables the feature must not
         // spend the one scarce thing in the system after they said stop.
@@ -1404,7 +1404,7 @@ mod tests {
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
             .await
             .unwrap();
-        core.associate.enabled = false;
+        core.learn.enabled = false;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 

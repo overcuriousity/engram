@@ -75,6 +75,13 @@ schemars = "1.2.2"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 # EXIF is where the phone says when and where a photo was taken.
 kamadak-exif = "0.6.1"
+# Local time, so "Friday at 15:00" is a question the base can ask of its own
+# log. Storage stays Unix seconds; this is only ever applied at the edge.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# The IANA database, because the zone comes from the device
+# (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and a stored offset
+# cannot answer what happens across a DST boundary.
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the

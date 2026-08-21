@@ -541,15 +541,15 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
         counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),
+        recommend: Default::default(),
+        clock: engram::core::context::Clock::System,
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
             engram::core::QUERY_CACHE_CAPACITY,
         ))),
         consolidate: engram::config::ConsolidateConfig::default(),
         weak_below: 0.0,
-        feedback: engram::config::FeedbackConfig {
-            enabled: false,
-            ..Default::default()
-        },
+        learn: engram::config::LearnConfig { enabled: false },
+        feedback: engram::config::FeedbackConfig::default(),
         capture: engram::config::CaptureConfig::default(),
         associate: engram::config::AssociateConfig::default(),
         activation: engram::config::ActivationConfig::default(),

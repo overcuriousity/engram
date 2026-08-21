@@ -221,7 +221,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let progress_pct = (stats.judged * 100 / FIRST_SWEEP_AT.max(1)).min(100);
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
-        judge_pending: st.core.feedback.enabled.then_some(stats.pending),
+        judge_pending: st.core.learn.enabled.then_some(stats.pending),
         ask_enabled: crate::web::state::ask_enabled(&st),
         recall: format!("{:.2}", stats.recall_at_10),
         mrr: format!("{:.2}", stats.mrr),

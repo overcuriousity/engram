@@ -365,9 +365,29 @@ interval_hours = 24
 # is ever asked about.
 dedupe_interval_mins = 15
 max_dedupe_per_tick = 5
+# ── Learning from what happens here ─────────────────────────────────────────
+# One switch over the whole layer: recording searches, learning links from
+# co-retrieval, activation, pursuits, and the area under the search box. These
+# were three separate flags — [feedback], [associate] and [pursuit] each had
+# their own — and two of their combinations were refused at startup while a
+# third was a warning, which is how you find out they were one setting written
+# three times. The sections below keep their thresholds; this is the switch.
+#
+# The three old keys are refused at startup rather than ignored. Deserialization
+# drops what it does not recognise, and `[feedback] enabled = false` is a key
+# whose whole purpose was to say "keep none of this" — ignored, it would have
+# said nothing, and an upgrade would have turned recording back on for the
+# operator who had most explicitly refused it.
+#
+# On by default. Everything downstream of it moves only while the log is being
+# written, so off is the deliberate act. Nothing here leaves the machine, Ops
+# forgets all of it on one press, and off means nothing is recorded in the
+# first place.
+[learn]
+enabled = true
+
 # Recording real searches so they can be judged later, and turned into the
-# query/artifact pairs the evaluation harness scores against. Off by default: a
-# query log is personal, and it is useful to nobody but you.
+# query/artifact pairs the evaluation harness scores against.
 #
 # The queries a benchmark needs cannot be written from memory. Phrased while
 # looking at an artifact, they reuse its wording, and every retrieval system
@@ -379,10 +399,7 @@ max_dedupe_per_tick = 5
 # one there is. Typing bursts fold into their final wording, so `daten`,
 # `datentr`, `datenträger nicht erkannt` is one event rather than three.
 [feedback]
-# On by default: promotion at synthesis = "earned" reads activation, and
-# activation only moves while searches are recorded. Everything stays on this
-# machine and Ops forgets it on one press; set false to record nothing at all.
-enabled = true
+# No switch here: see [learn], which is the one switch over all of this.
 # Candidates stored per search. Wider than the answer on purpose — retrieval
 # over-fetches anyway, so the extra rows cost nothing, and they are what lets an
 # artifact the ranking buried still be confirmed as the right one. 0 is not a
@@ -408,10 +425,9 @@ sweep_hours = 6
 
 # Links learned from co-retrieval, and a decaying accessibility per artifact.
 # Both are learned from use and neither touches what is stored: the trace is
-# fixed, access is plastic. Needs `feedback.enabled` — without recorded searches
-# there is nothing to learn from, and saying otherwise is a warning at startup.
+# fixed, access is plastic. Runs behind [learn] — without recorded searches
+# there is nothing to learn from.
 [associate]
-enabled = true
 # How often the sweep replays the search log. Pure SQLite, no model call.
 interval_mins = 30
 # A link unused for this long has half the strength it had. One co-appearance is
@@ -467,12 +483,11 @@ resynthesize_after_unconfirmed = 0
 # A coherent run of searches, what was opened and pivoted through, and — when
 # the base did not answer or the answer was assembled by hand — one generated
 # artifact written from exactly that, carrying the questions it was written
-# for. Off until turned on: this writes model-written text into the index.
-# Needs feedback.enabled. Local only, nothing leaves the machine, and the
-# forget button on Settings clears all of it. The grouping line is measured,
-# not configured.
+# for. Runs behind [learn]: the events it reads are the ones recording writes,
+# and the sweep it rides on is the associative pass. Local only, nothing leaves
+# the machine, and the forget button on Settings clears all of it. The grouping
+# line is measured, not configured.
 [pursuit]
-enabled = false
 # A pursuit is over when nothing has happened for this long.
 idle_secs = 900
 # Fewer engaged artifacts than this is a promotion case, not generation.
@@ -480,6 +495,77 @@ min_sources = 2
 # Engagement weight a pursuit needs before it is worth a call: opened 1.0,
 # pivoted 1.5, returned 2.0, confirmed 3.0.
 min_engagement = 3.0
+
+# ── A recommendation under the search box ────────────────────────────────────
+# The area under the search box, filled from the situation the page was opened
+# in: the time zone and local time the browser reports, the device, the
+# viewport, the network, the battery. A sweep learns which situations recur for
+# which artifact; a page view is one vector query against what it learned. No
+# model call and no embedding on this path, ever.
+#
+# On, and behind [learn] as well: the situations it clusters are opens recorded
+# in the same log everything else here reads. Forgetting on Settings takes them
+# in both places they live — the rows and the centroids on the points — and the
+# 400-day window over them keeps ageing whether or not [learn] is on, because
+# switching a thing off is when its data most needs to leave. A weekly pattern needs weeks, so a
+# young base sees the bottom rung — a card drawn at random, claiming nothing —
+# until it has something to say.
+[recommend]
+enabled = true
+# Cosine above which an event joins a cluster rather than opening its own.
+cluster_merge_at = 0.82
+# Situations kept per artifact, per person. More than one is the point: a thing
+# looked up on Friday afternoons and occasionally on Monday mornings is two
+# situations, and their mean is a situation that never happened.
+max_clusters = 5
+# A pattern that stops fades rather than standing for ever.
+half_life_days = 45.0
+# A cluster lighter than this is dropped. Low enough that a single recent event
+# survives: a thing done twice is worth saying so about, it is just not worth
+# calling a pattern.
+min_weight = 0.9
+# Weight at or above which a situation is spoken of as established. Below it the
+# offer says how many times it has happened instead — "Twice before" — and
+# demands a strong match before saying anything at all, because there is less
+# behind it. At the default half-life this is the third repetition.
+firm_at = 2.5
+# Score at or above which an established situation is called a pattern, and
+# above which it is called a resemblance. Below both, a card is drawn at random
+# with no reason printed beside it — something to look at while the base has
+# nothing to say about the situation. Scored without the `scope` block, which
+# decides *who* may be offered something rather than how well it matches.
+strong_at = 0.75
+weak_at = 0.45
+# What an open of something this offered counts for, back into the profile.
+# Zero: without it, the first lucky guess grows into a habit the system taught
+# itself.
+self_weight = 0.0
+
+# What each named block of the situation is worth. Each block is normalised to
+# length 1 and then scaled by its weight, so a block contributes exactly its
+# weight however many dimensions it uses — seven one-hot slots for the weekday
+# do not outweigh two for the hour because there are seven of them.
+[recommend.weights]
+# Interim, and load-bearing: every person shares one collection today, so this
+# is what keeps one person's situations from being offered to another. It goes
+# to 0 when each user has their own collection.
+scope = 10.0
+# The hour, as an angle — 23:30 and 00:30 are an hour apart, and 14:55 against a
+# 15:00 pattern costs almost nothing.
+time_of_day = 1.0
+# One-hot, because "Friday is three from Tuesday" means nothing and the pattern
+# is exactly Friday.
+weekday = 1.0
+# The part of the weekday that genuinely is gradual, kept separate and weak.
+weekend = 0.3
+device = 0.8
+viewport = 0.4
+locale = 0.3
+network = 0.6
+power = 0.2
+environment = 0.2
+# Off. A monthly rhythm is real, but nothing has shown one here yet.
+month_cycle = 0.0
 
 # ── Scheduling ───────────────────────────────────────────────────────────────
 # The queue is the scheduler. Whether somebody is waiting on a unit is a

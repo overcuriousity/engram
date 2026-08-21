@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     pub consolidate: ConsolidateConfig,
     #[serde(default)]
+    pub learn: LearnConfig,
+    #[serde(default)]
     pub feedback: FeedbackConfig,
     #[serde(default)]
     pub pacing: PacingConfig,
@@ -29,6 +31,8 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub sitting: SittingConfig,
+    #[serde(default)]
+    pub recommend: RecommendConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -90,6 +94,33 @@ pub struct PacingConfig {
     pub cooldown_secs: u64,
 }
 
+/// The one switch over everything learned from what happens here.
+///
+/// Recording searches, learning links from co-retrieval, and writing a pursuit
+/// were three flags that only ever meant something together: association reads
+/// recorded searches, and a pursuit is swept on the associative pass. Two of
+/// the three combinations were refused at startup and the third was a warning,
+/// which is a way of saying they were never really three settings. They are
+/// one now.
+///
+/// On by default. Everything downstream of it — activation, promotion at
+/// `synthesis = "earned"`, the associative spread, `[recommend]` — moves only
+/// while the log is being written, so off is the deliberate act. The wording of
+/// a query is personal and nothing here leaves the machine; this is the switch
+/// for the operator who wants none of it kept, and turning it off stops the
+/// recording as well as everything read from it.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct LearnConfig {
+    pub enabled: bool,
+}
+
+impl Default for LearnConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Recording real searches so they can be judged later.
 ///
 /// The queries a benchmark needs cannot be written from memory: phrased while
@@ -99,12 +130,6 @@ pub struct PacingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct FeedbackConfig {
-    /// Whether real searches are recorded at all. On by default: promotion at
-    /// `synthesis = "earned"` reads activation, and activation moves only
-    /// while searches are recorded. The wording of a query is personal and
-    /// nothing here leaves the machine; this is the switch for the operator
-    /// who wants none of it kept.
-    pub enabled: bool,
     /// Candidates stored per event. Wider than the answer on purpose — search
     /// over-fetches anyway, so the extra rows are free, and they are what lets a
     /// buried hit be confirmed later.
@@ -123,10 +148,6 @@ pub struct FeedbackConfig {
 impl Default for FeedbackConfig {
     fn default() -> Self {
         Self {
-            // On: promotion at `synthesis = "earned"` reads activation, and
-            // activation moves only while searches are recorded. Recording is
-            // the thing an operator turns *off*.
-            enabled: true,
             candidates: 20,
             coalesce_secs: 15,
             retain_days: 0,
@@ -143,9 +164,6 @@ impl Default for FeedbackConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct AssociateConfig {
-    /// Requires `feedback.enabled`. Without recorded searches there is nothing
-    /// to learn from, and that combination is a warning at startup.
-    pub enabled: bool,
     pub interval_mins: u64,
     pub half_life_days: f64,
     /// Decayed weight under which a `learning` link is deleted.
@@ -172,7 +190,6 @@ pub struct AssociateConfig {
 impl Default for AssociateConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             interval_mins: 30,
             half_life_days: 30.0,
             prune_below: 0.5,
@@ -220,15 +237,13 @@ impl Default for PromoteConfig {
 
 /// What a coherent run of searches — a pursuit — may earn: one generated
 /// artifact, written from what was engaged with, when the base did not answer
-/// or the answer was assembled by hand. Off until turned on: this writes
-/// model-written text into the index, and that is a step an operator takes.
-/// Needs `feedback.enabled`, since the events it reads are the ones recording
-/// writes. The grouping line is not a key: it is measured, like the gap
-/// clusters', by `core::gaps::link_threshold`.
+/// or the answer was assembled by hand. Runs behind `[learn]`, which is the
+/// switch: the events it reads are the ones recording writes, and the sweep it
+/// rides on is the associative pass. The grouping line is not a key: it is
+/// measured, like the gap clusters', by `core::gaps::link_threshold`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct PursuitConfig {
-    pub enabled: bool,
     /// A pursuit is over when nothing has happened for this long.
     pub idle_secs: u64,
     /// Fewer engaged artifacts than this is a promotion case, not generation.
@@ -240,7 +255,6 @@ pub struct PursuitConfig {
 impl Default for PursuitConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             idle_secs: 900,
             min_sources: 2,
             min_engagement: 3.0,
@@ -300,6 +314,156 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// What each named block of the context vector is worth.
+///
+/// This is the whole of the encoder's argument in config form. Each block is
+/// normalised to length 1 and *then* scaled by its weight, so a block
+/// contributes exactly its weight however many dimensions it uses — seven
+/// one-hot slots for the weekday do not outweigh two for the hour because there
+/// are seven of them. That is what turns the encoding's implicit weighting,
+/// which nobody can tune, back into named numbers an operator can change.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct BlockWeights {
+    /// Interim, and load-bearing. Every scope shares one collection today, and
+    /// a point's multivector mixes the clusters of everyone who opened that
+    /// artifact — a payload filter cannot help, because it acts on the point
+    /// and not on elements of the set. A dominating `scope` block is what keeps
+    /// a foreign cluster from ever winning `max_sim`. When each user gets their
+    /// own collection this goes to 0 and nothing else changes.
+    pub scope: f32,
+    /// The hour, as an angle. See `core::context::encode`.
+    pub time_of_day: f32,
+    pub weekday: f32,
+    /// The part of the weekday that genuinely is gradual, kept apart from the
+    /// one-hot and kept weak.
+    pub weekend: f32,
+    pub device: f32,
+    pub viewport: f32,
+    pub locale: f32,
+    pub network: f32,
+    pub power: f32,
+    pub environment: f32,
+    /// Off. A monthly rhythm is real — rent, invoices — but nothing has shown
+    /// one here yet, and a block at zero costs two dimensions and no reasoning.
+    pub month_cycle: f32,
+}
+
+impl Default for BlockWeights {
+    fn default() -> Self {
+        Self {
+            scope: 10.0,
+            time_of_day: 1.0,
+            weekday: 1.0,
+            weekend: 0.3,
+            device: 0.8,
+            viewport: 0.4,
+            locale: 0.3,
+            network: 0.6,
+            power: 0.2,
+            environment: 0.2,
+            month_cycle: 0.0,
+        }
+    }
+}
+
+impl BlockWeights {
+    /// The weight of a block by name. A name nothing knows is worth nothing,
+    /// rather than a default: the block table and this lookup are edited
+    /// together, and a typo that silently gave a block weight 1.0 would be a
+    /// recommendation nobody could account for.
+    pub fn of(&self, block: &str) -> f32 {
+        match block {
+            "scope" => self.scope,
+            "time_of_day" => self.time_of_day,
+            "weekday" => self.weekday,
+            "weekend" => self.weekend,
+            "device" => self.device,
+            "viewport" => self.viewport,
+            "locale" => self.locale,
+            "network" => self.network,
+            "power" => self.power,
+            "environment" => self.environment,
+            "month_cycle" => self.month_cycle,
+            _ => 0.0,
+        }
+    }
+}
+
+/// Offering an artifact before it is asked for, from the situation the page was
+/// opened in.
+///
+/// One gate and a table of numbers, on purpose: `ROADMAP.md` under
+/// `[Core Platform]` objects to eight gates over one faculty, and this does not
+/// add a ninth. The learning cadence is not here either — see
+/// `jobs::context::INTERVAL_HOURS`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct RecommendConfig {
+    /// On, with the floor of the ladder as the honest answer while the base is
+    /// young. A weekly pattern needs weeks, so a new base sees the random card
+    /// for a fortnight — that card claims nothing, and an area that says
+    /// nothing until it has something to say is an area nobody discovers.
+    /// Needs `learn.enabled`: the situations are read from the same log.
+    pub enabled: bool,
+    /// Cosine above which an event joins a cluster rather than opening its own.
+    pub cluster_merge_at: f32,
+    /// Per (scope, artifact). Multiple clusters are the point: a thing looked
+    /// up on Friday afternoons *and* occasionally on Monday mornings is two
+    /// situations, and their mean is a situation that never happened.
+    pub max_clusters: usize,
+    /// A pattern that stops fades rather than standing for ever.
+    pub half_life_days: f64,
+    /// A cluster below this is dropped.
+    ///
+    /// Low enough that a single recent event survives, because a thing done
+    /// twice is worth saying so about — it just is not worth calling a
+    /// pattern. What separates the two is `firm_at`, and what protects against
+    /// the single accident is that a thin cluster has to match the situation
+    /// *better* before anything is offered at all.
+    pub min_weight: f64,
+    /// Weight at or above which a cluster is spoken of as established.
+    ///
+    /// Below it the offer says how many times it has happened instead —
+    /// "Twice before" — and demands a strong situational match before saying
+    /// anything. At the default half-life this is the third repetition.
+    pub firm_at: f64,
+    /// Context score — the vector with its `scope` block sliced off — at or
+    /// above which the offer is called a pattern.
+    ///
+    /// Scored without `scope` because that block decides *who* may be offered
+    /// something, at weight 10 against a total of under 5. Counting it here
+    /// would drag every same-scope score above 0.95 and leave these two
+    /// thresholds four hundredths apart.
+    pub strong_at: f32,
+    /// And above which it is called a resemblance. Below it the ladder falls
+    /// through to the sitting, and then to what has been forgotten.
+    pub weak_at: f32,
+    /// What an open of something this feature offered counts for, back into the
+    /// profile. Zero, because without it the first lucky guess grows into a
+    /// habit the system taught itself.
+    pub self_weight: f64,
+    /// See `BlockWeights`.
+    pub weights: BlockWeights,
+}
+
+impl Default for RecommendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cluster_merge_at: 0.82,
+            max_clusters: 5,
+            half_life_days: 45.0,
+            min_weight: 0.9,
+            firm_at: 2.5,
+            strong_at: 0.75,
+            weak_at: 0.45,
+            self_weight: 0.0,
+            weights: BlockWeights::default(),
+        }
     }
 }
 
@@ -1383,6 +1547,7 @@ impl Config {
                     .list_separator(","),
             )
             .build()?;
+        Self::refuse_removed_keys(&raw)?;
         let mut cfg: Config = raw.try_deserialize()?;
         cfg.normalize();
         cfg.validate()?;
@@ -1391,6 +1556,48 @@ impl Config {
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
         Ok(cfg)
+    }
+
+    /// Keys that used to mean something, and no longer exist.
+    ///
+    /// Refused rather than ignored, and refused rather than folded into
+    /// `[learn]`. Deserialization drops what it does not recognise, so an
+    /// upgraded base whose file still says `[feedback] enabled = false` would
+    /// parse without complaint and start recording again — the one key whose
+    /// whole purpose was to say "keep none of this" turned into a key that
+    /// says nothing. Silence is the wrong answer to that.
+    ///
+    /// An alias would be the other answer, and it cannot be written: the three
+    /// old flags were independent, so `feedback.enabled = true` beside
+    /// `pursuit.enabled = false` has no single `[learn]` value that means what
+    /// the file meant. Naming them and stopping is what leaves the decision
+    /// with the person who wrote them.
+    ///
+    /// This is `migrate`'s rule for a database that is behind the schema,
+    /// applied to the file: read first, say what is wrong, change nothing.
+    fn refuse_removed_keys(raw: &config::Config) -> Result<(), ConfigError> {
+        // `[learn]` is the replacement for all three: recording, the links
+        // learned from it, and the pursuits that read both.
+        const REMOVED: [(&str, &str); 3] = [
+            ("feedback.enabled", "[learn] enabled"),
+            ("associate.enabled", "[learn] enabled"),
+            ("pursuit.enabled", "[learn] enabled"),
+        ];
+        let found: Vec<String> = REMOVED
+            .iter()
+            .filter(|(key, _)| raw.get::<config::Value>(key).is_ok())
+            .map(|(key, now)| format!("  {key} — see {now}"))
+            .collect();
+        if found.is_empty() {
+            return Ok(());
+        }
+        Err(ConfigError::Invalid(format!(
+            "this config sets keys that no longer exist:\n{}\nRemove them, or set [learn] to \
+             what you mean. They were three switches over one faculty and are one switch now; \
+             an upgrade cannot guess which of them you meant, and ignoring them would turn a \
+             setting that says \"keep none of this\" into a setting that says nothing.",
+            found.join("\n")
+        )))
     }
 
     /// Values that would make a feature quietly useless, put back rather than
@@ -1509,26 +1716,6 @@ impl Config {
                 self.infer.synthesis.as_str()
             )));
         }
-        if self.pursuit.enabled && !self.feedback.enabled {
-            return Err(ConfigError::Invalid(
-                "pursuit.enabled = true needs feedback.enabled = true: the events it reads are \
-                 the ones recording writes"
-                    .into(),
-            ));
-        }
-        // The other half of the same gate. Both the sweep and its ticker run
-        // behind `associating()`, which is these two flags together, so a
-        // pursuit configured without associating is not a degraded feature —
-        // it is a ticker that returns on its first line and a config that
-        // never writes a pursuit at all. Refused rather than warned, because
-        // the `feedback` half above is refused and the effect is identical.
-        if self.pursuit.enabled && !self.associate.enabled {
-            return Err(ConfigError::Invalid(
-                "pursuit.enabled = true needs associate.enabled = true: pursuits are swept on \
-                 the associative pass, which does not run without it"
-                    .into(),
-            ));
-        }
         if let Some(v) = &self.infer.vision
             && v.base_url.is_none()
             && self.infer.synthesize.is_none()
@@ -1547,21 +1734,15 @@ impl Config {
         Ok(())
     }
 
-    /// Two switches that only mean something together: say so once at startup
-    /// rather than letting an operator discover the association pass has been
-    /// idle since they turned recording off.
+    /// Settings that are on but cannot act: say so once at startup rather than
+    /// letting an operator discover a faculty has been idle since they turned
+    /// `[learn]` off. The combinations that used to be refused here are gone —
+    /// there is one switch now, and it cannot disagree with itself.
     fn warn_on_inert_settings(&self) {
-        if self.infer.synthesis == SynthesisMode::Earned && !self.feedback.enabled {
+        if self.infer.synthesis == SynthesisMode::Earned && !self.learn.enabled {
             tracing::warn!(
-                "infer.synthesis = \"earned\" with feedback.enabled = false: activation never \
+                "infer.synthesis = \"earned\" with learn.enabled = false: activation never \
                  moves, so nothing is ever promoted — this is `off` under another name."
-            );
-        }
-        if self.associate.enabled && !self.feedback.enabled {
-            tracing::warn!(
-                "associate.enabled has no effect while feedback.enabled is false: links are \
-                 learned from recorded searches, and none are being recorded. Recording queries \
-                 is a privacy decision, so it keeps its own switch."
             );
         }
     }
@@ -1739,6 +1920,73 @@ mod tests {
     }
 
     #[test]
+    fn the_recommender_ships_on_with_its_weights_named() {
+        let r = RecommendConfig::default();
+        // On, with the floor of the ladder as the honest answer while the base
+        // is young. It still needs `[learn]`, which is where the log it reads
+        // is switched on — see `Core::recommends`.
+        assert!(r.enabled);
+        // The scope block dominates so a foreign cluster can never win
+        // `max_sim`. When each user has their own collection this goes to 0
+        // and nothing else changes.
+        assert_eq!(r.weights.of("scope"), 10.0);
+        assert_eq!(r.weights.of("weekday"), 1.0);
+        assert_eq!(r.weights.of("month_cycle"), 0.0, "off by default");
+        // A block nobody named contributes nothing rather than a default. The
+        // block table and this lookup are edited together, and a typo that
+        // silently gave a block weight 1.0 would be a recommendation nobody
+        // could account for.
+        assert_eq!(r.weights.of("phase_of_the_moon"), 0.0);
+        // The two rungs are far enough apart to mean different things, which
+        // is only true because `scope` is left out of the score.
+        assert!(r.strong_at > r.weak_at + 0.2);
+        assert_eq!(r.self_weight, 0.0, "the offer does not teach itself");
+    }
+
+    #[test]
+    fn the_example_config_carries_the_recommend_block() {
+        // Every value here equals its struct default, which is the point — the
+        // example file documents what ships. That also makes a load-and-compare
+        // test vacuous on its own: it would pass with the block deleted, because
+        // `#[serde(default)]` would fill in the same numbers. So the file is
+        // read as text first, and only then parsed.
+        let path = std::path::Path::new("config.example.toml");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\n[recommend]\n"), "the block is documented");
+        assert!(
+            raw.contains("\n[recommend.weights]\n"),
+            "and so is every weight the offer rests on"
+        );
+        for block in [
+            "scope",
+            "time_of_day",
+            "weekday",
+            "weekend",
+            "device",
+            "viewport",
+            "locale",
+            "network",
+            "power",
+            "environment",
+            "month_cycle",
+        ] {
+            assert!(raw.contains(&format!("\n{block} = ")), "{block} is unnamed");
+        }
+
+        // And it parses: a mistyped value or a table the loader cannot reach
+        // fails here rather than at somebody's boot.
+        let cfg = Config::load(Some(path)).unwrap();
+        assert!(cfg.recommend.enabled);
+        // And the one switch it runs behind, in the file rather than only in
+        // the defaults: an operator turning the layer off must be able to find
+        // the key without reading the source.
+        assert!(raw.contains("\n[learn]\n"), "the example names no [learn]");
+        assert!(cfg.learn.enabled);
+        assert_eq!(cfg.recommend.max_clusters, 5);
+        assert_eq!(cfg.recommend.weights.of("network"), 0.6);
+    }
+
+    #[test]
     fn the_example_config_carries_the_capture_block() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.capture.min_extracted_chars, 200);
@@ -1816,21 +2064,43 @@ mod tests {
     }
 
     #[test]
+    fn a_key_that_no_longer_exists_stops_the_start_rather_than_being_ignored() {
+        // Deserialization drops what it does not recognise, so this file used
+        // to load in silence — and `[feedback] enabled = false` is the one key
+        // whose entire purpose is to say "keep none of this". Ignored, it
+        // became a key that said nothing, and an upgrade turned recording back
+        // on for the operator who had most explicitly refused it.
+        let dir = tempfile::tempdir().unwrap();
+        for key in ["[feedback]\nenabled = false", "[pursuit]\nenabled = false"] {
+            let p = write(&dir, &format!("{MINIMAL}\n{key}\n"));
+            let err = Config::load(Some(&p)).unwrap_err().to_string();
+            assert!(
+                err.contains("no longer exist") && err.contains("[learn]"),
+                "a removed key loaded without saying so: {err}"
+            );
+        }
+        // `true` is refused as well. It is not a safe no-op to leave lying in a
+        // file: the next person to read it would take it for the live switch.
+        let p = write(&dir, &format!("{MINIMAL}\n[associate]\nenabled = true\n"));
+        assert!(Config::load(Some(&p)).is_err());
+        // And a file that has been brought up to date loads.
+        let p = write(&dir, &format!("{MINIMAL}\n[learn]\nenabled = false\n"));
+        assert!(!Config::load(Some(&p)).unwrap().learn.enabled);
+    }
+
+    #[test]
     fn a_zero_candidate_pool_is_put_back_to_the_default() {
         // Zero would store an empty pool for every captured search: nothing to
         // choose on any card, so every judgement is forced through "none of
         // these" and recorded as a find that never happened.
         let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            &dir,
-            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 0\n"),
-        );
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 0\n"));
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,
             FeedbackConfig::default().candidates
         );
-        assert!(cfg.feedback.enabled, "the rest of the section was dropped");
+        assert!(cfg.learn.enabled, "the rest of the section was dropped");
     }
 
     #[test]
@@ -1840,10 +2110,7 @@ mod tests {
         // search — not just the depth of the pool stored behind it. Four digits
         // here silently made every API call a four-digit vector fetch.
         let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            &dir,
-            &format!("{MINIMAL}\n[feedback]\nenabled = true\ncandidates = 2000\n"),
-        );
+        let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 2000\n"));
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,
@@ -2128,7 +2395,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     #[test]
     fn the_association_defaults_are_the_documented_ones() {
         let a = AssociateConfig::default();
-        assert!(a.enabled);
         assert_eq!(a.interval_mins, 30);
         assert_eq!(a.half_life_days, 30.0);
         assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
@@ -2145,11 +2411,11 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert!(cfg.associate.enabled);
+        assert!(cfg.learn.enabled);
         // ...and recording is on too, so the feature is live out of the box:
         // promotion reads activation, and activation moves only while
         // searches are recorded.
-        assert!(cfg.feedback.enabled);
+        assert!(cfg.learn.enabled);
     }
 
     #[test]
@@ -2872,7 +3138,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
         // Opt-out now: promotion reads activation, and activation only moves
         // while searches are recorded.
-        assert!(cfg.feedback.enabled);
+        assert!(cfg.learn.enabled);
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
             [infer.synthesize]
@@ -2883,40 +3149,48 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             [promote]
             activation_above = 2.5
             resynthesize_after_unconfirmed = 12
-            [feedback]
+            [learn]
             enabled = false
             "
         ))
         .unwrap();
         assert_eq!(cfg.promote.activation_above, 2.5);
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
-        assert!(!cfg.feedback.enabled);
+        assert!(!cfg.learn.enabled);
     }
 
     #[test]
-    fn pursuit_defaults_and_requires_feedback() {
+    fn the_learning_layer_is_one_switch_that_nothing_can_contradict() {
         let _guard = env_guard();
         let roles = "[infer.synthesize]\ntier = \"efficient\"\noutput_ratio = 8.0\n[infer.ask]\ntier = \"efficient\"\n";
         let cfg = load_infer(&format!("{BARE_PREAMBLE}\n{roles}")).unwrap();
-        assert!(!cfg.pursuit.enabled);
+        // On, and the sections it governs carry no switch of their own. There
+        // used to be three — `feedback`, `associate`, `pursuit` — and two of
+        // their eight combinations were refused at startup while a third was a
+        // warning, which is how you find out they were one setting written
+        // three times. Nothing to refuse now: a config cannot express the
+        // combination that had to be rejected.
+        assert!(cfg.learn.enabled);
         assert_eq!(cfg.pursuit.idle_secs, 900);
         assert_eq!(cfg.pursuit.min_sources, 2);
         assert_eq!(cfg.pursuit.min_engagement, 3.0);
-        let err = load_infer(&format!(
-            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[feedback]\nenabled = false\n"
+        assert_eq!(cfg.associate.interval_mins, 30);
+        assert_eq!(cfg.feedback.candidates, 20);
+
+        // One key turns the whole layer off, including the recording that the
+        // rest of it reads.
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[learn]\nenabled = false\n"
         ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("pursuit.enabled"), "{err}");
-        // Associating is both flags, so the other half is refused the same
-        // way: with feedback on and associate off, the sweep and its ticker
-        // still never run, and a config that silently writes no pursuit is
-        // the thing this refusal exists to prevent.
-        let err = load_infer(&format!(
-            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[associate]\nenabled = false\n"
+        .unwrap();
+        assert!(!cfg.learn.enabled);
+        // And the tuning under each faculty still loads with it off: a section
+        // is thresholds now, not a gate.
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[learn]\nenabled = false\n[pursuit]\nidle_secs = 60\n"
         ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("associate.enabled = true"), "{err}");
+        .unwrap();
+        assert_eq!(cfg.pursuit.idle_secs, 60);
+        assert!(!cfg.learn.enabled);
     }
 }

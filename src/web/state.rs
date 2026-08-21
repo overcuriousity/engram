@@ -101,7 +101,7 @@ pub fn ask_enabled(st: &AppState) -> bool {
 /// `count(*)`; a failure returns `None`, since a broken badge is not a reason to
 /// fail the page it sits on.
 pub async fn judge_pending(st: &AppState) -> Option<i64> {
-    if !st.core.feedback.enabled {
+    if !st.core.learn.enabled {
         return None;
     }
     match st.core.store.pending_count().await {

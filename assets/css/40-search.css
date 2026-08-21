@@ -521,3 +521,16 @@ body { overflow-x: hidden; }
 /* Said under the passage it belongs to, quietly: it is a way onward, not a
    warning that something is wrong. */
 .continues { margin: 0.5rem 0 0; font-size: 0.8125rem; }
+
+/* The area under the search box. `min-height` is what keeps the answer landing
+   from pushing the hint and the chips down a page that has already been read —
+   the fetch is one round trip after `load`, which is long enough to see. */
+.offer { min-height: 3.25rem; margin: 0.25rem 0 0.5rem; }
+.offer-title { font-size: var(--text-base); color: var(--color-fg-primary); }
+.offer-why { font-size: var(--text-xs); margin: 0.125rem 0 0; }
+.offer-detail { display: inline; }
+.offer-detail summary { display: inline; cursor: pointer; color: var(--color-accent); }
+.offer-detail pre {
+  white-space: pre-wrap; word-break: break-all;
+  margin: 0.375rem 0 0; font-size: var(--text-xs);
+}

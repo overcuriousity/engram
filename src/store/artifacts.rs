@@ -744,6 +744,12 @@ impl Store {
     /// The revision bump is what makes this safe to run while a worker is
     /// mid-batch on the same source: that worker's `mark_embedded` no longer
     /// matches, so it cannot clear the pending state this just set.
+    ///
+    /// `updated_at` is deliberately left alone. It answers whether the text on
+    /// screen is the text that was captured, and re-embedding changes no text —
+    /// a model change or a `--reindex` would otherwise stamp every artifact in
+    /// the corpus as edited today, which is the one thing the column is there
+    /// to deny.
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE artifacts
@@ -787,10 +793,11 @@ impl Store {
             sqlx::query(
                 "UPDATE artifacts
                  SET title = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1
+                     embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
             )
             .bind(title)
+            .bind(super::now())
             .bind(id)
             .execute(&self.pool)
             .await?,
@@ -802,10 +809,11 @@ impl Store {
             sqlx::query(
                 "UPDATE artifacts
                  SET text = ?, embed_state = 'pending', embed_model = NULL,
-                     embed_rev = embed_rev + 1
+                     embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
             )
             .bind(text)
+            .bind(super::now())
             .bind(id)
             .execute(&self.pool)
             .await?,
@@ -1459,6 +1467,64 @@ mod tests {
         s.insert_artifacts(&src.id, &[nc(0, "x")]).await.unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.artifacts_for_corpus(&src.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_embedding_a_corpus_is_not_an_edit() {
+        // `updated_at` answers whether the text on screen is the text that was
+        // captured. Re-embedding changes no text — it is a model change or a
+        // `--reindex` — so stamping it here would mark every artifact in the
+        // corpus as edited today, which is the one thing the column exists to
+        // deny.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let c = s.insert_artifacts(&src.id, &[nc(0, "x")]).await.unwrap()[0].clone();
+
+        s.reset_embed_state(&src.id).await.unwrap();
+
+        let stamp: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(stamp, 0, "a re-embed reported itself as an edit");
+        let got = s.artifacts_for_corpus(&src.id).await.unwrap();
+        assert_eq!(
+            got[0].embed_state,
+            EmbedState::Pending,
+            "and it did re-queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_an_artifact_stamps_when_it_changed() {
+        // The one question the base could not previously answer about itself.
+        // `created_at` says when it arrived and `last_verified_at` says when
+        // someone vouched for it; neither says whether the text on screen is
+        // the text that was captured.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let c = s
+            .insert_artifacts(&src.id, &[nc(0, "before")])
+            .await
+            .unwrap()
+            .remove(0);
+
+        let before: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 0, "a fresh row has never been edited");
+
+        s.update_artifact_text(&c.id, "after").await.unwrap();
+
+        let after: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert!(after > 0, "an edit says when it happened");
     }
 
     #[tokio::test]

@@ -54,6 +54,14 @@ pub struct Pursuit {
     pub artifact_id: Option<String>,
 }
 
+/// Shown against clicked, for one rung of the ladder.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfferRate {
+    pub rung: String,
+    pub shown: i64,
+    pub opened: i64,
+}
+
 fn row_to_pursuit(r: &sqlx::sqlite::SqliteRow) -> Pursuit {
     Pursuit {
         id: r.get("id"),
@@ -115,6 +123,70 @@ impl Store {
         Ok(())
     }
 
+    /// What this base offered, and whether it was taken.
+    ///
+    /// `kind` is `recommended_shown` or `recommended_open`. Both live in
+    /// `interaction_events` because both are things that happened after a page
+    /// rendered — but neither counts as an ordinary open: the context sweep
+    /// reads `recommended_open` at `recommend.self_weight` and ignores
+    /// `recommended_shown` entirely, and the pursuit sweep skips the latter too.
+    ///
+    /// `detail` carries the rung and the winning cluster as JSON, which is what
+    /// makes the Ops hit rate a breakdown rather than one number.
+    pub async fn record_recommendation(
+        &self,
+        artifact_id: &str,
+        kind: &str,
+        detail: &str,
+        scope: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(artifact_id)
+        .bind(kind)
+        .bind(detail)
+        .bind(scope)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// What was offered and what was taken, by rung, since `since`.
+    ///
+    /// The only number that can later settle whether the block weights are
+    /// right. They are chosen, not measured, and fitting them before this data
+    /// exists would be guessing with extra steps — so this is the instrument,
+    /// and it goes on Ops, which is where mechanisms whose effect nobody can
+    /// otherwise see belong.
+    pub async fn offer_rates(&self, since: i64) -> Result<Vec<OfferRate>> {
+        let rows = sqlx::query(
+            "SELECT json_extract(detail, '$.rung') AS rung,
+                    SUM(kind = 'recommended_shown') AS shown,
+                    SUM(kind = 'recommended_open')  AS opened
+               FROM interaction_events
+              WHERE at >= ? AND kind IN ('recommended_shown', 'recommended_open')
+              GROUP BY rung
+              ORDER BY shown DESC, rung",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| OfferRate {
+                rung: r
+                    .get::<Option<String>, _>("rung")
+                    .unwrap_or_else(|| "unknown".into()),
+                shown: r.get("shown"),
+                opened: r.get("opened"),
+            })
+            .collect())
+    }
+
     /// Interactions with `from < at <= to`, oldest first.
     pub async fn interactions_between(&self, from: i64, to: i64) -> Result<Vec<Interaction>> {
         let rows = sqlx::query(
@@ -137,6 +209,28 @@ impl Store {
                 at: r.get("at"),
             })
             .collect())
+    }
+
+    /// Drop interactions past keeping.
+    ///
+    /// The table had no sweep at all, only the manual `purge_pursuits`, while
+    /// the situations it is read beside got `context::RETAIN_DAYS` from the
+    /// start. That was survivable while a row meant an open; it stopped being
+    /// so when the offer began writing a `recommended_shown` per page view, so
+    /// the table grew with browsing rather than with use — and the context
+    /// sweep reads the whole window into memory every six hours.
+    ///
+    /// The same window as the situations, and for the same reason: the sweep
+    /// pairs the two, and an interaction kept past the situation it happened in
+    /// profiles nothing. Nothing else reads further back — `offer_rates` asks
+    /// for a month, and the pursuit sweep works from a cursor.
+    pub async fn expire_interactions(&self, retain_days: i64) -> Result<u64> {
+        let cutoff = crate::store::now() - retain_days * 86_400;
+        Ok(sqlx::query("DELETE FROM interaction_events WHERE at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
     }
 
     /// A new pursuit, `open`. Returns its id.
@@ -289,6 +383,53 @@ mod tests {
         let got = s.interactions_between(0, 100).await.unwrap();
         assert_eq!(got[2].kind, "dwell");
         assert_eq!(got[2].detail.as_deref(), Some("45"));
+    }
+
+    #[tokio::test]
+    async fn interactions_past_the_window_are_dropped_and_the_rest_are_kept() {
+        // The table had no sweep of any kind. That was survivable while a row
+        // meant somebody opened something; it stopped being so when the offer
+        // began writing a `recommended_shown` per search-page view, because the
+        // context sweep reads the whole window into memory every six hours and
+        // the window had no end.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let a = s
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let now = crate::store::now();
+        let retain = crate::store::context::RETAIN_DAYS;
+        let old = now - (retain + 1) * 86_400;
+        let recent = now - 86_400;
+        s.record_interaction(&a, "opened", None, Some("u1"), old)
+            .await
+            .unwrap();
+        s.record_recommendation(&a, "recommended_shown", "{}", Some("u1"), old)
+            .await
+            .unwrap();
+        s.record_interaction(&a, "opened", None, Some("u1"), recent)
+            .await
+            .unwrap();
+
+        assert_eq!(s.expire_interactions(retain).await.unwrap(), 2);
+        let got = s.interactions_between(0, now + 1).await.unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].at, recent);
     }
 
     #[tokio::test]

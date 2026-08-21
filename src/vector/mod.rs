@@ -318,6 +318,42 @@ pub trait VectorStore: Send + Sync {
     /// no embedding call, because the query is a point that is already in the
     /// index. The artifact itself is never among its own neighbours.
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>>;
+    /// Replace this artifact's set of context centroids — the `ctx`
+    /// multivector, scored with `max_sim`.
+    ///
+    /// A **vector** write, never a point write. `upsert` replaces the whole
+    /// payload, and a writer that does not know when the artifact was last
+    /// shown would clear `last_seen_at` and `status` with it — which puts every
+    /// artifact the sweep hid straight back into search. See `qdrant.rs`'s
+    /// `upsert` for the same hazard stated where it bites.
+    ///
+    /// An empty `vectors` removes the set. That is the ordinary case for an
+    /// artifact whose every cluster has decayed below `min_weight`, not an
+    /// error, and it must leave the point and its dense vector alone.
+    ///
+    /// An artifact with no point is not a failure: its embedding may never have
+    /// run. There is nothing to attach a set to, and nothing to complain about.
+    async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()>;
+    /// The artifacts whose learned situations most resemble this one.
+    ///
+    /// `max_sim` over each artifact's set: an artifact matches if *any* of its
+    /// situations does, which is the whole reason the profile is a set rather
+    /// than a mean. A thing looked up on Friday afternoons and occasionally on
+    /// Monday mornings must match both, and their average is a situation that
+    /// never happened.
+    ///
+    /// Points carrying no set are absent from the answer, so the candidates are
+    /// "anything ever opened" without a filter saying so.
+    ///
+    /// `score` is the `max_sim`. `similarity` is `None`: this is not a query
+    /// vector against a document vector, and calling it a similarity would
+    /// invite it into a ranking it has no business in.
+    async fn context_query(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>>;
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
     async fn count(&self) -> Result<u64>;

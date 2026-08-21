@@ -384,6 +384,7 @@ fn sweep_label(stage: &str) -> &str {
         "generate" => "Answering gaps",
         "retention" => "Retention",
         "arm_dedupe" => "Arming dedupe",
+        "context" => "Learning situations",
         other => other,
     }
 }
@@ -630,6 +631,9 @@ struct SearchTemplate {
     /// What this sitting has been in. Absent on a cold sitting — an empty box
     /// saying "nothing yet" is worse than no box.
     sitting: Vec<SittingItem>,
+    /// Whether the area under the search box exists at all. See
+    /// `Core::recommends`.
+    recommend: bool,
 }
 
 #[derive(Template)]
@@ -887,6 +891,11 @@ struct OpsTemplate {
     /// could never give: whether this started yesterday or has been going
     /// wrong for a week.
     sweep_history: Vec<SweepRunRow>,
+    /// Shown against clicked, by rung. Empty when the offer is switched off, or
+    /// when it has been on and never had anything to say — either way there is
+    /// no table, because a heading over no rows is a claim that something is
+    /// being measured when nothing is.
+    offer_rates: Vec<crate::store::pursuits::OfferRate>,
 }
 
 #[derive(Template)]
@@ -1105,7 +1114,7 @@ async fn capture_page(
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if st.core.feedback.enabled {
+    let (gaps, loose) = if st.core.learn.enabled {
         let (rows, loose) = st
             .core
             .store
@@ -1246,8 +1255,195 @@ async fn search_page(
         facets,
         category,
         sitting: sitting_rail(&st, &id).await,
+        recommend: st.core.recommends(),
     })
     .into_response())
+}
+
+/// One offer, flattened for the template. Every decision — which rung, which
+/// blocks, how the stamp reads — is made here, so the template holds no logic
+/// and a new block in the encoder changes no markup.
+#[derive(Default)]
+pub struct OfferView {
+    pub id: String,
+    pub title: String,
+    /// What the line leads with. Fixed wording for the two established rungs;
+    /// for a thin one it is the count in words, because "Twice before" is the
+    /// honest thing to say about two occurrences and "Pattern" is not. Empty
+    /// on the random card, which claims nothing.
+    pub rung: String,
+    /// The blocks that decided it, joined. Empty on the lower two rungs.
+    pub blocks: String,
+    /// `08.08., 15:04`, or empty.
+    pub when: String,
+    /// `?rec=<slot>&rung=<rung>`, or empty — what tells `artifact_detail` this
+    /// open came from an offer, and which rung it was offered on.
+    pub rec: String,
+    /// The raw bundle and the contribution numbers, for the `<details>`.
+    pub detail: String,
+    /// The rung's machine name — `pattern`, `similar`, `tentative`, `random`.
+    /// What the impression confirmation posts back, and what `Rung::parse`
+    /// reads at the other end.
+    pub kind: String,
+    /// The winning cluster's slot as text, or empty on the random card, which
+    /// has no cluster.
+    pub slot: String,
+}
+
+#[derive(Template, Default)]
+#[template(path = "_context.html")]
+struct ContextTemplate {
+    offer: Option<OfferView>,
+}
+
+#[derive(serde::Deserialize)]
+struct ContextForm {
+    #[serde(default)]
+    bundle: String,
+}
+
+/// One endpoint, two jobs: it writes the situation and answers with the
+/// fragment. Recording happens even when nothing is recommended — a base that
+/// has learned nothing yet is exactly the one that most needs its situations
+/// written down.
+async fn context_offer(
+    State(st): State<AppState>,
+    id: Identity,
+    Form(f): Form<ContextForm>,
+) -> Result<Response> {
+    if !st.core.recommends() {
+        return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
+    }
+    let bundle = crate::core::context::parse_bundle(&f.bundle);
+    st.core
+        .record_context_event(&f.bundle, &bundle, Some(&id.subject));
+
+    // A recommendation that cannot be computed is not worth a 500: the area is
+    // what it was yesterday, which is empty.
+    let offer = st
+        .core
+        .offer(Some(&id.subject), &bundle)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not build a recommendation");
+            None
+        });
+
+    // Nothing is recorded here. This function *computes* an offer; whether a
+    // person was ever shown one is a different fact, and only the browser
+    // knows it — the fetch races the first keystroke, so an answer that
+    // arrives after the box has been typed in is dropped client-side and was
+    // never on screen. Recording at this point counted those, and they are not
+    // a random sample: a visit that goes straight to typing is exactly a visit
+    // where nothing would have been clicked. That is a structural zero
+    // folded into the denominator of the one number the block weights are
+    // meant to be fitted against later. `/ui/context/seen` is the other half.
+    Ok(HtmlTemplate(ContextTemplate {
+        offer: offer.map(offer_view),
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct SeenForm {
+    artifact_id: String,
+    rung: String,
+    slot: Option<i64>,
+}
+
+/// The browser confirming an offer actually reached the screen.
+///
+/// Posted by `app.js` after the fragment is swapped in and not dismissed, and
+/// it is what writes `recommended_shown`. The pair it forms with
+/// `recommended_open` is the hit rate on Ops, so both halves have to mean what
+/// they say: shown is shown.
+///
+/// Everything in the form comes from a page and a page can be made to say
+/// anything, so nothing is trusted. The rung goes through `Rung::parse` — the
+/// same gate the open marker passes, and for the same reason: an unrecognised
+/// word would appear on Ops as a fifth rung of a four-rung ladder. The
+/// artifact must exist. Neither failure is worth a status code, because
+/// nothing is waiting on the answer.
+async fn context_seen(
+    State(st): State<AppState>,
+    id: Identity,
+    Form(f): Form<SeenForm>,
+) -> Result<Response> {
+    use crate::core::recommend::Rung;
+    let Some(rung) = Rung::parse(&f.rung) else {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    };
+    if st.core.store.get_artifact(&f.artifact_id).await.is_err() {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    }
+    st.core.record_recommendation(
+        &f.artifact_id,
+        "recommended_shown",
+        rung.as_str(),
+        f.slot,
+        Some(&id.subject),
+    );
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
+fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
+    use crate::core::recommend::Rung;
+    OfferView {
+        rung: match o.rung {
+            Rung::Pattern => "Pattern".to_string(),
+            Rung::Similar => "Similar to".to_string(),
+            // The count, in words a person reads. `weight` is the decayed
+            // number the ranking uses and nobody can read 1.9 and know it means
+            // twice — so the undecayed count is stored alongside it and said
+            // out loud here.
+            Rung::Tentative => match o.events {
+                0 | 1 => "Once before".to_string(),
+                2 => "Twice before".to_string(),
+                n => format!("{n} times before"),
+            },
+            // Nothing about the situation produced it, so nothing is claimed.
+            Rung::Random => String::new(),
+        },
+        blocks: o.blocks.join(", "),
+        // The device's own reading of when this happened, in the zone it
+        // happened in. One date format, and the whole of the third part of the
+        // line.
+        when: o
+            .at
+            .map(|at| {
+                let t = crate::core::context::local_time(at, o.at_tz.as_deref(), None);
+                format!(
+                    "{:02}.{:02}., {:02}:{:02}",
+                    t.day,
+                    t.month,
+                    t.hour as u32,
+                    ((t.hour % 1.0) * 60.0).round() as u32
+                )
+            })
+            .unwrap_or_default(),
+        // The rung rides on the link because that is the only place it still
+        // exists: the offer was computed on a previous request, and Ops's
+        // breakdown is a breakdown only if the click knows which rung it came
+        // from. Every rung, including the floor: the random card has no cluster
+        // and so no slot, and hanging the whole marker off `slot` left it
+        // linking like an ordinary result — its opens counted as opens, so its
+        // hit rate read zero for ever and the card it drew was fed back into
+        // the profile at full weight. `rec` is the slot when there is one;
+        // `rung` is always there.
+        rec: match o.slot {
+            Some(s) => format!("?rec={s}&rung={}", o.rung.as_str()),
+            None => format!("?rung={}", o.rung.as_str()),
+        },
+        // The machine name of the rung, and the slot as text. Not for reading —
+        // these are what the browser posts back to confirm the offer reached
+        // the screen, and they are the same two values the link carries on a
+        // click, so the shown and the open agree about what was offered.
+        kind: o.rung.as_str().to_string(),
+        slot: o.slot.map(|s| s.to_string()).unwrap_or_default(),
+        id: o.artifact_id,
+        title: o.title,
+        detail: o.detail,
+    }
 }
 
 /// Append `value` to a facet row if the store did not report it. `count` is 0
@@ -2387,11 +2583,11 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
-        feedback: match st.core.feedback.enabled {
+        feedback: match st.core.learn.enabled {
             true => Some(st.core.store.feedback_stats().await?),
             false => None,
         },
-        asks: match st.core.feedback.enabled {
+        asks: match st.core.learn.enabled {
             true => Some(st.core.store.ask_stats().await?),
             false => None,
         },
@@ -2518,7 +2714,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             sources,
         });
     }
-    let pursuit_enabled = st.core.pursuit.enabled;
+    let pursuit_enabled = st.core.learn.enabled;
     let recent = match pursuit_enabled {
         true => st.core.store.recent_pursuits(50).await?,
         false => Vec::new(),
@@ -2654,6 +2850,19 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         last_day,
         last_day_failures,
         sweep_history,
+        // The last month rather than the last day: a weekly pattern needs
+        // weeks, so a hit rate measured over a day would be a number nobody
+        // could act on. Read like `vector_count` — a failure here must not
+        // blank the page you open when something is wrong.
+        offer_rates: match st.core.recommends() {
+            true => st
+                .core
+                .store
+                .offer_rates(crate::store::now() - 30 * 86_400)
+                .await
+                .unwrap_or_default(),
+            false => Vec::new(),
+        },
     })
     .into_response())
 }
@@ -2669,10 +2878,13 @@ async fn undo_merge_ui(
     Ok(Redirect::to("/ui/ops").into_response())
 }
 
-/// Forget every captured search and every recorded question.
+/// Forget every captured search, every recorded question, and every situation.
 ///
 /// Judgements go with them: a verdict is a statement about a query, and one
-/// whose query no longer exists records nothing. Accepted settings and their
+/// whose query no longer exists records nothing. The situations a page view
+/// was made in go too, in both places they live — the rows in SQLite and the
+/// centroids on the points — because a profile is the situations that formed
+/// it, and a button that says "forget" may not leave the average behind. Accepted settings and their
 /// history stay, because they describe how the application is configured now.
 ///
 /// Both tables, because one switch records both and `expire_feedback` ages both
@@ -2680,10 +2892,13 @@ async fn undo_merge_ui(
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
 async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+    // The index first, while the rows still say which points carry a set.
+    let cleared = st.core.forget_situations().await;
     let n = st.core.store.purge_feedback().await?;
     tracing::info!(
         dropped = n,
-        "captured searches and questions deleted by the operator"
+        points_cleared = cleared,
+        "captured searches, questions and situations deleted by the operator"
     );
     // Back to the page the button is on. The route keeps its /ui/ops prefix —
     // the two pages split, the endpoints did not.
@@ -3394,9 +3609,9 @@ pub(crate) async fn build_artifact_detail(
         .collect();
     // Unreadable links are not a missing pane, for the same reason a missing
     // neighbour list is not: this layer can only ever add. And gated on
-    // `associating()`, not just `associate.enabled`: a base that learned
-    // links and then had the feature switched off must stop rendering them,
-    // the same as every other associative surface.
+    // And gated on `associating()`: a base that learned links and then had
+    // `[learn]` switched off must stop rendering them, the same as every other
+    // associative surface.
     let anchor = vec![c.id.clone()];
     let seen_together_links = if core.associating() {
         match core
@@ -3524,6 +3739,17 @@ struct ArtifactViewParams {
     /// a continuation — when the link came from another artifact's page.
     #[serde(default)]
     via: Option<String>,
+    /// The cluster slot this was offered under, when the offer rested on a
+    /// learned cluster. Absent on the floor of the ladder, which has none —
+    /// so this says which cluster, never whether the link came from an offer.
+    #[serde(default)]
+    rec: Option<i64>,
+    /// The rung it was offered on, and the thing that marks the link as an
+    /// offer's at all. Carried on the link because the offer was computed on a
+    /// previous request and nothing server-side still holds it — without it,
+    /// every click lands in one bucket on Ops.
+    #[serde(default)]
+    rung: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
@@ -3538,9 +3764,34 @@ async fn artifact_detail(
     let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     st.core.mark_artifact_seen(&cid);
-    // And the act the pursuit sweep reads: opened, or pivoted through.
-    st.core
-        .record_interaction(&cid, p.via.as_deref(), Some(&id.subject));
+    // And the act the pursuit sweep reads: opened, or pivoted through — unless
+    // this came from the area under the search box, in which case it is written
+    // under its own kind and *not* as an ordinary open. A `recommended_open`
+    // counted as an open is the first lucky guess growing into a habit the
+    // system taught itself. Keyed on the rung and not on the slot: the floor of
+    // the ladder carries no slot, and it is the rung with no evidence behind it
+    // at all — the last one that should be teaching the profile.
+    //
+    // The marker is checked against the ladder rather than taken as written:
+    // it arrives in a query string, and an unrecognised word would be recorded
+    // as the rung it claims and counted on Ops as a row of its own. A link
+    // carrying one is not an open under a rung, so it is an ordinary open.
+    match p
+        .rung
+        .as_deref()
+        .and_then(crate::core::recommend::Rung::parse)
+    {
+        Some(rung) => st.core.record_recommendation(
+            &cid,
+            "recommended_open",
+            rung.as_str(),
+            p.rec,
+            Some(&id.subject),
+        ),
+        None => st
+            .core
+            .record_interaction(&cid, p.via.as_deref(), Some(&id.subject)),
+    }
     // The live half of the same act. Written here rather than inside
     // `record_interaction` because this is where the session is known — and
     // that is the whole of what keeps the sitting at the web door.
@@ -3668,6 +3919,8 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
+        .route("/ui/context", post(context_offer))
+        .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
         // An installed PWA may still hold /ui/browse as its start URL, and a
         // bookmark outlives the page it pointed at.
@@ -4574,7 +4827,7 @@ mod tests {
     /// changes the handle and not the app.
     async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         (app, cookie, handle)
@@ -4985,6 +5238,618 @@ mod tests {
         );
     }
 
+    /// A session with the recommender on, plus one artifact old enough and
+    /// unseen enough that `resurface` returns it.
+    async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "when the recycling centre is open".into(),
+                    corpus_span: None,
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; 8],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: a.id.clone(),
+                    corpus_id: src.id.clone(),
+                    text: a.text.clone(),
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    created_at: 0,
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        // Held so a test can drain the recording writes rather than sleep.
+        BACKGROUND.with(|b| *b.borrow_mut() = Some(background));
+        (app, cookie, store, a.id)
+    }
+
+    thread_local! {
+        static BACKGROUND: std::cell::RefCell<Option<std::sync::Arc<crate::core::background::Background>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The recording writes run off the request path. Drain them rather than
+    /// sleeping and hoping.
+    async fn drain() {
+        let b = BACKGROUND.with(|b| b.borrow().clone());
+        if let Some(b) = b {
+            b.wait_idle().await;
+        }
+    }
+
+    /// The same base, plus one established situation matching the bundle the
+    /// tests post — so the reason line actually renders.
+    async fn app_with_a_learned_situation() -> (axum::Router, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "when the recycling centre is open".into(),
+                    corpus_span: None,
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; 8],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: aid.clone(),
+                    corpus_id: src.id.clone(),
+                    text: "when the recycling centre is open".into(),
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    created_at: 0,
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+
+        // The centroid is this very situation, so the offer lands on `Pattern`.
+        let at = crate::store::now();
+        let bundle = crate::core::context::Bundle {
+            tz: Some("Europe/Berlin".into()),
+            ..Default::default()
+        };
+        let v = crate::core::context::encode(at, Some("user-1"), &bundle, &core.recommend.weights);
+        core.store
+            .replace_context_clusters(
+                &aid,
+                &[crate::store::context::StoredCluster {
+                    scope: Some("user-1".into()),
+                    artifact_id: aid.clone(),
+                    slot: 0,
+                    centroid: v.clone(),
+                    weight: 6.0,
+                    events: 6,
+                    last_at: at,
+                    encoder_version: crate::core::context::encoder_version(&core.recommend.weights),
+                    representative: serde_json::json!({ "at": at, "bundle": bundle }).to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .set_context_vectors(&aid, vec![v])
+            .await
+            .unwrap();
+
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        (app, cookie, aid)
+    }
+
+    #[tokio::test]
+    async fn a_page_view_is_recorded_even_when_nothing_is_offered() {
+        // The endpoint has two jobs and does the first unconditionally. A base
+        // that has learned nothing yet is exactly the base that most needs its
+        // situations written down.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/context",
+                &cookie,
+                "bundle=%7B%22tz%22%3A%22Europe%2FBerlin%22%7D",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+
+        let rows = store.context_events_since(0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tz.as_deref(), Some("Europe/Berlin"));
+        assert!(rows[0].local_hour.is_some(), "denormalised for the sweep");
+        assert!(rows[0].weekday.is_some());
+        assert_eq!(rows[0].scope.as_deref(), Some("user-1"));
+        // Stored whole, including what the encoder does not read today.
+        assert!(rows[0].bundle.contains("Europe/Berlin"));
+    }
+
+    #[tokio::test]
+    async fn a_bundle_the_browser_could_not_build_does_not_break_the_page() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7Bnope"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "an empty bundle still works");
+        background.wait_idle().await;
+        assert_eq!(store.context_events_since(0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_area_is_not_rendered_when_the_faculty_is_off() {
+        // One gate, in one place: no placeholder, no request, nothing recorded.
+        let core = crate::core::test_support::test_core().await;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(!page.contains("/ui/context"), "no placeholder");
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+        assert!(store.context_events_since(0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_placeholder_reserves_its_height_so_the_page_does_not_jump() {
+        let (app, cookie, _store, _aid) = app_recommending().await;
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(page.contains(r#"id="context-offer""#));
+        assert!(page.contains(r#"hx-post="/ui/context""#));
+        assert!(page.contains("engramContext()"));
+        // The class the reserved height hangs off.
+        assert!(page.contains(r#"class="offer""#));
+    }
+
+    #[tokio::test]
+    async fn the_offer_is_absent_from_a_page_that_already_carries_a_query() {
+        // The area is for the state "no intent expressed yet". A deep link, a
+        // reload or a back-navigation renders the box with its query restored
+        // and results below it — and app.js only removes the area on a
+        // *keystroke*, which never comes on any of those. Left ungated, the
+        // offer sat beside real results and wrote a `recommended_shown` row per
+        // results page view, inflating the denominator of the one hit rate this
+        // feature is measured by.
+        let (app, cookie, _store, _aid) = app_recommending().await;
+        let page = get(&app, "/ui/search?q=recycling", &cookie).await;
+        assert!(
+            !page.contains(r#"id="context-offer""#),
+            "an offer beside results: {page}"
+        );
+        // And it is back on the next fresh page view: dismissal is per view,
+        // not a state anything remembers.
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(page.contains(r#"id="context-offer""#));
+    }
+
+    #[tokio::test]
+    async fn the_floor_of_the_ladder_is_clicked_like_an_offer_and_not_like_a_result() {
+        // The random card has no cluster and so no slot. Hanging the whole
+        // offer marker off the slot left it linking like an ordinary result:
+        // its opens counted as `opened`, so Ops read `random: shown N, opened
+        // 0` for ever — and random is the baseline the block weights would have
+        // to be fitted against. Worse, the open fed back into the profile at
+        // full weight, which is the self-reinforcement `self_weight = 0.0`
+        // exists to close, entered through the one rung with no evidence behind
+        // it at all.
+        let (app, cookie, store, aid) = app_recommending().await;
+        let body = crate::web::test_support::body_of(
+            app.clone()
+                .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            body.contains(&format!("/ui/artifacts/{aid}?rung=random")),
+            "the card links like an ordinary result: {body}"
+        );
+
+        // The browser confirming the card reached the screen. The fragment
+        // above computed it; only this says anybody saw it.
+        app.clone()
+            .oneshot(form(
+                "/ui/context/seen",
+                &cookie,
+                &format!("artifact_id={aid}&rung=random"),
+            ))
+            .await
+            .unwrap();
+        get(&app, &format!("/ui/artifacts/{aid}?rung=random"), &cookie).await;
+        drain().await;
+        // A shown and an open, and both of them on the random rung: that pair
+        // is the hit rate, and before this the second half could never be
+        // written.
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["recommended_shown", "recommended_open"]);
+        assert!(
+            rows.iter()
+                .all(|r| r.detail.as_deref().unwrap_or_default().contains("random")),
+            "Ops cannot tell which rung: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_a_page_made_up_records_nothing() {
+        // The impression now comes from the browser, which means it comes from
+        // whatever anyone chooses to post. Both halves go into `offer_rates`'
+        // `GROUP BY rung` — a made-up rung would appear on Ops as a fifth rung
+        // of a four-rung ladder, and a made-up artifact would put a shown
+        // against something that was never offered and cannot ever be clicked,
+        // which is a zero in the denominator of the hit rate for ever.
+        let (app, cookie, store, aid) = app_recommending().await;
+
+        for body in [
+            format!("artifact_id={aid}&rung=excellent"),
+            "artifact_id=no-such-artifact&rung=random".to_string(),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form("/ui/context/seen", &cookie, &body))
+                .await
+                .unwrap();
+            // Nothing is waiting on the answer, so neither is an error — but
+            // neither is a row.
+            assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        }
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(
+            rows.is_empty(),
+            "a page wrote its own row into the hit rate: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rung_the_ladder_does_not_have_is_an_ordinary_open() {
+        // The marker rides in the query string, so its value is whatever the
+        // viewer sends. Taken as written it went into the recorded row and from
+        // there into `offer_rates`' `GROUP BY rung`, which is to say anyone
+        // could add rows to the Ops breakdown by editing a URL — beside the
+        // four rungs that exist, in the one table the block weights would be
+        // fitted against.
+        let (app, cookie, store, aid) = app_recommending().await;
+        get(
+            &app,
+            &format!("/ui/artifacts/{aid}?rung=excellent"),
+            &cookie,
+        )
+        .await;
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["opened"],
+            "an invented rung was recorded as an offer: {rows:?}"
+        );
+        assert!(
+            store
+                .offer_rates(0)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| crate::core::recommend::Rung::parse(&r.rung).is_some()),
+            "Ops lists a rung the ladder does not have"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reason_line_is_markup_a_browser_will_not_rearrange() {
+        // `details` and `pre` are flow content and a `p` may hold only phrasing
+        // content, so a `p` here is closed by the parser before the `details`
+        // and leaves a stray empty paragraph behind — a DOM the stylesheet is
+        // not written against, with the Details control on its own line.
+        let (app, cookie, _aid) = app_with_a_learned_situation().await;
+        let body = crate::web::test_support::body_of(
+            app.clone()
+                .oneshot(form(
+                    "/ui/context",
+                    &cookie,
+                    "bundle=%7B%22tz%22%3A%22Europe%2FBerlin%22%7D",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(body.contains("Pattern"), "no reason line at all: {body}");
+        assert!(body.contains(r#"<div class="muted offer-why">"#), "{body}");
+        assert!(
+            !body.contains("<p class=\"muted offer-why\">"),
+            "the reason line must not be a paragraph: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_was_offered_is_written_down_with_its_rung() {
+        // Shown against clicked, broken down by rung, is a hit rate. It is the
+        // only number that can later settle whether the weights are right, and
+        // a recommender with no visible hit rate becomes `[sitting] prime`:
+        // a default nobody ever measured.
+        let (app, cookie, store, aid) = app_recommending().await;
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(body.contains(&aid), "{body}");
+        // Nothing about the situation produced it, so nothing is claimed: no
+        // rung name, no blocks, no reason line at all. A card with a sentence
+        // under it would be the area borrowing authority it does not have.
+        assert!(
+            !body.contains("offer-why"),
+            "the card explains nothing: {body}"
+        );
+        assert!(!body.contains("Pattern"), "{body}");
+        // The fragment carries what the confirmation posts back, so the shown
+        // and the open agree about what was offered.
+        assert!(
+            body.contains(r#"data-rec-rung="random""#),
+            "the browser cannot say what it was shown: {body}"
+        );
+        drain().await;
+
+        // Computing an offer is not showing one. Until the browser says it
+        // reached the screen, nothing is recorded: this fetch races the first
+        // keystroke, and the answer that loses is dropped without ever being
+        // seen. Counting those put a population that cannot click into the
+        // denominator of the one number the weights would be fitted against.
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(
+            !rows.iter().any(|r| r.kind == "recommended_shown"),
+            "an offer nobody has confirmed seeing is already counted: {rows:?}"
+        );
+
+        app.clone()
+            .oneshot(form(
+                "/ui/context/seen",
+                &cookie,
+                &format!("artifact_id={aid}&rung=random"),
+            ))
+            .await
+            .unwrap();
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let shown: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == "recommended_shown")
+            .collect();
+        assert_eq!(shown.len(), 1);
+        assert!(
+            shown[0].detail.as_deref().unwrap().contains("random"),
+            "{:?}",
+            shown[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn taking_an_offer_is_not_an_ordinary_open() {
+        // Without this the profile reinforces itself. The row is written, and
+        // it is written under its own kind so the sweep can weigh it at
+        // `self_weight` — which is zero.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        // Both on, so an ordinary open *would* be recorded — otherwise this
+        // test would pass on a base that records nothing at all.
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "opening hours".into(),
+                    corpus_span: None,
+                    title: Some("hours".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        get(
+            &app,
+            &format!("/ui/artifacts/{aid}?rec=0&rung=pattern"),
+            &cookie,
+        )
+        .await;
+        background.wait_idle().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["recommended_open"], "not an ordinary open");
+        assert!(
+            rows[0].detail.as_deref().unwrap().contains("pattern"),
+            "and it remembers which rung it was offered on: {:?}",
+            rows[0].detail
+        );
+
+        // And the ordinary path still records an ordinary open, so the branch
+        // above is a branch rather than a hole.
+        get(&app, &format!("/ui/artifacts/{aid}"), &cookie).await;
+        background.wait_idle().await;
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(rows.iter().any(|r| r.kind == "opened"));
+    }
+
+    #[tokio::test]
+    async fn ops_shows_shown_against_clicked_by_rung() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "opening hours".into(),
+                    corpus_span: None,
+                    title: Some("hours".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let now = crate::store::now();
+        for _ in 0..4 {
+            store
+                .record_recommendation(
+                    &aid,
+                    "recommended_shown",
+                    r#"{"rung":"pattern"}"#,
+                    Some("me"),
+                    now,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .record_recommendation(
+                &aid,
+                "recommended_open",
+                r#"{"rung":"pattern"}"#,
+                Some("me"),
+                now,
+            )
+            .await
+            .unwrap();
+        store
+            .record_recommendation(
+                &aid,
+                "recommended_shown",
+                r#"{"rung":"forgotten"}"#,
+                Some("me"),
+                now,
+            )
+            .await
+            .unwrap();
+
+        let rates = store.offer_rates(0).await.unwrap();
+        assert_eq!(rates.len(), 2, "one row per rung: {rates:?}");
+        let pattern = rates.iter().find(|r| r.rung == "pattern").unwrap();
+        assert_eq!(pattern.shown, 4);
+        assert_eq!(pattern.opened, 1);
+        let forgotten = rates.iter().find(|r| r.rung == "forgotten").unwrap();
+        assert_eq!(forgotten.shown, 1);
+        assert_eq!(forgotten.opened, 0, "nobody took that one");
+
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let page = get(&app, "/ui/ops", &cookie).await;
+        assert!(page.contains("What was offered"), "no heading");
+        assert!(page.contains("pattern"), "no rung");
+        assert!(page.contains("forgotten"));
+    }
+
+    #[tokio::test]
+    async fn ops_says_nothing_about_offers_when_the_faculty_is_off() {
+        // A heading over no rows is a claim that something is being measured
+        // when nothing is.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let page = get(&app, "/ui/ops", &cookie).await;
+        assert!(!page.contains("What was offered"));
+    }
+
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {
         let res = app
             .clone()
@@ -5005,7 +5870,7 @@ mod tests {
     /// of them captured and waiting for a verdict.
     async fn app_recording_searches(pending: usize) -> (axum::Router, String) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         for i in 0..pending {
             core.store
                 .record_search(
@@ -5334,7 +6199,7 @@ mod tests {
     #[tokio::test]
     async fn the_pane_lists_what_this_artifact_is_seen_together_with() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(
@@ -5361,7 +6226,7 @@ mod tests {
     #[tokio::test]
     async fn a_judged_link_shows_the_judges_line_instead_of_the_query() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -5430,7 +6295,7 @@ mod tests {
         // The associative layer can only add. It is not a reason to refuse to
         // show an artifact beside its source.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text"]).await;
         sqlx::query("DROP TABLE artifact_links")
             .execute(&core.store.pool)
@@ -5446,7 +6311,7 @@ mod tests {
         // document needing each other is not" is the whole point of the flag —
         // pin it on the data the pane renders, not on a CSS class name.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
         let other_corpus = core.store.insert_corpus("y", "web", None).await.unwrap();
         let made = core
@@ -7569,7 +8434,7 @@ mod tests {
     /// capture through the page alone leaves nothing to retrieve.
     async fn ask_recorded() -> (axum::Router, String, crate::core::Core, String, String) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
@@ -7927,7 +8792,7 @@ mod tests {
         // Coverage is closed silently — nothing asked the operator to confirm
         // it — so the queue row is the only place it is said.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -8088,7 +8953,7 @@ mod tests {
         // The default. Carrying ships on because it changes no order; this is
         // the part that does, and it waits for the harness.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         assert!(!c.sitting.prime, "priming must ship off");
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
@@ -8147,7 +9012,7 @@ mod tests {
         // loop that reinforces itself, which is the failure mode this whole
         // area is built to close.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -8199,7 +9064,7 @@ mod tests {
         // not the same claim, and an operator reading the list can tell them
         // apart.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         // The fake embedder's vectors are not a semantic space, so the shipped
         // threshold would call everything weak. A line above what the
         // candidate below scores and below nothing else.
@@ -8285,8 +9150,7 @@ mod tests {
         // same, so counting the state pointed the operator at entries that
         // were not there.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let core = handle;
@@ -8970,7 +9834,7 @@ mod tests {
     async fn app_session_and_core_with_an_embedded_base()
     -> (axum::Router, String, crate::core::Core) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
@@ -9469,7 +10333,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_question_is_refused_without_being_parked() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let st = ask_state_over(core).await;
         let (app, cookie) = app_over(&st).await;
         let res = app
@@ -9828,8 +10692,7 @@ mod tests {
     #[tokio::test]
     async fn opening_from_another_artifacts_page_records_a_pivot() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
@@ -9886,8 +10749,7 @@ mod tests {
     #[tokio::test]
     async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
         let mut core = crate::core::test_support::test_core().await;
-        core.pursuit.enabled = true;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
@@ -9968,8 +10830,7 @@ mod tests {
     #[tokio::test]
     async fn the_page_reports_how_long_an_artifact_was_open() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
