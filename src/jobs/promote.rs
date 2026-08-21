@@ -277,7 +277,7 @@ mod tests {
     async fn earned_with_one_passage() -> (crate::core::Core, String, String) {
         let mut core = test_core().await;
         core.synthesis = SynthesisMode::Earned;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ingest("a single verbatim passage", "web", None)
             .await
@@ -492,7 +492,7 @@ mod tests {
     ) {
         let mut core = test_core().await;
         core.synthesis = SynthesisMode::Earned;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let src = core
             .store
             .insert_corpus("l1\nl2\nl3\nl4\nl5\nl6", "web", None)

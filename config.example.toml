@@ -365,9 +365,23 @@ interval_hours = 24
 # is ever asked about.
 dedupe_interval_mins = 15
 max_dedupe_per_tick = 5
+# ── Learning from what happens here ─────────────────────────────────────────
+# One switch over the whole layer: recording searches, learning links from
+# co-retrieval, activation, pursuits, and the area under the search box. These
+# were three separate flags — [feedback], [associate] and [pursuit] each had
+# their own — and two of their combinations were refused at startup while a
+# third was a warning, which is how you find out they were one setting written
+# three times. The sections below keep their thresholds; this is the switch.
+#
+# On by default. Everything downstream of it moves only while the log is being
+# written, so off is the deliberate act. Nothing here leaves the machine, Ops
+# forgets all of it on one press, and off means nothing is recorded in the
+# first place.
+[learn]
+enabled = true
+
 # Recording real searches so they can be judged later, and turned into the
-# query/artifact pairs the evaluation harness scores against. Off by default: a
-# query log is personal, and it is useful to nobody but you.
+# query/artifact pairs the evaluation harness scores against.
 #
 # The queries a benchmark needs cannot be written from memory. Phrased while
 # looking at an artifact, they reuse its wording, and every retrieval system
@@ -379,10 +393,7 @@ max_dedupe_per_tick = 5
 # one there is. Typing bursts fold into their final wording, so `daten`,
 # `datentr`, `datenträger nicht erkannt` is one event rather than three.
 [feedback]
-# On by default: promotion at synthesis = "earned" reads activation, and
-# activation only moves while searches are recorded. Everything stays on this
-# machine and Ops forgets it on one press; set false to record nothing at all.
-enabled = true
+# No switch here: see [learn], which is the one switch over all of this.
 # Candidates stored per search. Wider than the answer on purpose — retrieval
 # over-fetches anyway, so the extra rows cost nothing, and they are what lets an
 # artifact the ranking buried still be confirmed as the right one. 0 is not a
@@ -408,10 +419,9 @@ sweep_hours = 6
 
 # Links learned from co-retrieval, and a decaying accessibility per artifact.
 # Both are learned from use and neither touches what is stored: the trace is
-# fixed, access is plastic. Needs `feedback.enabled` — without recorded searches
-# there is nothing to learn from, and saying otherwise is a warning at startup.
+# fixed, access is plastic. Runs behind [learn] — without recorded searches
+# there is nothing to learn from.
 [associate]
-enabled = true
 # How often the sweep replays the search log. Pure SQLite, no model call.
 interval_mins = 30
 # A link unused for this long has half the strength it had. One co-appearance is
@@ -467,12 +477,11 @@ resynthesize_after_unconfirmed = 0
 # A coherent run of searches, what was opened and pivoted through, and — when
 # the base did not answer or the answer was assembled by hand — one generated
 # artifact written from exactly that, carrying the questions it was written
-# for. Off until turned on: this writes model-written text into the index.
-# Needs feedback.enabled. Local only, nothing leaves the machine, and the
-# forget button on Settings clears all of it. The grouping line is measured,
-# not configured.
+# for. Runs behind [learn]: the events it reads are the ones recording writes,
+# and the sweep it rides on is the associative pass. Local only, nothing leaves
+# the machine, and the forget button on Settings clears all of it. The grouping
+# line is measured, not configured.
 [pursuit]
-enabled = false
 # A pursuit is over when nothing has happened for this long.
 idle_secs = 900
 # Fewer engaged artifacts than this is a promotion case, not generation.
@@ -488,10 +497,12 @@ min_engagement = 3.0
 # which artifact; a page view is one vector query against what it learned. No
 # model call and no embedding on this path, ever.
 #
-# Off until there is a base with weeks of situations in it — a weekly pattern
-# needs weeks, and until then every offer would sit on the bottom rung.
+# On, and behind [learn] as well: the situations it clusters are opens recorded
+# in the same log everything else here reads. A weekly pattern needs weeks, so a
+# young base sees the bottom rung — a card drawn at random, claiming nothing —
+# until it has something to say.
 [recommend]
-enabled = false
+enabled = true
 # Cosine above which an event joins a cluster rather than opening its own.
 cluster_merge_at = 0.82
 # Situations kept per artifact, per person. More than one is the point: a thing

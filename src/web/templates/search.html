@@ -101,8 +101,16 @@
    returns on the next page view.
 
    Without JavaScript the area stays empty, which is the honest failure: the
-   bundle is the browser's to send. #}
-{% if recommend %}
+   bundle is the browser's to send.
+
+   `q.is_empty()` as well as the switch, because "no intent expressed yet" is a
+   claim about the page and not about the switch. A deep link, a reload or a
+   back-navigation renders the box with its query restored and its results
+   below — app.js only removes the area on a *keystroke*, which never comes on
+   any of those, so the offer sat beside real results and wrote a
+   `recommended_shown` row per results page view, inflating the denominator of
+   the one hit rate this feature is measured by. #}
+{% if recommend && q.is_empty() %}
 <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
      hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
 {% endif %}

@@ -94,7 +94,7 @@ pub struct SweepReport {
 /// is stored; a coverage check that could not run is a line on the capture page
 /// that does not appear.
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
-    if !core.feedback.enabled {
+    if !core.learn.enabled {
         return Ok(0);
     }
     let mut open = core
@@ -443,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn a_capture_that_answers_a_gap_closes_it_and_says_which() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.weak_below = 1.0;
@@ -473,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn a_capture_that_answers_nothing_closes_nothing() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.weak_below = 1.0;
@@ -503,7 +503,7 @@ mod tests {
         // `reconcile_stores_once` exists to repair, and `gap_coverage` carries
         // a foreign key onto it.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let dangling = vec![0.0, 1.0, 0.0, 0.0];
         let answerable = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "what does a torn write look like", dangling.clone()).await;
@@ -554,7 +554,7 @@ mod tests {
         // Reversible, and by the cascade rather than by a second mechanism.
         // Nothing an automatic score decided overwrote what a person judged.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.weak_below = 1.0;
@@ -584,7 +584,7 @@ mod tests {
         // capture, once per open gap.
         let (mut core, embedder) =
             crate::core::test_support::test_core_counting_embed_calls().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.weak_below = 1.0;

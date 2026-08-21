@@ -55,7 +55,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    if core.feedback.enabled {
+    if core.learn.enabled {
         match crate::jobs::gaps::sweep(core).await {
             Ok(r) => {
                 if r.named > 0 || r.removed > 0 {
@@ -155,7 +155,7 @@ mod tests {
         // own unit now, and it stays its own unit.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         seed_old_event(&core).await;
 
@@ -176,7 +176,7 @@ mod tests {
         // into `sweep_runs` as `ok` with no counts — and the `failed` flag, the
         // stated reason that history exists, could never fire for this sweep.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         // The expiry's table, taken out from under it.
         sqlx::query("DROP TABLE search_events")
@@ -206,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn the_unit_groups_the_gaps() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         // Two of them: one gap is not a group, and the sweep no longer spends a
         // naming call restating a single question.
         for q in ["mount an E01", "mounting E01 images"] {
@@ -247,7 +247,7 @@ mod tests {
         // reads the rows expiring removes, and naming a cluster around a search
         // deleted a second later is a call spent on nothing.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.retain_days = 30;
         seed_old_event(&core).await;
 

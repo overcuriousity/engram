@@ -133,8 +133,12 @@ pub struct Core {
     /// Cosine similarity below which a result is reported as only loosely
     /// related. See `VectorConfig::weak_below`.
     pub weak_below: f32,
-    /// Whether and how real searches are recorded for later judging. Read on
-    /// the search path, so it lives here rather than being threaded down.
+    /// The one switch over everything learned from what happens here. Read on
+    /// the search path and by every sweep downstream of it, so it lives here
+    /// rather than being threaded down. See `LearnConfig`.
+    pub learn: crate::config::LearnConfig,
+    /// How real searches are recorded for later judging. Read on the search
+    /// path, so it lives here rather than being threaded down.
     pub feedback: crate::config::FeedbackConfig,
     /// Limits for the upload, link and extension capture paths. Read on the
     /// request path, so it lives here rather than being threaded down.
@@ -237,6 +241,7 @@ impl Core {
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
             weak_below: cfg.vector.weak_below,
+            learn: cfg.learn.clone(),
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
             associate: cfg.associate.clone(),
@@ -294,16 +299,13 @@ impl Core {
     /// Whether the associative layer — links and priming — is actually live,
     /// not merely configured on.
     ///
-    /// Links are learned from recorded searches (`search_events`), and
-    /// recording queries is a separate privacy decision the operator makes
-    /// with `feedback.enabled`. Without recordings there is nothing to learn
-    /// from, so `associate.enabled` alone must not let the layer read or
-    /// write anything: every site that primes, associates, bumps activation
-    /// from a search, or renders "seen together" has to check both flags, or
-    /// an install that never opted into `feedback` still has its ranking and
-    /// activation quietly touched.
+    /// Links are learned from recorded searches (`search_events`), and nothing
+    /// is recorded while `[learn]` is off. Kept as a named predicate rather
+    /// than inlined: every site that primes, associates, bumps activation from
+    /// a search, or renders "seen together" asks this one question, and the
+    /// name says which question it is.
     pub fn associating(&self) -> bool {
-        self.associate.enabled && self.feedback.enabled
+        self.learn.enabled
     }
 
     /// Is there a synthesizer to call? `false` means no `[infer.synthesize]`:
@@ -320,9 +322,15 @@ impl Core {
 
     /// Is the area under the search box filled? `false` means the placeholder
     /// is not rendered, the endpoint records nothing, and the sweep does not
-    /// run — one gate, in one place.
+    /// run — one question, asked in one place.
+    ///
+    /// `[learn]` as well as `[recommend]`, and not as a second gate over the
+    /// faculty: the situations it clusters are opens recorded in the same log
+    /// everything else here reads, so with the log unwritten the sweep profiles
+    /// nothing and the ladder falls to its floor for ever. Saying so here is
+    /// what stops that being a silent state.
     pub fn recommends(&self) -> bool {
-        self.recommend.enabled
+        self.recommend.enabled && self.learn.enabled
     }
 }
 
@@ -405,14 +413,12 @@ pub mod test_support {
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
             weak_below: 0.0,
-            // Off in tests, whatever ships: the capture tests switch it on and
-            // the rest assert nothing is recorded.
-            feedback: crate::config::FeedbackConfig {
-                enabled: false,
-                ..Default::default()
-            },
+            // Off in tests, whatever ships: the tests that need a log switch
+            // it on and the rest assert nothing is recorded.
+            learn: crate::config::LearnConfig { enabled: false },
+            feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
-            // On, like the shipped default — and inert in most tests, because
+            // Inert in most tests whatever it says, because `learn` is off and
             // nothing has learned a link yet. The association tests seed one.
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
@@ -420,10 +426,13 @@ pub mod test_support {
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
             sitting: crate::config::SittingConfig::default(),
-            // Off, like the shipped default. The recommendation tests switch it
-            // on; every other test asserts nothing is offered and nothing is
-            // recorded.
-            recommend: crate::config::RecommendConfig::default(),
+            // Off, unlike the shipped default: `recommends()` is two flags and
+            // a test that leaves both alone must offer nothing. The
+            // recommendation tests switch both on.
+            recommend: crate::config::RecommendConfig {
+                enabled: false,
+                ..Default::default()
+            },
             sittings: Arc::new(Default::default()),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.
@@ -471,23 +480,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn associating_requires_both_flags_and_the_shipped_default_has_both() {
-        // Shipped defaults: `associate.enabled = true`, `feedback.enabled =
-        // true` — promotion reads activation, and activation only moves while
-        // searches are recorded, so recording is opt-out. The test core keeps
-        // feedback off so every other test starts from nothing recorded, and
-        // the layer must still stay dark until both are on.
-        assert!(crate::config::FeedbackConfig::default().enabled);
-        assert!(crate::config::AssociateConfig::default().enabled);
+    async fn the_layer_is_one_switch_and_it_ships_on() {
+        // Recording searches, learning links and writing pursuits were three
+        // flags that only ever meant something together — two of their
+        // combinations were refused at startup and the third was a warning.
+        // One switch now, on by default: promotion reads activation, and
+        // activation only moves while the log is being written, so off is the
+        // deliberate act. The test core keeps it off so every other test
+        // starts from nothing recorded.
+        assert!(crate::config::LearnConfig::default().enabled);
         let mut core = test_support::test_core().await;
-        assert!(core.associate.enabled && !core.feedback.enabled);
-        assert!(!core.associating(), "on with only associate.enabled set");
+        assert!(!core.learn.enabled);
+        assert!(
+            !core.associating(),
+            "the layer is dark while `[learn]` is off"
+        );
+        assert!(
+            !core.recommends(),
+            "and so is the area under the search box"
+        );
 
-        core.feedback.enabled = true;
-        assert!(core.associating(), "both flags set");
+        core.learn.enabled = true;
+        assert!(core.associating());
+    }
 
-        core.associate.enabled = false;
-        assert!(!core.associating(), "on with only feedback.enabled set");
+    #[tokio::test]
+    async fn the_offer_needs_the_log_as_well_as_its_own_switch() {
+        // The situations it clusters are opens recorded in the same log
+        // everything else reads. `[recommend]` alone over an unwritten log is
+        // a sweep that profiles nothing and a ladder that falls to its floor
+        // for ever — the inert state this predicate exists to make impossible.
+        let mut core = test_support::test_core().await;
+        core.recommend.enabled = true;
+        assert!(!core.recommends(), "its own switch is not enough");
+        core.learn.enabled = true;
+        assert!(core.recommends());
+        core.recommend.enabled = false;
+        assert!(!core.recommends(), "and neither is the log");
     }
 
     #[tokio::test]

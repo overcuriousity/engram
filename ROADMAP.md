@@ -386,15 +386,18 @@ to trust.
   three pages fold into `/ui/search` and the others become deep links to it.
   What has to be answered there and not here: where the rail, the filter chips
   and the judged-verdict bar live when the box is doing all three jobs.
-- **One dial instead of eight gates.** `feedback.enabled`, `[associate]`,
-  `[activation]`, `[pursuit]`, `[promote]` and `[consolidate]` are separate
-  switches over one faculty, and they depend on each other in ways only the
-  config comments admit: a pursuit needs feedback, promotion reads an
-  activation that only moves while searches are recorded, priming exists only
-  to be fed by activation. An operator who switches one off silently switches
-  off two more. A named mode — off, learning, full — setting a coherent bundle,
-  with the individual keys still there for whoever wants them, is an afternoon,
-  and it is what makes the rest of this list configurable at all.
+- **One dial instead of eight gates.** Three of them are gone: `[learn]` is now
+  the single switch over recording, association and pursuits, and the sections
+  below it keep their thresholds and no switch of their own. That was the half
+  of this item where the flags were not really independent — two of their
+  combinations were refused at startup and a third was a warning, which is how
+  you find out a setting has been written three times. What is left is the half
+  where they are genuinely different questions: `[activation]`, `[promote]` and
+  `[consolidate]` still depend on each other in ways only the config comments
+  admit — promotion reads an activation that only moves while `[learn]` is on,
+  and priming exists only to be fed by activation. A named mode — off,
+  learning, full — setting a coherent bundle across those, with the individual
+  keys still there for whoever wants them, is what would finish it.
 - **A CLI.** PDF capture is built: `docling` reads an uploaded PDF into markdown
   in `Stage::Extract`, locally and without a model, and the corpus is text like
   any other from there. Spans into it are line spans labelled `extraction`, not

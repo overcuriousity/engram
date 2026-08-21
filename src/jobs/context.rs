@@ -238,6 +238,21 @@ fn closest_pair(centroids: &[&[f32]]) -> Option<(usize, usize)> {
     best.map(|(a, b, _)| (a, b))
 }
 
+/// The slice of an `at`-ordered log that falls in `[lo, hi]`.
+///
+/// The three sources come back ordered by time — `ORDER BY at, id` in each of
+/// the three queries — and the sweep asks each of them the same question once
+/// per interaction: what is near this moment. Scanning the whole vector for
+/// that made the pass quadratic, which on a base with a year of page views and
+/// a log that is never pruned is a background job doing hundreds of millions of
+/// string comparisons every six hours. Two `partition_point` calls answer it
+/// against the order the rows already arrive in.
+fn window<T>(v: &[T], at: impl Fn(&T) -> i64, lo: i64, hi: i64) -> &[T] {
+    let start = v.partition_point(|x| at(x) < lo);
+    let end = v.partition_point(|x| at(x) <= hi);
+    &v[start..end.max(start)]
+}
+
 /// One pass: read the log, encode, cluster, write.
 pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
@@ -276,12 +291,10 @@ pub async fn run(core: &Core) -> Result<Report> {
         // Where the open followed a search, the situation is the search's, not
         // the open's: a recurring search resolves to the artifact it led to
         // rather than to a rerun of the query.
-        let anchor = searches
+        let anchor = window(&searches, |s| s.created_at, i.at - BRIDGE_SECS, i.at)
             .iter()
             .filter(|s| {
                 s.scope.as_deref().unwrap_or_default() == scope
-                    && s.created_at <= i.at
-                    && i.at - s.created_at <= BRIDGE_SECS
                     && s.shown.iter().any(|(id, _)| id == &artifact_id)
             })
             .map(|s| s.created_at)
@@ -289,13 +302,15 @@ pub async fn run(core: &Core) -> Result<Report> {
             .unwrap_or(i.at);
 
         // The nearest recorded situation, within half an hour either way.
-        let matched = contexts
-            .iter()
-            .filter(|c| {
-                c.scope.as_deref().unwrap_or_default() == scope
-                    && (c.at - anchor).abs() <= MATCH_SECS
-            })
-            .min_by_key(|c| ((c.at - anchor).abs(), c.id));
+        let matched = window(
+            &contexts,
+            |c| c.at,
+            anchor - MATCH_SECS,
+            anchor + MATCH_SECS,
+        )
+        .iter()
+        .filter(|c| c.scope.as_deref().unwrap_or_default() == scope)
+        .min_by_key(|c| ((c.at - anchor).abs(), c.id));
 
         // No bundle is not no event. `at` and `scope` were recorded from the
         // beginning, and because an absent block is zeroed rather than
@@ -382,7 +397,7 @@ pub async fn run(core: &Core) -> Result<Report> {
                 weight: c.weight,
                 events: c.events as i64,
                 last_at: c.last_at,
-                encoder_version: crate::core::context::ENCODER_VERSION,
+                encoder_version: crate::core::context::encoder_version(&cfg.weights),
                 representative: c.representative.clone(),
             })
             .collect();
@@ -430,7 +445,7 @@ mod tests {
         }
     }
 
-    use crate::core::context::{Bundle, CTX_DIM, ENCODER_VERSION, device_key, parse_bundle};
+    use crate::core::context::{Bundle, CTX_DIM, device_key, encoder_version, parse_bundle};
     use crate::core::test_support::test_core;
 
     /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
@@ -445,6 +460,7 @@ mod tests {
     async fn recommending_core(now: i64) -> Core {
         let mut core = test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         core.clock = crate::core::context::Clock::Fixed(now);
         core
     }
@@ -567,7 +583,7 @@ mod tests {
         let c = &stored[&aid][0];
         assert_eq!(c.slot, 0);
         assert_eq!(c.centroid.len(), CTX_DIM);
-        assert_eq!(c.encoder_version, ENCODER_VERSION);
+        assert_eq!(c.encoder_version, encoder_version(&core.recommend.weights));
         assert_eq!(c.scope.as_deref(), Some("alice"));
 
         // And the vector store agrees, which is what the read path queries.
@@ -852,5 +868,25 @@ mod tests {
     #[test]
     fn nothing_in_means_nothing_out() {
         assert!(agglomerate(&[], 0.82, 5, 2.0).is_empty());
+    }
+
+    #[test]
+    fn the_window_is_the_slice_and_nothing_either_side_of_it() {
+        // The sweep asks each of three ordered logs the same question once per
+        // interaction — what is near this moment — and scanning them whole made
+        // the pass quadratic over a 400-day window. The answer has to be the
+        // same slice a filter would have produced.
+        let ats: Vec<i64> = vec![10, 20, 20, 30, 40, 50];
+        let got = |lo, hi| -> Vec<i64> { window(&ats, |a| *a, lo, hi).to_vec() };
+        assert_eq!(got(20, 40), vec![20, 20, 30, 40], "both bounds inclusive");
+        assert_eq!(got(21, 39), vec![30]);
+        assert_eq!(got(0, 100), ats);
+        assert_eq!(got(51, 100), Vec::<i64>::new(), "past the end");
+        assert_eq!(got(0, 9), Vec::<i64>::new(), "before the start");
+        assert_eq!(got(41, 41), Vec::<i64>::new(), "a gap");
+        // An empty log, and a window whose bounds have crossed — neither may
+        // panic on a slice index.
+        assert_eq!(window::<i64>(&[], |a| *a, 0, 10).len(), 0);
+        assert_eq!(got(40, 20).len(), 0);
     }
 }

@@ -63,7 +63,17 @@ pub fn local_time(at: i64, tz: Option<&str>, offset_mins: Option<i32>) -> LocalT
     let utc = DateTime::from_timestamp(at, 0).unwrap_or_default();
     let naive = match tz.and_then(|z| z.parse::<chrono_tz::Tz>().ok()) {
         Some(z) => z.from_utc_datetime(&utc.naive_utc()).naive_local(),
-        None => match offset_mins.and_then(|m| chrono::FixedOffset::east_opt(m * 60)) {
+        // `checked_mul` because the offset arrives from the browser and a
+        // browser may say anything: `tz_offset_mins` is a bare `i32` off the
+        // wire, and any value past ±35 791 394 overflows the seconds it is
+        // converted to — a panic in a debug build, inside a handler whose whole
+        // rule is that nothing a browser sends may take a page view down. An
+        // overflow reads as "no offset given", which is the same fallback as a
+        // browser that reported nothing: UTC.
+        None => match offset_mins
+            .and_then(|m| m.checked_mul(60))
+            .and_then(chrono::FixedOffset::east_opt)
+        {
             Some(o) => o.from_utc_datetime(&utc.naive_utc()).naive_local(),
             None => utc.naive_utc(),
         },
@@ -191,7 +201,7 @@ pub const BLOCKS: [Block; 11] = [
 ];
 
 /// Fixed at collection creation, so a new block invalidates every stored
-/// centroid. That is what `ENCODER_VERSION` and whole-bundle storage are for:
+/// centroid. That is what `encoder_version` and whole-bundle storage are for:
 /// the sweep rebuilds from the raw bundles rather than losing the history.
 pub const CTX_DIM: usize = 53;
 
@@ -199,10 +209,37 @@ pub const CTX_DIM: usize = 53;
 pub const SCOPE_DIMS: usize = 8;
 
 /// Bumped whenever `BLOCKS` changes in any way — a width, an order, or what a
-/// slot means. A stored cluster carrying a different one is skipped by the read
-/// path and rebuilt by the next sweep; explaining a hit with the wrong block is
-/// worse than explaining nothing.
-pub const ENCODER_VERSION: i64 = 1;
+/// slot means. Not what is stored: see `encoder_version`.
+pub const LAYOUT_VERSION: i64 = 1;
+
+/// What a stored cluster carries, and what the read path insists on matching.
+///
+/// The layout is half of it. The other half is `[recommend.weights]`, because
+/// every block is scaled by its weight before anything is compared — a weight
+/// is not a knob on top of the encoding, it *is* the geometry. An operator who
+/// edits one and restarts leaves the store full of centroids built under the
+/// old numbers, while `offer` encodes the present situation under the new ones
+/// and compares the two; for the six hours until the next sweep, `context_score`
+/// and the argmax are computed across two different encodings. That is exactly
+/// the recommendation nobody can account for that `BlockWeights::of` refuses a
+/// typo to avoid.
+///
+/// So the weights are hashed into the version. A cluster written under other
+/// numbers is skipped by the read path — the area falls to its floor rather
+/// than explaining a hit with an encoding that no longer exists — and the next
+/// sweep, which rebuilds every profile from the raw bundles, replaces it.
+pub fn encoder_version(w: &crate::config::BlockWeights) -> i64 {
+    let mut key = format!("layout{LAYOUT_VERSION}");
+    for b in BLOCKS {
+        // The bits, not the printed value: two weights that differ below what
+        // `{}` prints are two different geometries.
+        key.push_str(&format!("|{}={:08x}", b.name, w.of(b.name).to_bits()));
+    }
+    // Shifted down one bit so the version is always positive: it goes into a
+    // signed column, and a negative version is a value no operator reading the
+    // table would recognise as one.
+    (fnv1a(&key) >> 1) as i64
+}
 
 /// What the browser said about the situation, as received.
 ///
@@ -869,5 +906,82 @@ mod tests {
         assert_eq!(t.day, 21);
         assert_eq!(t.month, 8);
         assert_eq!(t.days_in_month, 31);
+    }
+
+    #[test]
+    fn an_offset_no_zone_could_hold_falls_back_rather_than_overflowing() {
+        // `tz_offset_mins` is a bare `i32` off the wire and a browser may say
+        // anything. Past ±35 791 394 the conversion to seconds overflows —
+        // a panic in a debug build, inside a handler whose whole rule is that
+        // nothing a browser sends may take a page view down.
+        for m in [i32::MAX, i32::MIN, 35_791_395, -35_791_395] {
+            let t = local_time(FRIDAY_1352_UTC, None, Some(m));
+            assert!(
+                (t.hour - 13.866_666).abs() < 0.001,
+                "offset {m} did not fall back to UTC: got {}",
+                t.hour
+            );
+        }
+    }
+
+    #[test]
+    fn the_stored_version_moves_when_a_weight_does() {
+        // A weight is not a knob on top of the encoding — every block is scaled
+        // by it before anything is compared, so it *is* the geometry. An
+        // operator who edits one leaves the store full of centroids built under
+        // the old numbers while `offer` encodes the present situation under the
+        // new ones, and for the six hours until the next sweep the two are
+        // compared across different encodings.
+        let a = weights();
+        let mut b = weights();
+        b.network += 0.01;
+        assert_ne!(
+            encoder_version(&a),
+            encoder_version(&b),
+            "an edited weight left the version standing"
+        );
+        // Even a change below what `{}` would print: two weights that differ at
+        // all are two geometries.
+        let mut c = weights();
+        c.power += f32::EPSILON;
+        assert_ne!(encoder_version(&a), encoder_version(&c));
+        // Stable across calls, and positive — it goes into a signed column and
+        // a negative version is a value no operator would recognise as one.
+        assert_eq!(encoder_version(&a), encoder_version(&weights()));
+        assert!(encoder_version(&a) > 0);
+    }
+
+    #[test]
+    fn a_block_that_agreed_on_nothing_is_not_one_of_the_reasons() {
+        // `cosine` returns zero for a zero vector — which is what an absent
+        // block is — and zero sorts above every negative contribution. Naming
+        // the top three unconditionally printed "battery" on a pair where
+        // neither side ever sent a battery reading.
+        let w = weights();
+        let bare = Bundle {
+            tz: Some("Europe/Berlin".into()),
+            ..Default::default()
+        };
+        let v = encode(FRIDAY_1352_UTC, Some("alice"), &bare, &w);
+        let named = contributions(&v, &v, &w);
+        // Every block is still in the list — the `<details>` pane is where
+        // exactness lives — but the ones the browser said nothing about are
+        // worth zero, and the line above it takes only what is worth something.
+        // `device`, `network` and `language` are not among them: their last
+        // slot means "nothing identifying was sent", which is a state that
+        // recurs and not an absence.
+        assert_eq!(named.len(), BLOCKS.len() - 1, "{named:?}");
+        let spoken: Vec<&str> = named
+            .iter()
+            .filter(|(_, c)| *c > 0.0)
+            .map(|(l, _)| *l)
+            .collect();
+        assert!(spoken.contains(&"weekday"), "{named:?}");
+        for absent in ["battery", "month", "screen", "surroundings"] {
+            assert!(
+                !spoken.contains(&absent),
+                "{absent} was named on a bundle that never carried it: {named:?}"
+            );
+        }
     }
 }

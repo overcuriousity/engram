@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         );
         if pairs == 0 {
             println!(
-                "no judged searches yet — set feedback.enabled, use the base, \
+                "no judged searches yet — set learn.enabled, use the base, \
                  then judge what it recorded at /ui/judge"
             );
         }
@@ -388,6 +388,7 @@ mod startup_tests {
                 }),
             },
             consolidate: ConsolidateConfig::default(),
+            learn: LearnConfig::default(),
             feedback: FeedbackConfig::default(),
             capture: CaptureConfig::default(),
             pacing: engram::config::PacingConfig::default(),

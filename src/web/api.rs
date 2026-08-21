@@ -1671,7 +1671,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_extension_search_records_its_own_door() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let (app, token, core) = app_from_core(core).await;
 
         let res = app
@@ -1796,7 +1796,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_client_cannot_claim_a_door_that_would_launder_its_query() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let (app, token, core) = app_from_core(core).await;
 
         // `ask` and `judge` are never captured, so naming one would be a way

@@ -119,7 +119,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     // operator who switches duplicate hygiene off is not asking to keep their
     // query log forever. With nothing to expire and nothing to group there is
     // no unit at all, which is what the ticker's `return` used to say.
-    if core.feedback.retain_days > 0 || core.feedback.enabled || core.recommends() {
+    if core.feedback.retain_days > 0 || core.learn.enabled || core.recommends() {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
     }
     // Learning which situations recur for which artifact. Behind its own gate
@@ -132,10 +132,10 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Its own period as a floor. The association sweep arming it is what
         // orders the two; this is what keeps pursuits running at the cadence
-        // they ran at before, rather than at the association sweep's.
-        if core.pursuit.enabled {
-            out.push((Stage::Pursuit, ASSOCIATE_TARGET));
-        }
+        // they ran at before, rather than at the association sweep's. No second
+        // condition of its own any more — a pursuit runs behind `[learn]`, and
+        // `associating()` is `[learn]`.
+        out.push((Stage::Pursuit, ASSOCIATE_TARGET));
     }
     out
 }
@@ -405,6 +405,8 @@ mod tests {
         assert_eq!(periodic_period(&core, Stage::Context), None);
 
         core.recommend.enabled = true;
+
+        core.learn.enabled = true;
         assert!(
             periodic_units(&core)
                 .iter()
@@ -558,7 +560,7 @@ mod tests {
         // dedupe arming and consolidation keep running, and keep writing a row
         // apiece into a table nothing was left to trim.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = false;
+        core.learn.enabled = false;
         core.feedback.retain_days = 0;
         assert!(
             !periodic_units(&core)
@@ -676,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn the_association_sweep_is_armed_when_the_process_starts() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
 
         arm_missing_periodic(&core).await;
 
@@ -695,10 +697,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_recorded_searches_means_no_association_sweep_at_all() {
-        // `associate.enabled` without `feedback.enabled` is a warning at startup
-        // and nothing else: there is nothing to learn from, so there is no unit
-        // — which is the list's job now that there is no ticker to return from.
-        let core = crate::core::test_support::test_core().await; // feedback off
+        // With `[learn]` off nothing is recorded, so there is nothing to learn
+        // from and there is no unit — which is the list's job now that there is
+        // no ticker to return from.
+        let core = crate::core::test_support::test_core().await; // `[learn]` off
         assert!(
             !periodic_units(&core)
                 .iter()
@@ -713,7 +715,7 @@ mod tests {
         // nothing at all. A unit that is never armed cannot do that.
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.retain_days = 0;
-        core.feedback.enabled = false;
+        core.learn.enabled = false;
         assert!(
             !periodic_units(&core)
                 .iter()

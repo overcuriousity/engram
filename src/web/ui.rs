@@ -1114,7 +1114,7 @@ async fn capture_page(
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if st.core.feedback.enabled {
+    let (gaps, loose) = if st.core.learn.enabled {
         let (rows, loose) = st
             .core
             .store
@@ -1375,10 +1375,15 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
         // The rung rides on the link because that is the only place it still
         // exists: the offer was computed on a previous request, and Ops's
         // breakdown is a breakdown only if the click knows which rung it came
-        // from.
+        // from. Every rung, including the floor: the random card has no cluster
+        // and so no slot, and hanging the whole marker off `slot` left it
+        // linking like an ordinary result — its opens counted as opens, so its
+        // hit rate read zero for ever and the card it drew was fed back into
+        // the profile at full weight. `rec` is the slot when there is one;
+        // `rung` is always there.
         rec: match o.slot {
             Some(s) => format!("?rec={s}&rung={}", o.rung.as_str()),
-            None => String::new(),
+            None => format!("?rung={}", o.rung.as_str()),
         },
         id: o.artifact_id,
         title: o.title,
@@ -2523,11 +2528,11 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
-        feedback: match st.core.feedback.enabled {
+        feedback: match st.core.learn.enabled {
             true => Some(st.core.store.feedback_stats().await?),
             false => None,
         },
-        asks: match st.core.feedback.enabled {
+        asks: match st.core.learn.enabled {
             true => Some(st.core.store.ask_stats().await?),
             false => None,
         },
@@ -2654,7 +2659,7 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             sources,
         });
     }
-    let pursuit_enabled = st.core.pursuit.enabled;
+    let pursuit_enabled = st.core.learn.enabled;
     let recent = match pursuit_enabled {
         true => st.core.store.recent_pursuits(50).await?,
         false => Vec::new(),
@@ -3543,9 +3548,9 @@ pub(crate) async fn build_artifact_detail(
         .collect();
     // Unreadable links are not a missing pane, for the same reason a missing
     // neighbour list is not: this layer can only ever add. And gated on
-    // `associating()`, not just `associate.enabled`: a base that learned
-    // links and then had the feature switched off must stop rendering them,
-    // the same as every other associative surface.
+    // And gated on `associating()`: a base that learned links and then had
+    // `[learn]` switched off must stop rendering them, the same as every other
+    // associative surface.
     let anchor = vec![c.id.clone()];
     let seen_together_links = if core.associating() {
         match core
@@ -3673,13 +3678,15 @@ struct ArtifactViewParams {
     /// a continuation — when the link came from another artifact's page.
     #[serde(default)]
     via: Option<String>,
-    /// The cluster slot this was offered under, when the link came from the
-    /// area under the search box.
+    /// The cluster slot this was offered under, when the offer rested on a
+    /// learned cluster. Absent on the floor of the ladder, which has none —
+    /// so this says which cluster, never whether the link came from an offer.
     #[serde(default)]
     rec: Option<i64>,
-    /// And the rung it was offered on. Carried on the link because the offer
-    /// was computed on a previous request and nothing server-side still holds
-    /// it — without it, every click lands in one bucket on Ops.
+    /// The rung it was offered on, and the thing that marks the link as an
+    /// offer's at all. Carried on the link because the offer was computed on a
+    /// previous request and nothing server-side still holds it — without it,
+    /// every click lands in one bucket on Ops.
     #[serde(default)]
     rung: Option<String>,
 }
@@ -3700,15 +3707,14 @@ async fn artifact_detail(
     // this came from the area under the search box, in which case it is written
     // under its own kind and *not* as an ordinary open. A `recommended_open`
     // counted as an open is the first lucky guess growing into a habit the
-    // system taught itself.
-    match p.rec {
-        Some(slot) => st.core.record_recommendation(
-            &cid,
-            "recommended_open",
-            p.rung.as_deref().unwrap_or("unknown"),
-            Some(slot),
-            Some(&id.subject),
-        ),
+    // system taught itself. Keyed on the rung and not on the slot: the floor of
+    // the ladder carries no slot, and it is the rung with no evidence behind it
+    // at all — the last one that should be teaching the profile.
+    match p.rung.as_deref() {
+        Some(rung) => {
+            st.core
+                .record_recommendation(&cid, "recommended_open", rung, p.rec, Some(&id.subject))
+        }
         None => st
             .core
             .record_interaction(&cid, p.via.as_deref(), Some(&id.subject)),
@@ -4747,7 +4753,7 @@ mod tests {
     /// changes the handle and not the app.
     async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         (app, cookie, handle)
@@ -5163,6 +5169,7 @@ mod tests {
     async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         let store = core.store.clone();
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let a = core
@@ -5232,6 +5239,7 @@ mod tests {
     async fn app_with_a_learned_situation() -> (axum::Router, String, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let aid = core
             .store
@@ -5294,7 +5302,7 @@ mod tests {
                     weight: 6.0,
                     events: 6,
                     last_at: at,
-                    encoder_version: crate::core::context::ENCODER_VERSION,
+                    encoder_version: crate::core::context::encoder_version(&core.recommend.weights),
                     representative: serde_json::json!({ "at": at, "bundle": bundle }).to_string(),
                 }],
             )
@@ -5316,6 +5324,7 @@ mod tests {
         // situations written down.
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         let store = core.store.clone();
         let background = core.background.clone();
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
@@ -5346,6 +5355,7 @@ mod tests {
     async fn a_bundle_the_browser_could_not_build_does_not_break_the_page() {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         let store = core.store.clone();
         let background = core.background.clone();
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
@@ -5390,6 +5400,65 @@ mod tests {
         assert!(page.contains("engramContext()"));
         // The class the reserved height hangs off.
         assert!(page.contains(r#"class="offer""#));
+    }
+
+    #[tokio::test]
+    async fn the_offer_is_absent_from_a_page_that_already_carries_a_query() {
+        // The area is for the state "no intent expressed yet". A deep link, a
+        // reload or a back-navigation renders the box with its query restored
+        // and results below it — and app.js only removes the area on a
+        // *keystroke*, which never comes on any of those. Left ungated, the
+        // offer sat beside real results and wrote a `recommended_shown` row per
+        // results page view, inflating the denominator of the one hit rate this
+        // feature is measured by.
+        let (app, cookie, _store, _aid) = app_recommending().await;
+        let page = get(&app, "/ui/search?q=recycling", &cookie).await;
+        assert!(
+            !page.contains(r#"id="context-offer""#),
+            "an offer beside results: {page}"
+        );
+        // And it is back on the next fresh page view: dismissal is per view,
+        // not a state anything remembers.
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(page.contains(r#"id="context-offer""#));
+    }
+
+    #[tokio::test]
+    async fn the_floor_of_the_ladder_is_clicked_like_an_offer_and_not_like_a_result() {
+        // The random card has no cluster and so no slot. Hanging the whole
+        // offer marker off the slot left it linking like an ordinary result:
+        // its opens counted as `opened`, so Ops read `random: shown N, opened
+        // 0` for ever — and random is the baseline the block weights would have
+        // to be fitted against. Worse, the open fed back into the profile at
+        // full weight, which is the self-reinforcement `self_weight = 0.0`
+        // exists to close, entered through the one rung with no evidence behind
+        // it at all.
+        let (app, cookie, store, aid) = app_recommending().await;
+        let body = crate::web::test_support::body_of(
+            app.clone()
+                .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            body.contains(&format!("/ui/artifacts/{aid}?rung=random")),
+            "the card links like an ordinary result: {body}"
+        );
+
+        get(&app, &format!("/ui/artifacts/{aid}?rung=random"), &cookie).await;
+        drain().await;
+        // A shown and an open, and both of them on the random rung: that pair
+        // is the hit rate, and before this the second half could never be
+        // written.
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["recommended_shown", "recommended_open"]);
+        assert!(
+            rows.iter()
+                .all(|r| r.detail.as_deref().unwrap_or_default().contains("random")),
+            "Ops cannot tell which rung: {rows:?}"
+        );
     }
 
     #[tokio::test]
@@ -5464,10 +5533,10 @@ mod tests {
         // `self_weight` — which is zero.
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         // Both on, so an ordinary open *would* be recorded — otherwise this
         // test would pass on a base that records nothing at all.
-        core.pursuit.enabled = true;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let store = core.store.clone();
         let background = core.background.clone();
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -5521,6 +5590,7 @@ mod tests {
     async fn ops_shows_shown_against_clicked_by_rung() {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         let store = core.store.clone();
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let aid = core
@@ -5622,7 +5692,7 @@ mod tests {
     /// of them captured and waiting for a verdict.
     async fn app_recording_searches(pending: usize) -> (axum::Router, String) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         for i in 0..pending {
             core.store
                 .record_search(
@@ -5951,7 +6021,7 @@ mod tests {
     #[tokio::test]
     async fn the_pane_lists_what_this_artifact_is_seen_together_with() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(
@@ -5978,7 +6048,7 @@ mod tests {
     #[tokio::test]
     async fn a_judged_link_shows_the_judges_line_instead_of_the_query() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -6047,7 +6117,7 @@ mod tests {
         // The associative layer can only add. It is not a reason to refuse to
         // show an artifact beside its source.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text"]).await;
         sqlx::query("DROP TABLE artifact_links")
             .execute(&core.store.pool)
@@ -6063,7 +6133,7 @@ mod tests {
         // document needing each other is not" is the whole point of the flag —
         // pin it on the data the pane renders, not on a CSS class name.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
         let other_corpus = core.store.insert_corpus("y", "web", None).await.unwrap();
         let made = core
@@ -8186,7 +8256,7 @@ mod tests {
     /// capture through the page alone leaves nothing to retrieve.
     async fn ask_recorded() -> (axum::Router, String, crate::core::Core, String, String) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
@@ -8544,7 +8614,7 @@ mod tests {
         // Coverage is closed silently — nothing asked the operator to confirm
         // it — so the queue row is the only place it is said.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -8705,7 +8775,7 @@ mod tests {
         // The default. Carrying ships on because it changes no order; this is
         // the part that does, and it waits for the harness.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         assert!(!c.sitting.prime, "priming must ship off");
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
@@ -8764,7 +8834,7 @@ mod tests {
         // loop that reinforces itself, which is the failure mode this whole
         // area is built to close.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -8816,7 +8886,7 @@ mod tests {
         // not the same claim, and an operator reading the list can tell them
         // apart.
         let mut c = crate::core::test_support::test_core().await;
-        c.feedback.enabled = true;
+        c.learn.enabled = true;
         // The fake embedder's vectors are not a semantic space, so the shipped
         // threshold would call everything weak. A line above what the
         // candidate below scores and below nothing else.
@@ -8902,8 +8972,7 @@ mod tests {
         // same, so counting the state pointed the operator at entries that
         // were not there.
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let core = handle;
@@ -9587,7 +9656,7 @@ mod tests {
     async fn app_session_and_core_with_an_embedded_base()
     -> (axum::Router, String, crate::core::Core) {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
             .await
@@ -10086,7 +10155,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_question_is_refused_without_being_parked() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let st = ask_state_over(core).await;
         let (app, cookie) = app_over(&st).await;
         let res = app
@@ -10445,8 +10514,7 @@ mod tests {
     #[tokio::test]
     async fn opening_from_another_artifacts_page_records_a_pivot() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
@@ -10503,8 +10571,7 @@ mod tests {
     #[tokio::test]
     async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
         let mut core = crate::core::test_support::test_core().await;
-        core.pursuit.enabled = true;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
@@ -10585,8 +10652,7 @@ mod tests {
     #[tokio::test]
     async fn the_page_reports_how_long_an_artifact_was_open() {
         let mut core = crate::core::test_support::test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle

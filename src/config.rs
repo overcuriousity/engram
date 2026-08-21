@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     pub consolidate: ConsolidateConfig,
     #[serde(default)]
+    pub learn: LearnConfig,
+    #[serde(default)]
     pub feedback: FeedbackConfig,
     #[serde(default)]
     pub pacing: PacingConfig,
@@ -92,6 +94,33 @@ pub struct PacingConfig {
     pub cooldown_secs: u64,
 }
 
+/// The one switch over everything learned from what happens here.
+///
+/// Recording searches, learning links from co-retrieval, and writing a pursuit
+/// were three flags that only ever meant something together: association reads
+/// recorded searches, and a pursuit is swept on the associative pass. Two of
+/// the three combinations were refused at startup and the third was a warning,
+/// which is a way of saying they were never really three settings. They are
+/// one now.
+///
+/// On by default. Everything downstream of it — activation, promotion at
+/// `synthesis = "earned"`, the associative spread, `[recommend]` — moves only
+/// while the log is being written, so off is the deliberate act. The wording of
+/// a query is personal and nothing here leaves the machine; this is the switch
+/// for the operator who wants none of it kept, and turning it off stops the
+/// recording as well as everything read from it.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct LearnConfig {
+    pub enabled: bool,
+}
+
+impl Default for LearnConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Recording real searches so they can be judged later.
 ///
 /// The queries a benchmark needs cannot be written from memory: phrased while
@@ -101,12 +130,6 @@ pub struct PacingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct FeedbackConfig {
-    /// Whether real searches are recorded at all. On by default: promotion at
-    /// `synthesis = "earned"` reads activation, and activation moves only
-    /// while searches are recorded. The wording of a query is personal and
-    /// nothing here leaves the machine; this is the switch for the operator
-    /// who wants none of it kept.
-    pub enabled: bool,
     /// Candidates stored per event. Wider than the answer on purpose — search
     /// over-fetches anyway, so the extra rows are free, and they are what lets a
     /// buried hit be confirmed later.
@@ -125,10 +148,6 @@ pub struct FeedbackConfig {
 impl Default for FeedbackConfig {
     fn default() -> Self {
         Self {
-            // On: promotion at `synthesis = "earned"` reads activation, and
-            // activation moves only while searches are recorded. Recording is
-            // the thing an operator turns *off*.
-            enabled: true,
             candidates: 20,
             coalesce_secs: 15,
             retain_days: 0,
@@ -145,9 +164,6 @@ impl Default for FeedbackConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct AssociateConfig {
-    /// Requires `feedback.enabled`. Without recorded searches there is nothing
-    /// to learn from, and that combination is a warning at startup.
-    pub enabled: bool,
     pub interval_mins: u64,
     pub half_life_days: f64,
     /// Decayed weight under which a `learning` link is deleted.
@@ -174,7 +190,6 @@ pub struct AssociateConfig {
 impl Default for AssociateConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             interval_mins: 30,
             half_life_days: 30.0,
             prune_below: 0.5,
@@ -222,15 +237,13 @@ impl Default for PromoteConfig {
 
 /// What a coherent run of searches — a pursuit — may earn: one generated
 /// artifact, written from what was engaged with, when the base did not answer
-/// or the answer was assembled by hand. Off until turned on: this writes
-/// model-written text into the index, and that is a step an operator takes.
-/// Needs `feedback.enabled`, since the events it reads are the ones recording
-/// writes. The grouping line is not a key: it is measured, like the gap
-/// clusters', by `core::gaps::link_threshold`.
+/// or the answer was assembled by hand. Runs behind `[learn]`, which is the
+/// switch: the events it reads are the ones recording writes, and the sweep it
+/// rides on is the associative pass. The grouping line is not a key: it is
+/// measured, like the gap clusters', by `core::gaps::link_threshold`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct PursuitConfig {
-    pub enabled: bool,
     /// A pursuit is over when nothing has happened for this long.
     pub idle_secs: u64,
     /// Fewer engaged artifacts than this is a promotion case, not generation.
@@ -242,7 +255,6 @@ pub struct PursuitConfig {
 impl Default for PursuitConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             idle_secs: 900,
             min_sources: 2,
             min_engagement: 3.0,
@@ -391,9 +403,11 @@ impl BlockWeights {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct RecommendConfig {
-    /// Off until there is a base with weeks of situations in it. A weekly
-    /// pattern needs weeks; shipping this on would show the bottom rung of the
-    /// ladder for a fortnight and teach the operator to ignore the area.
+    /// On, with the floor of the ladder as the honest answer while the base is
+    /// young. A weekly pattern needs weeks, so a new base sees the random card
+    /// for a fortnight — that card claims nothing, and an area that says
+    /// nothing until it has something to say is an area nobody discovers.
+    /// Needs `learn.enabled`: the situations are read from the same log.
     pub enabled: bool,
     /// Cosine above which an event joins a cluster rather than opening its own.
     pub cluster_merge_at: f32,
@@ -439,7 +453,7 @@ pub struct RecommendConfig {
 impl Default for RecommendConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             cluster_merge_at: 0.82,
             max_clusters: 5,
             half_life_days: 45.0,
@@ -1659,26 +1673,6 @@ impl Config {
                 self.infer.synthesis.as_str()
             )));
         }
-        if self.pursuit.enabled && !self.feedback.enabled {
-            return Err(ConfigError::Invalid(
-                "pursuit.enabled = true needs feedback.enabled = true: the events it reads are \
-                 the ones recording writes"
-                    .into(),
-            ));
-        }
-        // The other half of the same gate. Both the sweep and its ticker run
-        // behind `associating()`, which is these two flags together, so a
-        // pursuit configured without associating is not a degraded feature —
-        // it is a ticker that returns on its first line and a config that
-        // never writes a pursuit at all. Refused rather than warned, because
-        // the `feedback` half above is refused and the effect is identical.
-        if self.pursuit.enabled && !self.associate.enabled {
-            return Err(ConfigError::Invalid(
-                "pursuit.enabled = true needs associate.enabled = true: pursuits are swept on \
-                 the associative pass, which does not run without it"
-                    .into(),
-            ));
-        }
         if let Some(v) = &self.infer.vision
             && v.base_url.is_none()
             && self.infer.synthesize.is_none()
@@ -1697,21 +1691,15 @@ impl Config {
         Ok(())
     }
 
-    /// Two switches that only mean something together: say so once at startup
-    /// rather than letting an operator discover the association pass has been
-    /// idle since they turned recording off.
+    /// Settings that are on but cannot act: say so once at startup rather than
+    /// letting an operator discover a faculty has been idle since they turned
+    /// `[learn]` off. The combinations that used to be refused here are gone —
+    /// there is one switch now, and it cannot disagree with itself.
     fn warn_on_inert_settings(&self) {
-        if self.infer.synthesis == SynthesisMode::Earned && !self.feedback.enabled {
+        if self.infer.synthesis == SynthesisMode::Earned && !self.learn.enabled {
             tracing::warn!(
-                "infer.synthesis = \"earned\" with feedback.enabled = false: activation never \
+                "infer.synthesis = \"earned\" with learn.enabled = false: activation never \
                  moves, so nothing is ever promoted — this is `off` under another name."
-            );
-        }
-        if self.associate.enabled && !self.feedback.enabled {
-            tracing::warn!(
-                "associate.enabled has no effect while feedback.enabled is false: links are \
-                 learned from recorded searches, and none are being recorded. Recording queries \
-                 is a privacy decision, so it keeps its own switch."
             );
         }
     }
@@ -1889,9 +1877,12 @@ mod tests {
     }
 
     #[test]
-    fn the_recommender_ships_off_with_its_weights_named() {
+    fn the_recommender_ships_on_with_its_weights_named() {
         let r = RecommendConfig::default();
-        assert!(!r.enabled, "a faculty that learns from a log ships off");
+        // On, with the floor of the ladder as the honest answer while the base
+        // is young. It still needs `[learn]`, which is where the log it reads
+        // is switched on — see `Core::recommends`.
+        assert!(r.enabled);
         // The scope block dominates so a foreign cluster can never win
         // `max_sim`. When each user has their own collection this goes to 0
         // and nothing else changes.
@@ -1942,7 +1933,12 @@ mod tests {
         // And it parses: a mistyped value or a table the loader cannot reach
         // fails here rather than at somebody's boot.
         let cfg = Config::load(Some(path)).unwrap();
-        assert!(!cfg.recommend.enabled);
+        assert!(cfg.recommend.enabled);
+        // And the one switch it runs behind, in the file rather than only in
+        // the defaults: an operator turning the layer off must be able to find
+        // the key without reading the source.
+        assert!(raw.contains("\n[learn]\n"), "the example names no [learn]");
+        assert!(cfg.learn.enabled);
         assert_eq!(cfg.recommend.max_clusters, 5);
         assert_eq!(cfg.recommend.weights.of("network"), 0.6);
     }
@@ -2039,7 +2035,7 @@ mod tests {
             cfg.feedback.candidates,
             FeedbackConfig::default().candidates
         );
-        assert!(cfg.feedback.enabled, "the rest of the section was dropped");
+        assert!(cfg.learn.enabled, "the rest of the section was dropped");
     }
 
     #[test]
@@ -2337,7 +2333,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
     #[test]
     fn the_association_defaults_are_the_documented_ones() {
         let a = AssociateConfig::default();
-        assert!(a.enabled);
         assert_eq!(a.interval_mins, 30);
         assert_eq!(a.half_life_days, 30.0);
         assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
@@ -2354,11 +2349,11 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert!(cfg.associate.enabled);
+        assert!(cfg.learn.enabled);
         // ...and recording is on too, so the feature is live out of the box:
         // promotion reads activation, and activation moves only while
         // searches are recorded.
-        assert!(cfg.feedback.enabled);
+        assert!(cfg.learn.enabled);
     }
 
     #[test]
@@ -3081,7 +3076,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
         // Opt-out now: promotion reads activation, and activation only moves
         // while searches are recorded.
-        assert!(cfg.feedback.enabled);
+        assert!(cfg.learn.enabled);
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
             [infer.synthesize]
@@ -3092,40 +3087,48 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             [promote]
             activation_above = 2.5
             resynthesize_after_unconfirmed = 12
-            [feedback]
+            [learn]
             enabled = false
             "
         ))
         .unwrap();
         assert_eq!(cfg.promote.activation_above, 2.5);
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
-        assert!(!cfg.feedback.enabled);
+        assert!(!cfg.learn.enabled);
     }
 
     #[test]
-    fn pursuit_defaults_and_requires_feedback() {
+    fn the_learning_layer_is_one_switch_that_nothing_can_contradict() {
         let _guard = env_guard();
         let roles = "[infer.synthesize]\ntier = \"efficient\"\noutput_ratio = 8.0\n[infer.ask]\ntier = \"efficient\"\n";
         let cfg = load_infer(&format!("{BARE_PREAMBLE}\n{roles}")).unwrap();
-        assert!(!cfg.pursuit.enabled);
+        // On, and the sections it governs carry no switch of their own. There
+        // used to be three — `feedback`, `associate`, `pursuit` — and two of
+        // their eight combinations were refused at startup while a third was a
+        // warning, which is how you find out they were one setting written
+        // three times. Nothing to refuse now: a config cannot express the
+        // combination that had to be rejected.
+        assert!(cfg.learn.enabled);
         assert_eq!(cfg.pursuit.idle_secs, 900);
         assert_eq!(cfg.pursuit.min_sources, 2);
         assert_eq!(cfg.pursuit.min_engagement, 3.0);
-        let err = load_infer(&format!(
-            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[feedback]\nenabled = false\n"
+        assert_eq!(cfg.associate.interval_mins, 30);
+        assert_eq!(cfg.feedback.candidates, 20);
+
+        // One key turns the whole layer off, including the recording that the
+        // rest of it reads.
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[learn]\nenabled = false\n"
         ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("pursuit.enabled"), "{err}");
-        // Associating is both flags, so the other half is refused the same
-        // way: with feedback on and associate off, the sweep and its ticker
-        // still never run, and a config that silently writes no pursuit is
-        // the thing this refusal exists to prevent.
-        let err = load_infer(&format!(
-            "{BARE_PREAMBLE}\n{roles}[pursuit]\nenabled = true\n[associate]\nenabled = false\n"
+        .unwrap();
+        assert!(!cfg.learn.enabled);
+        // And the tuning under each faculty still loads with it off: a section
+        // is thresholds now, not a gate.
+        let cfg = load_infer(&format!(
+            "{BARE_PREAMBLE}\n{roles}[learn]\nenabled = false\n[pursuit]\nidle_secs = 60\n"
         ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("associate.enabled = true"), "{err}");
+        .unwrap();
+        assert_eq!(cfg.pursuit.idle_secs, 60);
+        assert!(!cfg.learn.enabled);
     }
 }

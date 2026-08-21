@@ -548,10 +548,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         ))),
         consolidate: engram::config::ConsolidateConfig::default(),
         weak_below: 0.0,
-        feedback: engram::config::FeedbackConfig {
-            enabled: false,
-            ..Default::default()
-        },
+        learn: engram::config::LearnConfig { enabled: false },
+        feedback: engram::config::FeedbackConfig::default(),
         capture: engram::config::CaptureConfig::default(),
         associate: engram::config::AssociateConfig::default(),
         activation: engram::config::ActivationConfig::default(),

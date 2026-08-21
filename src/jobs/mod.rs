@@ -307,7 +307,7 @@ async fn rearm_periodic(core: &Core, job: &Job) {
 /// the last half-hour's. The pursuit sweep keeps its own period as a floor, so
 /// this pulls it forward rather than being the only thing that runs it.
 async fn arm_successor(core: &Core, job: &Job) {
-    if job.stage != Stage::Associate || !core.pursuit.enabled {
+    if job.stage != Stage::Associate || !core.learn.enabled {
         return;
     }
     if let Err(e) = core
@@ -446,7 +446,7 @@ mod tests {
         // The question a system that describes itself as sleeping has to be
         // able to answer: what did the memory do while I was away.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.store
             .arm_periodic(
                 Stage::Associate,
@@ -476,7 +476,7 @@ mod tests {
         // No ticker holds the period any more: `run_after` is the cursor
         // recording when the sweep last ran, and it is already indexed.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.store
             .arm_periodic(
                 Stage::Associate,
@@ -516,7 +516,7 @@ mod tests {
         // leaves the row pending behind a backoff, which is the re-arming — so
         // what this asserts is that nothing closes it instead.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         // A pursuit sweep with no store behind it fails; what it fails on does
         // not matter, only that the row survives it.
         core.store
@@ -546,7 +546,7 @@ mod tests {
         // The gates live on the list now, so this is what "switched off" means
         // for a unit already in the queue: it runs once more and stops.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.store
             .arm_periodic(
                 Stage::Associate,
@@ -557,7 +557,7 @@ mod tests {
             .await
             .unwrap();
         let job = core.store.claim_job().await.unwrap().unwrap();
-        core.associate.enabled = false;
+        core.learn.enabled = false;
 
         run_claimed(&core, job).await.unwrap();
 
@@ -573,8 +573,7 @@ mod tests {
         // the last half-hour's. The pursuit sweep keeps its own period as a
         // floor; this is what pulls it forward.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         // Pursuit asleep on its own period, as it is for all but a moment of
         // every cycle.
         core.store

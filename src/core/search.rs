@@ -541,10 +541,12 @@ impl Core {
     /// What happened after the list rendered: this artifact was opened, or
     /// reached from `via` — a neighbour, an association, a continuation. The
     /// pursuit sweep attaches it to a search by time and scope; nothing here
-    /// names one. Off the request path, and a no-op unless pursuits are on
-    /// and searches are being recorded.
+    /// names one, and the context sweep reads the same rows to learn which
+    /// situations an artifact is opened in. Off the request path, and a no-op
+    /// only while `[learn]` is off — this is the log, and every faculty
+    /// downstream reads it rather than writing its own.
     pub fn record_interaction(&self, artifact_id: &str, via: Option<&str>, scope: Option<&str>) {
-        if !self.pursuit.enabled || !self.feedback.enabled {
+        if !self.learn.enabled {
             return;
         }
         let store = self.store.clone();
@@ -566,9 +568,9 @@ impl Core {
     }
 
     /// How long an artifact stayed open. Capped — a tab left open overnight is
-    /// not a day of reading — and a no-op unless pursuits are on.
+    /// not a day of reading — and a no-op while `[learn]` is off.
     pub fn record_dwell(&self, artifact_id: &str, secs: i64, scope: Option<&str>) {
-        if !self.pursuit.enabled || !self.feedback.enabled || secs <= 0 {
+        if !self.learn.enabled || secs <= 0 {
             return;
         }
         let secs = secs.min(600);
@@ -883,7 +885,7 @@ impl Core {
         // Widening the fetch is also the cost of the setting: `Config::normalize`
         // caps `candidates` at `MAX_LIMIT * CANDIDATE_MULTIPLIER` so this can
         // never exceed what the widest ordinary search already fetches.
-        let candidates = if self.feedback.enabled && door.captured() {
+        let candidates = if self.learn.enabled && door.captured() {
             candidates.max(self.feedback.candidates)
         } else {
             candidates
@@ -911,7 +913,7 @@ impl Core {
         // Taken for the same reason: the similarity is dropped when a payload
         // becomes a `SearchResult`, and capture wants the value rather than the
         // `weak` verdict computed from it.
-        let sims: HashMap<String, Option<f32>> = if self.feedback.enabled && door.captured() {
+        let sims: HashMap<String, Option<f32>> = if self.learn.enabled && door.captured() {
             hits.iter()
                 .map(|h| (h.payload.artifact_id.clone(), h.similarity))
                 .collect()
@@ -942,7 +944,7 @@ impl Core {
             // capture a pool exactly as wide as what the searcher saw. A hit
             // the reranker buried would then be unconfirmable, and the whole
             // point of storing a pool is that it can be.
-            let top_n = if self.feedback.enabled && door.captured() {
+            let top_n = if self.learn.enabled && door.captured() {
                 limit.max(self.feedback.candidates)
             } else {
                 limit
@@ -1017,7 +1019,7 @@ impl Core {
         // ordering is final. Off the request path via `Background`, like
         // `mark_seen` below it: a search must not get slower, or fail, because
         // bookkeeping did.
-        if self.feedback.enabled && door.captured() {
+        if self.learn.enabled && door.captured() {
             let candidates: Vec<crate::store::feedback::NewCandidate> = results
                 .iter()
                 .take(self.feedback.candidates)
@@ -1301,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
@@ -1330,7 +1332,7 @@ mod tests {
         // retrieval, and letting every keystroke raise activation would make
         // accessibility a function of how slowly someone types.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
@@ -1361,7 +1363,7 @@ mod tests {
         // `resurface` shows what has been forgotten. Counting that as a reason
         // to be more accessible is the loop this whole design is built to close.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         sqlx::query("UPDATE artifacts SET created_at = ?")
             .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
@@ -1393,7 +1395,7 @@ mod tests {
     #[tokio::test]
     async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
         let before = core
@@ -2110,7 +2112,7 @@ mod tests {
     #[tokio::test]
     async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
@@ -2151,14 +2153,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_marked_search_does_not_touch_activation_while_feedback_is_off() {
-        // Shipped defaults: `feedback.enabled = false`, `associate.enabled =
-        // true`. Links are learned from recorded searches, and none are being
-        // recorded, so the whole associative layer — including activation,
-        // which exists only to feed priming — must stay dark. `test_core()`
-        // is exactly this combination; nothing here turns `feedback` on.
+    async fn a_marked_search_does_not_touch_activation_while_learning_is_off() {
+        // Nothing is recorded while `[learn]` is off, and links are learned
+        // from recorded searches — so the whole associative layer, including
+        // activation, which exists only to feed priming, must stay dark.
+        // `test_core()` ships with the switch off; nothing here turns it on.
         let core = test_core().await;
-        assert!(!core.feedback.enabled && core.associate.enabled);
+        assert!(!core.learn.enabled);
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
@@ -2182,18 +2183,18 @@ mod tests {
             .0;
         assert_eq!(
             after, before,
-            "a marked search raised activation with feedback.enabled false"
+            "a marked search raised activation with `[learn]` off"
         );
     }
 
     #[tokio::test]
-    async fn priming_never_reaches_the_order_while_feedback_is_off() {
+    async fn priming_never_reaches_the_order_while_learning_is_off() {
         // The spec promise (§11): "existing installs see nothing change until
-        // they opt in." `associate.enabled` alone must not let a large
-        // activation move the ranked order — the order must be byte-identical
-        // to `prime_lift = 0`, not merely bounded.
+        // they opt in." With `[learn]` off, a large activation must not move
+        // the ranked order — the order must be byte-identical to
+        // `prime_lift = 0`, not merely bounded.
         let core = test_core().await;
-        assert!(!core.feedback.enabled && core.associate.enabled);
+        assert!(!core.learn.enabled);
         assert_eq!(core.associate.prime_lift, 2, "the shipped default");
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
@@ -2228,7 +2229,7 @@ mod tests {
             .collect();
         assert_eq!(
             plain_ids, after_ids,
-            "the order changed even though feedback.enabled is false"
+            "the order changed even though `[learn]` is off"
         );
         assert!(with_huge_activation.iter().all(|r| !r.primed));
     }
@@ -2242,7 +2243,7 @@ mod tests {
         // dropped is the one that answered best, invisibly. `judge` needs the
         // pool it labels to be the pool the ranking produced.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
@@ -2290,7 +2291,7 @@ mod tests {
         // satisfy it, or the search hands back exactly the rows they narrowed
         // away.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.associate.show_min = 1.0;
         seed(
             &core,
@@ -2355,7 +2356,7 @@ mod tests {
         // The stored pool is wider than the answer: the judging card offers all
         // of it, so an artifact the ranking buried can still be confirmed.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let texts: Vec<(&str, &str, &[&str])> = (0..12)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -2391,7 +2392,7 @@ mod tests {
         // the six missing candidates are exactly the buried ones the judging
         // card exists to surface.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.feedback.candidates = 12;
         let texts: Vec<(&str, &str, &[&str])> = (0..20)
             .map(|_| ("alpha text about it", "note", &[][..]))
@@ -2420,7 +2421,7 @@ mod tests {
         // hand capture a pool exactly as wide as the answer — and a hit the
         // reranker buried would become unconfirmable.
         let (mut core, _r) = crate::core::test_support::test_core_counting_reranked_docs().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let texts: Vec<(&str, &str, &[&str])> = (0..12)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -2457,7 +2458,7 @@ mod tests {
         // category would score the judged pair against a base the search
         // never saw.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
 
@@ -2485,7 +2486,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_writes_nothing_while_it_is_switched_off() {
-        let core = test_core().await; // feedback.enabled defaults to false
+        let core = test_core().await; // `[learn]` is off in tests
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
         core.search(&q("alpha text"), Door::Ui).await.unwrap();
@@ -2497,7 +2498,7 @@ mod tests {
         // Deliberately unlike `mark_seen`, which skips an empty list because
         // there is nothing to stamp. Here the empty list is the finding.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.search(&q("nothing is indexed yet"), Door::Ui)
             .await
             .unwrap();
@@ -2509,7 +2510,7 @@ mod tests {
         // Judging composes its queries while reading the artifact, and `ask`
         // has no single right answer to judge. Both would only add noise.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
 
@@ -2532,7 +2533,7 @@ mod tests {
     #[tokio::test]
     async fn a_linked_artifact_is_recalled_beside_the_answer_and_says_what_recalled_it() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -2569,7 +2570,7 @@ mod tests {
         // gate is door-shaped rather than coincidental, so this checks both
         // an excluded door and an included one against the same link.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -2605,7 +2606,7 @@ mod tests {
     #[tokio::test]
     async fn an_artifact_already_in_the_answer_is_not_recalled_again() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(
             &core,
             "one",
@@ -2673,7 +2674,7 @@ mod tests {
         // the fixture rather than a bug.
         async fn seeded() -> (crate::core::Core, String, String) {
             let mut core = test_core().await;
-            core.feedback.enabled = true;
+            core.learn.enabled = true;
             seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
             seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
             reembed_all(&core).await;
@@ -2738,7 +2739,7 @@ mod tests {
     #[tokio::test]
     async fn a_hidden_artifact_is_never_recalled_by_association() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -2758,7 +2759,7 @@ mod tests {
     #[tokio::test]
     async fn a_weak_link_is_not_strong_enough_to_recall_anything() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
         seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
         reembed_all(&core).await;
@@ -2984,7 +2985,7 @@ mod tests {
     #[tokio::test]
     async fn a_synthesized_artifact_leading_the_list_marks_the_search_answered() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let captured = core
             .store
@@ -3049,9 +3050,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_interaction_is_recorded_only_with_pursuits_on() {
+    async fn an_interaction_is_recorded_whenever_the_layer_is_learning() {
+        // It used to take pursuits as well, which made the log a pursuit's
+        // private record rather than the layer's. It is not: the context sweep
+        // reads the same `opened` and `pivoted` rows to learn which situations
+        // an artifact is opened in, and gating the only writer behind a second
+        // faculty left that sweep profiling nothing at all. One switch, and
+        // everything downstream reads what it writes.
         let mut core = test_core().await;
-        core.feedback.enabled = true;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let a = core
             .store
@@ -3080,9 +3086,10 @@ mod tests {
                 .interactions_between(0, now + 1)
                 .await
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "an open was written down with `[learn]` off"
         );
-        core.pursuit.enabled = true;
+        core.learn.enabled = true;
         core.record_interaction(&a, None, Some("me"));
         core.record_interaction(&a, Some("other"), Some("me"));
         core.background.wait_idle().await;

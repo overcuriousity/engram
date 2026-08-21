@@ -881,7 +881,7 @@ impl Core {
         origin: &Origin,
         mut response: AskResponse,
     ) -> Result<AskResponse> {
-        if !(self.feedback.enabled && origin.door == Door::Ui) {
+        if !(self.learn.enabled && origin.door == Door::Ui) {
             return Ok(response);
         }
         let ask = NewAsk {
@@ -1928,9 +1928,9 @@ mod tests {
     #[tokio::test]
     async fn an_artifact_linked_to_a_hit_is_reached_where_adjacency_cannot_go() {
         let mut core = test_core().await;
-        // `associate.enabled` is already the shipped default; links are learned
-        // from recorded searches, so the reach stays shut until this is on too.
-        core.feedback.enabled = true;
+        // Links are learned from recorded searches, and `test_core` records
+        // none, so the reach stays shut until the layer is switched on.
+        core.learn.enabled = true;
         seed(&core, 5, 4).await;
 
         // A second corpus, on a subject the query does not ask about. Its raw
@@ -2065,7 +2065,7 @@ mod tests {
     #[tokio::test]
     async fn a_ui_ask_is_recorded_with_its_citations_when_feedback_is_on() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed(&core, 3, 4).await;
         let out = core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
         let id = out.event_id.expect("a UI ask is recorded");
@@ -2097,7 +2097,7 @@ mod tests {
     #[tokio::test]
     async fn an_api_or_mcp_ask_is_never_recorded() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed(&core, 3, 4).await;
         for door in [Door::Api, Door::Mcp] {
             let out = core.ask(&req("chunk"), door).await.unwrap();
@@ -2117,7 +2117,7 @@ mod tests {
     #[tokio::test]
     async fn an_ask_with_no_hits_is_recorded_as_an_abstention_without_a_model_call() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         let out = core
             .ask(&req("nothing is stored"), Door::Ui.by("me"))
             .await
@@ -2288,7 +2288,7 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_ask_is_recorded_exactly_once() {
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         seed(&core, 3, 4).await;
 
         let before = core.store.ask_stats().await.unwrap().asked;
@@ -2389,7 +2389,7 @@ mod tests {
     async fn a_reader_who_leaves_mid_answer_does_not_hand_the_gpu_to_the_worker() {
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut core = test_core().await;
-        core.feedback.enabled = true;
+        core.learn.enabled = true;
         core.completer = Some(std::sync::Arc::new(Stalling {
             release: release.clone(),
         }));

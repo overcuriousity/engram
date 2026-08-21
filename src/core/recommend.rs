@@ -156,7 +156,8 @@ impl Core {
                 // explained with the wrong blocks. Its centroid may still be in
                 // the index — a rebuild copies any set whose width matches —
                 // and the next sweep replaces it.
-                if c.encoder_version != crate::core::context::ENCODER_VERSION
+                if c.encoder_version
+                    != crate::core::context::encoder_version(&self.recommend.weights)
                     || c.centroid.len() != now.len()
                 {
                     continue;
@@ -191,7 +192,22 @@ impl Core {
                     rung,
                     slot: Some(cluster.slot),
                     events: cluster.events,
-                    blocks: all.iter().take(NAMED_BLOCKS).map(|(l, _)| *l).collect(),
+                    // Only the blocks that actually agreed. `cosine` returns
+                    // zero for a zero vector — which is what an absent block
+                    // is — and zero sorts above every negative contribution,
+                    // so taking the top three unconditionally printed
+                    // "Pattern · weekday, hour, battery" on a pair where
+                    // neither side ever sent a battery reading. The line names
+                    // what decided it, or fewer things, or nothing. The
+                    // `<details>` still carries every block including the ones
+                    // that disagreed: that is the pane for exactness, and this
+                    // is the line a person reads.
+                    blocks: all
+                        .iter()
+                        .filter(|(_, v)| *v > 0.0)
+                        .take(NAMED_BLOCKS)
+                        .map(|(l, _)| *l)
+                        .collect(),
                     at: rep.get("at").and_then(serde_json::Value::as_i64),
                     at_tz: rep
                         .pointer("/bundle/tz")
@@ -337,7 +353,7 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{Clock, ENCODER_VERSION};
+    use crate::core::context::{Clock, encoder_version};
     use crate::core::test_support::test_core;
 
     /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
@@ -346,6 +362,7 @@ mod tests {
     async fn core_at(now: i64) -> Core {
         let mut core = test_core().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         core.clock = Clock::Fixed(now);
         core
     }
@@ -421,7 +438,7 @@ mod tests {
                     weight,
                     events,
                     last_at: at,
-                    encoder_version: ENCODER_VERSION,
+                    encoder_version: encoder_version(&core.recommend.weights),
                     representative: serde_json::json!({ "at": at, "bundle": b }).to_string(),
                 }],
             )
@@ -837,7 +854,7 @@ mod tests {
             .await
             .unwrap()[&aid]
             .clone();
-        rows[0].encoder_version = ENCODER_VERSION + 1;
+        rows[0].encoder_version = encoder_version(&core.recommend.weights) + 1;
         core.store
             .replace_context_clusters(&aid, &rows)
             .await
@@ -848,6 +865,68 @@ mod tests {
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "got {offer:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cluster_built_under_other_weights_is_not_compared_against_new_ones() {
+        // The weights are the geometry, not a knob on top of it: `encode`
+        // scales every block by its weight before anything is compared. An
+        // operator who edits one and restarts leaves the store full of
+        // centroids built under the old numbers while this path encodes the
+        // present situation under the new ones — and for the six hours until
+        // the next sweep rebuilds them, `context_score` and the argmax are
+        // computed across two different encodings. Which is exactly the
+        // recommendation nobody can account for that `BlockWeights::of` refuses
+        // a typo to avoid.
+        let mut core = core_at(FRIDAY).await;
+        let aid = seed_artifact(&core, "recycling centre").await;
+        for w in 1..=6 {
+            learn(&core, &aid, "alice", FRIDAY - w * 7 * 86_400, &phone()).await;
+        }
+        let offered = core.offer(Some("alice"), &phone()).await.unwrap();
+        assert!(
+            offered.as_ref().is_some_and(|o| o.slot.is_some()),
+            "this test needs a learned offer to invalidate: {offered:?}"
+        );
+
+        // One weight moved, nothing else touched. The stored centroids are now
+        // a geometry this reader does not know.
+        core.recommend.weights.network += 0.5;
+        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
+        assert!(
+            offer.as_ref().is_none_or(|o| o.slot.is_none()),
+            "a centroid from the old geometry was still explained: {offer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reason_names_only_the_blocks_that_agreed() {
+        // `cosine` returns zero for a zero vector — which is what a block the
+        // browser said nothing about is — and zero sorts above every negative
+        // contribution. Taking the top three unconditionally printed
+        // "Pattern · weekday, hour, battery" on a pair where neither side ever
+        // sent a battery reading.
+        let core = core_at(FRIDAY).await;
+        let aid = seed_artifact(&core, "recycling centre").await;
+        let bare = Bundle {
+            tz: Some("Europe/Berlin".into()),
+            ..Default::default()
+        };
+        for w in 1..=6 {
+            learn(&core, &aid, "alice", FRIDAY - w * 7 * 86_400, &bare).await;
+        }
+        let offer = core.offer(Some("alice"), &bare).await.unwrap().unwrap();
+        for absent in ["battery", "month", "screen", "surroundings"] {
+            assert!(
+                !offer.blocks.contains(&absent),
+                "the line claimed {absent} on a bundle that never carried it: {:?}",
+                offer.blocks
+            );
+        }
+        // The `<details>` pane still carries every block, including the ones
+        // worth nothing: that is the pane for exactness, and this is the line a
+        // person reads.
+        assert!(offer.detail.contains("battery"), "{}", offer.detail);
     }
 
     #[tokio::test]
@@ -897,6 +976,7 @@ mod tests {
         let (mut core, embedder) =
             crate::core::test_support::test_core_counting_embed_calls().await;
         core.recommend.enabled = true;
+        core.learn.enabled = true;
         core.clock = Clock::Fixed(FRIDAY);
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
