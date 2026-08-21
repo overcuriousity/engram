@@ -77,6 +77,10 @@ body { overflow-x: hidden; }
    under a container query. */
 
 .rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
+/* The results are their own element inside the rail, so that a search replaces
+   them and not the sitting above them — and the rail's own column layout has to
+   carry through to it, or every card loses the gap between it and the next. */
+#results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
 .rail-item {
   display: block; text-decoration: none; color: inherit;
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);

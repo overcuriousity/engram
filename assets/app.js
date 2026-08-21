@@ -633,7 +633,31 @@
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
-      if (ws && e.target.id === 'rail') ws.classList.remove('has-selection');
+      //
+      // `#results` rather than `#rail`: the list is its own element inside the
+      // rail now, so that what a search replaces is the results and not the
+      // sitting beside them.
+      if (e.target.id === 'results') {
+        if (ws) ws.classList.remove('has-selection');
+        // Back to the top of the answer. Nothing moved the scroll on a swap,
+        // and the two layouts strand it in different places for the same
+        // reason: whatever you had scrolled to in the last list is kept, and
+        // the new list is drawn under it. On a phone the search box is the
+        // fixed bar at the *bottom*, so typing leaves the window scrolled to
+        // the end of the page — and the answer to what you just typed opened
+        // at its last result, with the best hits somewhere above the top of
+        // the screen.
+        var railEl = document.getElementById('rail');
+        if (railEl) {
+          // Wide: the rail is its own scroll box (see 40-search.css).
+          railEl.scrollTop = 0;
+          // Narrow: `max-height: none`, so the window is the scroller. Only
+          // ever scrolls up, and only as far as the list's own top — a page
+          // that jumped on every keystroke would be worse than the bug.
+          var top = railEl.getBoundingClientRect().top;
+          if (top < 0) window.scrollBy(0, top);
+        }
+      }
       // A clicked result was never marked as the open one. `aria-selected` was
       // set only by the arrow-key handler below, so the styling for an open
       // card — the accent border, and dropping the snippet the pane beside it

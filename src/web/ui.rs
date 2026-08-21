@@ -7843,6 +7843,28 @@ mod tests {
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(page.contains("Read just now"), "{page}");
         assert!(page.contains("Mounting an E01"), "{page}");
+
+        // And it is still there after a search. The filter form replaces what
+        // it targets wholesale, so a sitting inside that target was wiped by
+        // the first keystroke and never came back — visible only on a search
+        // page with no query, which is the one moment it has nothing to say.
+        let form = page
+            .split("<form id=\"filters\"")
+            .nth(1)
+            .expect("the search page has a filter form");
+        let target = form
+            .split("hx-target=\"")
+            .nth(1)
+            .and_then(|t| t.split('"').next())
+            .expect("the filter form names a target");
+        let swapped = page
+            .split(&format!("id=\"{}\"", target.trim_start_matches('#')))
+            .nth(1)
+            .expect("the target is on the page");
+        assert!(
+            !swapped.contains("Read just now"),
+            "a search replaces {target}, and the sitting is inside it: {swapped}"
+        );
     }
 
     #[tokio::test]

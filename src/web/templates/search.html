@@ -28,7 +28,7 @@
    in the box — and nothing on screen says so. Replace aborts the request in
    flight, so the answer shown is always the answer to the last thing typed. #}
 <div class="region-bar">
-<form id="filters" hx-get="/ui/search/results" hx-target="#rail" hx-swap="innerHTML"
+<form id="filters" hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
       hx-sync="this:replace"
       hx-trigger="change from:#kind-chips,
                   keyup changed delay:120ms from:input[name=q],
@@ -103,8 +103,18 @@
 </p>
 </div>
 
-<div id="rail" class="region-rail rail" role="listbox" aria-label="Results">
+{# The sitting sits beside the results and outside the swap. It used to be the
+   whole of what `#rail` held, and the filter form replaces `#rail` wholesale —
+   so the first keystroke wiped "Read just now" and nothing brought it back.
+   It was on screen only on a search page with no query, which is the one
+   moment it has nothing to say.
+
+   The listbox is the inner div rather than this one for the same reason: the
+   arrow keys walk `.rail-item`, and a way back to what you were reading is not
+   a result of the search you are typing. #}
+<div id="rail" class="region-rail rail">
 {% include "_sitting.html" %}
+<div id="results" role="listbox" aria-label="Results"></div>
 </div>
 <div id="pane" class="region-focus pane">
   {# Before a search there is no rail beside this, so the sentence used to sit
