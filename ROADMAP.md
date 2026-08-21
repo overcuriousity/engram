@@ -120,6 +120,28 @@ in config. The items below are the mechanisms that come after it, in order.
   excerpt says the same thing about a question a person asked in earnest. Text
   untouched; changes what vectors are built from, so it waits for the harness
   to say it helps.
+
+  *There is a cheaper shape of it that does not wait on re-embedding.* Qdrant's
+  `recommend` with `strategy: "best_score"` carries the cue as a second
+  positive example at query time: the stored vector is left alone, and a
+  candidate is scored by `max` over the examples rather than by their mean, so
+  the query and the remembered question stay two independent ways in instead of
+  collapsing to a midpoint that is neither. `average_vector` is the wrong knob
+  here for exactly that reason. It still moves ranking, so it is still the
+  harness's call; what it changes is the cost of being wrong, from a
+  re-embedding pass to a flag.
+- **A forgotten list with a direction.** `resurface` samples at random —
+  `{"sample": "random"}` in `vector/qdrant.rs` under payload filters — old,
+  unseen, otherwise arbitrary, which is a list you read once. Qdrant's context
+  search takes pairs where a query would go and scores a candidate by which
+  side of each pair it falls on, so the sitting's rail is the positive side and
+  `superseded`/`deprecated` the negative one, and what comes back is old and
+  unseen *and* near what this sitting has been in. The property that makes
+  context search a poor search — everything inside the admitted zone ties, so
+  the order within it is arbitrary — is the right property here: a forgotten
+  list wants spread within a subject, not the same five every time. Alone among
+  the three Qdrant items on this list it moves no ranking, because the
+  forgotten list is its own list. It needs no harness and can go first.
 - **Error-driven re-synthesis.** An artifact shown often and never confirmed,
   or judged noise, is misleading — a title that over-claims, a passage that
   lost its context. It is re-synthesised **from its source segment**, never from
@@ -241,6 +263,17 @@ own.
   `vector/memory.rs`, and the measurement against the judged-pair set, since
   it moves ranking. Until then a very long document at `off` can dominate a
   result list.
+- **A dismissal that changes the next search.** Verdicts and dismissals are
+  recorded and read — by gaps, by pursuits, by activation — and `verdict`
+  appears in `src/core/search.rs` exactly once, in a comment. A hit sent away
+  is therefore back tomorrow for the same question. As a negative example in a
+  `best_score` recommend it is not: the penalty there is squared and
+  sign-flipped, so it reaches the neighbours of the dismissed chunk and not
+  only the chunk, where a payload exclusion reaches exactly one point. This is
+  the one whose cause the operator set themselves — an effect on your own last
+  action reads as a base that listened, where the same effect with no visible
+  cause reads as noise. It moves ranking, and it is worth the measurement it
+  costs.
 - **Reranking on by default**, once there is a default endpoint worth assuming.
   A cross-encoder, not a model call; the harness — both of them — decides.
 - **Why this hit is where it is, as one object.** A rank is now the product of
@@ -253,10 +286,17 @@ own.
   lets all three doors say the same thing, and it is the only honest way to
   keep adding stages to a ranking the operator is asked to trust.
 
-<!-- CUT: late-interaction reranking (ColBERT-style multivectors). A vector per
-     token per artifact wrecks storage and memory in Qdrant and adds a model
-     dependency, to beat a baseline that atomic, LLM-synthesised artifacts and
-     hybrid search already make strong. -->
+<!-- CUT: late-interaction reranking (ColBERT-style multivectors). Not for the
+     reason first written here, which said storage and memory both. Memory is
+     avoidable and the claim was wrong: a multivector kept out of HNSW
+     (`hnsw_config: { m: 0 }`) is a rerank stage over the top-k rather than an
+     index, and holds nothing resident. Storage is real at roughly the order
+     first guessed, and bounded — a reduced-width vector per token against one
+     dense vector per artifact, `on_disk`. Expensive, not ruinous. What stands
+     is the last clause, and it is enough on its own: a model dependency, to
+     beat a baseline that atomic, LLM-synthesised artifacts and hybrid search
+     already make strong. A multivector of two to five *context* vectors per
+     artifact is a different size of thing and is not covered by this cut. -->
 
 ## [What the base says about itself]
 
