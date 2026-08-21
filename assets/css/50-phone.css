@@ -172,5 +172,21 @@
   }
   table.grid td { border: none; height: auto; padding: 0.125rem 0; }
   table.grid tr:hover td { background: transparent; }
+
+  /* ── Judging, one-handed ──────────────────────────────────────────────
+     Three ways out of a card and a spacer between them is one line about
+     440px wide, on a screen that is 390: the page gained a horizontal scroll
+     and every card sat shifted off the left edge, which is where the misalign
+     came from. The bar wraps instead (`flex-wrap` is on `.judge-outs`), and
+     the spacer goes — it exists to push "Not a real search" away from the two
+     safe options, and a line of its own does that better. */
+  .judge-outs .spacer { display: none; }
+  /* Sticky against the viewport's bottom put it under the fixed tab bar, so
+     the bar that is supposed to always offer the way out was covered by it on
+     every card long enough to scroll. Same offset the search bar uses. */
+  .judge-outs { bottom: calc(46px + env(safe-area-inset-bottom)); }
+  /* 34px of indent is a tenth of the screen. Enough to read as nested, and
+     the rest goes back to the text. */
+  .judge-peek { margin-left: 1rem; }
 }
 

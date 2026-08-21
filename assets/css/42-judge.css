@@ -6,6 +6,10 @@
    wrapping. The options are buttons rather than links: they act, they do not
    navigate. */
 .judge-header { max-width: 52rem; margin-bottom: 1.25rem; }
+/* Four figures and a spacer between them do not fit across a phone. They wrap
+   rather than run off the side — the row is a readout, and a readout that has
+   to be scrolled sideways is not one. */
+.judge-header .row { flex-wrap: wrap; }
 .judge-card { max-width: 52rem; }
 .judge-query { font-size: 1.25rem; font-weight: 500; margin: 0.25rem 0 0.75rem; }
 .judge-options {
@@ -13,7 +17,7 @@
   display: flex; flex-direction: column; gap: 0.375rem;
 }
 .judge-option {
-  display: grid; grid-template-columns: 1.5rem 1fr; gap: 0.125rem 0.5rem;
+  display: grid; grid-template-columns: 1.5rem minmax(0, 1fr); gap: 0.125rem 0.5rem;
   width: 100%; text-align: left; padding: 0.5rem 0.625rem; cursor: pointer;
   border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
   background: var(--color-bg-elevated); color: inherit; font: inherit;
@@ -30,8 +34,14 @@
 .judge-option-unusable:hover { background: transparent; }
 .judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
 .judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: 0.8125rem; }
-.judge-title { font-weight: 500; }
-.judge-snippet { grid-column: 2; color: var(--color-fg-secondary); font-size: 0.875rem; }
+/* `anywhere`, because a snippet is a slice of whatever was captured: a URL, a
+   hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
+   the column; this is what stops it spilling out of the one it is in. */
+.judge-title { font-weight: 500; overflow-wrap: anywhere; }
+.judge-snippet {
+  grid-column: 2; color: var(--color-fg-secondary); font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
 /* Reading a candidate before confirming it. Indented under its option and
    quiet, because the snippet answers most of the time and this is the second
    question, not the first. Capped and scrollable so a long artifact cannot
@@ -42,7 +52,10 @@
   width: fit-content;
 }
 .judge-peek > summary:hover { color: var(--color-fg-secondary); }
-.judge-full { max-height: 22rem; overflow-y: auto; margin-top: 0.25rem; }
+/* `overflow`, not `overflow-y`: the capped height was the only thing being
+   thought about, and a wide markdown table or an unwrapped code block inside a
+   peek pushed the page instead of scrolling inside the box that caps it. */
+.judge-full { max-height: 22rem; overflow: auto; margin-top: 0.25rem; }
 .judge-full .md { font-size: 0.875rem; }
 /* Sticky, because the three answers sat below every candidate: twenty-three
    cards at `feedback.candidates` of twenty, and the way out of the question
@@ -51,6 +64,7 @@
    it. */
 .judge-outs {
   position: sticky; bottom: 0; z-index: 1;
+  flex-wrap: wrap; row-gap: 0.375rem;
   margin-bottom: 0; padding: 0.6rem 0;
   background: var(--color-bg-base);
   border-top: 1px solid var(--color-border-subtle);
@@ -63,6 +77,9 @@
 .progress span { display: block; height: 100%; background: var(--color-accent); }
 .misses { max-width: 52rem; margin-bottom: 1.25rem; }
 .misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; }
+/* A query is whatever someone typed, in a monospace list with no spaces to
+   break at. It wraps rather than setting the width of the page. */
+.misses li { overflow-wrap: anywhere; }
 /* The rest of what the camera wrote. Folded, and smaller than the facts above
    it, because it is a reference to fall back on rather than something to read. */
 .exif-all { margin-top: 0.75rem; font-size: 0.8125rem; }

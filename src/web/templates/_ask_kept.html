@@ -1,0 +1,14 @@
+{# What became of the answer, in place of the button that kept it. The chips row
+   swaps itself, so the answer above stays exactly where it was being read. #}
+<div class="chips">
+  {% if duplicate %}
+    <span class="badge badge-muted" title="This text was already stored, so nothing was processed a second time">already in the base</span>
+  {% else if parked %}
+    <span class="badge badge-warning"
+          title="Stored verbatim, but it looks {{ near_dupe_percent }}% like an existing source, so it waits for a decision on Ops before it is processed">stored — waiting on a decision</span>
+    <a class="btn btn-ghost btn-sm" href="/ui/ops">decide on Ops</a>
+  {% else %}
+    <span class="badge badge-success" title="Stored as a source and queued like any other capture">kept</span>
+  {% endif %}
+  <a class="btn btn-ghost btn-sm" href="/ui/corpora/{{ id }}">view source</a>
+</div>

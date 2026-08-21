@@ -78,9 +78,15 @@
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
   border-radius: var(--radius-md); padding: 1rem; margin-bottom: 0.75rem;
 }
-.card-head { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem; }
+/* Wraps, because the badges beside a title are not a fixed width: an answer
+   can carry four of them, and on a phone a non-wrapping row squeezed the title
+   to one letter per line rather than pushing the badges under it. */
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem; }
 .card-title { font-weight: 600; font-size: 0.9375rem; }
+/* Only the first meta is pushed to the right edge. Any that wrap below it start
+   at the left, where a second right-aligned run would read as a second column. */
 .card-meta { margin-left: auto; font-size: 0.75rem; color: var(--color-fg-muted); font-family: var(--font-mono); }
+.card-meta + .card-meta { margin-left: 0; }
 .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.625rem; align-items: center; }
 
 .md { font-size: 0.9375rem; }

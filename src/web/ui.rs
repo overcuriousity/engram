@@ -1047,6 +1047,20 @@ struct AskVerdictTemplate {
     oob: bool,
 }
 
+/// What the keep button leaves behind: the outcome of storing the answer.
+#[derive(Template)]
+#[template(path = "_ask_kept.html")]
+struct AskKeptTemplate {
+    /// The corpus the answer is now — the new one, or the one that already
+    /// held the same bytes.
+    id: String,
+    duplicate: bool,
+    /// Stored but not processed: it resembles something already in the base
+    /// closely enough that an operator decides on Ops first.
+    parked: bool,
+    near_dupe_percent: i64,
+}
+
 #[derive(Template)]
 #[template(path = "_ask_carried.html")]
 struct AskCarriedTemplate {
@@ -3273,6 +3287,57 @@ async fn ask_carried(
     .into_response())
 }
 
+/// Keep an answer: store it as a source, here, without a detour through the
+/// capture box.
+///
+/// The same pipeline as any paste — one corpus, segmented, embedded, searchable
+/// — and the same concession the capture door already made: `origin = "ask"`
+/// and the `ask` metadata, so what the base holds says a model wrote it, from
+/// which question, and from which artifacts. Nothing about it is special
+/// downstream, which is why this works whatever `synthesis` is set to: at
+/// `eager` the windows go to the synthesiser, at `off` and `earned` they are
+/// captured verbatim, and both end in artifacts with vectors.
+///
+/// The answer as the model wrote it, not as the operator retyped it: an
+/// operator who wants to edit first has `edit first` beside this, which is the
+/// old path unchanged.
+async fn ask_keep(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
+    // Unlike the capture door, there is no text to fall back to here: the row
+    // is where the answer lives. A question that retention has already taken
+    // has nothing left to keep, and saying so is better than storing an empty
+    // source or an unprovenanced one.
+    let ev = st.core.store.ask_event(&id).await?.ok_or(Error::NotFound)?;
+    let out = st
+        .core
+        .ingest_capture(
+            crate::core::ingest::Capture::new(&ev.answer, ORIGIN_ASK).with_ask(
+                &ev.id,
+                &ev.question,
+                &ev.citations,
+            ),
+        )
+        .await?;
+    Ok(HtmlTemplate(AskKeptTemplate {
+        id: out.id,
+        duplicate: out.duplicate,
+        parked: out.near_duplicate.is_some(),
+        near_dupe_percent: out
+            .near_duplicate
+            .as_ref()
+            .map(|n| (n.similarity * 100.0).round() as i64)
+            .unwrap_or(0),
+    })
+    .into_response())
+}
+
 /// Neighbours shown beside an artifact. A short list, because this is a way
 /// out of the pane rather than a second result rail.
 const RELATED_LIMIT: usize = 5;
@@ -3632,6 +3697,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
         .route("/ui/ask/{id}/carried", post(ask_carried))
+        .route("/ui/ask/{id}/keep", post(ask_keep))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         .route("/ui/ops", get(ops))
         // One name for the page. The nav word is Housekeeping and the route is
@@ -7527,15 +7593,14 @@ mod tests {
         (app, cookie, handle, html, id)
     }
 
-    /// Prefilled, never saved. The save is the operator's decision, and that is
-    /// the line: this is a person keeping something a model wrote, recorded as
-    /// such, and not the system writing memory to itself.
+    /// The second door, for an operator who wants to rewrite the answer before
+    /// it is stored: prefilled, and nothing saved until they say so.
     #[tokio::test]
-    async fn keeping_an_answer_fills_the_capture_box_and_stores_nothing() {
+    async fn editing_an_answer_first_fills_the_capture_box_and_stores_nothing() {
         let (app, cookie, core, html, id) = ask_recorded().await;
         assert!(
             html.contains(&format!("/ui/capture?from_ask={id}")),
-            "the answer offers no way to keep it: {html}"
+            "the answer offers no way to edit it before keeping it: {html}"
         );
         let before = core.store.list_corpora(100, 0).await.unwrap().len();
 
@@ -7554,6 +7619,57 @@ mod tests {
             before,
             "opening the capture page must store nothing"
         );
+    }
+
+    /// Keep means keep. The button stores the answer where it is read — one
+    /// source, queued for the same pipeline every paste goes through, carrying
+    /// the question and the artifacts it was written from — rather than
+    /// shuttling the text to another page for the operator to save by hand.
+    #[tokio::test]
+    async fn keeping_an_answer_stores_it_and_queues_it_like_any_capture() {
+        let (app, cookie, core, html, id) = ask_recorded().await;
+        assert!(
+            html.contains(&format!("/ui/ask/{id}/keep")),
+            "the answer offers no way to keep it in place: {html}"
+        );
+        let answer = core.store.ask_event(&id).await.unwrap().unwrap().answer;
+
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/ask/{id}/keep"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+
+        let (corpus_id, origin, metadata): (String, String, String) =
+            sqlx::query_as("SELECT id, origin, metadata FROM corpora WHERE raw_text = ?")
+                .bind(&answer)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(origin, "ask", "a kept answer must not read as a paste");
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(meta["ask"]["event_id"], id.as_str());
+        assert_eq!(meta["ask"]["question"], "what is alpha");
+        assert!(
+            meta["ask"]["artifact_ids"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "the artifacts the answer was written from are the provenance: {meta}"
+        );
+        assert!(
+            body.contains(&format!("/ui/corpora/{corpus_id}")),
+            "the operator is not told where the answer went: {body}"
+        );
+        // Queued, not merely stored: the artifacts and their vectors are what
+        // the next stage makes of it, at every synthesis setting.
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE target_id = ?")
+            .bind(&corpus_id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(queued > 0, "a kept answer was stored but never processed");
     }
 
     /// The point of carrying the id through the edit: what is stored says a
@@ -8263,9 +8379,17 @@ mod tests {
         // Outside the posted form still: that form posts urlencoded and the
         // file this note describes goes multipart to a different endpoint.
         assert!(page.contains(r#"form="capture""#), "{page}");
+
+        // The order the work happens in: the file arrives and is held, the note
+        // says what it is, the button sends both. A photo taken on a phone used
+        // to upload the instant the camera handed it back, which put the note
+        // after the send and made it unfillable.
+        let staged = page
+            .find(r#"id="staged""#)
+            .expect("a file waits to be sent rather than going on arrival");
         assert!(
-            page.contains("the file you drop next"),
-            "the note must say it is for a file that has not arrived yet: {page}"
+            staged < note,
+            "what is waiting must sit above the note describing it: {page}"
         );
     }
 

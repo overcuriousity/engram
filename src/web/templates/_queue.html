@@ -65,7 +65,7 @@
        said, and it says nothing at all on the captures that answered
        nothing, which is nearly all of them. #}
     {% if !r.covered.is_empty() %}
-    <div class="qmeta muted">
+    <div class="qanswers">
       answers {% for q in r.covered %}&ldquo;{{ q }}&rdquo;{% if !loop.last %}, {% endif %}{% endfor %}
     </div>
     {% endif %}
