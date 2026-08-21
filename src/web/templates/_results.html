@@ -95,17 +95,14 @@
       </p>
       {% endif %}
     </a>
-    {# Swaps its own row out and leaves the rest of the results alone, so the
-       search you were reading is still on screen afterwards. #}
-    <div class="rail-del">
-      <button class="btn-icon btn-icon-danger" title="Delete artifact"
-              aria-label="Delete artifact"
-              hx-post="/ui/artifacts/{{ r.artifact_id }}/delete"
-              hx-target="closest .rail-row" hx-swap="outerHTML"
-              hx-confirm="Delete this artifact for good? Deprecating hides it instead and can be undone.">
-        {% include "_icon_trash.html" %}
-      </button>
-    </div>
+    {# No delete control here. It was the only irreversible act in the app that
+       could be fired on something nobody had opened — a title, a snippet and a
+       confirm dialog were the whole of what stood behind it — and it was the
+       *only* one-click act a result row offered, so the permanent choice was
+       the easy one and hiding, which can be undone, meant opening the artifact
+       first. A result is an answer to what was typed, not an inventory row.
+       Deleting lives where the artifact is open and readable; a whole bad
+       capture goes from the corpus page in one action. #}
   </div>
   {% endfor %}
   {% if !associated.is_empty() %}

@@ -88,22 +88,12 @@ body { overflow-x: hidden; }
 }
 .rail-item:hover { background: var(--color-bg-hover); }
 
-/* A result row is the link plus a delete control *beside* it, not inside it: a
-   <button> nested in an <a> is invalid HTML, and the anchor has to stay the
-   `.rail-item` because that is the element the arrow-key navigation focuses.
-   The control is held out of the way until the row is hovered or something
-   inside it takes focus, so the rail still reads as a list of results rather
-   than a list of delete buttons. Keyboard users reach it by tabbing, which
-   `:focus-within` reveals; a touch screen has no hover, so there it is simply
-   always visible. */
-.rail-row { position: relative; }
-.rail-row .rail-item { padding-right: 2.75rem; }
-.rail-del {
-  position: absolute; top: 0.5rem; right: 0.5rem;
-  opacity: 0; transition: opacity 120ms ease;
-}
-.rail-row:hover .rail-del, .rail-del:focus-within { opacity: 1; }
-@media (hover: none) { .rail-del { opacity: 1; } }
+/* A result row is the link and nothing else. It carried a delete control until
+   that control turned out to be the only irreversible act in the app that could
+   be fired on something nobody had opened; `.rail-row` stays as the row's own
+   element, and the shape the control needed — a sibling of the anchor, held out
+   of the way until hover or focus — lives on in `.seen-row` below, which still
+   has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
@@ -367,8 +357,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
-  .regions.reading .badge,
-  .regions.reading .rail-row > form { display: none; }
+  .regions.reading .badge { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
   }

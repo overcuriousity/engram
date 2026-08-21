@@ -5999,12 +5999,21 @@ mod tests {
                 "the {word} control has no label"
             );
         }
-        // The square is still right for the controls that repeat down a list,
-        // where the row already says what they act on.
+        // And a result row offers none of them. Deleting from the rail was the
+        // one irreversible act in the app that could be fired on something
+        // nobody had opened, and the only one-click act a result carried — so
+        // the permanent choice was the easy one, while hiding, which can be
+        // undone, meant opening the artifact first. The square icon button is
+        // still right where controls repeat down a list the operator is working
+        // through: the corpus page's own artifacts, and the pairs on Ops.
         let rail = include_str!("templates/_results.html");
         assert!(
-            rail.contains("btn-icon btn-icon-danger"),
-            "the rail's delete stopped being an icon button"
+            !rail.contains("/delete"),
+            "a result row must not delete what it is only showing"
+        );
+        assert!(
+            include_str!("templates/_artifact.html").contains("btn-icon btn-icon-danger"),
+            "the corpus page's artifact list stopped offering delete"
         );
     }
 
