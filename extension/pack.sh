@@ -9,5 +9,5 @@ cd "$(dirname "$0")"
 for browser in chrome firefox; do
   rm -rf "$browser/shared"
   mkdir -p "$browser/shared"
-  cp shared/*.js shared/*.html shared/*.css shared/*.png "$browser/shared/"
+  cp shared/*.js shared/*.html shared/*.css shared/*.png shared/*.woff2 "$browser/shared/"
 done

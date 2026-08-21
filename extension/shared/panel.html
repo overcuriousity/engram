@@ -13,16 +13,34 @@
     <button id="pair" class="primary" type="button">Pair</button>
   </section>
 
-  <button id="capture" class="primary">Capture this page</button>
+  <!-- The one action that is about the page rather than about the box, and the
+       reason most people open the panel. Its own button, naming its own
+       target: the two verbs under the box act on typed text and never on the
+       page, so no control here means two things. -->
+  <button id="capture-page" class="primary" type="button">Capture this page</button>
+
+  <!-- One box for all three verbs. It is a textarea from the first keystroke
+       to the last and never changes shape on its own: typing runs the search
+       under it, and the two buttons below act on exactly what is in it. What
+       decides which of the three happens is a button, never a length or a
+       newline the panel noticed. -->
+  <textarea id="box" rows="3" placeholder="Search, ask, or paste" autocomplete="off"></textarea>
+  <div class="verbs">
+    <button id="ask" class="verb" type="button" disabled>Ask</button>
+    <button id="capture-text" class="verb" type="button" disabled>Capture</button>
+  </div>
+
+  <p id="hint" hidden></p>
   <p id="status" hidden></p>
+  <p id="thinking" hidden></p>
 
-  <label for="q">Search</label>
-  <input id="q" type="search" autocomplete="off">
-
-  <label for="ask">Ask</label>
-  <form id="ask-form"><input id="ask" type="text" autocomplete="off"></form>
-
+  <button id="back" class="quiet" type="button" hidden>← back to results</button>
   <div id="results"></div>
+
+  <section id="recent" hidden>
+    <button id="recent-toggle" class="quiet" type="button">▸ Recent</button>
+    <div id="recent-list" hidden></div>
+  </section>
 
   <button id="forget" class="quiet" type="button" hidden>Forget this deployment</button>
 </main>

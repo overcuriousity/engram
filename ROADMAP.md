@@ -299,6 +299,21 @@ to trust.
 
 ## [Core Platform & Tooling]
 
+- **One text surface for the whole web UI, as the panel now has.** Capture,
+  search and ask are three pages, and moving between them means retyping or
+  carrying a prefill: the same words are a query on one, a question on the
+  second and a document on the third, and the operator navigates to say which.
+  The extension's panel does not. It is one box that never changes shape, with
+  the verb chosen by a button — typing searches, **Ask** spends the model call,
+  **Capture** stores what is in the box — and no state hidden between them.
+  That is the thesis at the top of this file made literal: the box is the
+  application, and the page you are on stops being a thing to decide. It ships
+  in the extension first because a side panel is 350 pixels of one column,
+  which is the cheapest possible place to find out whether one surface really
+  does hold three verbs without any of them getting in the way. If it does, the
+  three pages fold into `/ui/search` and the others become deep links to it.
+  What has to be answered there and not here: where the rail, the filter chips
+  and the judged-verdict bar live when the box is doing all three jobs.
 - **One dial instead of eight gates.** `feedback.enabled`, `[associate]`,
   `[activation]`, `[pursuit]`, `[promote]` and `[consolidate]` are separate
   switches over one faculty, and they depend on each other in ways only the
