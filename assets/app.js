@@ -600,12 +600,117 @@
     box.focus();
   }
 
+  // The situation this page view happened in.
+  //
+  // Synchronous, because htmx reads `hx-vals js:` synchronously. The two
+  // asynchronous sources — the Battery API and the device list — are read once
+  // at load and cached here, so the first page view of a session goes without
+  // them and the server zeroes their blocks rather than inventing a value.
+  //
+  // Deliberately not collected: canvas, WebGL, fonts, plugins. Those identify a
+  // device across a population; here the population is one authenticated
+  // person, so they are constant and say nothing about which situation this is
+  // — and a hardened browser randomises them per session, so every day would
+  // look like a new device.
+  var slow = { battery_level: null, charging: null, audio_outputs: null };
+
+  function primeSlow() {
+    if (navigator.getBattery) {
+      navigator.getBattery().then(function (b) {
+        slow.battery_level = b.level;
+        slow.charging = b.charging;
+      }).catch(function () {});
+    }
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then(function (list) {
+        slow.audio_outputs = list.filter(function (d) {
+          return d.kind === 'audiooutput';
+        }).length;
+      }).catch(function () {});
+    }
+  }
+
+  function uaFamily() {
+    var d = navigator.userAgentData;
+    if (d && d.brands) {
+      for (var i = 0; i < d.brands.length; i++) {
+        // Chromium pads the list with a deliberately absurd brand to break
+        // exactly the kind of sniffing this is not doing; skip it.
+        if (!/Not.*Brand/i.test(d.brands[i].brand)) return d.brands[i].brand;
+      }
+    }
+    var m = /(Firefox|Edg|Chrome|Safari)\/[\d.]+/.exec(navigator.userAgent || '');
+    return m ? m[1] : null;
+  }
+
+  function netKind() {
+    var c = navigator.connection || navigator.mozConnection;
+    if (!c) return null;
+    if (c.type) return c.type;
+    // `effectiveType` describes speed rather than medium, and calling a slow
+    // wifi "cellular" would be inventing a fact. Absent instead.
+    return null;
+  }
+
+  window.engramContext = function () {
+    var b = {};
+    try {
+      b.tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+      b.tz_offset_mins = -new Date().getTimezoneOffset();
+      b.language = navigator.language || null;
+      b.languages = navigator.languages ? Array.prototype.slice.call(navigator.languages) : [];
+      b.viewport_w = window.innerWidth;
+      b.viewport_h = window.innerHeight;
+      b.screen_w = screen.width;
+      b.screen_h = screen.height;
+      b.dpr = window.devicePixelRatio;
+      b.color_scheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      b.platform = (navigator.userAgentData && navigator.userAgentData.platform)
+        || navigator.platform || null;
+      b.ua_family = uaFamily();
+      b.cores = navigator.hardwareConcurrency || null;
+      b.memory_gb = navigator.deviceMemory || null;
+      b.touch = navigator.maxTouchPoints > 0;
+      b.orientation = window.innerHeight >= window.innerWidth ? 'portrait' : 'landscape';
+      b.network = netKind();
+      b.battery_level = slow.battery_level;
+      b.charging = slow.charging;
+      b.audio_outputs = slow.audio_outputs;
+    } catch (e) {
+      // A partial bundle is a working one: the blocks it could not fill are
+      // zeroed server-side, and the weekday and the hour still stand.
+    }
+    return JSON.stringify(b);
+  };
+
+  // Removed on the first keystroke, and it does not come back when the box is
+  // cleared. The flag is what covers the race: the fetch fires on `load`, and
+  // its answer can land *after* the first keystroke — without this, an offer
+  // already dismissed would swap itself back in.
+  var offerDismissed = false;
+
+  function dropOffer() {
+    var area = document.getElementById('context-offer');
+    if (area) area.remove();
+  }
+
+  function contextOffer() {
+    var box = document.querySelector('input[name=q]');
+    if (!box) return;
+    box.addEventListener('input', function () {
+      offerDismissed = true;
+      dropOffer();
+    }, { once: true });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     commandBar();
     claimPaste();
     themeToggle();
     keyHint();
+    primeSlow();
+    contextOffer();
     restoreReading();
     askDriver();
     trackDwell();
@@ -625,6 +730,10 @@
       window.location.assign('/auth/login?go=' + encodeURIComponent(here));
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
+      // The offer's own fetch can land after the first keystroke has already
+      // dismissed it. Swapping it back in then would be exactly the flicker the
+      // removal exists to prevent.
+      if (e.target.id === 'context-offer' && offerDismissed) dropOffer();
       enhance(e.target);
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.

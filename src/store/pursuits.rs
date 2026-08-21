@@ -115,6 +115,38 @@ impl Store {
         Ok(())
     }
 
+    /// What this base offered, and whether it was taken.
+    ///
+    /// `kind` is `recommended_shown` or `recommended_open`. Both live in
+    /// `interaction_events` because both are things that happened after a page
+    /// rendered — but neither counts as an ordinary open: the context sweep
+    /// reads `recommended_open` at `recommend.self_weight` and ignores
+    /// `recommended_shown` entirely, and the pursuit sweep skips the latter too.
+    ///
+    /// `detail` carries the rung and the winning cluster as JSON, which is what
+    /// makes the Ops hit rate a breakdown rather than one number.
+    pub async fn record_recommendation(
+        &self,
+        artifact_id: &str,
+        kind: &str,
+        detail: &str,
+        scope: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(artifact_id)
+        .bind(kind)
+        .bind(detail)
+        .bind(scope)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Interactions with `from < at <= to`, oldest first.
     pub async fn interactions_between(&self, from: i64, to: i64) -> Result<Vec<Interaction>> {
         let rows = sqlx::query(

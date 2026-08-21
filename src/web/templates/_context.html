@@ -1,0 +1,32 @@
+{# The area under the search box. Fetched rather than rendered because the
+   bundle originates in the browser and the server does not have it at first
+   render — `search_page` puts a placeholder here with reserved height, and this
+   replaces it.
+
+   Three parts, all cheap: the rung name, which is one of four fixed strings;
+   the blocks that decided it, which are `&'static str` labels sorted by
+   contribution; and the representative event's stamp, which is one date format.
+   No sentences are generated anywhere — a new block in the encoder brings its
+   own label and needs no template written for it. Generated prose per block was
+   the first draft and was cut, because it coupled every new dimension to a
+   sentence somebody had to keep in step with it.
+
+   The id is kept on the answer as well as on the placeholder: app.js removes
+   this area on the first keystroke, and it needs something to remove whichever
+   of the two is on screen when that happens. #}
+<div id="context-offer" class="offer">
+{% if let Some(o) = offer %}
+  <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
+  <p class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
+    {# `serde_json` over the raw bundle plus the contribution numbers, inside a
+       `<details>`. No formatting code, and it satisfies "the parameters must be
+       visible" completely: whoever wants to know exactly, expands it. It is
+       also the answer to what is being collected — inspectable rather than
+       promised. #}
+    <details class="offer-detail">
+      <summary>Details</summary>
+      <pre class="mono">{{ o.detail }}</pre>
+    </details>
+  </p>
+{% endif %}
+</div>

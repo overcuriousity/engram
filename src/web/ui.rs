@@ -631,6 +631,9 @@ struct SearchTemplate {
     /// What this sitting has been in. Absent on a cold sitting — an empty box
     /// saying "nothing yet" is worse than no box.
     sitting: Vec<SittingItem>,
+    /// Whether the area under the search box exists at all. See
+    /// `Core::recommends`.
+    recommend: bool,
 }
 
 #[derive(Template)]
@@ -1247,8 +1250,117 @@ async fn search_page(
         facets,
         category,
         sitting: sitting_rail(&st, &id).await,
+        recommend: st.core.recommends(),
     })
     .into_response())
+}
+
+/// One offer, flattened for the template. Every decision — which rung, which
+/// blocks, how the stamp reads — is made here, so the template holds no logic
+/// and a new block in the encoder changes no markup.
+#[derive(Default)]
+pub struct OfferView {
+    pub id: String,
+    pub title: String,
+    /// One of four fixed strings. See `Rung::line`.
+    pub rung: &'static str,
+    /// The blocks that decided it, joined. Empty on the lower two rungs.
+    pub blocks: String,
+    /// `08.08., 15:04`, or empty.
+    pub when: String,
+    /// `?rec=<slot>&rung=<rung>`, or empty — what tells `artifact_detail` this
+    /// open came from an offer, and which rung it was offered on.
+    pub rec: String,
+    /// The raw bundle and the contribution numbers, for the `<details>`.
+    pub detail: String,
+}
+
+#[derive(Template, Default)]
+#[template(path = "_context.html")]
+struct ContextTemplate {
+    offer: Option<OfferView>,
+}
+
+#[derive(serde::Deserialize)]
+struct ContextForm {
+    #[serde(default)]
+    bundle: String,
+}
+
+/// One endpoint, two jobs: it writes the situation and answers with the
+/// fragment. Recording happens even when nothing is recommended — a base that
+/// has learned nothing yet is exactly the one that most needs its situations
+/// written down.
+async fn context_offer(
+    State(st): State<AppState>,
+    id: Identity,
+    Form(f): Form<ContextForm>,
+) -> Result<Response> {
+    if !st.core.recommends() {
+        return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
+    }
+    let bundle = crate::core::context::parse_bundle(&f.bundle);
+    st.core
+        .record_context_event(&f.bundle, &bundle, Some(&id.subject));
+
+    // A recommendation that cannot be computed is not worth a 500: the area is
+    // what it was yesterday, which is empty.
+    let offer = st
+        .core
+        .offer(Some(&id.subject), &bundle, id.session.as_deref())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not build a recommendation");
+            None
+        });
+
+    if let Some(o) = &offer {
+        st.core.record_recommendation(
+            &o.artifact_id,
+            "recommended_shown",
+            o.rung.as_str(),
+            o.slot,
+            Some(&id.subject),
+        );
+    }
+    Ok(HtmlTemplate(ContextTemplate {
+        offer: offer.map(offer_view),
+    })
+    .into_response())
+}
+
+fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
+    OfferView {
+        rung: o.rung.line(),
+        blocks: o.blocks.join(", "),
+        // The device's own reading of when this happened, in the zone it
+        // happened in. One date format, and the whole of the third part of the
+        // line.
+        when: o
+            .at
+            .map(|at| {
+                let t = crate::core::context::local_time(at, o.at_tz.as_deref(), None);
+                format!(
+                    "{:02}.{:02}., {:02}:{:02}",
+                    t.day,
+                    t.month,
+                    t.hour as u32,
+                    ((t.hour % 1.0) * 60.0).round() as u32
+                )
+            })
+            .unwrap_or_default(),
+        // The rung rides on the link because that is the only place it still
+        // exists: the offer was computed on a previous request, and Ops's
+        // breakdown is a breakdown only if the click knows which rung it came
+        // from.
+        rec: match o.slot {
+            Some(s) => format!("?rec={s}&rung={}", o.rung.as_str()),
+            None => String::new(),
+        },
+        id: o.artifact_id,
+        title: o.title,
+        detail: o.detail,
+    }
 }
 
 /// Append `value` to a facet row if the store did not report it. `count` is 0
@@ -3669,6 +3781,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/search", get(search_page))
         .route("/ui/search/results", get(search_results))
+        .route("/ui/context", post(context_offer))
         .route("/ui/queue", get(queue_fragment))
         // An installed PWA may still hold /ui/browse as its start URL, and a
         // bookmark outlives the page it pointed at.
@@ -4983,6 +5096,193 @@ mod tests {
         assert_eq!(
             core.store.get_corpus(&id).await.unwrap().status,
             CorpusStatus::Describing
+        );
+    }
+
+    /// A session with the recommender on, plus one artifact old enough and
+    /// unseen enough that `resurface` returns it.
+    async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        let store = core.store.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "when the recycling centre is open".into(),
+                    corpus_span: None,
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; 8],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: a.id.clone(),
+                    corpus_id: src.id.clone(),
+                    text: a.text.clone(),
+                    title: Some("recycling centre".into()),
+                    category: None,
+                    tags: vec![],
+                    created_at: 0,
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        // Held so a test can drain the recording writes rather than sleep.
+        BACKGROUND.with(|b| *b.borrow_mut() = Some(background));
+        (app, cookie, store, a.id)
+    }
+
+    thread_local! {
+        static BACKGROUND: std::cell::RefCell<Option<std::sync::Arc<crate::core::background::Background>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The recording writes run off the request path. Drain them rather than
+    /// sleeping and hoping.
+    async fn drain() {
+        let b = BACKGROUND.with(|b| b.borrow().clone());
+        if let Some(b) = b {
+            b.wait_idle().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_page_view_is_recorded_even_when_nothing_is_offered() {
+        // The endpoint has two jobs and does the first unconditionally. A base
+        // that has learned nothing yet is exactly the base that most needs its
+        // situations written down.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/context",
+                &cookie,
+                "bundle=%7B%22tz%22%3A%22Europe%2FBerlin%22%7D",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+
+        let rows = store.context_events_since(0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tz.as_deref(), Some("Europe/Berlin"));
+        assert!(rows[0].local_hour.is_some(), "denormalised for the sweep");
+        assert!(rows[0].weekday.is_some());
+        assert_eq!(rows[0].scope.as_deref(), Some("user-1"));
+        // Stored whole, including what the encoder does not read today.
+        assert!(rows[0].bundle.contains("Europe/Berlin"));
+    }
+
+    #[tokio::test]
+    async fn a_bundle_the_browser_could_not_build_does_not_break_the_page() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7Bnope"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "an empty bundle still works");
+        background.wait_idle().await;
+        assert_eq!(store.context_events_since(0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_area_is_not_rendered_when_the_faculty_is_off() {
+        // One gate, in one place: no placeholder, no request, nothing recorded.
+        let core = crate::core::test_support::test_core().await;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(!page.contains("/ui/context"), "no placeholder");
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+        assert!(store.context_events_since(0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_placeholder_reserves_its_height_so_the_page_does_not_jump() {
+        let (app, cookie, _store, _aid) = app_recommending().await;
+        let page = get(&app, "/ui/search", &cookie).await;
+        assert!(page.contains(r#"id="context-offer""#));
+        assert!(page.contains(r#"hx-post="/ui/context""#));
+        assert!(page.contains("engramContext()"));
+        // The class the reserved height hangs off.
+        assert!(page.contains(r#"class="offer""#));
+    }
+
+    #[tokio::test]
+    async fn what_was_offered_is_written_down_with_its_rung() {
+        // Shown against clicked, broken down by rung, is a hit rate. It is the
+        // only number that can later settle whether the weights are right, and
+        // a recommender with no visible hit rate becomes `[sitting] prime`:
+        // a default nobody ever measured.
+        let (app, cookie, store, aid) = app_recommending().await;
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(body.contains("Not seen in a long time"), "{body}");
+        assert!(body.contains(&aid), "{body}");
+        // Nothing was matched, so nothing is named — the bottom rung does not
+        // borrow a pattern's wording.
+        assert!(!body.contains(" · weekday"), "{body}");
+        drain().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let shown: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == "recommended_shown")
+            .collect();
+        assert_eq!(shown.len(), 1);
+        assert!(
+            shown[0].detail.as_deref().unwrap().contains("forgotten"),
+            "{:?}",
+            shown[0].detail
         );
     }
 

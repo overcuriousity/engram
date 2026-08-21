@@ -592,6 +592,46 @@ mod tests {
     const FRIDAY: i64 = FRIDAY_1352_UTC;
 
     #[test]
+    fn the_browser_sends_exactly_the_fields_this_struct_reads() {
+        // The one seam in this feature with a compiler on neither side: the
+        // bundle is assembled in `assets/app.js` and parsed here, and a field
+        // renamed on one side is silently `None` on the other — a block that
+        // quietly stops contributing, with nothing failing anywhere.
+        //
+        // Both files are in the repository, so the check is just reading them.
+        let js = include_str!("../../assets/app.js");
+        let sent: std::collections::BTreeSet<&str> = js
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("b."))
+            .filter_map(|l| l.split_once(" = "))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!sent.is_empty(), "found no bundle assignments in app.js");
+
+        // The struct's own field list, read off the source rather than kept by
+        // hand — a hand-kept list is the thing everyone forgets to append to.
+        let src = include_str!("context.rs");
+        let body = src
+            .split_once("pub struct Bundle {")
+            .expect("Bundle struct")
+            .1
+            .split_once("\n}")
+            .expect("end of Bundle")
+            .0;
+        let expected: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(name, _)| name)
+            .collect();
+
+        assert_eq!(
+            sent, expected,
+            "app.js and Bundle disagree about what a situation is"
+        );
+    }
+
+    #[test]
     fn the_layout_adds_up() {
         // The one invariant everything else rests on: a block that overlaps its
         // neighbour would silently mix two meanings into one dimension, and

@@ -93,6 +93,20 @@
   {% endif %}
 </form>
 
+{# Reserved height, so the answer landing does not push the hint and the chips
+   down a page that has already been read. The offer is for the state "no intent
+   expressed yet" — app.js removes it on the first keystroke, and it does not
+   come back when the box is cleared: once there is an intent the offer is
+   wrong, and reappearing because someone corrected a typo is flicker. It
+   returns on the next page view.
+
+   Without JavaScript the area stays empty, which is the honest failure: the
+   bundle is the browser's to send. #}
+{% if recommend %}
+<div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
+     hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
+{% endif %}
+
 {# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
    a hint that cannot be dismissed is a banner. Hidden until app.js decides
    there is a keyboard to use it with. #}

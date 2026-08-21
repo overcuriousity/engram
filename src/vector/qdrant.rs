@@ -1789,8 +1789,15 @@ impl VectorStore for QdrantVectors {
         // payload — see the comment on `upsert` — and clearing `status` puts
         // every artifact the sweep hid straight back into search, on every
         // sweep run. This endpoint does not touch payload at all.
-        let (path, body) = match vectors.is_empty() {
+        // Update is PUT, delete is POST. Not symmetrical, and not a guess: the
+        // update was written as POST first, and Qdrant 1.19 answered 404 —
+        // which `call_absent_point_as_none` then read as "no such point" and
+        // swallowed, so the sweep wrote its clusters to SQLite, reported `ok`,
+        // and left the index with no `ctx` set at all. Nothing but running it
+        // against a real Qdrant would have caught that.
+        let (method, path, body) = match vectors.is_empty() {
             true => (
+                Method::POST,
                 format!(
                     "/collections/{}/points/vectors/delete?wait=true",
                     self.alias
@@ -1798,6 +1805,7 @@ impl VectorStore for QdrantVectors {
                 json!({ "points": [id], "vector": [CTX] }),
             ),
             false => (
+                Method::PUT,
                 format!("/collections/{}/points/vectors?wait=true", self.alias),
                 json!({ "points": [{ "id": id, "vector": { CTX: vectors } }] }),
             ),
@@ -1806,9 +1814,17 @@ impl VectorStore for QdrantVectors {
         // an artifact whose embedding never ran has no point, and a sweep that
         // errored on one would take the whole run down over an artifact that
         // has nothing to attach a set to.
-        let _: Option<Value> = self
-            .call_absent_point_as_none(Method::POST, &path, Some(body))
-            .await?;
+        //
+        // `missing_point_only` rather than the broader helper: that one accepts
+        // any 404 on a live collection, which is exactly how a wrong verb read
+        // as a missing point. Here only Qdrant actually saying so counts.
+        let (status, text) = self.send(method, &path, Some(body)).await?;
+        if status == reqwest::StatusCode::NOT_FOUND && text.contains("No point with id") {
+            return Ok(());
+        }
+        if !status.is_success() {
+            return Err(Error::Vector(format!("{path}: {}", text.trim())));
+        }
         Ok(())
     }
 

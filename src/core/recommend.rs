@@ -250,6 +250,78 @@ impl Core {
     }
 }
 
+impl Core {
+    /// Write down the situation this page view happened in.
+    ///
+    /// Off the request path: a page view must not get slower, or fail, because
+    /// a bookkeeping write did — and a situation dropped at shutdown is a
+    /// Friday afternoon the base never learns about, which is why it goes
+    /// through `background` rather than a bare `tokio::spawn`.
+    ///
+    /// The raw string is stored whole, including the fields the encoder does
+    /// not read today; the denormalised columns are what the sweep reads on
+    /// every row.
+    pub fn record_context_event(&self, raw: &str, bundle: &Bundle, scope: Option<&str>) {
+        if !self.recommends() {
+            return;
+        }
+        let at = self.clock.now();
+        let t = crate::core::context::local_time(at, bundle.tz.as_deref(), bundle.tz_offset_mins);
+        let row = crate::store::context::ContextEvent {
+            id: 0,
+            scope: scope.map(str::to_string),
+            at,
+            bundle: raw.to_string(),
+            device_key: crate::core::context::device_key(bundle),
+            local_hour: Some(t.hour as i64),
+            weekday: Some(t.weekday as i64),
+            tz: bundle.tz.clone(),
+        };
+        let store = self.store.clone();
+        self.background.spawn(async move {
+            if let Err(e) = store.record_context(&row).await {
+                tracing::warn!(error = %e, "could not record the situation of a page view");
+            }
+        });
+    }
+
+    /// Write down that something was offered, or that the offer was taken.
+    ///
+    /// Shown against clicked, broken down by rung, is a hit rate — the only
+    /// number that can later settle whether the block weights are right. They
+    /// are chosen, not measured, and a recommender with no visible hit rate
+    /// becomes `[sitting] prime`: a default nobody ever moved because nobody
+    /// could see its effect.
+    pub fn record_recommendation(
+        &self,
+        artifact_id: &str,
+        kind: &str,
+        rung: &str,
+        slot: Option<i64>,
+        scope: Option<&str>,
+    ) {
+        if !self.recommends() {
+            return;
+        }
+        let detail = serde_json::json!({ "rung": rung, "slot": slot }).to_string();
+        let (store, id, kind, scope) = (
+            self.store.clone(),
+            artifact_id.to_string(),
+            kind.to_string(),
+            scope.map(str::to_string),
+        );
+        let at = self.clock.now();
+        self.background.spawn(async move {
+            if let Err(e) = store
+                .record_recommendation(&id, &kind, &detail, scope.as_deref(), at)
+                .await
+            {
+                tracing::warn!(error = %e, "could not record what was offered");
+            }
+        });
+    }
+}
+
 fn title_of(p: &crate::vector::VectorPayload) -> String {
     p.title
         .clone()
