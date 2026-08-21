@@ -5,6 +5,8 @@ use crate::store::jobs::{FailedJob, Stage};
 use crate::web::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
@@ -939,6 +941,133 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
     }))
 }
 
+/// The same ask, streamed, for a client that cannot wait in one request.
+///
+/// The browser extension's panel is the caller this exists for. `/ui/ask` would
+/// not serve it three times over: it parks the question and streams from a
+/// second GET, because a page navigates and an `EventSource` cannot POST; it
+/// records against `Door::Ui`; and its frames carry rendered HTML. The panel
+/// has none of those problems and one the page does not — it reads the stream
+/// by hand with `fetch`, since `EventSource` cannot carry a bearer header — so
+/// one POST that streams its own response is the shape that fits.
+///
+/// One question, one request, and no handoff to expire.
+async fn ask_stream(
+    State(st): State<AppState>,
+    id: Identity,
+    Json(req): Json<crate::core::ask::AskRequest>,
+) -> Result<Response> {
+    // No ask model, no ask door: the route is not there. See `Core::asks`.
+    if !st.core.asks() {
+        return Err(Error::NotFound);
+    }
+    use tokio_stream::StreamExt as _;
+
+    let core = st.core.clone();
+    // The door an ask came through, which names the caller and nothing more.
+    // Unlike search, where `door=extension` decides how the query is recorded,
+    // no ask is recorded from here: `record_ask` admits `Door::Ui` alone, so
+    // this answer carries no `event_id` and is never judged. Named anyway,
+    // because a question composed while reading is a different thing from one
+    // typed into an API client, and the log should not have to guess.
+    let origin = crate::store::feedback::Door::Extension.by(id.subject);
+    let events = async_stream::stream! {
+        let s = core.ask_events(&req, origin);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            // Every arm is a frame, and the stream itself never fails. Yielding
+            // an `Err` into `Sse` ends the response body where it stands, with
+            // no frame at all — from the panel that is indistinguishable from
+            // an answer that simply stopped, `thinking` still on screen and
+            // nothing said. A failure that has words is worth the words.
+            yield Ok::<_, Error>(match ev {
+                // Terminal by construction: the producer is a `try_stream!` and
+                // ends at its first error, so the panel sees one `error` frame
+                // and nothing after it.
+                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
+                Err(e) => error_frame(&e),
+            });
+        }
+    };
+    // Kept alive for the same reason the page's stream is: a slow model thinks
+    // for longer than a proxy's idle timeout, and a connection closed
+    // mid-answer looks exactly like an answer that ended.
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// A failure the panel can read, in the shape every other frame has.
+///
+/// JSON like the rest of them, so the panel's reader has one shape to parse
+/// rather than one payload that is a value and one that is a bare sentence.
+///
+/// The words are `client_message`'s, not `Display`'s, for the reason the JSON
+/// error body uses them: a store or LLM-parse failure carries schema and
+/// prompt fragments, and a stream is no less a door than a status code. This
+/// is also where the detail goes to the log, since a frame yielded from inside
+/// the body never reaches `IntoResponse` and would otherwise fail in silence.
+fn error_frame(e: &Error) -> SseEvent {
+    if e.status().is_server_error() {
+        tracing::error!(error = %e, "ask stream failed");
+    } else {
+        tracing::debug!(error = %e, "ask stream rejected");
+    }
+    SseEvent::default()
+        .event("error")
+        .data(serde_json::json!({ "error": e.client_message() }).to_string())
+}
+
+/// One ask event as a JSON frame.
+///
+/// The twin of `sse_event` in `ui.rs`, and deliberately not the same function.
+/// That one renders the rail and the answer into HTML, because the page's two
+/// halves of a citation have to be numbered by one server-side pass. The panel
+/// builds every node with `textContent` — artifact text is whatever a captured
+/// page contained — so it is sent values and renders them itself.
+///
+/// The frame names are shared with that mapper, and a test asserts the panel
+/// names every one of them.
+fn api_sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
+    use crate::core::ask::stream::AskEvent::*;
+    let (name, data) = match ev {
+        Retrieved {
+            round,
+            retrieved,
+            shown,
+            dropped,
+            cliff_at,
+        } => (
+            "retrieved",
+            serde_json::json!({
+                "round": round,
+                "retrieved": retrieved,
+                "shown": shown,
+                "dropped": dropped,
+                "cliff_at": cliff_at,
+            }),
+        ),
+        Needs(what) => ("needs", serde_json::json!({ "queries": what })),
+        Citations(hits) => ("citations", serde_json::json!({ "hits": hits })),
+        Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
+        Token(t) => ("token", serde_json::json!({ "text": t })),
+        // The whole response, which is what the blocking door returns: the
+        // panel replaces its streamed draft with it, so what is finally on
+        // screen is the answer the server stands behind rather than a
+        // concatenation the panel assembled.
+        Done(d) => (
+            "done",
+            // Every field is a string, a number or a list of those, so this
+            // cannot fail for any input the type admits. Returned rather than
+            // unwrapped because a panic here would kill the stream mid-answer
+            // with nothing said; the caller turns it into an `error` frame.
+            serde_json::to_value(*d)
+                .map_err(|e| Error::Internal(format!("the answer would not serialise: {e}")))?,
+        ),
+    };
+    Ok(SseEvent::default().event(name).data(data.to_string()))
+}
+
 pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
@@ -961,6 +1090,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
         .route("/ask", post(ask))
+        .route("/ask/stream", post(ask_stream))
         .route("/resurface", get(resurface))
         .route("/consolidation", get(consolidation))
         .route("/consolidation/stale", get(stale))
@@ -1918,6 +2048,7 @@ pub(crate) mod tests {
             ("DELETE", "/api/v1/corpora/abc"),
             ("POST", "/api/v1/corpora/abc/reprocess"),
             ("POST", "/api/v1/ask"),
+            ("POST", "/api/v1/ask/stream"),
             ("GET", "/api/v1/artifacts/abc"),
             ("PATCH", "/api/v1/artifacts/abc"),
             ("DELETE", "/api/v1/artifacts/abc"),
@@ -2234,10 +2365,113 @@ pub(crate) mod tests {
         core.completer = None;
         let (app, token) = app_with_token(core).await;
         let res = app
-            .oneshot(post_json("/ask", &token, serde_json::json!({"q": "x"})))
+            .oneshot(post_json(
+                "/api/v1/ask",
+                &token,
+                serde_json::json!({"q": "x"}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The streaming twin of `/ask`, as the extension panel performs it: one
+    /// POST carrying the bearer, and the answer arriving in frames.
+    #[tokio::test]
+    async fn api_ask_streams_the_answer_in_json_frames() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/ask/stream",
+                &token,
+                serde_json::json!({"q": "what is alpha"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream"),
+            "{:?}",
+            res.headers()
+        );
+
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(body.contains("event: token"), "no tokens in {body}");
+
+        // The panel builds every node with `textContent`, so the frames it is
+        // sent are values rather than the UI route's rendered fragments. The
+        // `done` frame therefore carries the whole `AskResponse`.
+        let done = body
+            .split("event: done")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no done frame in {body}"))
+            .lines()
+            .find_map(|l| l.strip_prefix("data:"))
+            .and_then(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+            .unwrap_or_else(|| panic!("the done frame carried no JSON: {body}"));
+        assert!(done["answer"].is_string(), "{done}");
+        assert!(done["citations"].is_array(), "{done}");
+        assert!(!body.contains('<'), "a frame carried markup: {body}");
+    }
+
+    #[tokio::test]
+    async fn api_ask_stream_is_not_found_without_an_ask_model() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.completer = None;
+        let (app, token) = app_with_token(core).await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/ask/stream",
+                &token,
+                serde_json::json!({"q": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The panel reads this stream by hand — `EventSource` cannot carry a
+    /// bearer header — so a frame the server sends and the panel's switch does
+    /// not name is a frame that vanishes silently. The same guard `app.js` has
+    /// against `sse_event` in `ui.rs`, pointed at the other mapper.
+    #[tokio::test]
+    async fn every_frame_the_api_streams_is_handled_by_the_panel() {
+        let api = include_str!("api.rs");
+        let body = &api[api
+            .find("fn api_sse_event(")
+            .expect("api_sse_event is in this file")..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let names: Vec<String> = body
+            .split('(')
+            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            names.len() >= 6,
+            "the frame names could not be read out of api_sse_event: {names:?}"
+        );
+
+        let panel = include_str!("../../extension/shared/panel.js");
+        for name in names {
+            assert!(
+                panel.contains(&format!("case '{name}':")),
+                "the server streams a `{name}` frame and the panel ignores it"
+            );
+        }
     }
 }
 

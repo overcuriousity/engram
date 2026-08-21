@@ -270,7 +270,10 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_marker_is_left_alone() {
         // No space after the dot: not a list to CommonMark, and not one here.
-        assert_eq!(stand_in_title("1.9. Termin im Mai", 60), "1.9. Termin im Mai");
+        assert_eq!(
+            stand_in_title("1.9. Termin im Mai", 60),
+            "1.9. Termin im Mai"
+        );
         // Nothing for the marker to mark: an empty list item, which flattens
         // to nothing at all, exactly as `---` does. `title_of` falls back to
         // the id there rather than showing a name that is one number.

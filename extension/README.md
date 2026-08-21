@@ -36,9 +36,15 @@ browser.
 - [ ] Chrome: load unpacked, click the toolbar icon.
 - [ ] Firefox: load the temporary add-on, click the toolbar icon.
 
-Expected in both: a side panel holding a "Capture this page" button, a search
-box, an ask box, and an empty results area. Nothing else — no explanatory copy
-beyond the field labels.
+Expected in both: a side panel holding a "Capture this page" button, one text
+box, an Ask and a Capture button under it — both greyed while the box is empty
+— a collapsed "Recent", and an empty results area. Nothing else, and no
+explanatory copy at all.
+
+- [ ] It is engram's face, not a generic one: warm paper in light mode, the
+      deployment's dark palette in dark mode, and Inter rather than the
+      browser's UI font. The fonts are packaged, so this holds with engram
+      stopped and the machine offline.
 
 ### 2. Pairing
 
@@ -104,19 +110,62 @@ one that has to be in the header.
       Expected: the read-pages permission was handed back with the token, so
       the prompt appears again.
 
-### 4. Search and ask
+### 4. The box: search, ask, capture
 
-- [ ] Type into Search. Results appear as you type; clicking one opens that
+One box, three verbs, and which one happens is always a button or the act of
+typing — never something the panel inferred.
+
+- [ ] Type into the box. Results appear as you type; clicking one opens that
       artifact on the deployment in a new tab.
 - [ ] With `feedback.enabled = true`, search once from the panel and once
       from `/ui/search`, then open `/ui/judge`.
       Expected: two events, one against the `extension` door and one against
       `ui`. That distinction is the point — a query typed in the panel while
       reading was composed before anything came back.
-- [ ] Type a question into Ask and submit.
-      Expected: the panel keeps waiting (up to `infer.ask.timeout_secs`,
-      default 900) and eventually renders the answer, without closing or
-      clearing. This is why it is a panel and not a popup.
+- [ ] Paste several paragraphs into the box.
+      Expected: the box grows to fit and then scrolls; it does not change
+      shape, relabel itself, or switch modes. Past 2000 characters the live
+      search stops firing and a line says so — the only thing length changes,
+      and it changes it in as many words rather than silently.
+- [ ] Press Capture with text in the box.
+      Expected: "Captured.", the box empties, and the document is under Recent
+      on `/ui/capture` with origin `web`. Nothing was fetched and no page was
+      read — this is the paste door, and it is the same `POST
+      /api/v1/corpora` the web UI's paste box uses.
+- [ ] Press Capture again immediately.
+      Expected: nothing happens. The two verbs are greyed while the box is
+      empty, so there is no way to capture the same paste twice by reflex.
+- [ ] Press Ask with a question in the box.
+      Expected: the results area clears, a muted line reports retrieval, and
+      then **the answer arrives a word at a time** rather than after a wait.
+      Citations appear under it. This is `POST /api/v1/ask/stream`; the panel
+      reads it with `fetch` because `EventSource` cannot carry a bearer
+      header.
+- [ ] While an answer is streaming, press "← back to results".
+      Expected: the search results for the same words are back, and when the
+      answer finishes it does **not** overwrite them. An ask that is no longer
+      on screen is dropped rather than written into what replaced it.
+- [ ] Ask something the base has nothing for.
+      Expected: the abstention, and a line saying the base had nothing.
+- [ ] Let an ask run to the end and read the line under it. Where the answer
+      carries a command or a number that no excerpt does, it is named there.
+- [ ] With `[infer.ask]` unconfigured, press Ask.
+      Expected: a plain failure, not a hang. The route is a 404 when there is
+      no ask model, exactly as `/api/v1/ask` is.
+
+### 4a. Recent
+
+- [ ] Press "Recent".
+      Expected: it opens and lists the last few captures with their status,
+      each linking to its corpus on the deployment. A paste with no title is
+      named by its own first line.
+- [ ] Capture something with Recent open.
+      Expected: the list refetches and the new capture is on it — first
+      `raw` or `segmenting`, then `ready` on a later open. This is what makes
+      "Captured." evidence rather than a claim the panel makes about itself.
+- [ ] Capture something with Recent closed.
+      Expected: no request for the list at all. A collapsed list is not
+      fetched.
 
 ### 5. Outside the panel
 
@@ -125,7 +174,8 @@ one that has to be in the header.
 - [ ] Press each. The panel opens (if closed) with the selection searched, or
       the selection captured.
 - [ ] Type `eg`, space, a query, Enter in the address bar. The panel opens
-      with that query searched.
+      with that query searched, and the query is in the box — where Ask and
+      Capture can then act on it.
 - [ ] Do the omnibox and context-menu cases with the panel **closed** first.
       The panel has to register its message listener before the background
       script sends work; `shared/background.js` holds the work and the panel
@@ -149,16 +199,22 @@ one that has to be in the header.
       would otherwise leave the panel unusable short of reinstalling.
 - [ ] Pair again from that state. It works, with no clearing of extension
       storage in between.
+- [ ] Stop engram, press Ask.
+      Expected: "engram is unreachable." The stream and the ordinary call go
+      through one `send`, so they fail in the same words.
 - [ ] Press "Forget this deployment".
-      Expected: the address field returns, and the host disappears from
+      Expected: the address field returns, Recent goes with it, and the host
+      disappears from
       Chrome's Site access / Firefox's Permissions. The token is still listed
       in Housekeeping — the panel says so rather than implying it revoked it.
 
-### 7. Icons
+### 7. Icons and fonts
 
 - [ ] The toolbar button shows the engram mark, not a puzzle piece or a grey
       letter.
 - [ ] `chrome://extensions` and `about:addons` show it beside the name.
+- [ ] With the machine offline, the panel still renders in Inter. The two
+      weights are inside the package; nothing is fetched from the deployment.
 
 ## Two things I could not check while writing this
 
@@ -212,6 +268,10 @@ git add extension/firefox-signed.xpi
 ```
 
 ### Icons
+
+`extension/shared/inter-*.woff2` are copies of `assets/fonts/`, packaged rather
+than fetched so the panel reads correctly with the deployment unreachable —
+which is exactly when it is being read. Re-copy them if the web fonts change.
 
 `extension/shared/icon-*.png` are rasterized from `assets/icon.svg` and
 committed, for the same reason the web icons are: a build must not need a
