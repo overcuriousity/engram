@@ -891,6 +891,11 @@ struct OpsTemplate {
     /// could never give: whether this started yesterday or has been going
     /// wrong for a week.
     sweep_history: Vec<SweepRunRow>,
+    /// Shown against clicked, by rung. Empty when the offer is switched off, or
+    /// when it has been on and never had anything to say — either way there is
+    /// no table, because a heading over no rows is a claim that something is
+    /// being measured when nothing is.
+    offer_rates: Vec<crate::store::pursuits::OfferRate>,
 }
 
 #[derive(Template)]
@@ -2767,6 +2772,19 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         last_day,
         last_day_failures,
         sweep_history,
+        // The last month rather than the last day: a weekly pattern needs
+        // weeks, so a hit rate measured over a day would be a number nobody
+        // could act on. Read like `vector_count` — a failure here must not
+        // blank the page you open when something is wrong.
+        offer_rates: match st.core.recommends() {
+            true => st
+                .core
+                .store
+                .offer_rates(crate::store::now() - 30 * 86_400)
+                .await
+                .unwrap_or_default(),
+            false => Vec::new(),
+        },
     })
     .into_response())
 }
@@ -3637,6 +3655,15 @@ struct ArtifactViewParams {
     /// a continuation — when the link came from another artifact's page.
     #[serde(default)]
     via: Option<String>,
+    /// The cluster slot this was offered under, when the link came from the
+    /// area under the search box.
+    #[serde(default)]
+    rec: Option<i64>,
+    /// And the rung it was offered on. Carried on the link because the offer
+    /// was computed on a previous request and nothing server-side still holds
+    /// it — without it, every click lands in one bucket on Ops.
+    #[serde(default)]
+    rung: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
@@ -3651,9 +3678,23 @@ async fn artifact_detail(
     let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     st.core.mark_artifact_seen(&cid);
-    // And the act the pursuit sweep reads: opened, or pivoted through.
-    st.core
-        .record_interaction(&cid, p.via.as_deref(), Some(&id.subject));
+    // And the act the pursuit sweep reads: opened, or pivoted through — unless
+    // this came from the area under the search box, in which case it is written
+    // under its own kind and *not* as an ordinary open. A `recommended_open`
+    // counted as an open is the first lucky guess growing into a habit the
+    // system taught itself.
+    match p.rec {
+        Some(slot) => st.core.record_recommendation(
+            &cid,
+            "recommended_open",
+            p.rung.as_deref().unwrap_or("unknown"),
+            Some(slot),
+            Some(&id.subject),
+        ),
+        None => st
+            .core
+            .record_interaction(&cid, p.via.as_deref(), Some(&id.subject)),
+    }
     // The live half of the same act. Written here rather than inside
     // `record_interaction` because this is where the session is known — and
     // that is the whole of what keeps the sitting at the web door.
@@ -5284,6 +5325,151 @@ mod tests {
             "{:?}",
             shown[0].detail
         );
+    }
+
+    #[tokio::test]
+    async fn taking_an_offer_is_not_an_ordinary_open() {
+        // Without this the profile reinforces itself. The row is written, and
+        // it is written under its own kind so the sweep can weigh it at
+        // `self_weight` — which is zero.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        // Both on, so an ordinary open *would* be recorded — otherwise this
+        // test would pass on a base that records nothing at all.
+        core.pursuit.enabled = true;
+        core.feedback.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "opening hours".into(),
+                    corpus_span: None,
+                    title: Some("hours".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        get(
+            &app,
+            &format!("/ui/artifacts/{aid}?rec=0&rung=pattern"),
+            &cookie,
+        )
+        .await;
+        background.wait_idle().await;
+
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["recommended_open"], "not an ordinary open");
+        assert!(
+            rows[0].detail.as_deref().unwrap().contains("pattern"),
+            "and it remembers which rung it was offered on: {:?}",
+            rows[0].detail
+        );
+
+        // And the ordinary path still records an ordinary open, so the branch
+        // above is a branch rather than a hole.
+        get(&app, &format!("/ui/artifacts/{aid}"), &cookie).await;
+        background.wait_idle().await;
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(rows.iter().any(|r| r.kind == "opened"));
+    }
+
+    #[tokio::test]
+    async fn ops_shows_shown_against_clicked_by_rung() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        let store = core.store.clone();
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "opening hours".into(),
+                    corpus_span: None,
+                    title: Some("hours".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let now = crate::store::now();
+        for _ in 0..4 {
+            store
+                .record_recommendation(
+                    &aid,
+                    "recommended_shown",
+                    r#"{"rung":"pattern"}"#,
+                    Some("me"),
+                    now,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .record_recommendation(
+                &aid,
+                "recommended_open",
+                r#"{"rung":"pattern"}"#,
+                Some("me"),
+                now,
+            )
+            .await
+            .unwrap();
+        store
+            .record_recommendation(
+                &aid,
+                "recommended_shown",
+                r#"{"rung":"forgotten"}"#,
+                Some("me"),
+                now,
+            )
+            .await
+            .unwrap();
+
+        let rates = store.offer_rates(0).await.unwrap();
+        assert_eq!(rates.len(), 2, "one row per rung: {rates:?}");
+        let pattern = rates.iter().find(|r| r.rung == "pattern").unwrap();
+        assert_eq!(pattern.shown, 4);
+        assert_eq!(pattern.opened, 1);
+        let forgotten = rates.iter().find(|r| r.rung == "forgotten").unwrap();
+        assert_eq!(forgotten.shown, 1);
+        assert_eq!(forgotten.opened, 0, "nobody took that one");
+
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let page = get(&app, "/ui/ops", &cookie).await;
+        assert!(page.contains("What was offered"), "no heading");
+        assert!(page.contains("pattern"), "no rung");
+        assert!(page.contains("forgotten"));
+    }
+
+    #[tokio::test]
+    async fn ops_says_nothing_about_offers_when_the_faculty_is_off() {
+        // A heading over no rows is a claim that something is being measured
+        // when nothing is.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let page = get(&app, "/ui/ops", &cookie).await;
+        assert!(!page.contains("What was offered"));
     }
 
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {

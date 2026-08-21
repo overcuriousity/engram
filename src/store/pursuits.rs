@@ -54,6 +54,14 @@ pub struct Pursuit {
     pub artifact_id: Option<String>,
 }
 
+/// Shown against clicked, for one rung of the ladder.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfferRate {
+    pub rung: String,
+    pub shown: i64,
+    pub opened: i64,
+}
+
 fn row_to_pursuit(r: &sqlx::sqlite::SqliteRow) -> Pursuit {
     Pursuit {
         id: r.get("id"),
@@ -145,6 +153,38 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// What was offered and what was taken, by rung, since `since`.
+    ///
+    /// The only number that can later settle whether the block weights are
+    /// right. They are chosen, not measured, and fitting them before this data
+    /// exists would be guessing with extra steps — so this is the instrument,
+    /// and it goes on Ops, which is where mechanisms whose effect nobody can
+    /// otherwise see belong.
+    pub async fn offer_rates(&self, since: i64) -> Result<Vec<OfferRate>> {
+        let rows = sqlx::query(
+            "SELECT json_extract(detail, '$.rung') AS rung,
+                    SUM(kind = 'recommended_shown') AS shown,
+                    SUM(kind = 'recommended_open')  AS opened
+               FROM interaction_events
+              WHERE at >= ? AND kind IN ('recommended_shown', 'recommended_open')
+              GROUP BY rung
+              ORDER BY shown DESC, rung",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| OfferRate {
+                rung: r
+                    .get::<Option<String>, _>("rung")
+                    .unwrap_or_else(|| "unknown".into()),
+                shown: r.get("shown"),
+                opened: r.get("opened"),
+            })
+            .collect())
     }
 
     /// Interactions with `from < at <= to`, oldest first.

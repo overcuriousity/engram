@@ -517,8 +517,16 @@ fn need_of(
             bump(id, 3.0);
             n.strong_engaged = true;
         }
-        let mine: Vec<&crate::store::pursuits::Interaction> =
-            attached[m].iter().map(|&k| &interactions[k]).collect();
+        let mine: Vec<&crate::store::pursuits::Interaction> = attached[m]
+            .iter()
+            .map(|&k| &interactions[k])
+            // What this base *offered* is not something a person did. Every
+            // kind that is not `dwell` or `pivoted` is weighed at 1.0 below, so
+            // without this every artifact the recommender ever guessed at would
+            // count as engaged — and `engaged`, a few lines down, would call a
+            // search followed by nothing a search that was followed.
+            .filter(|i| i.kind != "recommended_shown")
+            .collect();
         if !e.answered {
             for i in &mine {
                 if i.kind == "dwell" {
@@ -834,6 +842,44 @@ mod tests {
             .await
             .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn an_offer_that_was_only_shown_is_not_engagement() {
+        // `recommended_shown` is the recommender's own guess, not something a
+        // person did. Every kind that is not `dwell` or `pivoted` is weighed at
+        // 1.0, so without an explicit exclusion every artifact the recommender
+        // ever guessed at would count as engaged — and a search followed by
+        // nothing at all would read as a search that was followed.
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let t0 = now - 100;
+        search_event(
+            &core,
+            "recycling centre hours",
+            vec![1.0, 0.0],
+            &[&ids[0]],
+            t0,
+        )
+        .await;
+        core.store
+            .record_recommendation(
+                &ids[0],
+                "recommended_shown",
+                r#"{"rung":"pattern","slot":0}"#,
+                Some("me"),
+                t0 + 1,
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+        let pursuits = core.store.recent_pursuits(50).await.unwrap();
+        assert!(
+            pursuits.iter().all(|p| !p.sources.contains(&ids[0])),
+            "an offer nobody clicked is not a source: {pursuits:?}"
+        );
     }
 
     #[tokio::test]

@@ -65,6 +65,25 @@
 {% endif %}
 {% endif %}
 
+{# Shown against clicked, by rung. The one number that can settle whether the
+   weights the recommender rests on are right — they are chosen, not measured,
+   and until this has data, fitting them would be guessing with extra steps.
+   `[sitting] prime` has sat at `false` for months because nobody measured it;
+   this is here so the same thing does not happen twice. #}
+{% if !offer_rates.is_empty() %}
+<h3>What was offered</h3>
+<p class="muted">The last thirty days. A weekly pattern needs weeks, so a rate
+  measured over a day would be a number nobody could act on.</p>
+<table class="grid">
+  <thead><tr><th>Rung</th><th>Shown</th><th>Opened</th></tr></thead>
+  <tbody>
+  {% for r in offer_rates %}
+    <tr><td>{{ r.rung }}</td><td>{{ r.shown }}</td><td>{{ r.opened }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if !merged.is_empty() %}
 <h3>Merged</h3>
 <p class="muted">
