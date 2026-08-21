@@ -50,12 +50,27 @@
   </p>
   {% endif %}
   <p id="size-hint" class="muted" hidden></p>
-  {# A drop target rather than a second page. What arrives here is held, not
-     sent — see `#staged` below. The file goes to the API endpoint rather than
-     through this form, because the form posts a urlencoded body and this one
-     is multipart. #}
-  <label class="row muted" id="drop"
-         style="border:1px dashed var(--line);padding:.6rem;border-radius:.4rem">
+</form>
+{# One box for the file, in both of its states. It was two — a dashed drop
+   zone inside the form, and this box appearing under it once something had
+   arrived — which meant the invitation and the answer to it sat in different
+   places and the page grew a row as you used it. Empty, this reads as the
+   invitation; full, it is what is about to be sent.
+
+   Outside the posted form on purpose: that form posts a urlencoded body and
+   the file goes multipart to the API endpoint instead. The label is what makes
+   the box clickable, and on a phone that is what opens the camera.
+
+   A photo taken on a phone used to upload the instant the camera handed it
+   back: the note underneath was unfillable by then, and nothing had been
+   pressed — the picture was simply gone into the base. A file waits here until
+   Capture is pressed, which is the same deliberate act pasted text has always
+   needed.
+
+   The thumbnail is for the camera above all: on a phone the only thing that
+   says which photo this is, is the photo. #}
+<div id="staged" class="staged">
+  <label class="muted" id="drop">
     {% if vision_enabled %}
     <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf,image/*" hidden>
     <span>…or drop a <code>.txt</code> file, a PDF or an image here — on a phone, tap to take a photo.</span>
@@ -64,19 +79,9 @@
     <span>…or drop a <code>.txt</code> file or a PDF here.</span>
     {% endif %}
   </label>
-</form>
-{# What is about to be sent. A photo taken on a phone used to upload the
-   instant the camera handed it back: the note underneath was unfillable by
-   then, and nothing had been pressed — the picture was simply gone into the
-   base. A file waits here instead until Capture is pressed, which is the same
-   deliberate act pasted text has always needed.
-
-   The thumbnail is for the camera above all: on a phone the only thing that
-   says which photo this is, is the photo. #}
-<div id="staged" class="staged" hidden>
   <img id="staged-thumb" alt="" hidden>
-  <span id="staged-name" class="mono"></span>
-  <button class="btn btn-ghost btn-sm" type="button" id="staged-clear">Remove</button>
+  <span id="staged-name" class="mono" hidden></span>
+  <button class="btn btn-ghost btn-sm" type="button" id="staged-clear" hidden>Remove</button>
 </div>
 {# Context for the file: a sentence about what it is. Sent with it, then
    cleared. For an image the vision model reads it too.
@@ -164,6 +169,7 @@
     var stagedBox = document.getElementById('staged');
     var stagedName = document.getElementById('staged-name');
     var stagedThumb = document.getElementById('staged-thumb');
+    var stagedClear = document.getElementById('staged-clear');
     var form = document.getElementById('capture');
 
     function unstage() {
@@ -172,7 +178,10 @@
       if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
       stagedThumb.removeAttribute('src');
       stagedThumb.hidden = true;
-      stagedBox.hidden = true;
+      stagedName.hidden = true;
+      stagedClear.hidden = true;
+      // The box stays; it goes back to being the invitation it started as.
+      if (drop) drop.hidden = false;
       // Or picking the same file twice in a row fires no `change` the second
       // time, and the drop zone looks broken.
       if (picker) picker.value = '';
@@ -199,7 +208,11 @@
         stagedThumb.src = stagedUrl;
         stagedThumb.hidden = false;
       }
-      stagedBox.hidden = false;
+      stagedName.hidden = false;
+      stagedClear.hidden = false;
+      // The invitation steps aside for the file that accepted it: one box,
+      // saying one thing at a time.
+      if (drop) drop.hidden = true;
       // Only where a pointer says there is a hardware keyboard — the rule the
       // paste box and the search box already follow. On a phone this would
       // throw the software keyboard over the thumbnail the operator is
@@ -263,15 +276,50 @@
           }
         });
     }
-    if (drop) {
-      picker.addEventListener('change', function () { stage(picker.files[0]); });
-      drop.addEventListener('dragover', function (e) { e.preventDefault(); });
-      drop.addEventListener('drop', function (e) {
-        e.preventDefault();
-        stage(e.dataTransfer.files[0]);
-      });
+    if (drop) picker.addEventListener('change', function () { stage(picker.files[0]); });
+
+    // The whole page is the drop target, because a browser that is not offered
+    // the file takes it: a photo dropped an inch wide of the box replaced
+    // engram with the picture, and the capture the operator was in the middle
+    // of writing went with it. The box below still says where to aim; missing
+    // it is no longer punished.
+    //
+    // Only for drags carrying files. Dragging selected text into the paste box
+    // is a drop too, and cancelling that one would break a thing that works.
+    function carriesFiles(e) {
+      var types = e.dataTransfer && e.dataTransfer.types;
+      if (!types) return false;
+      for (var i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
+      return false;
     }
-    document.getElementById('staged-clear').addEventListener('click', unstage);
+    // `dragenter` and `dragleave` fire again for every element the pointer
+    // crosses on the way in, so a depth count is what tells the page's edge
+    // from the boundary between two paragraphs inside it.
+    var depth = 0;
+    function undim() { depth = 0; if (stagedBox) stagedBox.classList.remove('dropping'); }
+    document.addEventListener('dragenter', function (e) {
+      if (!carriesFiles(e)) return;
+      depth++;
+      if (stagedBox) stagedBox.classList.add('dropping');
+    });
+    document.addEventListener('dragleave', function (e) {
+      if (!carriesFiles(e)) return;
+      if (--depth <= 0) undim();
+    });
+    // Without cancelling `dragover` the drop never happens — the browser reads
+    // the absence as "nothing here takes this" and opens the file itself.
+    document.addEventListener('dragover', function (e) {
+      if (carriesFiles(e)) e.preventDefault();
+    });
+    document.addEventListener('drop', function (e) {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      undim();
+      var files = e.dataTransfer.files;
+      if (files && files[0]) stage(files[0]);
+    });
+
+    stagedClear.addEventListener('click', unstage);
 
     // The one button. A staged file is what it sends; with nothing staged it is
     // the form's own submit and behaves exactly as it always did. Text typed
