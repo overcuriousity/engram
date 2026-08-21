@@ -97,7 +97,46 @@ pub fn stand_in_title(text: &str, max_chars: usize) -> String {
     let opening = flat.trim_start_matches(|c: char| {
         c.is_whitespace() || matches!(c, '-' | '–' | '—' | '*' | '#' | '>' | '·' | '•' | '|')
     });
-    truncate_at_word(opening.trim(), max_chars)
+    // Put back a number the parse took for structure. `snippet` is a whole
+    // CommonMark read that keeps the text events, so `1. Einleitung` arrives
+    // here as `Einleitung`: an ordered-list marker is structure to the parser
+    // and part of the name to everyone else. It matters twice over now that
+    // stored titles come through here too — two syntheses called `1. Einleitung`
+    // and `2. Einleitung` were shown under one name, and the number is the
+    // whole of what told them apart.
+    let name = match leading_enumerator(text) {
+        Some(marker) => format!("{marker} {opening}"),
+        None => opening.to_string(),
+    };
+    truncate_at_word(name.trim(), max_chars)
+}
+
+/// The `1.` or `1)` a text opens with, if it opens with one.
+///
+/// Only what CommonMark itself would have eaten: digits, one `.` or `)`, and
+/// whitespace after it. A date written `1.9. Termin` has no space after the
+/// first dot and is not a list to the parser either, so both leave it whole.
+/// Returns the marker as the text wrote it — `10.` stays `10.`, and `)` does not
+/// come back as `.` — because a name is what was written.
+fn leading_enumerator(text: &str) -> Option<&str> {
+    let start = text.trim_start();
+    let digits = start.len() - start.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    // Nine is CommonMark's own limit on how long an ordered marker may be; past
+    // it the parser stops reading a list, and so does this.
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    let delim = start[digits..].chars().next()?;
+    if !matches!(delim, '.' | ')') {
+        return None;
+    }
+    // A marker with nothing after it is not a list item, and a title that is
+    // only `3.` has nothing for this to be the marker of.
+    let marker = &start[..digits + delim.len_utf8()];
+    match start[marker.len()..].starts_with(|c: char| c.is_whitespace()) {
+        true => Some(marker),
+        false => None,
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +251,31 @@ mod tests {
             stand_in_title("## 3.4.2 FESTE MFT RECORDS", 60),
             "3.4.2 FESTE MFT RECORDS"
         );
+    }
+
+    #[test]
+    fn a_stand_in_title_keeps_the_number_a_section_opens_with() {
+        // The number is structure to the parser and part of the name to
+        // everyone else: without it two syntheses are shown under one name.
+        assert_eq!(stand_in_title("1. Einleitung", 60), "1. Einleitung");
+        assert_eq!(stand_in_title("2. Einleitung", 60), "2. Einleitung");
+        // As written: the width of the number and the delimiter both survive.
+        assert_eq!(stand_in_title("10. Kapitel Zehn", 60), "10. Kapitel Zehn");
+        assert_eq!(stand_in_title("1) Foo", 60), "1) Foo");
+        // A marker inside a heading was never a list marker; the heading's own
+        // `#` still goes, and the text under it is untouched either way.
+        assert_eq!(stand_in_title("## 1. Einleitung", 60), "1. Einleitung");
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_marker_is_left_alone() {
+        // No space after the dot: not a list to CommonMark, and not one here.
+        assert_eq!(stand_in_title("1.9. Termin im Mai", 60), "1.9. Termin im Mai");
+        // Nothing for the marker to mark: an empty list item, which flattens
+        // to nothing at all, exactly as `---` does. `title_of` falls back to
+        // the id there rather than showing a name that is one number.
+        assert_eq!(stand_in_title("3.", 60), "");
+        assert_eq!(stand_in_title("2024 war ein Jahr", 60), "2024 war ein Jahr");
     }
 
     #[test]
