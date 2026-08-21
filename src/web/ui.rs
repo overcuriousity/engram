@@ -8379,9 +8379,17 @@ mod tests {
         // Outside the posted form still: that form posts urlencoded and the
         // file this note describes goes multipart to a different endpoint.
         assert!(page.contains(r#"form="capture""#), "{page}");
+
+        // The order the work happens in: the file arrives and is held, the note
+        // says what it is, the button sends both. A photo taken on a phone used
+        // to upload the instant the camera handed it back, which put the note
+        // after the send and made it unfillable.
+        let staged = page
+            .find(r#"id="staged""#)
+            .expect("a file waits to be sent rather than going on arrival");
         assert!(
-            page.contains("the file you drop next"),
-            "the note must say it is for a file that has not arrived yet: {page}"
+            staged < note,
+            "what is waiting must sit above the note describing it: {page}"
         );
     }
 

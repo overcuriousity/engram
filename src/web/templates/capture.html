@@ -50,9 +50,10 @@
   </p>
   {% endif %}
   <p id="size-hint" class="muted" hidden></p>
-  {# A drop target rather than a second page. The file goes to the API
-     endpoint, not through this form, because the form posts a urlencoded body
-     and this one is multipart. #}
+  {# A drop target rather than a second page. What arrives here is held, not
+     sent — see `#staged` below. The file goes to the API endpoint rather than
+     through this form, because the form posts a urlencoded body and this one
+     is multipart. #}
   <label class="row muted" id="drop"
          style="border:1px dashed var(--line);padding:.6rem;border-radius:.4rem">
     {% if vision_enabled %}
@@ -64,22 +65,37 @@
     {% endif %}
   </label>
 </form>
-{# Context for whatever file comes next: a sentence about what it is. Sent with
-   the file, then cleared. For an image the vision model reads it too.
+{# What is about to be sent. A photo taken on a phone used to upload the
+   instant the camera handed it back: the note underneath was unfillable by
+   then, and nothing had been pressed — the picture was simply gone into the
+   base. A file waits here instead until Capture is pressed, which is the same
+   deliberate act pasted text has always needed.
+
+   The thumbnail is for the camera above all: on a phone the only thing that
+   says which photo this is, is the photo. #}
+<div id="staged" class="staged" hidden>
+  <img id="staged-thumb" alt="" hidden>
+  <span id="staged-name" class="mono"></span>
+  <button class="btn btn-ghost btn-sm" type="button" id="staged-clear">Remove</button>
+</div>
+{# Context for the file: a sentence about what it is. Sent with it, then
+   cleared. For an image the vision model reads it too.
 
    Directly under the drop zone it serves and above the button, because a
    control that submits a field must not sit above that field — it did, and the
    field it belonged to read as an afterthought below the thing that sends it.
 
-   It cannot be revealed on drop: a dropped file uploads immediately, so the
-   note has to be fillable before the file arrives, which is what the wording
-   now says. Still outside the form above on purpose — that form posts
-   urlencoded and this note rides a multipart request to the API — which is why
-   the button below carries `form`. #}
+   Still outside the form above on purpose — that form posts urlencoded and
+   this note rides a multipart request to the API — which is why the button
+   below carries `form`. #}
 <input class="input" type="text" name="note" maxlength="2000" style="margin-top:.6rem;width:100%"
-       placeholder="Note for the file you drop next (optional) — what is it, why keep it?">
+       placeholder="Note for the file (optional) — what is it, why keep it?">
+{# One button, whatever is waiting. With a file staged it sends that file and
+   the note beside it; with only text in the box it submits the form it names.
+   Two buttons would ask the operator which kind of capture this is, and they
+   can already see. #}
 <div class="row" style="margin-top:.6rem">
-  <button class="btn btn-accent" type="submit" form="capture">Capture</button>
+  <button class="btn btn-accent" type="submit" form="capture" id="capture-btn">Capture</button>
   <span class="spinner">saving…</span>
 </div>
 <div id="capture-result" style="margin-top:1rem"></div>
@@ -138,6 +154,61 @@
     var picker = drop && drop.querySelector('input[type=file]');
     var noteBox = document.querySelector('input[name="note"]');
     var VISION = {% if vision_enabled %}true{% else %}false{% endif %};
+
+    // ── What is waiting to be sent ────────────────────────────────────────
+    // A file arriving is not a capture. It is held here until Capture is
+    // pressed, so the note beside it can be written and the wrong photo can be
+    // removed — on a phone the camera hands the picture back the moment it is
+    // taken, and uploading on arrival meant the operator never got a say.
+    var staged = null, stagedUrl = null;
+    var stagedBox = document.getElementById('staged');
+    var stagedName = document.getElementById('staged-name');
+    var stagedThumb = document.getElementById('staged-thumb');
+    var form = document.getElementById('capture');
+
+    function unstage() {
+      staged = null;
+      // The object URL holds the picture in memory until it is let go.
+      if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
+      stagedThumb.removeAttribute('src');
+      stagedThumb.hidden = true;
+      stagedBox.hidden = true;
+      // Or picking the same file twice in a row fires no `change` the second
+      // time, and the drop zone looks broken.
+      if (picker) picker.value = '';
+    }
+
+    // `restore` is the failed upload coming back: the same file, already
+    // described, and no reason to reach for the note a second time.
+    function stage(file, restore) {
+      if (!file) return;
+      var result = document.getElementById('capture-result');
+      // Said now rather than after the operator has written a note for a file
+      // this server was never going to read.
+      if (file.type.indexOf('image/') === 0 && !VISION) {
+        result.textContent = 'Image capture is not configured on this server.';
+        unstage();
+        return;
+      }
+      unstage();
+      staged = file;
+      stagedName.textContent = (file.name || 'photo.jpg') +
+        ' — ready. Press Capture.';
+      if (file.type.indexOf('image/') === 0) {
+        stagedUrl = URL.createObjectURL(file);
+        stagedThumb.src = stagedUrl;
+        stagedThumb.hidden = false;
+      }
+      stagedBox.hidden = false;
+      // Only where a pointer says there is a hardware keyboard — the rule the
+      // paste box and the search box already follow. On a phone this would
+      // throw the software keyboard over the thumbnail the operator is
+      // checking, which is the picture they just took.
+      if (noteBox && !restore && window.matchMedia('(hover: hover)').matches) {
+        noteBox.focus();
+      }
+    }
+
     function send(file) {
       if (!file) return;
       var isImage = file.type.indexOf('image/') === 0;
@@ -149,6 +220,10 @@
         result.textContent = 'Image capture is not configured on this server.';
         return;
       }
+      // The upload does not go through htmx, so the spinner beside the button
+      // never lit for it. On a phone a photo is the slowest thing this page
+      // sends and pressing Capture looked like it had done nothing.
+      result.textContent = 'Sending…';
       var payload = new FormData();
       if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
       // The fallback name matters: a PDF that arrived unnamed and went up as
@@ -181,22 +256,40 @@
           if (pair[0]) {
             if (noteBox) noteBox.value = '';
             htmx.trigger(document.body, 'captured');
+          } else {
+            // It never left. Put it back where it was, so the fix is a second
+            // press rather than a second trip to the camera.
+            stage(file, true);
           }
         });
     }
     if (drop) {
-      picker.addEventListener('change', function () { send(picker.files[0]); });
+      picker.addEventListener('change', function () { stage(picker.files[0]); });
       drop.addEventListener('dragover', function (e) { e.preventDefault(); });
       drop.addEventListener('drop', function (e) {
         e.preventDefault();
-        send(e.dataTransfer.files[0]);
+        stage(e.dataTransfer.files[0]);
       });
     }
+    document.getElementById('staged-clear').addEventListener('click', unstage);
+
+    // The one button. A staged file is what it sends; with nothing staged it is
+    // the form's own submit and behaves exactly as it always did. Text typed
+    // above a staged file is not thrown away — it goes as the capture it is,
+    // in the same press.
+    document.getElementById('capture-btn').addEventListener('click', function (e) {
+      if (!staged) return;
+      e.preventDefault();
+      var file = staged;
+      unstage();
+      send(file);
+      if (box.value.trim()) form.requestSubmit();
+    });
     // A pasted screenshot goes the same way as a dropped one — unless the
     // paste is on its way somewhere that takes text. A clipboard from Sheets,
     // Excel or Word carries the selection twice, as text and as a picture of
     // itself, so taking the picture while the caret sat in the note box
-    // uploaded a screenshot and swallowed the paste the user asked for.
+    // staged a screenshot and swallowed the paste the user asked for.
     document.addEventListener('paste', function (e) {
       var t = e.target;
       if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
@@ -204,7 +297,7 @@
       for (var i = 0; i < items.length; i++) {
         if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
           e.preventDefault();
-          send(items[i].getAsFile());
+          stage(items[i].getAsFile());
           return;
         }
       }

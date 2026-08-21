@@ -91,6 +91,27 @@
 }
 
 
+/* ── A file, waiting to be sent ──────────────────────────────────────────── */
+
+/* Between the drop zone and the note that describes it, because that is the
+   order the work happens in: it arrived, say what it is, send it. */
+.staged {
+  display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
+  margin-top: 0.6rem; padding: 0.5rem 0.625rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); font-size: 0.8125rem;
+}
+/* Small: it identifies the photo, it does not display it. Capped in both
+   directions so a portrait shot from a phone cannot become the page. */
+.staged img {
+  max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
+  object-fit: cover; flex: none;
+}
+#staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
+/* Away from the name, so a long filename does not push it under the thumb. */
+#staged-clear { margin-left: auto; }
+
+
 /* ── A decision, where the work arrives ──────────────────────────────────── */
 
 /* Shown on Capture rather than on a page you have to remember to visit, and
