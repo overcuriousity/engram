@@ -162,7 +162,8 @@
 <p class="muted">
   {{ pursuit_recent }} recent{% if pursuit_unsatisfied > 0 %},
   of which {{ pursuit_unsatisfied }} went unanswered and
-  <a href="/ui/capture#gaps">are on the gap list</a>{% endif %}.
+  {% if pursuit_unsatisfied == 1 %}is{% else %}are{% endif %}
+  <a href="/ui/capture#gaps">on the gap list</a>{% endif %}.
 </p>
 {% endif %}
 {% endif %}

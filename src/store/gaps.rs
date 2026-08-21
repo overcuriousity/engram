@@ -449,6 +449,32 @@ impl Store {
         Ok(out)
     }
 
+    /// The ids of the pursuits the capture page's gap list is showing.
+    ///
+    /// Housekeeping says how many recent pursuits went unanswered and links
+    /// that sentence to the list. `state = 'unsatisfied'` on its own is not
+    /// that number: a pursuit a later capture answered keeps the state it ended
+    /// with — coverage never rewrites what happened — while the gap list drops
+    /// it. On a base where captures are answering pursuits the sentence sent
+    /// the operator to a list that did not hold what it promised.
+    ///
+    /// The same predicate the list itself is built from, so the two cannot
+    /// disagree about what is on it — including the embedder: a pursuit whose
+    /// vector is under another model is not on the page either.
+    pub async fn open_pursuit_gap_ids(
+        &self,
+        embed_model: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        Ok(sqlx::query(pursuit_gaps_sql!(""))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("id"))
+            .collect())
+    }
+
     /// Query vectors from every recorded search and question under this
     /// embedder — gap or not, judged or not — newest first, `CALIBRATION_SAMPLE`
     /// of each. What `core::gaps::link_threshold` measures the embedder's own

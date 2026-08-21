@@ -2510,7 +2510,24 @@ async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         false => Vec::new(),
     };
     let pursuit_recent = recent.len();
-    let pursuit_unsatisfied = recent.iter().filter(|p| p.state == "unsatisfied").count();
+    // The ones the sentence below can honestly point at. `unsatisfied` is how a
+    // run of searches *ended*, and a capture that answers one afterwards leaves
+    // that word alone deliberately — coverage never rewrites what happened — so
+    // counting the state sent the operator to a gap list that had already
+    // dropped half of them.
+    let on_the_gap_list = match pursuit_enabled {
+        true => st
+            .core
+            .store
+            .open_pursuit_gap_ids(st.core.embedder.model())
+            .await
+            .unwrap_or_default(),
+        false => Default::default(),
+    };
+    let pursuit_unsatisfied = recent
+        .iter()
+        .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
+        .count();
     // What the memory did while nobody was looking. The last day as one
     // sentence, and under it the runs themselves — which is the half a single
     // overwritten summary could never give.
@@ -8060,6 +8077,80 @@ mod tests {
                 "no `{badge}` badge on the list: {html}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn housekeeping_counts_only_the_pursuits_the_gap_list_still_holds() {
+        // `unsatisfied` is how the run ended, and a capture answering it later
+        // leaves that word alone on purpose. The gap list drops it all the
+        // same, so counting the state pointed the operator at entries that
+        // were not there.
+        let mut core = crate::core::test_support::test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let core = handle;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let art = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "how to mount an E01".into(),
+                    corpus_span: None,
+                    title: Some("Mounting an E01".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let mut ids = Vec::new();
+        for q in ["pursued one", "pursued two"] {
+            let p = core
+                .store
+                .insert_pursuit(
+                    1,
+                    &[q.to_string()],
+                    &[],
+                    Some((
+                        &[1.0; crate::core::test_support::TEST_DIM],
+                        core.embedder.model(),
+                    )),
+                )
+                .await
+                .unwrap();
+            core.store
+                .close_pursuit(&p, "unsatisfied", "nothing strong was engaged", 2)
+                .await
+                .unwrap();
+            ids.push(p);
+        }
+
+        let both = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(both.contains("2 went unanswered"), "{both}");
+
+        // A later capture answers one of them.
+        core.store
+            .cover_gap(
+                crate::store::gaps::GapKind::Pursuit,
+                &ids[0],
+                &src.id,
+                &art,
+                0.8,
+            )
+            .await
+            .unwrap();
+
+        let one = get_body(&app, &cookie, "/ui/ops").await;
+        assert!(one.contains("1 went unanswered"), "{one}");
+        assert!(one.contains("is\n  <a href=\"/ui/capture#gaps\""), "{one}");
     }
 
     #[tokio::test]
