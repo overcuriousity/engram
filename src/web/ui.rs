@@ -5293,6 +5293,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_reason_line_is_markup_a_browser_will_not_rearrange() {
+        // `details` and `pre` are flow content and a `p` may hold only phrasing
+        // content, so a `p` here is closed by the parser before the `details`
+        // and leaves a stray empty paragraph behind — a DOM the stylesheet is
+        // not written against, with the Details control on its own line.
+        let (app, cookie, _store, _aid) = app_recommending().await;
+        let body = crate::web::test_support::body_of(
+            app.clone()
+                .oneshot(form("/ui/context", &cookie, "bundle=%7B%7D"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(body.contains(r#"<div class="muted offer-why">"#), "{body}");
+        assert!(
+            !body.contains("<p class=\"muted offer-why\">"),
+            "the reason line must not be a paragraph: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn what_was_offered_is_written_down_with_its_rung() {
         // Shown against clicked, broken down by rung, is a hit rate. It is the
         // only number that can later settle whether the weights are right, and

@@ -788,15 +788,74 @@ impl Store {
         let a: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM ask_events")
             .fetch_one(&self.pool)
             .await?;
-        let i: Option<i64> = sqlx::query_scalar("SELECT MAX(at) FROM interaction_events")
-            .fetch_one(&self.pool)
-            .await?;
+        // `recommended_shown` is excluded for the same reason the judge door is:
+        // it is not a session. That row is written on every page view — it is
+        // the base talking to itself, not a person doing something — so
+        // counting it keeps the base looking busy for as long as a tab is open,
+        // and the sweep that waits for quiet then never runs at all.
+        //
+        // `recommended_open` is not excluded. Taking the offer is a real act.
+        let i: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(at) FROM interaction_events WHERE kind <> 'recommended_shown'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok([s, a, i].into_iter().flatten().max())
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn an_offer_nobody_asked_for_does_not_keep_the_base_looking_busy() {
+        // The pursuit sweep waits for quiet, and `recommended_shown` is written
+        // on every page view — the base talking to itself, not a person doing
+        // something. Counted, it would keep the base looking active for as long
+        // as a tab is open and the sweep would never run. This is the judge
+        // door's bug, one table over.
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let aid = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "x".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+
+        store
+            .record_interaction(&aid, "opened", None, Some("me"), 1_000)
+            .await
+            .unwrap();
+        store
+            .record_recommendation(&aid, "recommended_shown", "{}", Some("me"), 9_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.newest_event_at().await.unwrap(),
+            Some(1_000),
+            "the offer does not count as activity"
+        );
+
+        // Taking it does. That is a person doing something.
+        store
+            .record_recommendation(&aid, "recommended_open", "{}", Some("me"), 9_500)
+            .await
+            .unwrap();
+        assert_eq!(store.newest_event_at().await.unwrap(), Some(9_500));
+    }
     use super::*;
 
     fn ev(query: &str, door: Door) -> NewEvent {

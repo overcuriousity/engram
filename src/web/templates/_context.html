@@ -1,4 +1,9 @@
-{# The area under the search box. Fetched rather than rendered because the
+{# A `div` rather than a `p` for the reason line: `details` and `pre` are flow
+   content, and a `p` may only hold phrasing content — so a browser closes the
+   paragraph before the `details` and leaves a stray empty one behind, which is
+   not the DOM the stylesheet is written against.
+
+   The area under the search box. Fetched rather than rendered because the
    bundle originates in the browser and the server does not have it at first
    render — `search_page` puts a placeholder here with reserved height, and this
    replaces it.
@@ -17,7 +22,7 @@
 <div id="context-offer" class="offer">
 {% if let Some(o) = offer %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
-  <p class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
+  <div class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
     {# `serde_json` over the raw bundle plus the contribution numbers, inside a
        `<details>`. No formatting code, and it satisfies "the parameters must be
        visible" completely: whoever wants to know exactly, expands it. It is
@@ -27,6 +32,6 @@
       <summary>Details</summary>
       <pre class="mono">{{ o.detail }}</pre>
     </details>
-  </p>
+  </div>
 {% endif %}
 </div>
