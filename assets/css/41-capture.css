@@ -5,14 +5,27 @@
 /* Rows, not a table: five columns of mostly-empty cells collapse badly on a
    phone, and only two facts per row are ever worth reading — what it is called
    and whether it is done. */
-.queue { display: flex; flex-direction: column; margin-top: 0.25rem; }
+/* A container, because this list is the aside on Capture and not a page: it
+   has to answer the width it was actually given, which is a fraction of the
+   window and nothing the viewport knows. */
+.queue {
+  display: flex; flex-direction: column; margin-top: 0.25rem;
+  container-type: inline-size; container-name: queue;
+}
+/* Wrapping is not a nicety here. The row has a third child — what the capture
+   answered — and on one unwrapped line it was pushed past the right edge by
+   the `margin-left: auto` on the metadata beside it, taking the page's width
+   with it. It belongs under the name, and wrapping is what puts it there. */
 .qrow {
-  display: flex; gap: 0.75rem; align-items: baseline; min-width: 0;
+  display: flex; flex-wrap: wrap; gap: 0.125rem 0.75rem; align-items: baseline;
+  min-width: 0;
   padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--color-border-subtle);
 }
 .qrow:last-child { border-bottom: none; }
 .qrow:hover { background: var(--color-bg-hover); }
-.qname { min-width: 0; text-decoration: none; display: block; }
+/* Grows into whatever the metadata leaves and shrinks no further than a name
+   worth reading: below that the row wraps instead. */
+.qname { flex: 1 1 12rem; min-width: 0; text-decoration: none; display: block; }
 .qtitle {
   display: block;
   font-size: 0.9375rem; text-decoration: none; color: var(--color-fg-primary);
@@ -38,6 +51,15 @@
   font-size: 0.8125rem; color: var(--color-fg-muted); font-family: var(--font-mono);
 }
 .qtime { text-align: right; }
+/* What this capture answered, on its own line under the name. It carried
+   `.qmeta` before and inherited that class's `margin-left: auto` and its
+   9.5rem timestamp column — a sentence shoved right and padded with a column
+   reserved for a timestamp it does not have. It is a caption, not metadata in
+   a column. */
+.qanswers {
+  flex: 1 0 100%; margin-top: 0.125rem;
+  font-size: 0.8125rem; color: var(--color-fg-muted);
+}
 /* The one thing that says a reading is low: colour, not a different layout. */
 .qcov-low {
   color: var(--color-warning); text-decoration: underline;
@@ -51,6 +73,22 @@
 }
 @keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
 @media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
+
+/* Narrow enough that a fixed metadata column and a name cannot share a line:
+   the name takes the line, the metadata takes the next one. Two columns of
+   grid at this width spend 9.5rem on when a capture arrived and leave the
+   name a letter and an ellipsis — and the name is the only thing on the row
+   anyone reads. Same reasoning as `.qtime { display: none }` on a phone,
+   applied to the width rather than to the device: the aside is this narrow on
+   a laptop too. */
+@container queue (max-width: 30rem) {
+  .qname { flex: 1 0 100%; }
+  .qmeta {
+    margin-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .qtime { text-align: left; }
+}
 
 
 /* ── A decision, where the work arrives ──────────────────────────────────── */

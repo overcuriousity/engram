@@ -101,9 +101,16 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    1690px a 68rem column anchored left is six hundred pixels of nothing beside
    it, and every one of those pages had a second thing already on it, stacked
    underneath or folded into a scroller: Capture's Recent, Ask's excerpts. The
-   width was never the problem. Not using it was. */
+   width was never the problem. Not using it was.
+
+   The aside has a floor rather than `minmax(0, 1fr)`, because an `fr` track
+   takes what is left after a 68rem column and what is left can be nothing. At
+   an 81rem shell — a maximised laptop window — that left a 3rem gutter holding
+   the Recent list: every title truncated to one letter, the timestamp column
+   wider than the name beside it. Under the floor the reading column gives way
+   instead, which is the one that has room to. */
 .regions-focus-aside {
-  grid-template-columns: [focus] minmax(0, 68rem) [aside] minmax(0, 1fr);
+  grid-template-columns: [focus] minmax(0, 68rem) [aside] minmax(24rem, 1fr);
 }
 .region-aside { grid-column: aside; }
 
