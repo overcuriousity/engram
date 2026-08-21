@@ -1001,10 +1001,21 @@ async fn ask_stream(
 ///
 /// JSON like the rest of them, so the panel's reader has one shape to parse
 /// rather than one payload that is a value and one that is a bare sentence.
+///
+/// The words are `client_message`'s, not `Display`'s, for the reason the JSON
+/// error body uses them: a store or LLM-parse failure carries schema and
+/// prompt fragments, and a stream is no less a door than a status code. This
+/// is also where the detail goes to the log, since a frame yielded from inside
+/// the body never reaches `IntoResponse` and would otherwise fail in silence.
 fn error_frame(e: &Error) -> SseEvent {
+    if e.status().is_server_error() {
+        tracing::error!(error = %e, "ask stream failed");
+    } else {
+        tracing::debug!(error = %e, "ask stream rejected");
+    }
     SseEvent::default()
         .event("error")
-        .data(serde_json::json!({ "error": e.to_string() }).to_string())
+        .data(serde_json::json!({ "error": e.client_message() }).to_string())
 }
 
 /// One ask event as a JSON frame.

@@ -352,6 +352,11 @@ function abandonAsk() {
   if (askAbort) {
     askAbort.abort();
     askAbort = null;
+    // The progress line goes with it. `clearResults` empties it too, but a
+    // search defers that until its hits arrive, and an abandoned ask's "Also
+    // looking for: …" left standing under a failure describes work that was
+    // cancelled.
+    thinking('');
   }
 }
 
@@ -425,13 +430,18 @@ $('back').addEventListener('click', () => {
 
 $('ask').addEventListener('click', async () => {
   const q = box.value.trim();
-  if (!q || !(await requirePaired())) return;
+  if (!q) return;
 
   // The keystroke that finished the question armed a search 200ms ago. Left
   // armed, it fires once this answer's nodes are on screen and empties the
   // pane out from under a stream that goes on writing into nodes no longer in
-  // the document — an answer that streams into nowhere.
+  // the document — an answer that streams into nowhere. Disarmed before the
+  // await below rather than after it, or the 200ms can elapse while pairing is
+  // read from storage and the search that fires takes the higher turn, whose
+  // `abandonAsk` aborts the ask this click just asked for.
   clearTimeout(searchTimer);
+
+  if (!(await requirePaired())) return;
 
   const mine = ++turn;
   abandonAsk();
@@ -446,6 +456,12 @@ $('ask').addEventListener('click', async () => {
   answer.className = 'answer';
   const sources = document.createElement('div');
   $('results').append(answer, sources);
+
+  // Whether the stream said how it ended. A body that simply stops — a proxy
+  // cutting a long answer, an intermediary closing at an idle deadline —
+  // resolves the read without throwing, and without this the panel would sit on
+  // "Retrieving…" over half an answer for as long as it is left open.
+  let ended = false;
 
   try {
     await engramApi.stream('/api/v1/ask/stream', { q }, ask.signal, (name, data) => {
@@ -475,6 +491,7 @@ $('ask').addEventListener('click', async () => {
         // finally on screen is what the server stands behind rather than a
         // concatenation this panel assembled.
         case 'done':
+          ended = true;
           thinking('');
           answer.textContent = data.answer;
           sources.textContent = '';
@@ -482,11 +499,16 @@ $('ask').addEventListener('click', async () => {
           say(closing(data));
           break;
         case 'error':
+          ended = true;
           thinking('');
           say(data.error, 'error');
           break;
       }
     });
+    if (mine === turn && !ended) {
+      thinking('');
+      say('The connection closed before the answer finished.', 'error');
+    }
   } catch (e) {
     // An abandoned ask throws where it was aborted, and that is this panel's
     // own doing rather than news.
