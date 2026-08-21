@@ -964,27 +964,29 @@ async fn ask_stream(
     use tokio_stream::StreamExt as _;
 
     let core = st.core.clone();
-    // `door=extension` is honoured here for the reason it is honoured on
-    // search: a question composed while reading, before anything came back, is
-    // worth telling apart from one typed into the web UI. The subject scopes it
-    // exactly as the UI's does.
+    // The door an ask came through, which names the caller and nothing more.
+    // Unlike search, where `door=extension` decides how the query is recorded,
+    // no ask is recorded from here: `record_ask` admits `Door::Ui` alone, so
+    // this answer carries no `event_id` and is never judged. Named anyway,
+    // because a question composed while reading is a different thing from one
+    // typed into an API client, and the log should not have to guess.
     let origin = crate::store::feedback::Door::Extension.by(id.subject);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
-            yield match ev {
-                Ok(e) => api_sse_event(e),
+            // Every arm is a frame, and the stream itself never fails. Yielding
+            // an `Err` into `Sse` ends the response body where it stands, with
+            // no frame at all — from the panel that is indistinguishable from
+            // an answer that simply stopped, `thinking` still on screen and
+            // nothing said. A failure that has words is worth the words.
+            yield Ok::<_, Error>(match ev {
                 // Terminal by construction: the producer is a `try_stream!` and
                 // ends at its first error, so the panel sees one `error` frame
                 // and nothing after it.
-                // JSON like every other frame, so the panel's reader has one
-                // shape to parse rather than one payload that is a value and
-                // one that is a bare sentence.
-                Err(e) => Ok(SseEvent::default()
-                    .event("error")
-                    .data(serde_json::json!({ "error": e.to_string() }).to_string())),
-            };
+                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
+                Err(e) => error_frame(&e),
+            });
         }
     };
     // Kept alive for the same reason the page's stream is: a slow model thinks
@@ -993,6 +995,16 @@ async fn ask_stream(
     Ok(Sse::new(events)
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+/// A failure the panel can read, in the shape every other frame has.
+///
+/// JSON like the rest of them, so the panel's reader has one shape to parse
+/// rather than one payload that is a value and one that is a bare sentence.
+fn error_frame(e: &Error) -> SseEvent {
+    SseEvent::default()
+        .event("error")
+        .data(serde_json::json!({ "error": e.to_string() }).to_string())
 }
 
 /// One ask event as a JSON frame.
@@ -1035,9 +1047,9 @@ fn api_sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
         Done(d) => (
             "done",
             // Every field is a string, a number or a list of those, so this
-            // cannot fail for any input the type admits. Reported rather than
+            // cannot fail for any input the type admits. Returned rather than
             // unwrapped because a panic here would kill the stream mid-answer
-            // with nothing said.
+            // with nothing said; the caller turns it into an `error` frame.
             serde_json::to_value(*d)
                 .map_err(|e| Error::Internal(format!("the answer would not serialise: {e}")))?,
         ),

@@ -31,6 +31,10 @@ globalThis.engramApi = {
         },
       });
     } catch (e) {
+      // An abort is the panel's own doing — the operator moved on — and the
+      // caller that aborted knows what it did. Reporting it as a deployment
+      // that cannot be reached would be a lie about the deployment.
+      if (e.name === 'AbortError') throw e;
       // Unreachable is its own case, and it is not queued: the capture is
       // lost and the operator is told, rather than silently held in a queue
       // that may never drain.
@@ -64,11 +68,17 @@ globalThis.engramApi = {
   //
   // `onFrame(name, data)` is called once per event, in order. `data` is the
   // parsed JSON payload — every frame this server sends carries one.
-  async stream(path, body, onFrame) {
+  //
+  // `signal` ends the request where it stands. An ask the operator has walked
+  // away from is not merely unread: it goes on retrieving and prompting on the
+  // deployment, holding the lane the next ask needs, for as long as
+  // `infer.ask.timeout_secs` allows. Aborting is how the reader says so.
+  async stream(path, body, signal, onFrame) {
     const res = await this.send(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));

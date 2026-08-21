@@ -259,7 +259,11 @@ const box = $('box');
 /// box is still the same box, and a line says why the results stopped moving.
 /// The alternative was embedding a pasted chapter on the deployment on every
 /// pause in typing.
-const MAX_QUERY = 400;
+///
+/// Deliberately generous — several paragraphs rather than one. The cost this
+/// guards against is a pasted document embedded every 200ms, and stopping a
+/// search that somebody meant is the worse failure of the two.
+const MAX_QUERY = 2000;
 
 /// Grow to fit the text, to a point. Past that the box scrolls rather than
 /// pushing the results off the panel.
@@ -323,6 +327,39 @@ function renderHits(hits, into) {
   }
 }
 
+/// Which action owns the results.
+///
+/// Search and ask both write there and both are slow enough to overlap: the
+/// keystroke that finishes a question arms a search that fires 200ms after the
+/// click on ask, and two searches can be in flight at once over a deployment
+/// that answers the first one second. Each action takes a turn before it goes
+/// to the wire, and anything arriving for a turn that is no longer the current
+/// one is dropped rather than rendered under whatever replaced it.
+let turn = 0;
+
+/// The ask currently on the wire, so that abandoning one closes its request.
+///
+/// Dropping its frames is not enough. The request behind an abandoned ask goes
+/// on retrieving and prompting, and every one of those calls holds the
+/// deployment's interactive lane — so the next ask waits behind an answer
+/// nobody will read. Aborting stops the rounds that have not started yet. The
+/// model call already in flight finishes regardless: the lane is held across a
+/// dropped reader on purpose, so the worker cannot slip a window in against
+/// hardware that is still busy.
+let askAbort = null;
+
+function abandonAsk() {
+  if (askAbort) {
+    askAbort.abort();
+    askAbort = null;
+  }
+}
+
+/// Empty the results pane. Turn-taking is the caller's: back and capture empty
+/// it without putting anything on the wire, and a search empties it only once
+/// its own hits have arrived, so that the pane holds the last answer until
+/// there is something to put in its place rather than blinking on every pause
+/// in typing.
 function clearResults() {
   $('results').textContent = '';
   $('back').hidden = true;
@@ -333,21 +370,30 @@ async function runSearch() {
   const q = box.value.trim();
   if (!q) {
     hint('');
+    turn++;
+    abandonAsk();
     clearResults();
     return;
   }
   if (q.length > MAX_QUERY) {
+    // No turn taken and nothing cleared: what is on screen stays, and the hint
+    // is there to say why it stopped moving.
     hint('Longer than a query, so searching stopped. Ask and Capture still act on it.');
     return;
   }
   hint('');
   if (!(await requirePaired())) return;
+  // From here this search owns the results, and an ask still streaming into
+  // them does not.
+  const mine = ++turn;
+  abandonAsk();
   try {
     // `door=extension` is how the judging page tells a query typed while
     // reading from one typed in the web UI. Only this value is honoured
     // server-side; a client cannot claim to be `ask` or `judge`.
     const hits = await engramApi.call(
       '/api/v1/search?door=extension&q=' + encodeURIComponent(q));
+    if (mine !== turn) return;
     say('');
     clearResults();
     if (!hits.length) {
@@ -356,21 +402,23 @@ async function runSearch() {
     }
     renderHits(hits, $('results'));
   } catch (e) {
+    if (mine !== turn) return;
     await fail(e);
   }
 }
 
-/// Which ask the frames arriving belong to.
-///
-/// An ask runs for as long as the model takes — `infer.ask.timeout_secs`
-/// defaults to 900 — and the panel stays usable throughout: the operator can
-/// press back, type something else, and start another. Frames from an ask that
-/// is no longer the one on screen are dropped rather than written into a node
-/// that has been replaced.
-let askRun = 0;
-
+// An ask runs for as long as the model takes — `infer.ask.timeout_secs`
+// defaults to 900 — and the panel stays usable throughout: the operator can
+// press back, type something else, and start another.
+//
+// Back empties the pane itself rather than leaving it to the search it starts.
+// That search returns without touching anything when the box holds more than
+// `MAX_QUERY`, and back that visibly does nothing is worse than back that
+// shows an empty pane.
 $('back').addEventListener('click', () => {
-  askRun++;
+  turn++;
+  abandonAsk();
+  clearResults();
   say('');
   runSearch();
 });
@@ -379,7 +427,16 @@ $('ask').addEventListener('click', async () => {
   const q = box.value.trim();
   if (!q || !(await requirePaired())) return;
 
-  const run = ++askRun;
+  // The keystroke that finished the question armed a search 200ms ago. Left
+  // armed, it fires once this answer's nodes are on screen and empties the
+  // pane out from under a stream that goes on writing into nodes no longer in
+  // the document — an answer that streams into nowhere.
+  clearTimeout(searchTimer);
+
+  const mine = ++turn;
+  abandonAsk();
+  const ask = new AbortController();
+  askAbort = ask;
   clearResults();
   $('back').hidden = false;
   say('');
@@ -391,8 +448,8 @@ $('ask').addEventListener('click', async () => {
   $('results').append(answer, sources);
 
   try {
-    await engramApi.stream('/api/v1/ask/stream', { q }, (name, data) => {
-      if (run !== askRun) return;
+    await engramApi.stream('/api/v1/ask/stream', { q }, ask.signal, (name, data) => {
+      if (mine !== turn) return;
       switch (name) {
         // How wide the net was and how much of it the model will see. Said out
         // loud because a missing citation is otherwise silent.
@@ -431,7 +488,11 @@ $('ask').addEventListener('click', async () => {
       }
     });
   } catch (e) {
-    if (run === askRun) await fail(e);
+    // An abandoned ask throws where it was aborted, and that is this panel's
+    // own doing rather than news.
+    if (mine === turn) await fail(e);
+  } finally {
+    if (askAbort === ask) askAbort = null;
   }
 });
 
@@ -467,6 +528,8 @@ $('capture-text').addEventListener('click', async () => {
     fit();
     reflectVerbs();
     hint('');
+    turn++;
+    abandonAsk();
     clearResults();
     await refreshRecent();
   } catch (e) {

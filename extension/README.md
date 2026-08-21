@@ -124,7 +124,7 @@ typing — never something the panel inferred.
       reading was composed before anything came back.
 - [ ] Paste several paragraphs into the box.
       Expected: the box grows to fit and then scrolls; it does not change
-      shape, relabel itself, or switch modes. Past 400 characters the live
+      shape, relabel itself, or switch modes. Past 2000 characters the live
       search stops firing and a line says so — the only thing length changes,
       and it changes it in as many words rather than silently.
 - [ ] Press Capture with text in the box.
