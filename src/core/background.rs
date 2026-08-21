@@ -119,7 +119,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     // operator who switches duplicate hygiene off is not asking to keep their
     // query log forever. With nothing to expire and nothing to group there is
     // no unit at all, which is what the ticker's `return` used to say.
-    if core.feedback.retain_days > 0 || core.feedback.enabled {
+    if core.feedback.retain_days > 0 || core.feedback.enabled || core.recommends() {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
     }
     if core.associating() {

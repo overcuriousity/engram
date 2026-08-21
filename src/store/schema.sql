@@ -481,6 +481,61 @@ CREATE TABLE IF NOT EXISTS interaction_events (
 );
 CREATE INDEX IF NOT EXISTS idx_interactions_at ON interaction_events(at);
 
+-- ── The situation a page view happened in ────────────────────────────────────
+-- Joined to `search_events` and `interaction_events` through `scope` and `at`,
+-- never through a stored id — the same rule `interaction_events` states just
+-- above for pursuits. The clustering decides what belongs together, and
+-- re-clustering never has to rewrite these.
+CREATE TABLE IF NOT EXISTS context_events (
+  id          INTEGER PRIMARY KEY,
+  scope       TEXT,
+  at          INTEGER NOT NULL,
+  -- The whole bundle as received, including fields the encoder ignores. That
+  -- is what makes a new block cheap: a reindex plus a sweep, rather than the
+  -- loss of every situation recorded before it existed.
+  bundle      TEXT NOT NULL,
+  -- Hash over the stable fields only: platform, UA family, screen dimensions,
+  -- hardwareConcurrency, deviceMemory, language. Not canvas, WebGL or fonts —
+  -- those are what identify a device across a population, and here the
+  -- population is one authenticated person, so they are constant and say
+  -- nothing about *which situation* this is. They are also randomised per
+  -- session and origin by a hardened browser, so every day would look like a
+  -- new device.
+  device_key  TEXT,
+  -- Denormalised because the sweep reads them on every row.
+  local_hour  INTEGER,
+  weekday     INTEGER,
+  tz          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_context_scope_at ON context_events(scope, at);
+
+-- The situations one artifact is opened in, agglomerated. The centroids
+-- themselves live in the vector store as the `ctx` multivector; this is the
+-- bookkeeping, for two reasons: Qdrant holds numbers and cannot produce a
+-- reason, and this table survives a `--reindex` while the vectors are rewritten.
+CREATE TABLE IF NOT EXISTS context_clusters (
+  id              INTEGER PRIMARY KEY,
+  scope           TEXT,
+  artifact_id     TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Position of this centroid within the point's `ctx` multivector. Unique per
+  -- artifact and NOT per (scope, artifact): the multivector is one array on one
+  -- point, shared by every scope that has opened this artifact, so a slot
+  -- numbered per scope would have two owners writing index 0.
+  slot            INTEGER NOT NULL,
+  centroid        BLOB NOT NULL,
+  weight          REAL NOT NULL,
+  last_at         INTEGER NOT NULL,
+  -- What layout `centroid` was written under. A reader that does not recognise
+  -- it skips the cluster rather than explaining a hit with the wrong blocks.
+  encoder_version INTEGER NOT NULL,
+  -- The member nearest the centroid, as `{"at": <unix>, "bundle": {…}}` — what
+  -- the display quotes. The stamp is carried with it because a bundle does not
+  -- contain one and the line says "like 08.08., 15:04".
+  representative  TEXT NOT NULL,
+  UNIQUE (artifact_id, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_context_clusters_artifact ON context_clusters(artifact_id);
+
 -- A coherent thing that was wanted: its queries, and what came of it.
 CREATE TABLE IF NOT EXISTS pursuits (
   id           TEXT PRIMARY KEY,

@@ -20,6 +20,8 @@ pub struct Report {
     pub clusters: usize,
     pub named: usize,
     pub removed: usize,
+    /// Situations dropped for being past `store::context::RETAIN_DAYS`.
+    pub contexts: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -72,6 +74,28 @@ pub async fn run(core: &Core) -> Result<Report> {
                 tracing::warn!(error = %e, "could not group knowledge gaps");
                 failure.get_or_insert(e);
             }
+        }
+    }
+
+    // Its own window, and behind no key. A weekly pattern needs weeks, and
+    // `feedback.retain_days` defaults to keeping for ever but is an operator
+    // switch — an operator who shortens their query log is not asking the base
+    // to forget what Friday afternoon looks like. Runs whenever this unit runs,
+    // which is why `periodic_units` also arms it for `recommend.enabled`.
+    match core
+        .store
+        .expire_context_events(crate::store::context::RETAIN_DAYS)
+        .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(dropped = n, "expired recorded situations");
+            }
+            report.contexts = n;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not expire recorded situations");
+            failure.get_or_insert(e);
         }
     }
 

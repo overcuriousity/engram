@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod asks;
 pub mod attachments;
 pub mod auth;
+pub mod context;
 pub mod corpora;
 pub mod feedback;
 pub mod gaps;
