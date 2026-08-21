@@ -2751,14 +2751,43 @@ impl ReturnTo {
     }
 }
 
+/// What a lifecycle button answers with: the artifact it just changed.
+///
+/// These four buttons say something about an artifact, not about the page it is
+/// on — so the answer is that artifact, re-rendered where it already was, and
+/// nothing navigates. `_artifact_detail.html` is rendered in two places and the
+/// hidden `to` beside each button can only name one of them: it named the
+/// standalone artifact page, so pressing "Confirm still accurate" on a search
+/// result took the whole window there and the results the operator was working
+/// through were gone. That is the reason `ReturnTo` exists, arrived at from the
+/// other side.
+///
+/// The redirect is still what a browser without htmx gets, and `to` is still
+/// what it follows. Nothing here is the only way any of these buttons work.
+async fn artifact_changed(
+    st: &AppState,
+    headers: &axum::http::HeaderMap,
+    aid: &str,
+    terms: &str,
+    back: &ReturnTo,
+) -> Result<Response> {
+    if headers.contains_key("hx-request") {
+        let d = build_artifact_detail(&st.core, aid, terms).await?;
+        return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
+    }
+    Ok(Redirect::to(back.path()).into_response())
+}
+
 async fn unsupersede_ui(
     State(st): State<AppState>,
     _id: Identity,
+    headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.unsupersede(&aid).await?;
-    Ok(Redirect::to(back.path()).into_response())
+    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
 async fn dismiss_pair_ui(
@@ -2846,31 +2875,37 @@ async fn apply_pair_supersede_ui(
 async fn deprecate_ui(
     State(st): State<AppState>,
     _id: Identity,
+    headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.deprecate(&aid).await?;
-    Ok(Redirect::to(back.path()).into_response())
+    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
 async fn reactivate_ui(
     State(st): State<AppState>,
     _id: Identity,
+    headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.reactivate(&aid).await?;
-    Ok(Redirect::to(back.path()).into_response())
+    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
 async fn verify_ui(
     State(st): State<AppState>,
     _id: Identity,
+    headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     st.core.verify(&aid).await?;
-    Ok(Redirect::to(back.path()).into_response())
+    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
 async fn ask_page(
@@ -5475,6 +5510,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.headers().get("location").unwrap(), "/ui/ops");
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_button_pressed_in_the_pane_swaps_the_artifact_not_the_page() {
+        // The same fragment is the standalone page and the pane beside the
+        // search results, and the hidden `to` can only name one of them. It
+        // named the page, so pressing "Confirm still accurate" on a result
+        // navigated the whole window there and took the results with it.
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let rail = get(&app, "/ui/search/results?q=alpha", &cookie).await;
+        let id = rail
+            .split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string();
+
+        let mut req = form(
+            &format!("/ui/ops/artifacts/{id}/verify"),
+            &cookie,
+            &format!("to=/ui/artifacts/{id}"),
+        );
+        req.headers_mut()
+            .insert("hx-request", "true".parse().unwrap());
+        let res = app.clone().oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers().get("location").is_none(),
+            "a swap must not navigate"
+        );
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(
+            body.contains(&format!(r#"data-artifact="{id}""#)),
+            "the answer is the artifact, re-rendered: {body}"
+        );
+        // A fragment, not a whole page: the pane is inside one already.
+        assert!(!body.contains("<nav"), "{body}");
     }
 
     #[tokio::test]

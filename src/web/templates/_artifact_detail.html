@@ -31,9 +31,25 @@
       <div>Something near-identical and newer
         (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
       <div class="chips">
-        {# `to`: these buttons also live on Ops, whose copies send nothing and
-           land back on the queue. Pressed from here, they come back here. #}
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+        {# Swapped, not navigated. What these buttons change is the artifact,
+           so what they answer with is the artifact, re-rendered in place —
+           `closest [data-artifact]` is this fragment's own root, and it is the
+           root in both places this fragment is rendered: the standalone page,
+           and the pane beside the search results. The hidden `to` could only
+           ever name one of the two, and it named the page, so pressing one of
+           these on a search result took the whole window there and the results
+           being worked through were gone.
+
+           `method`/`action` and `to` stay for a browser with no htmx, which
+           still posts and still follows the redirect. `terms` rides along so
+           the highlighting survives the swap.
+
+           These buttons also live on Ops, whose copies send no `to` and land
+           back on the queue — there the queue *is* the thing being worked
+           through, and a row leaving it is the point. #}
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/unsupersede?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
           <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Put it back</button>
         </form>
@@ -79,18 +95,22 @@
      about. #}
   <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/verify?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
               title="Confirm still accurate" aria-label="Confirm still accurate">
         {% include "_icon_check.html" %}<span>Verified</span>
       </button>
     </form>
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/deprecate?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
-              title="Deprecate — hide from results, keep the artifact"
-              aria-label="Deprecate: hide from results, keep the artifact">
+              title="Hide from results — the artifact is kept, and this can be undone"
+              aria-label="Hide from results: the artifact is kept, and this can be undone">
         {% include "_icon_hide.html" %}<span>Hide</span>
       </button>
     </form>
