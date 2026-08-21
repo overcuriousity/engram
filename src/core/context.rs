@@ -342,12 +342,29 @@ fn fill(name: &str, s: &mut [f32], t: &LocalTime, scope: Option<&str>, b: &Bundl
     use std::f32::consts::TAU;
     match name {
         "scope" => {
-            // Hashed into buckets rather than looked up in a registry: there is
-            // no list of every subject that has ever searched, and one bucket
-            // shared by two people is a collision per-user collections remove
-            // rather than a bug to work around here.
+            // A deterministic pseudo-random direction per scope, spread over
+            // every slot — *not* one-hot over eight buckets.
+            //
+            // One-hot was the first version and was wrong: two people had a
+            // one-in-eight chance of landing in the same bucket, and a shared
+            // bucket means identical scope blocks, which means one person's
+            // Friday afternoon offered to another at a perfect score. A test
+            // with two names caught it on the first run.
+            //
+            // Spread this way, two distinct scopes are near-orthogonal rather
+            // than identical. That keeps a foreign cluster from ranking first
+            // in the store; what *guarantees* isolation is the exact scope
+            // check in `Core::offer`, because a near-orthogonal direction is
+            // still a probability and isolation must not be one.
             if let Some(sc) = scope {
-                s[bucket(sc, s.len())] = 1.0;
+                for (i, x) in s.iter_mut().enumerate() {
+                    let h = fnv1a(&format!("{sc}#{i}"));
+                    // The top 53 bits into [-1, 1): the low bits of FNV-1a move
+                    // least between neighbouring inputs, and `sc#0`..`sc#7` are
+                    // exactly neighbouring inputs.
+                    let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
+                    *x = (unit * 2.0 - 1.0) as f32;
+                }
             }
         }
         "time_of_day" => {

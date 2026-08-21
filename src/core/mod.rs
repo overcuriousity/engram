@@ -7,6 +7,7 @@ pub mod gaps;
 pub mod image;
 pub mod ingest;
 pub mod pdf;
+pub mod recommend;
 pub mod search;
 pub mod sitting;
 
