@@ -262,24 +262,17 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let background = core.background.clone();
-    let ticker =
-        engram::core::background::spawn_consolidation_ticker(core.clone(), shutdown_rx.clone());
-    let retention =
-        engram::core::background::spawn_retention_ticker(core.clone(), shutdown_rx.clone());
-    let dedupe = engram::core::background::spawn_dedupe_ticker(core.clone(), shutdown_rx.clone());
+    // One ticker left. The five that queued the sweeps are gone: a sweep arms
+    // itself an interval out when it finishes, so the queue holds the schedule
+    // and `run_after` is the cursor. Repair stays outside it — it is what
+    // recovers an interrupted schedule, including arming a sweep that died
+    // between being claimed and re-arming itself, so it cannot be scheduled by
+    // the thing it recovers.
     let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
-    let associate =
-        engram::core::background::spawn_associate_ticker(core.clone(), shutdown_rx.clone());
-    let pursuit = engram::core::background::spawn_pursuit_ticker(core.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
-    // Joined with the workers so shutdown waits for them too, rather than
-    // leaving tasks the runtime drops mid-enqueue.
-    handles.push(ticker);
-    handles.push(retention);
-    handles.push(dedupe);
+    // Joined with the workers so shutdown waits for it too, rather than
+    // leaving a task the runtime drops mid-enqueue.
     handles.push(repair);
-    handles.push(associate);
-    handles.push(pursuit);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
@@ -402,6 +395,8 @@ mod startup_tests {
             activation: ActivationConfig::default(),
             promote: engram::config::PromoteConfig::default(),
             pursuit: engram::config::PursuitConfig::default(),
+            schedule: engram::config::ScheduleConfig::default(),
+            sitting: engram::config::SittingConfig::default(),
         }
     }
 

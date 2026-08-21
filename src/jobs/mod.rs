@@ -11,6 +11,7 @@ pub mod promote;
 pub mod pursuit;
 pub mod reconcile;
 pub mod relate;
+pub mod retention;
 pub mod synthesize;
 pub mod window;
 
@@ -97,10 +98,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
-        // The sweep looks at the whole collection, so it ignores the target.
-        (Stage::Consolidate, _) => consolidate::run(core).await.map(|_| ()),
-        // The sweep looks at the whole collection, so it ignores the target.
-        (Stage::Associate, _) => associate::run(core).await,
         (Stage::LinkJudge, _) => associate::judge(core, &job.target_id).await,
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
@@ -108,8 +105,18 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
-        (Stage::Pursuit, _) => pursuit::run(core).await.map(|_| ()),
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
+        // Every periodic unit goes through one path, because every periodic
+        // unit is accounted for. The sweeps below look at the whole collection,
+        // so they ignore the target.
+        (
+            Stage::Consolidate
+            | Stage::Associate
+            | Stage::Pursuit
+            | Stage::Retention
+            | Stage::ArmDedupe,
+            _,
+        ) => run_accounted(core, job.stage).await,
     };
 
     match result {
@@ -121,6 +128,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
             }
+            rearm_periodic(core, &job).await;
+            arm_successor(core, &job).await;
             Ok(true)
         }
         // The target was deleted while the job waited. Retrying can never
@@ -204,6 +213,110 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             }
             Ok(true)
         }
+    }
+}
+
+/// Run one periodic unit and write down what it did.
+///
+/// The counts are the ones each sweep already returns; nothing here is counted
+/// for the account's sake. A failed run is recorded too — it is exactly the run
+/// an operator needs to see, and a history that kept only the successes would
+/// show a sweep going quiet with nothing anywhere saying why.
+///
+/// The row is written whatever happens to the unit afterwards, which is why it
+/// is written here rather than beside `complete_job`: a failed sweep stays
+/// queued behind a backoff, and that is a retry of the same unit rather than a
+/// run that never happened.
+async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
+    let started_at = crate::store::now();
+    let outcome = match stage {
+        Stage::Consolidate => consolidate::run(core).await.and_then(detail),
+        Stage::Associate => associate::run(core).await.and_then(detail),
+        Stage::Retention => retention::run(core).await.and_then(detail),
+        Stage::Pursuit => pursuit::run(core)
+            .await
+            .and_then(|n| detail(serde_json::json!({ "pursuits": n }))),
+        Stage::ArmDedupe => consolidate::arm_dedupe(core).await.and_then(|n| {
+            if n > 0 {
+                tracing::info!(armed = n, "armed dedupe units");
+            }
+            detail(serde_json::json!({ "armed": n }))
+        }),
+        // `run_claimed` sends only the five above here, and a sixth arriving
+        // silently unaccounted for is worse than a row saying so.
+        _ => detail(serde_json::json!({})),
+    };
+    let (state, written) = match &outcome {
+        Ok(d) => ("ok", d.clone()),
+        Err(e) => (
+            "failed",
+            serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+    };
+    if let Err(e) = core
+        .store
+        .record_sweep_run(stage.as_str(), started_at, state, &written)
+        .await
+    {
+        tracing::warn!(stage = stage.as_str(), error = %e, "could not record what the sweep did");
+    }
+    outcome.map(|_| ())
+}
+
+/// The counts a sweep returned, as the JSON the account stores.
+fn detail<T: serde::Serialize>(report: T) -> Result<String> {
+    Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()))
+}
+
+/// A sweep that has finished arms itself one interval out.
+///
+/// After completing, never before: the queue is keyed by `(stage, target)`, so
+/// a handler that re-armed itself would be upserting the very row
+/// `complete_job` then closes.
+///
+/// Nothing is done for a *failed* sweep, and nothing needs to be: `fail_job`
+/// leaves the row pending behind a backoff, which is already the re-arming. One
+/// failure ending a sweep for the life of the process is the one way this
+/// design could quietly stop the memory from learning, and there is a test
+/// saying it does not.
+///
+/// A sweep switched off since it was armed re-arms as nothing: `periodic_period`
+/// returns `None`, the row stays closed, and the repair pass will not put it
+/// back either, because it is no longer in `periodic_units`.
+async fn rearm_periodic(core: &Core, job: &Job) {
+    let Some(period) = crate::core::background::periodic_period(core, job.stage) else {
+        return;
+    };
+    let at = crate::store::now() + period.as_secs() as i64;
+    if let Err(e) = core
+        .store
+        .arm_periodic(job.stage, &job.target_kind, &job.target_id, at)
+        .await
+    {
+        tracing::warn!(stage = job.stage.as_str(), error = %e, "could not re-arm the sweep");
+    }
+}
+
+/// Replay before pursue.
+///
+/// The one ordering worth expressing beyond what the tree already expresses by
+/// arming: a sitting scored against the links this run folded in, not against
+/// the last half-hour's. The pursuit sweep keeps its own period as a floor, so
+/// this pulls it forward rather than being the only thing that runs it.
+async fn arm_successor(core: &Core, job: &Job) {
+    if job.stage != Stage::Associate || !core.pursuit.enabled {
+        return;
+    }
+    if let Err(e) = core
+        .store
+        .arm_now(
+            Stage::Pursuit,
+            "collection",
+            crate::core::background::ASSOCIATE_TARGET,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "could not bring the pursuit sweep forward");
     }
 }
 
@@ -315,6 +428,181 @@ mod tests {
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
     use std::sync::Arc;
+
+    /// The row a sweep leaves behind, whatever state it left in.
+    async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
+        sqlx::query_scalar("SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'")
+            .bind(stage.as_str())
+            .fetch_optional(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_ran_says_what_it_did() {
+        // The question a system that describes itself as sleeping has to be
+        // able to answer: what did the memory do while I was away.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.store
+            .arm_periodic(
+                Stage::Associate,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        run_claimed(&core, job).await.unwrap();
+
+        let runs = core.store.sweep_history(10).await.unwrap();
+        assert_eq!(runs.len(), 1, "the run was never recorded");
+        assert_eq!(runs[0].stage, "associate");
+        assert_eq!(runs[0].outcome, "ok");
+        assert!(
+            runs[0].detail.contains("forgotten"),
+            "the counts the sweep already returns were not kept: {}",
+            runs[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_sweep_arms_itself_one_interval_out() {
+        // No ticker holds the period any more: `run_after` is the cursor
+        // recording when the sweep last ran, and it is already indexed.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.store
+            .arm_periodic(
+                Stage::Associate,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Associate);
+        run_claimed(&core, job).await.unwrap();
+
+        let at = pending_run_after(&core, Stage::Associate)
+            .await
+            .expect("the sweep did not arm itself again");
+        let interval = core.associate.interval_mins as i64 * 60;
+        let expected = crate::store::now() + interval;
+        assert!(
+            (at - expected).abs() <= 5,
+            "armed at {at}, expected about {expected}"
+        );
+        // And exactly one of it: `UNIQUE(stage, target_id)` still does that
+        // work, for free and for the same reason it always did.
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'associate'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_failed_is_still_going_to_run_again() {
+        // The one way this design could quietly stop the memory from learning:
+        // one failure ending a sweep for the life of the process. `fail_job`
+        // leaves the row pending behind a backoff, which is the re-arming — so
+        // what this asserts is that nothing closes it instead.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        // A pursuit sweep with no store behind it fails; what it fails on does
+        // not matter, only that the row survives it.
+        core.store
+            .arm_periodic(Stage::Pursuit, "collection", "collection", 0)
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        let id = job.id;
+        core.store
+            .fail_job(id, 1, "the endpoint was down")
+            .await
+            .unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(id)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            state, "pending",
+            "a failed sweep was closed rather than left to retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_switched_off_since_it_was_armed_does_not_arm_itself_again() {
+        // The gates live on the list now, so this is what "switched off" means
+        // for a unit already in the queue: it runs once more and stops.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.store
+            .arm_periodic(
+                Stage::Associate,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                0,
+            )
+            .await
+            .unwrap();
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        core.associate.enabled = false;
+
+        run_claimed(&core, job).await.unwrap();
+
+        assert!(
+            pending_run_after(&core, Stage::Associate).await.is_none(),
+            "a sweep switched off armed itself anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_comes_before_pursue() {
+        // A sitting scored against the links this run folded in, not against
+        // the last half-hour's. The pursuit sweep keeps its own period as a
+        // floor; this is what pulls it forward.
+        let mut core = test_core().await;
+        core.feedback.enabled = true;
+        core.pursuit.enabled = true;
+        // Pursuit asleep on its own period, as it is for all but a moment of
+        // every cycle.
+        core.store
+            .arm_periodic(
+                Stage::Pursuit,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                crate::store::now() + 3600,
+            )
+            .await
+            .unwrap();
+        core.store
+            .arm_periodic(
+                Stage::Associate,
+                "collection",
+                crate::core::background::ASSOCIATE_TARGET,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Associate);
+        run_claimed(&core, job).await.unwrap();
+
+        assert_eq!(
+            pending_run_after(&core, Stage::Pursuit).await,
+            Some(0),
+            "the pursuit sweep was left asleep after the replay it depends on"
+        );
+    }
 
     #[tokio::test]
     async fn a_batch_embed_the_endpoint_rejects_is_retried_chunk_by_chunk() {

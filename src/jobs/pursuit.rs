@@ -378,9 +378,20 @@ pub async fn run(core: &Core) -> Result<usize> {
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         let sources: Vec<String> = ranked.into_iter().map(|(id, _)| id).collect();
         let decision = decide(&need, core.pursuit.min_sources, core.pursuit.min_engagement);
+        // The leading event's vector, carried onto the row. A pursuit that
+        // closes unsatisfied is a gap, and a gap is a question plus the vector
+        // it was found by; the sweep is holding both right here, and embedding
+        // the words again later would be a call spent on a vector that has
+        // already been computed.
+        let lead = members.first().map(|&m| &evs[m]);
         let pid = core
             .store
-            .insert_pursuit(need.opened_at, &need.queries, &sources)
+            .insert_pursuit(
+                need.opened_at,
+                &need.queries,
+                &sources,
+                lead.map(|e| (e.vec.as_slice(), core.embedder.model())),
+            )
             .await?;
         // `insert_pursuit` is keyed on the cluster, so a sitting the previous
         // sweep already reached comes back with the row it wrote. Only a
@@ -649,7 +660,7 @@ mod tests {
         let ids = two_sources(&core).await;
         let pid = core
             .store
-            .insert_pursuit(100, &["how do I read the journal".into()], &ids)
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
             .await
             .unwrap();
 
@@ -693,7 +704,7 @@ mod tests {
         let ids = two_sources(&core).await;
         let pid = core
             .store
-            .insert_pursuit(100, &["q".into()], &ids)
+            .insert_pursuit(100, &["q".into()], &ids, None)
             .await
             .unwrap();
         generate(&core, &pid).await.unwrap();

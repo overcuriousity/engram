@@ -150,21 +150,39 @@ impl Store {
     /// re-clusters them identically. Without this the operator would find the
     /// sitting listed once per crash on Ops, each copy able to arm its own
     /// generation.
+    /// `query_vec` is the leading clustered query's vector and the model that
+    /// produced it, carried forward because a pursuit that closes unsatisfied
+    /// is a gap and a gap is a question plus the vector it was found by. The
+    /// sweep is holding both already; re-embedding the words later would be a
+    /// call spent on a vector that has been computed once.
     pub async fn insert_pursuit(
         &self,
         opened_at: i64,
         queries: &[String],
         sources: &[String],
+        query_vec: Option<(&[f32], &str)>,
     ) -> Result<String> {
         let id = pursuit_id(opened_at, queries);
+        let (blob, dim, model) = match query_vec {
+            Some((v, m)) if !v.is_empty() => (
+                crate::store::feedback::vec_to_blob(v),
+                v.len() as i64,
+                Some(m.to_string()),
+            ),
+            _ => (Vec::new(), 0, None),
+        };
         sqlx::query(
-            "INSERT OR IGNORE INTO pursuits (id, opened_at, state, queries, sources)
-             VALUES (?, ?, 'open', ?, ?)",
+            "INSERT OR IGNORE INTO pursuits
+               (id, opened_at, state, queries, sources, query_vec, vec_dim, embed_model)
+             VALUES (?, ?, 'open', ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(opened_at)
         .bind(serde_json::to_string(queries).unwrap_or_else(|_| "[]".into()))
         .bind(serde_json::to_string(sources).unwrap_or_else(|_| "[]".into()))
+        .bind(blob)
+        .bind(dim)
+        .bind(model)
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -277,7 +295,12 @@ mod tests {
     async fn a_pursuit_round_trips_and_closes() {
         let s = Store::memory().await.unwrap();
         let id = s
-            .insert_pursuit(100, &["how to mount".into()], &["a1".into(), "a2".into()])
+            .insert_pursuit(
+                100,
+                &["how to mount".into()],
+                &["a1".into(), "a2".into()],
+                None,
+            )
             .await
             .unwrap();
         let p = s.get_pursuit(&id).await.unwrap();

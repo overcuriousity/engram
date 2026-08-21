@@ -77,6 +77,10 @@ body { overflow-x: hidden; }
    under a container query. */
 
 .rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
+/* The results are their own element inside the rail, so that a search replaces
+   them and not the sitting above them — and the rail's own column layout has to
+   carry through to it, or every card loses the gap between it and the next. */
+#results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
 .rail-item {
   display: block; text-decoration: none; color: inherit;
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
@@ -84,22 +88,12 @@ body { overflow-x: hidden; }
 }
 .rail-item:hover { background: var(--color-bg-hover); }
 
-/* A result row is the link plus a delete control *beside* it, not inside it: a
-   <button> nested in an <a> is invalid HTML, and the anchor has to stay the
-   `.rail-item` because that is the element the arrow-key navigation focuses.
-   The control is held out of the way until the row is hovered or something
-   inside it takes focus, so the rail still reads as a list of results rather
-   than a list of delete buttons. Keyboard users reach it by tabbing, which
-   `:focus-within` reveals; a touch screen has no hover, so there it is simply
-   always visible. */
-.rail-row { position: relative; }
-.rail-row .rail-item { padding-right: 2.75rem; }
-.rail-del {
-  position: absolute; top: 0.5rem; right: 0.5rem;
-  opacity: 0; transition: opacity 120ms ease;
-}
-.rail-row:hover .rail-del, .rail-del:focus-within { opacity: 1; }
-@media (hover: none) { .rail-del { opacity: 1; } }
+/* A result row is the link and nothing else. It carried a delete control until
+   that control turned out to be the only irreversible act in the app that could
+   be fired on something nobody had opened; `.rail-row` stays as the row's own
+   element, and the shape the control needed — a sibling of the anchor, held out
+   of the way until hover or focus — lives on in `.seen-row` below, which still
+   has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
@@ -112,6 +106,14 @@ body { overflow-x: hidden; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.4em;
 }
+/* With the rail at its reading width there is room for the whole excerpt, and
+   the two-line clamp is what made a result unreadable without opening it.
+   The floor stays: an artifact whose excerpt came back empty still must not
+   collapse the card. */
+.regions-rail-focus-source:not(.has-selection) .rail-snippet {
+  -webkit-line-clamp: unset; display: block; overflow: visible;
+}
+
 .pane { min-width: 0; }
 
 /* Association is a second list on the same page, not a continuation of the
@@ -244,6 +246,16 @@ body { overflow-x: hidden; }
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--color-border-subtle);
 }
+
+/* The name of what is being read stays while it is read. The pane scrolls a
+   long artifact past its own heading, and three screens down there was
+   nothing on the page saying which artifact this was. Its own background, or
+   the text scrolls through it. */
+.pane .card-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--color-bg-elevated);
+  padding-top: 0.25rem;
+}
 .actions > form + form:last-of-type { margin-left: auto; }
 
 /* The open card keeps one line of itself. The pane beside it holds the text in
@@ -345,8 +357,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
-  .regions.reading .badge,
-  .regions.reading .rail-row > form { display: none; }
+  .regions.reading .badge { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
   }
@@ -506,3 +517,7 @@ body { overflow-x: hidden; }
     min-height: 12rem; overflow-y: auto;
   }
 }
+
+/* Said under the passage it belongs to, quietly: it is a way onward, not a
+   warning that something is wrong. */
+.continues { margin: 0.5rem 0 0; font-size: 0.8125rem; }

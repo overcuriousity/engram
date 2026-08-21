@@ -1,0 +1,16 @@
+{# What this sitting has been in. A way back to what you were just reading,
+   carried between the doors — the pages had nothing between them, so a hit
+   opened on search and wanted again on ask meant searching for it twice.
+   Absent, not empty, on a cold sitting: a box saying "nothing yet" is worse
+   than no box. Six at most; a list long enough to need reading would be a
+   second set of results beside the real ones. #}
+{% if !sitting.is_empty() %}
+<div class="sitting">
+  <p class="pane-label">Read just now</p>
+  <ul>
+    {% for s in sitting %}
+    <li><a href="/ui/artifacts/{{ s.id }}">{{ s.title }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}

@@ -92,8 +92,15 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 /// Single-linkage over cosine: two vectors join at `link_at`, and joining is
 /// transitive. Returns groups of indices, each sorted, ordered by their first
-/// member. N is bounded by `store::gaps::MAX_OPEN_GAPS`, so the quadratic pass
-/// is fine.
+/// member.
+///
+/// N is bounded by `store::gaps::MAX_OPEN_GAPS` *per kind*, and there are four
+/// kinds, so the quadratic pass is up to four times as many comparisons as that
+/// constant reads like — two million of them at today's numbers, on the
+/// retention tick. That is deliberate and it is the ceiling: it runs on a timer
+/// rather than on a request, nothing waits for it, and cutting the cap to make
+/// one number match the other would cost the operator gaps on the page to buy
+/// back time nobody is holding.
 ///
 /// Borrowed, not owned: the caller holds the vectors it read out of the store,
 /// and copying a thousand of them to pass them in was four million floats moved

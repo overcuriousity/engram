@@ -195,11 +195,21 @@
     if (!form) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
+    // The disclosure around it: what is shown or hidden is the box, while the
+    // text still streams into the div inside it.
+    var reasoningBox = document.getElementById('ask-reasoning-box');
     var progress = document.getElementById('ask-progress');
     var rail = document.getElementById('ask-rail');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
+    var spinner = document.getElementById('ask-spinner');
+    var stopBtn = document.getElementById('ask-stop');
     var source = null;
+    // The wait is fifty seconds on a fan-out and nothing on the page predicted
+    // it. Counted from the submit rather than from the first token, because
+    // the retrieval in front of the model is most of what is being waited on.
+    var started = 0;
+    var ticker = null;
     // Which ask the page belongs to. See the submit handler.
     var generation = 0;
 
@@ -211,8 +221,32 @@
     // here.
     function stop() {
       if (source) { source.close(); source = null; }
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      stopBtn.hidden = true;
+      spinner.textContent = 'thinking…';
       form.classList.remove('asking');
     }
+
+    // Count up beside the spinner while the stream is open.
+    function startTicking() {
+      started = Date.now();
+      stopBtn.hidden = false;
+      if (ticker) clearInterval(ticker);
+      ticker = setInterval(function () {
+        var secs = Math.round((Date.now() - started) / 1000);
+        spinner.textContent = 'thinking… ' + secs + 's';
+      }, 1000);
+    }
+
+    stopBtn.addEventListener('click', function () {
+      if (!source) return;
+      var secs = Math.round((Date.now() - started) / 1000);
+      stop();
+      // What arrived stays. `live` holds the partial answer and the rail holds
+      // the excerpts it was being written from, and both are worth more than a
+      // cleared page — the reader stopped the wait, not the answer.
+      status.textContent = 'stopped after ' + secs + ' seconds';
+    });
 
     function fail(message) {
       stop();
@@ -225,7 +259,7 @@
       box.textContent = message;
       result.appendChild(box);
       live.hidden = true;
-      reasoning.hidden = true;
+      reasoningBox.hidden = true;
       progress.hidden = true;
     }
 
@@ -284,8 +318,11 @@
       });
       source.addEventListener('reasoning', function (e) {
         if (!current()) return;
-        reasoning.hidden = false;
+        reasoningBox.hidden = false;
         reasoning.appendChild(document.createTextNode(JSON.parse(e.data).text));
+        // Only while it is open. A closed box has no scroll position to keep,
+        // and asking for one fights the page for the reader's.
+        if (reasoningBox.open) reasoning.scrollTop = reasoning.scrollHeight;
       });
       source.addEventListener('token', function (e) {
         if (!current()) return;
@@ -306,7 +343,7 @@
         // the rendered answer. Hidden rather than emptied, so the next ask
         // reuses them.
         live.hidden = true;
-        reasoning.hidden = true;
+        reasoningBox.hidden = true;
         // `progress` deliberately stays: what the retrieval went looking for
         // still describes the rail underneath the answer, and it is the only
         // place on the page that says a fan-out happened at all.
@@ -347,8 +384,10 @@
       rail.textContent = '';
       result.textContent = '';
       live.hidden = true;
-      reasoning.hidden = true;
+      reasoningBox.hidden = true;
+      reasoningBox.open = false;
       form.classList.add('asking');
+      startTicking();
 
       fetch('/ui/ask', {
         method: 'POST',
@@ -594,7 +633,31 @@
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
-      if (ws && e.target.id === 'rail') ws.classList.remove('has-selection');
+      //
+      // `#results` rather than `#rail`: the list is its own element inside the
+      // rail now, so that what a search replaces is the results and not the
+      // sitting beside them.
+      if (e.target.id === 'results') {
+        if (ws) ws.classList.remove('has-selection');
+        // Back to the top of the answer. Nothing moved the scroll on a swap,
+        // and the two layouts strand it in different places for the same
+        // reason: whatever you had scrolled to in the last list is kept, and
+        // the new list is drawn under it. On a phone the search box is the
+        // fixed bar at the *bottom*, so typing leaves the window scrolled to
+        // the end of the page — and the answer to what you just typed opened
+        // at its last result, with the best hits somewhere above the top of
+        // the screen.
+        var railEl = document.getElementById('rail');
+        if (railEl) {
+          // Wide: the rail is its own scroll box (see 40-search.css).
+          railEl.scrollTop = 0;
+          // Narrow: `max-height: none`, so the window is the scroller. Only
+          // ever scrolls up, and only as far as the list's own top — a page
+          // that jumped on every keystroke would be worse than the bug.
+          var top = railEl.getBoundingClientRect().top;
+          if (top < 0) window.scrollBy(0, top);
+        }
+      }
       // A clicked result was never marked as the open one. `aria-selected` was
       // set only by the arrow-key handler below, so the styling for an open
       // card — the accent border, and dropping the snippet the pane beside it

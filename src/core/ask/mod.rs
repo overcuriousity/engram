@@ -856,6 +856,7 @@ impl Core {
                 // assumed — in either direction.
                 weak: false,
                 primed: false,
+                in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
                 // What makes a reached artifact tellable apart from a retrieved
@@ -2615,6 +2616,7 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                in_sitting: false,
                 past_cliff: false,
                 via: None,
                 reason: None,

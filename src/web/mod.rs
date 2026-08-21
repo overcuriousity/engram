@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
                 state.core.capture.pdf_max_bytes,
             ),
         )
+        .fallback(ui::not_found)
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -118,6 +119,177 @@ mod tests {
         let res = app.oneshot(get(None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
         assert_eq!(res.headers()["location"], "/ui/search");
+    }
+
+    #[tokio::test]
+    async fn housekeeping_is_one_name_and_one_url() {
+        // The nav says Housekeeping, the URL says /ui/ops, the page title said
+        // Ops — and /ui/housekeeping, the name a reader would type, was the
+        // browser's own error page.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/housekeeping")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT, "{res:?}");
+        assert_eq!(res.headers()["location"], "/ui/ops");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ui_path_gets_the_apps_own_page() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(
+            body.contains("engram"),
+            "the browser's error page, not ours: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_asset_is_a_missing_asset_and_not_a_login() {
+        // The fallback is the whole application's, not the UI router's, so a
+        // stylesheet nobody routed arrived at the page — which for a browser
+        // with no session is a 401, which the redirect middleware then turns
+        // into the login screen. A 303 to `/auth/login` in place of a 404 on a
+        // `<link>` is not a missing stylesheet, it is a mystery.
+        let core = crate::core::test_support::test_core().await;
+        let (app, _cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/nothing-here.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_mcp_path_is_not_a_web_page_either() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/mcp/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(!body.contains("<html"), "an HTML document to parse: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_post_to_a_path_nobody_routed_is_not_handed_a_page() {
+        // Nobody types a POST into a browser bar, so there is nobody to show a
+        // page to; whatever sent it wants the status.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/ui/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(!body.contains("<html"), "an HTML document to parse: {body}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_api_path_is_still_not_a_web_page() {
+        // The fallback is for people typing URLs. An agent asking the API for
+        // a route that does not exist must not be handed a login-shaped HTML
+        // document to parse.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/nothing-here")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(
+            !body.contains("<html"),
+            "an API 404 came back as a page: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_path_is_behind_a_session_like_every_other_page() {
+        // The fallback took no `Identity`, so the one path nobody had routed
+        // was the one path that rendered the whole nav — `judge_pending`, a
+        // live count out of the base, included — to a visitor with no session.
+        let core = crate::core::test_support::test_core().await;
+        let app = crate::web::test_support::router(core, None);
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/nothing-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert!(
+            res.headers()["location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/auth/login"),
+            "an unknown path rendered rather than bouncing: {res:?}"
+        );
+
+        // And the API answer is unchanged: a caller with no credentials asking
+        // for a route that does not exist is told the route does not exist,
+        // not sent to an interactive login it cannot follow.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/nothing-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
     }
 
     #[tokio::test]

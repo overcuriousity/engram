@@ -129,12 +129,15 @@ fn ago(then: i64) -> String {
     }
 }
 
+/// The card's preview: plain text, markup gone.
+///
+/// Flattening whitespace was the whole of this, so a card showed
+/// `# Configure Linux…` and `custom\_passphrase` — the escapes an artifact
+/// carries so that markdown renders it correctly, shown to a person as if they
+/// were the text. `markdown::snippet` already strips them, and already stops
+/// at a word rather than mid-one.
 fn snippet_of(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(140) {
-        Some((i, _)) => format!("{}…", &flat[..i]),
-        None => flat,
-    }
+    crate::web::markdown::snippet(text, 140)
 }
 
 /// Shuffle without pulling in a random-number crate: the event id is already a
@@ -176,7 +179,7 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
                 // card, before the keystroke, instead of after it.
                 usable: a.in_results(),
                 artifact_id: a.id,
-                title: a.title.unwrap_or_else(|| "Untitled".into()),
+                title: a.title.unwrap_or_default(),
                 snippet: snippet_of(&a.text),
                 key: None,
             }),
@@ -512,7 +515,7 @@ async fn assign_results(
             .enumerate()
             .map(|(i, h)| Choice {
                 artifact_id: h.artifact_id,
-                title: h.title.unwrap_or_else(|| "Untitled".into()),
+                title: h.title.unwrap_or_default(),
                 snippet: snippet_of(&h.text),
                 // The search that produced these excluded deprecated and
                 // superseded artifacts, so everything offered here is something
@@ -558,6 +561,20 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn a_judge_card_names_nothing_untitled_and_leaks_no_markdown() {
+        // Two thirds of the deployment's judge list read "Untitled", and the
+        // snippets under them carried the backslash escapes and the leading
+        // "#" that an artifact carries so a renderer reads it correctly —
+        // shown to a person as if they were the text.
+        assert_eq!(
+            super::snippet_of("## Configure **auditd**"),
+            "Configure auditd"
+        );
+        let s = super::snippet_of(r"2 - A custom passphrase (custom\_passphrase)");
+        assert!(!s.contains('\\'), "escape shown as text: {s:?}");
+    }
 
     /// A session, `real` genuine artifacts, and one captured search whose pool
     /// is those artifacts followed by `phantom` ids that name nothing.

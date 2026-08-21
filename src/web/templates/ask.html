@@ -22,6 +22,11 @@
     <input class="input" name="q" value="{{ q }}" placeholder="Ask a question…" autofocus>
     <button class="btn btn-accent" type="submit">Ask</button>
     <span id="ask-spinner" class="spinner">thinking…</span>
+    {# A way out of a wait whose length nothing on the page predicts. Closing
+       the stream is what it does — the model call is already paid for either
+       way — so the tokens that did arrive stay where they are rather than
+       being thrown away with it. #}
+    <button id="ask-stop" class="btn btn-ghost btn-sm" type="button" hidden>Stop</button>
   </form>
   {# What the retrieval did before the model was asked anything, when there was
      more of it than usual. Silent on an ask the first round already covered: no
@@ -29,6 +34,7 @@
      searches are otherwise a silent pause of unknown length in front of the
      answer, and what they went looking for is nowhere on the page. #}
   <p id="ask-progress" class="muted" hidden></p>
+  {% include "_sitting.html" %}
 </div>
 
 {# One focus region, not two with the excerpts wedged between them: everything
@@ -36,9 +42,19 @@
    this column would put the finished answer on a grid row below the excerpts
    rather than beside them. #}
 <div class="region-focus">
-  {# What the model said on the way to the answer, kept dim and out of the way:
-     it is not the answer, and nothing in it is cited. #}
-  <div id="ask-reasoning" class="reasoning" hidden></div>
+  {# What the model said on the way to the answer. Behind a disclosure and
+     closed, rather than dim and out of the way: it is not the answer, nothing
+     in it is cited, and what it actually contains is the prompt's own
+     constraints restated back at whoever is reading — "Answer *only* using the
+     provided knowledge-base excerpts", for fifty seconds, above an empty
+     space where the answer will be. Kept rather than dropped because it is
+     what a tuning session wants to see; closed because nobody else asked for
+     it. The id stays on the inner element, so the stream appends where it
+     always did. #}
+  <details id="ask-reasoning-box" class="reasoning-box" hidden>
+    <summary>Reasoning</summary>
+    <div id="ask-reasoning" class="reasoning"></div>
+  </details>
   {# The answer as it is being written, in plain text; the markdown is rendered
      by the server and swapped in whole at the end. `aria-live="polite"` so a
      reader who cannot see it knows the answer is arriving — the announcement is

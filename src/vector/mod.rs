@@ -79,6 +79,11 @@ pub struct SearchFilter {
     /// statuses mean different things and callers may want to audit one
     /// without the other.
     pub include_deprecated: bool,
+    /// Only artifacts of this one document. What the gap coverage check needs:
+    /// the question is whether *this capture* answered something, and a hit
+    /// from anywhere else answers a different question — the base held it all
+    /// along, and the gap is open for a reason.
+    pub corpus_id: Option<String>,
 }
 
 impl SearchFilter {
@@ -88,6 +93,7 @@ impl SearchFilter {
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
             && self.category.is_none()
+            && self.corpus_id.is_none()
             && self.include_superseded
             && self.include_deprecated
     }

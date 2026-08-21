@@ -43,7 +43,12 @@
            disabled one would advertise a key that refuses. The column stays
            either way so the titles line up. #}
         <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
-        <span class="judge-title">{{ o.title }}</span>
+        {# No heading where there is no name. A verbatim passage has no title
+           by design, and a list of "Untitled" is a column of a word that says
+           nothing where a name would say something — the same reasoning
+           `render_hit` states for the search rail. The snippet below carries
+           the row. #}
+        {% if !o.title.is_empty() %}<span class="judge-title">{{ o.title }}</span>{% endif %}
         {% if o.usable %}
         <span class="judge-snippet">{{ o.snippet }}</span>
         {% else %}

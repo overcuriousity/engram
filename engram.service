@@ -1,0 +1,16 @@
+[Unit]
+Description=engram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=svc-engram
+WorkingDirectory=/home/svc-engram/engram
+EnvironmentFile=/home/svc-engram/engram/engram.env
+ExecStart=/home/svc-engram/engram/target/release/engram
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

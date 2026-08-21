@@ -311,15 +311,23 @@ fn interpret(
         if !lost.is_empty() {
             // Escalated rather than retried: the merge is the thing that was
             // wrong, and refusing it hands the pair to a person, which is the
-            // finding. What is not written any more is a sentence naming the
-            // lost tokens — those are as often a bare "1, 4" as a version
-            // number, which is evidence too thin to put on a card someone has
-            // to act on, in a voice unlike every other line beside it. The
-            // judge's own detail goes with it: it was written to say why the
-            // two are the *same* ("same claim"), and under Contradiction the
-            // card renders it directly beneath "these two disagree", so the
-            // pair states the opposite of its own finding to the person the
+            // finding. Two sentences are still not written here. Not the lost
+            // tokens — those are as often a bare "1, 4" as a version number,
+            // which is evidence too thin to put on a card someone has to act
+            // on, in a voice unlike every other line beside it. And not the
+            // judge's own detail: it was written to say why the two are the
+            // *same* ("same claim"), and under Contradiction the card renders
+            // it directly beneath "these two disagree", so the pair would
+            // state the opposite of its own finding to the person the
             // escalation exists to hand it to.
+            //
+            // What is written is a third thing, true of this escalation and of
+            // no other: the merge was refused because it would have lost
+            // something. Saying nothing at all was the state before, and five
+            // cards reading "these two disagree" with nothing under them sat
+            // on a deployment — a dispute nobody can act on is not better than
+            // an imperfect sentence about it, it is the one thing a card in
+            // this queue must never be.
             //
             // Logged, though. Keeping the tokens off the card is a judgement
             // about what a person can act on; keeping them out of the process
@@ -333,7 +341,11 @@ fn interpret(
                 "refused a merge that would have dropped these"
             );
             relation = Relation::Conflict;
-            detail = None;
+            detail = Some(
+                "These two state a value differently, and merging them would have dropped \
+                 one of them. Which is current is the judgement this hands over."
+                    .to_string(),
+            );
             merged = None;
         }
     }
@@ -646,12 +658,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_would_lose_a_value_is_escalated_without_a_sentence_about_it() {
-        // The loss check, from the unit's side. Refusing the merge and handing
-        // the pair to a person is the whole finding. The sentence this used to
-        // write named the lost tokens, and those are as often a bare "1, 4" as
-        // a version number — evidence too thin to put on a card someone has to
-        // act on, in a voice unlike every other line beside it.
+    async fn a_merge_that_would_lose_a_value_says_so_without_naming_the_tokens() {
+        // The loss check, from the unit's side. Two sentences must not be
+        // written here: the lost tokens, which are as often a bare "1, 4" as a
+        // version number and are evidence too thin to act on; and the judge's
+        // own line, which was written to say the two are the *same* and would
+        // contradict the "these two disagree" it renders under. Neither of
+        // those is an argument for saying nothing at all — a card naming no
+        // dispute is one nobody can decide, and five of them sat on the
+        // deployment.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
@@ -669,11 +684,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].detail, None,
-            "no loss sentence is written, and the judge's own line said the two \
-             were the same — rendered under \"these two disagree\" it would \
-             contradict the card it sits on"
+        let detail = found[0].detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("dropped"),
+            "the card says nothing about why it was escalated: {detail:?}"
+        );
+        assert!(
+            !detail.contains("same claim"),
+            "the judge's line said these two were the same; under \"these two \
+             disagree\" it contradicts the card it sits on: {detail:?}"
+        );
+        assert!(
+            !detail.contains("1.30.0"),
+            "the lost tokens are evidence too thin to act on: {detail:?}"
         );
         for id in &ids {
             assert!(

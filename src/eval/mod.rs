@@ -8,6 +8,10 @@
 //! The corpus this measures is not in the repository and must not be: it is
 //! whatever documents the operator actually wants to search. What lives here is
 //! the shape of the files and the arithmetic over ranks.
+//!
+//! `docs/evaluation.md` is the whole of it in prose: what each harness
+//! measures, which knob to sweep for which metric, and — the part worth
+//! reading before trusting a number — what neither of them can measure.
 
 pub mod claims;
 pub mod export;

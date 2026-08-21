@@ -16,7 +16,23 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
     results
         .iter()
         .map(|r| {
-            let title = r.title.clone().unwrap_or_else(|| "Untitled".into());
+            // Never "Untitled": a verbatim passage has no title by design, and
+            // an agent reading a list of them has the same problem the search
+            // rail has — a column of a word that says nothing where a name
+            // would say something. The opening of the passage says what it is.
+            let title = r
+                .title
+                .clone()
+                .unwrap_or_else(|| crate::web::markdown::stand_in_title(&r.text, 60));
+            // `stand_in_title` takes markup and leading punctuation off the
+            // front, so a passage that is only those leaves nothing — and a
+            // heading with no text after it is a numbered entry an agent
+            // cannot refer back to. The id is a poor name and a working one.
+            let title = if title.is_empty() {
+                r.artifact_id.clone()
+            } else {
+                title
+            };
             let tags = if r.tags.is_empty() {
                 String::new()
             } else {
@@ -262,6 +278,43 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    fn search_hit(title: Option<&str>, text: &str) -> SearchResult {
+        SearchResult {
+            artifact_id: "a".into(),
+            corpus_id: "s".into(),
+            title: title.map(str::to_string),
+            text: text.into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            via: None,
+            reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        }
+    }
+
+    #[test]
+    fn the_mcp_door_names_a_passage_by_its_opening() {
+        // Claude Code reads this list. A verbatim passage has no title by
+        // design, and three headings reading "Untitled" is a list of a word
+        // that says nothing where a name would say something.
+        let out = format_search_results(&[search_hit(
+            None,
+            "Die digitale Forensik unterscheidet sich zusätzlich",
+        )]);
+        assert!(!out.contains("Untitled"), "{out}");
+        assert!(out.contains("Die digitale Forensik"), "{out}");
+    }
+
     fn answer(unsupported: &[&str]) -> crate::core::ask::AskResponse {
         crate::core::ask::AskResponse {
             answer: "Run `engram reindex`, then `wipefs --all /dev/sdX`.".into(),
@@ -376,6 +429,7 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            in_sitting: false,
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,

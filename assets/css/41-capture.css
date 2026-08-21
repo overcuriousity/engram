@@ -12,13 +12,24 @@
 }
 .qrow:last-child { border-bottom: none; }
 .qrow:hover { background: var(--color-bg-hover); }
+.qname { min-width: 0; text-decoration: none; display: block; }
 .qtitle {
+  display: block;
   font-size: 0.9375rem; text-decoration: none; color: var(--color-fg-primary);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The label truncates; what tells this row from the one above it does not.
+   `disambiguate_labels` keeps the capture's opening words for a label shared
+   with another row, and a single `nowrap` line cut them off — so the repair
+   ran and six rows still read the same six words. Its own line, dimmer and
+   smaller, because it is a qualifier on the name rather than part of it. */
+.qtitle-opening {
+  display: block; white-space: normal; overflow: visible;
+  font-size: 0.8125rem; line-height: 1.35; color: var(--color-fg-muted);
+}
 .qrow:hover .qtitle { color: var(--color-accent); }
 /* A capture on its way to being named reads as a placeholder, because it is. */
-.qtitle.pending { color: var(--color-fg-muted); font-style: italic; }
+.qname.pending .qtitle { color: var(--color-fg-muted); font-style: italic; }
 /* A grid rather than a flex row, so the timestamp sits in a column of its own
    width and stops sliding left and right as the text beside it changes. */
 .qmeta {
@@ -75,3 +86,27 @@
 }
 .quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
 
+
+/* Which "LevelDB: Funktionsweise und forensische Analyse" this one is. Shown
+   only where the title is shared with another row on the page — see
+   `disambiguate_pair_titles`. */
+.decide-opening { color: var(--color-fg-muted); font-size: 0.8125rem; }
+
+/* What a run of cards is about, said once above them. A cluster of two needs
+   no such line — the two titles on the card are the whole of it. */
+.decide-cluster {
+  margin: 0.9rem 0 0.2rem; font-size: 0.8125rem; color: var(--color-fg-muted);
+}
+
+/* Two sides side by side, because the decision is a comparison. Stacked where
+   there is no room for two columns — one above the other still compares; two
+   columns 12rem wide do not. */
+.decide-read { margin: 0.5rem 0; }
+.decide-read summary { cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted); }
+.decide-sides {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;
+}
+.decide-sides p { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--color-fg-secondary); }
+@container shell (max-width: 60rem) {
+  .decide-sides { grid-template-columns: 1fr; }
+}

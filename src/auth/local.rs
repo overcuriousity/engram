@@ -24,6 +24,9 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
         Some(Identity {
             subject: cfg.username.clone(),
             email: None,
+            // The session does not exist yet: this is the check that decides
+            // whether to create one.
+            session: None,
         })
     } else {
         None

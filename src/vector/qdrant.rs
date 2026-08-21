@@ -147,6 +147,9 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     if let Some(c) = &filter.category {
         must.push(json!({ "key": "category", "match": { "value": c } }));
     }
+    if let Some(c) = &filter.corpus_id {
+        must.push(json!({ "key": "corpus_id", "match": { "value": c } }));
+    }
 
     // `must` is omitted rather than sent empty. A search that only excludes
     // superseded points has no positive condition, and an empty condition list
@@ -2029,6 +2032,7 @@ mod tests {
             category: Some("procedure".into()),
             include_superseded: false,
             include_deprecated: false,
+            corpus_id: None,
         })
         .unwrap();
         let must = f["must"].as_array().unwrap();

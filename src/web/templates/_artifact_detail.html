@@ -31,9 +31,25 @@
       <div>Something near-identical and newer
         (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
       <div class="chips">
-        {# `to`: these buttons also live on Ops, whose copies send nothing and
-           land back on the queue. Pressed from here, they come back here. #}
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede">
+        {# Swapped, not navigated. What these buttons change is the artifact,
+           so what they answer with is the artifact, re-rendered in place —
+           `closest [data-artifact]` is this fragment's own root, and it is the
+           root in both places this fragment is rendered: the standalone page,
+           and the pane beside the search results. The hidden `to` could only
+           ever name one of the two, and it named the page, so pressing one of
+           these on a search result took the whole window there and the results
+           being worked through were gone.
+
+           `method`/`action` and `to` stay for a browser with no htmx, which
+           still posts and still follows the redirect. `terms` rides along so
+           the highlighting survives the swap.
+
+           These buttons also live on Ops, whose copies send no `to` and land
+           back on the queue — there the queue *is* the thing being worked
+           through, and a row leaving it is the point. #}
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/unsupersede?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
           <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Put it back</button>
         </form>
@@ -44,11 +60,14 @@
   <div class="flag" role="status">
     <div aria-hidden="true">⚠</div>
     <div>
-      <b>Deprecated</b>
-      <div>Flagged stale, with no specific replacement. Still stored and still
-        readable; kept out of results only.</div>
+      <b>Hidden as stale</b>
+      <div>Flagged stale, with no specific replacement. Search will not return
+        it and Ask will not read from it; it is still stored, and this link
+        still works. Reactivate puts it back in results.</div>
       <div class="chips">
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate">
+        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/reactivate?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
           <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
           <button class="btn btn-sm" type="submit">Reactivate</button>
         </form>
@@ -79,18 +98,22 @@
      about. #}
   <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify">
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/verify?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
               title="Confirm still accurate" aria-label="Confirm still accurate">
         {% include "_icon_check.html" %}<span>Verified</span>
       </button>
     </form>
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate">
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
+          hx-post="/ui/ops/artifacts/{{ d.id }}/deprecate?terms={{ d.terms|urlencode }}"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
-              title="Deprecate — hide from results, keep the artifact"
-              aria-label="Deprecate: hide from results, keep the artifact">
+              title="Hide from results — the artifact is kept, and this can be undone"
+              aria-label="Hide from results: the artifact is kept, and this can be undone">
         {% include "_icon_hide.html" %}<span>Hide</span>
       </button>
     </form>
@@ -99,7 +122,7 @@
        stores and cannot be undone. Nothing else deletes an artifact — see
        `Core::heal_store_drift`. #}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
-          onsubmit="return confirm('Delete this artifact for good? Deprecating hides it instead and can be undone.')">
+          onsubmit="return confirm('Delete this artifact for good? It goes from both stores, anything written from it loses it as a source, and none of that can be undone. Hide keeps the artifact and only takes it out of results.')">
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete permanently" aria-label="Delete artifact permanently">
         {% include "_icon_trash.html" %}<span>Delete</span>
@@ -151,6 +174,12 @@
                            f.querySelector('textarea').focus()">edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {# The passage stopped mid-sentence, so the window it was cut from did.
+           The source column beside this already shows the rest of the line;
+           this is the way to the artifact that carries it. #}
+        {% if let Some(next) = d.continues_at %}
+        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}">continues in the next passage →</a></p>
+        {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
            the source states. Shown but deliberately not embedded. #}

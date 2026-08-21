@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+{% block title %}Not found — engram{% endblock %}
+{# Our own page rather than the browser's. A mistyped URL kept the nav, the
+   session and a way back on every other wrong turn in the app; an unmatched
+   path was the one place that dropped the reader out of it entirely. #}
+{% block content %}
+<div class="empty">
+  <h2>Nothing at this address</h2>
+  <p class="muted">The page you asked for is not one this base has. Nothing is wrong with what you have stored.</p>
+  <p><a class="btn btn-ghost btn-sm" href="/ui/search">Search</a>
+     <a class="btn btn-ghost btn-sm" href="/ui/capture">Capture</a></p>
+</div>
+{% endblock %}

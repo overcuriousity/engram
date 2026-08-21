@@ -9,7 +9,15 @@
 
    Each button names the artifact it keeps. "Keep one" and "Keep the other"
    made you look back at the columns to know what you were about to press. #}
-{% for p in pairs %}
+{# One cluster, one card. A cluster of two artifacts renders exactly as a
+   single pair always did; a larger one says what it is asking about before the
+   rows do, because three questions about one artifact arrived looking like the
+   same question asked three times. #}
+{% for cluster in pairs %}
+{% if cluster.members > 2 %}
+<p class="decide-cluster">{{ cluster.members }} artifacts, {{ cluster.pairs.len() }} open questions between them.</p>
+{% endif %}
+{% for p in cluster.pairs %}
 <div class="decide">
   {# The titles lead. What the pair is *about* is the content of the card, and
      whether they disagree and by how much is the qualifier on it — the other
@@ -20,11 +28,23 @@
      through repeated co-retrieval, not cosine — so `percent` would read as a
      measured similarity that was never computed. #}
   <div class="decide-head">
-    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a> vs
-    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a> —
+    <a href="/ui/artifacts/{{ p.a_id }}">{{ p.a_title }}</a>{% if !p.a_opening.is_empty() %}
+    <span class="decide-opening">{{ p.a_opening }}</span>{% endif %} vs
+    <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>{% if !p.b_opening.is_empty() %}
+    <span class="decide-opening">{{ p.b_opening }}</span>{% endif %} —
     <b>{% if p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
+  {# Both sides, readable where the decision is made. Closed by default: the
+     titles answer most cards on their own, and five open cards would be a page
+     of text above the buttons that clear it. #}
+  <details class="decide-read">
+    <summary>Read both</summary>
+    <div class="decide-sides">
+      <div><b>{{ p.a_title }}</b><p>{{ p.a_excerpt }}</p></div>
+      <div><b>{{ p.b_title }}</b><p>{{ p.b_excerpt }}</p></div>
+    </div>
+  </details>
   <div class="row">
     {# The judge's pick, when it has one, is the accented button rather than a
        separate action — a recommendation about which of these two to press,
@@ -59,4 +79,5 @@
     </form>
   </div>
 </div>
+{% endfor %}
 {% endfor %}

@@ -21,6 +21,11 @@
 //! The corpus it reads is whatever the operator actually wants to search, and
 //! is not in this repository. Nothing here prints artifact text; a miss is named
 //! by the leading characters of its own query.
+//!
+//! See `docs/evaluation.md` for what the numbers mean, which parameter to sweep
+//! for which of them, and what this harness cannot measure — notably anything
+//! about a *sequence* of queries, since every pair is scored independently and
+//! `Door::Ui` here carries no session.
 
 use engram::config::Config;
 use engram::core::Core;
@@ -550,6 +555,9 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         activation: engram::config::ActivationConfig::default(),
         promote: engram::config::PromoteConfig::default(),
         pursuit: engram::config::PursuitConfig::default(),
+        schedule: engram::config::ScheduleConfig::default(),
+        sitting: engram::config::SittingConfig::default(),
+        sittings: std::sync::Arc::new(Default::default()),
         // The benchmark makes no background inference call, so the pacer never
         // has anything to hold back.
         gate: std::sync::Arc::new(engram::infer::gate::InferenceGate::new(

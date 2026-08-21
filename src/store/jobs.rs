@@ -54,9 +54,41 @@ pub enum Stage {
     Pursuit,
     /// One pursuit, one call: write the artifact it earned.
     Generate,
+    /// The periodic retention sweep: expire what `feedback.retain_days` says is
+    /// past keeping, then regroup the knowledge gaps. In that order, which is
+    /// the order the ticker it replaces used — grouping reads the rows expiring
+    /// removes. Local work, no call.
+    Retention,
+    /// The periodic dedupe arming: walks the pairs `Relate` found and arms
+    /// `Dedupe` units for the ones worth a call. Named for what it does — it
+    /// arms judgements, it is not one — and local, since the call belongs to
+    /// the units it arms.
+    ArmDedupe,
 }
 
 impl Stage {
+    /// Every stage there is. Written out rather than derived, and the compiler
+    /// is no help here — a stage left out of this list is not an error, it is a
+    /// stage the class backfill silently never sees.
+    pub const ALL: [Stage; 16] = [
+        Stage::Synthesize,
+        Stage::Enrich,
+        Stage::SegmentWindow,
+        Stage::Title,
+        Stage::Embed,
+        Stage::Consolidate,
+        Stage::Dedupe,
+        Stage::Relate,
+        Stage::Describe,
+        Stage::Extract,
+        Stage::Associate,
+        Stage::LinkJudge,
+        Stage::Pursuit,
+        Stage::Generate,
+        Stage::Retention,
+        Stage::ArmDedupe,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Stage::Synthesize => "synthesize",
@@ -73,8 +105,44 @@ impl Stage {
             Stage::LinkJudge => "link_judge",
             Stage::Pursuit => "pursuit",
             Stage::Generate => "generate",
+            Stage::Retention => "retention",
+            Stage::ArmDedupe => "arm_dedupe",
         }
     }
+    /// Is someone waiting on this? `0` foreground, `1` background.
+    ///
+    /// Foreground is the capture pipeline: the operator pasted something and is
+    /// watching it move `raw → embedding → ready`. Background is every sweep
+    /// whose result nobody is standing in front of. One distinction and not a
+    /// scale — two classes cannot say that embedding matters more than titling,
+    /// and deliberately so: the distinction that pays is *someone is waiting*,
+    /// and a second one can be added later without moving the column.
+    ///
+    /// Exhaustive on purpose. A stage added later has to answer this question
+    /// rather than inherit an answer from a wildcard arm.
+    pub fn class(self) -> i64 {
+        match self {
+            // `Enrich` shares `synthesize::plan` with `Synthesize` and is
+            // foreground for the same reason: it is a capture in flight.
+            Stage::Synthesize
+            | Stage::Enrich
+            | Stage::SegmentWindow
+            | Stage::Title
+            | Stage::Embed
+            | Stage::Describe
+            | Stage::Extract => 0,
+            Stage::Consolidate
+            | Stage::Dedupe
+            | Stage::Relate
+            | Stage::Associate
+            | Stage::LinkJudge
+            | Stage::Pursuit
+            | Stage::Generate
+            | Stage::Retention
+            | Stage::ArmDedupe => 1,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
@@ -91,6 +159,8 @@ impl Stage {
             "link_judge" => Some(Stage::LinkJudge),
             "pursuit" => Some(Stage::Pursuit),
             "generate" => Some(Stage::Generate),
+            "retention" => Some(Stage::Retention),
+            "arm_dedupe" => Some(Stage::ArmDedupe),
             _ => None,
         }
     }
@@ -147,7 +217,14 @@ pub fn backoff_secs(attempts: i64) -> i64 {
 enum Guard {
     /// Anything, running included. An operator's reprocess.
     Any,
-    /// Only a row closed while its work was not.
+    /// Only a row nothing is going to run: closed, or given up on.
+    ///
+    /// `'failed'` belongs here with `'done'`. Nothing writes that state any
+    /// more — a job out of attempts is delayed rather than abandoned — but bases
+    /// upgraded across that change still hold rows in it, and a row that is
+    /// neither live nor armable is a unit that never runs again. For a periodic
+    /// sweep that is silent and permanent: `arm_missing_periodic` sees a unit
+    /// nothing is going to run, and the arming it answers with is refused.
     Closed,
 }
 
@@ -177,6 +254,7 @@ async fn upsert_job_with<'e>(
         .bind(target_id)
         .bind(now())
         .bind(seq)
+        .bind(stage.class())
         .execute(exec)
         .await?;
     Ok(())
@@ -187,11 +265,16 @@ async fn upsert_job_with<'e>(
 macro_rules! arm_job {
     ($guard:literal) => {
         concat!(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq)
-             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?)
              ON CONFLICT(stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
-               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq ",
+               claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq,
+               -- Re-armed rows take the stage's class back, ageing included: an
+               -- arming resets `attempts` and `created_at` too, so what it
+               -- leaves behind is a fresh unit, and a fresh background unit has
+               -- not waited for anything yet.
+               class = excluded.class ",
             $guard
         )
     };
@@ -201,7 +284,7 @@ impl Guard {
     fn statement(self) -> &'static str {
         match self {
             Guard::Any => arm_job!(""),
-            Guard::Closed => arm_job!("WHERE jobs.state = 'done'"),
+            Guard::Closed => arm_job!("WHERE jobs.state IN ('done', 'failed')"),
         }
     }
 }
@@ -253,6 +336,78 @@ impl Store {
     ) -> Result<()> {
         self.upsert_job(stage, target_kind, target_id, seq, Guard::Closed)
             .await
+    }
+
+    /// Arm a periodic unit to run at `run_after`.
+    ///
+    /// What a self-rescheduling sweep does when it finishes: `run_after` is the
+    /// cursor recording when it last ran, and it is already indexed, so nothing
+    /// has to hold a clock and no meta key has to remember a period.
+    ///
+    /// Guarded on the row being closed, like every automatic arming: a sweep
+    /// already queued is already going to run, and pushing its `run_after` an
+    /// interval further out on every pass is how a sweep would recede forever.
+    /// `'failed'` counts as closed here for the reason `Guard::Closed` gives —
+    /// a row nothing will run is not a row that is going to recede.
+    pub async fn arm_periodic(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, 'pending', 0, ?, ?, 0, ?)
+             ON CONFLICT(stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = 0, run_after = excluded.run_after,
+               last_error = NULL, claimed_at = NULL,
+               created_at = excluded.created_at, class = excluded.class
+             WHERE jobs.state IN ('done', 'failed')",
+        )
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// This unit has just become worth running: let it go now.
+    ///
+    /// Two statements, because there are two cases and neither is the other's.
+    /// A unit sleeping on its own period has its `run_after` pulled forward —
+    /// and only that, so a sweep that keeps failing does not have its attempt
+    /// count wound back and reclaim the front of the queue every time something
+    /// arms it. A unit that is closed is armed outright.
+    ///
+    /// A unit a worker is already inside is left alone by both: it is running.
+    ///
+    /// The pulled-forward row has its class restored along with its `run_after`,
+    /// the way the closed-row path does. Ageing is a statement about how long
+    /// something has been waiting, and a unit that is being armed is not the
+    /// unit that waited: leaving the aged class on it would hand a sweep
+    /// foreground priority for the rest of its life, one arming at a time.
+    ///
+    /// `created_at` moves with them, for the same reason: pulling `run_after`
+    /// down to zero on a row stamped a period ago would leave a unit that has
+    /// been ready for one instant looking, to `age_background`, like one that
+    /// has been waiting all period.
+    pub async fn arm_now(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE jobs SET run_after = 0, class = ?, created_at = ?
+              WHERE stage = ? AND target_id = ? AND state = 'pending' AND run_after > 0",
+        )
+        .bind(stage.class())
+        .bind(now())
+        .bind(stage.as_str())
+        .bind(target_id)
+        .execute(&self.pool)
+        .await?;
+        self.rearm_idle_seq(stage, target_kind, target_id, 0).await
     }
 
     /// The one upsert the three above differ only in the guard on.
@@ -363,6 +518,13 @@ impl Store {
     /// `seq` then interleaves whole documents. Without it, a corpus armed as
     /// thirty-four units takes thirty-four consecutive ids and reproduces the
     /// same head-of-line blocking one level down.
+    ///
+    /// `class` sorts ahead of all of that and answers one question: is somebody
+    /// waiting on this? Without it a capture the operator is watching queues
+    /// behind a consolidation sweep armed a minute earlier and waits for it,
+    /// with nothing anywhere able to say that one of the two has a person in
+    /// front of it. It sorts *before* `seq` and never instead of it: within one
+    /// class the fairness above is untouched.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
         let row = sqlx::query(
             "UPDATE jobs
@@ -370,7 +532,7 @@ impl Store {
               WHERE id = (
                 SELECT id FROM jobs
                  WHERE state = 'pending' AND run_after <= ?
-                 ORDER BY attempts, seq, id LIMIT 1
+                 ORDER BY class, attempts, seq, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
         )
@@ -484,6 +646,59 @@ impl Store {
             .collect())
     }
 
+    /// A background unit that has waited long enough becomes foreground.
+    ///
+    /// Written, not computed. Ageing at claim time would put `created_at` — an
+    /// inequality — into the ordering, and an inequality ends an index's usable
+    /// ordering: every poll would find the ready rows and then sort them in a
+    /// temp B-tree, which is the cost `idx_jobs_claim3`'s column order exists to
+    /// avoid. Ageing a few rows on the repair tick is one indexed update and
+    /// leaves the hot path exactly as fast as it was.
+    ///
+    /// A unit that has aged stays aged: it has already waited, and demoting it
+    /// again would be starting its wait over.
+    ///
+    /// The wait is measured from the moment the unit became *ready*, which is
+    /// the later of the two stamps it carries. A unit asleep on its own period
+    /// carries the `created_at` of the moment it was rescheduled, so waiting and
+    /// sleeping look identical from `created_at` alone — and every sweep whose
+    /// period is longer than `age_after_mins` (consolidation's day, retention's
+    /// six hours) would arrive at its `run_after` with a `created_at` already a
+    /// whole period old, and be promoted on the very next repair tick without
+    /// having waited in the queue at all. That is the promotion the class exists
+    /// to stop, arriving a period late instead of never. `run_after` is what
+    /// tells resting from waiting, and taking the later of the two stamps says
+    /// both things at once: a unit that is not due yet cannot age, and a unit
+    /// that has just come due starts its wait then.
+    ///
+    /// A job that was never delayed has `run_after = 0`, so for everything that
+    /// is not periodic the later stamp is `created_at` and this reads exactly as
+    /// it did.
+    /// At most `limit` rows move per call, oldest first. Background units
+    /// accumulate on their own — every `arm_dedupe` tick arms a batch of judge
+    /// units — and a slow judge endpoint leaves hundreds of them waiting past
+    /// the threshold. Promoting the whole backlog at once puts every one of
+    /// them ahead of a capture the operator has just pasted, since within a
+    /// class the order is `attempts, seq, id` and they were all armed first.
+    /// An aged unit going ahead of a fresh capture is the promise (§4.4) and
+    /// stays; the whole queue doing it at once is not.
+    pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE jobs SET class = 0
+              WHERE id IN (
+                SELECT id FROM jobs
+                 WHERE state = 'pending' AND class = 1
+                   AND max(created_at, run_after) < ?
+                 ORDER BY max(created_at, run_after)
+                 LIMIT ?)",
+        )
+        .bind(older_than)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// How long the longest-waiting pending job has been queued, in seconds.
     ///
     /// Measured from `created_at`, not `run_after`: a job that was never
@@ -524,6 +739,336 @@ mod tests {
             s.claim_job().await.unwrap().is_none(),
             "duplicate enqueue created a second job"
         );
+    }
+
+    #[tokio::test]
+    async fn a_capture_does_not_wait_behind_a_sweep() {
+        // The whole point of the class column: a sweep armed first is not what
+        // the operator is standing in front of.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Associate, "collection", "collection")
+            .await
+            .unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+
+        let first = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            first.stage,
+            Stage::Synthesize,
+            "the capture queued behind the sweep that was armed a moment earlier"
+        );
+        let second = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(second.stage, Stage::Associate, "the sweep must still run");
+    }
+
+    #[tokio::test]
+    async fn within_one_class_the_order_is_still_attempts_then_seq() {
+        // `seq`'s anti-starvation property is the easiest thing to lose to a
+        // priority column, so it is asserted directly rather than inferred from
+        // the claim ordering being "unchanged".
+        let s = Store::memory().await.unwrap();
+        // Two documents' worth of windows, interleaved by seq: the second
+        // document's first window must beat the first document's second.
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "a#0", 0)
+            .await
+            .unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "a#1", 1)
+            .await
+            .unwrap();
+        s.enqueue_seq(Stage::SegmentWindow, "corpus", "b#0", 0)
+            .await
+            .unwrap();
+
+        let mut order = Vec::new();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            order.push(j.target_id);
+        }
+        assert_eq!(
+            order,
+            vec!["a#0", "b#0", "a#1"],
+            "seq no longer interleaves whole documents"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claim_still_walks_one_index_and_never_sorts() {
+        // The shape of the class column, and of ageing being a write rather
+        // than a read, exists to keep this true. An inequality or a computed
+        // age in the ordering turns every poll into a temp B-tree sort, and
+        // nothing about the queue's behaviour would say so.
+        let s = Store::memory().await.unwrap();
+        let rows = sqlx::query(
+            "EXPLAIN QUERY PLAN
+             SELECT id FROM jobs
+              WHERE state = 'pending' AND run_after <= ?
+              ORDER BY class, attempts, seq, id LIMIT 1",
+        )
+        .bind(now())
+        .fetch_all(&s.pool)
+        .await
+        .unwrap();
+        let plan = rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_jobs_claim3"),
+            "the claim stopped using its covering index: {plan}"
+        );
+        assert!(
+            !plan.to_uppercase().contains("TEMP B-TREE"),
+            "the claim now sorts: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_background_unit_that_has_waited_long_enough_goes_first() {
+        // Priority without ageing is starvation. The claim is unchanged: what
+        // moves is the row.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Associate, "collection", "collection")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'associate'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+
+        let aged = s.age_background(now() - 3600, 100).await.unwrap();
+        assert_eq!(aged, 1);
+
+        let first = s.claim_job().await.unwrap().unwrap();
+        assert_eq!(
+            first.stage,
+            Stage::Associate,
+            "a sweep that has waited an hour is still behind a fresh capture"
+        );
+        let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'associate'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(class, 0, "having aged must be durable, not recomputed");
+    }
+
+    #[tokio::test]
+    async fn only_so_many_units_may_age_on_one_pass() {
+        // Ageing lets a unit that has waited go ahead of a fresh capture, which
+        // is the promise. The whole backlog doing it at once is not: background
+        // units arm themselves — a judge endpoint that is slow for an hour
+        // leaves hundreds of them past the threshold — and within one class the
+        // order is `attempts, seq, id`, so every one of them was armed before
+        // the capture the operator just pasted and every one of them goes
+        // first. That is the head-of-line wait the class exists to end,
+        // arriving an hour late.
+        let s = Store::memory().await.unwrap();
+        for i in 0..5 {
+            s.enqueue(Stage::Relate, "artifact", &format!("a-{i}"))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'relate'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(s.age_background(now() - 3600, 2).await.unwrap(), 2);
+
+        let still: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE class = 1 AND stage = 'relate'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(still, 3, "the rest wait for the next pass");
+
+        // And they do get their turn.
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_oldest_units_age_first() {
+        // The cap is a cap on how many jump the queue, not a reason for the
+        // one that has waited longest to keep waiting.
+        let s = Store::memory().await.unwrap();
+        for i in 0..3 {
+            s.enqueue(Stage::Relate, "artifact", &format!("a-{i}"))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id = 'a-2'")
+            .bind(now() - 86_400)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id <> 'a-2'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(s.age_background(now() - 3600, 1).await.unwrap(), 1);
+
+        let aged: String =
+            sqlx::query_scalar("SELECT target_id FROM jobs WHERE class = 0 AND stage = 'relate'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(aged, "a-2", "the longest wait goes first");
+    }
+
+    #[tokio::test]
+    async fn a_sweep_asleep_on_its_own_period_is_not_waiting() {
+        // `arm_periodic` stamps `created_at` when it reschedules, so a sweep
+        // resting on a day-long period looks, from `created_at` alone, exactly
+        // like one that has been queued a day. Ageing it would hand the front
+        // of the queue to work that is not even due — ahead of the captures
+        // somebody is watching, which is the one thing the class exists to
+        // stop.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Retention, "collection", "collection", now() + 21_600)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'retention'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.age_background(now() - 3600, 100).await.unwrap(),
+            0,
+            "a unit that is not due yet has not been waiting"
+        );
+
+        // Due, and now it ages.
+        sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'retention'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_has_just_come_due_has_not_been_waiting() {
+        // The other half of the test above, and the one the `run_after` guard
+        // alone did not answer: a sweep re-armed for six hours' time carries a
+        // `created_at` six hours old by the moment it comes due, so the very
+        // next repair tick would promote a unit that had been ready for
+        // seconds. The wait has to be measured from when it became ready.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Retention, "collection", "collection", now() + 21_600)
+            .await
+            .unwrap();
+        // Six hours later: due a minute ago, stamped when it was rescheduled.
+        sqlx::query("UPDATE jobs SET created_at = ?, run_after = ? WHERE stage = 'retention'")
+            .bind(now() - 21_600)
+            .bind(now() - 60)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.age_background(now() - 3600, 100).await.unwrap(),
+            0,
+            "a sweep one minute past due has not waited an hour for a worker"
+        );
+
+        // An hour of actually being ready, and now it ages.
+        sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'retention'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn arming_a_sleeping_unit_starts_its_wait_over() {
+        // `arm_now` pulls `run_after` to zero, which leaves `created_at` as the
+        // only stamp — and on a sweep armed an interval ago that stamp is an
+        // interval old, so the unit would be ready and immediately ageable
+        // without having waited at all.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Pursuit, "collection", "collection", now() + 600)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'")
+            .bind(now() - 7200)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        s.arm_now(Stage::Pursuit, "collection", "collection")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.age_background(now() - 3600, 100).await.unwrap(),
+            0,
+            "a unit that was just armed is not a unit that waited two hours"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_left_failed_by_an_older_build_can_still_be_armed() {
+        // Nothing writes `failed` any more — a job out of attempts is delayed
+        // rather than abandoned — but a base upgraded across that change still
+        // holds rows in it. Such a row is not live, so the repair pass asks for
+        // it; if the arming refuses, the sweep never runs again, silently, for
+        // the life of the install.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Consolidate, "collection", "collection", 0)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(!s.live_job(Stage::Consolidate, "collection").await.unwrap());
+
+        s.arm_periodic(Stage::Consolidate, "collection", "collection", 0)
+            .await
+            .unwrap();
+
+        assert!(
+            s.live_job(Stage::Consolidate, "collection").await.unwrap(),
+            "a sweep nothing was going to run stayed that way"
+        );
+    }
+
+    #[tokio::test]
+    async fn arming_a_sleeping_unit_gives_back_the_class_it_had() {
+        // Ageing says how long something has waited. Pulling a unit forward
+        // makes it a unit that has not waited, and leaving the aged class on it
+        // would let a sweep hold foreground priority for the rest of its life,
+        // one arming at a time.
+        let s = Store::memory().await.unwrap();
+        s.arm_periodic(Stage::Pursuit, "collection", "collection", now() + 600)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET class = 0 WHERE stage = 'pursuit'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        s.arm_now(Stage::Pursuit, "collection", "collection")
+            .await
+            .unwrap();
+
+        let (run_after, class): (i64, i64) =
+            sqlx::query_as("SELECT run_after, class FROM jobs WHERE stage = 'pursuit'")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(run_after, 0, "the unit must have been pulled forward");
+        assert_eq!(class, 1, "and it must be background again");
     }
 
     #[tokio::test]

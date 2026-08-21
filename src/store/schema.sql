@@ -218,18 +218,59 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- orders by it, so every document's first window runs before any document's
   -- second — which is what stops a large ingest starving a small one behind it.
   seq         INTEGER NOT NULL DEFAULT 0,
+  -- Is someone waiting on this? 0 = foreground (the capture pipeline the
+  -- operator is watching move raw → ready), 1 = background (work nobody is
+  -- standing in front of). One distinction and not a scale: a priority the
+  -- operator can set wrong presents as "the capture is hanging", with nothing
+  -- anywhere saying why. Default 0 because a row written before this column
+  -- existed is foreground, which is the safe direction to be wrong in; the
+  -- backfill in `migrate` puts the sweeps where they belong.
+  class       INTEGER NOT NULL DEFAULT 0,
   UNIQUE(stage, target_id)
 );
--- Ready work in the order `claim_job` takes it: least-tried first, then oldest.
+-- Ready work in the order `claim_job` takes it: what someone is waiting on
+-- first, then least-tried, then oldest.
 --
 -- The column order is the query's, not the filter's. `run_after` last looks
 -- wrong until you try it the other way round: an inequality ends an index's
 -- usable ordering, so `(state, run_after, attempts, id)` finds the ready rows
 -- and then sorts them in a temp B-tree on every poll. This walks `state`,
--- `attempts`, `id` in claim order, tests `run_after` on each entry, and stops
--- at the first row that is ready — covering, and no sort.
-CREATE INDEX IF NOT EXISTS idx_jobs_claim2  ON jobs(state, attempts, seq, id, run_after);
+-- `class`, `attempts`, `id` in claim order, tests `run_after` on each entry,
+-- and stops at the first row that is ready — covering, and no sort. `class`
+-- leads for the same reason `run_after` trails: it is an equality the walk can
+-- carry, so priority costs the hot path nothing. Ageing is a written column
+-- rather than a computed age precisely so that stays true — see
+-- `Store::age_background`.
+--
+-- Superseded index dropped by name: `CREATE INDEX IF NOT EXISTS` leaves an
+-- existing index's columns alone, so a base that already had `idx_jobs_claim2`
+-- would keep claiming through the old order — silently, and on exactly the
+-- installs the new one exists to serve.
+DROP INDEX IF EXISTS idx_jobs_claim2;
+CREATE INDEX IF NOT EXISTS idx_jobs_claim3  ON jobs(state, class, attempts, seq, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+-- One row per completed run of a periodic unit: what the memory did while
+-- nobody was looking.
+--
+-- There is no "night" to group these by. Units that reschedule themselves on
+-- their own periods do not line up into one cycle, and inventing a cycle
+-- identity to group them by would be inventing it. What Ops shows instead is
+-- the last day, and under it this history -- which is the thing a single
+-- overwritten summary could never give: whether a sweep started going wrong
+-- yesterday or has been going wrong for a week.
+CREATE TABLE IF NOT EXISTS sweep_runs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  stage      TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at   INTEGER NOT NULL,
+  -- 'ok' | 'failed'. A sweep that failed is exactly the run an operator needs
+  -- to see, so it is recorded like any other rather than only logged.
+  outcome    TEXT NOT NULL,
+  -- What it did, JSON: the counts each sweep already returns.
+  detail     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sweep_runs_at ON sweep_runs(started_at DESC);
 
 -- ── Consolidation ────────────────────────────────────────────────────────────
 -- Two artifacts that may say the same thing differently. The only question a
@@ -356,6 +397,32 @@ CREATE TABLE IF NOT EXISTS gap_clusters (
   created_at  INTEGER NOT NULL
 );
 
+-- A gap the base has since answered, and the capture that answered it.
+--
+-- Its own table rather than a column on the source row, which is deliberately
+-- left untouched: nothing an automatic score decides should overwrite what a
+-- person judged, and an operator who disagrees reopens the gap by deleting the
+-- row here rather than by re-judging anything. The cascades are that
+-- reversibility for free — delete the capture that closed a gap and the gap
+-- comes back.
+CREATE TABLE IF NOT EXISTS gap_coverage (
+  -- The `GapKind` and the id of the row it came from: an ask event, a search
+  -- event, a pursuit. Not a foreign key, because it names one of three tables
+  -- — so nothing cascades from the row it points at, and retention deletes
+  -- those rows routinely. `Store::trim_gap_coverage`, on the repair pass, is
+  -- the collection this cannot have declaratively.
+  kind        TEXT NOT NULL,
+  gap_id      TEXT NOT NULL,
+  corpus_id   TEXT NOT NULL REFERENCES corpora(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Similarity of the best new hit. Kept so the page can say how strong a
+  -- claim this was; a hit at exactly `weak_below` is a weak one.
+  score       REAL NOT NULL,
+  covered_at  INTEGER NOT NULL,
+  PRIMARY KEY (kind, gap_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gap_coverage_corpus ON gap_coverage(corpus_id);
+
 -- ── Association ──────────────────────────────────────────────────────────────
 -- Two artifacts that keep being retrieved by the same searches. The other half
 -- of relatedness: `artifact_pairs` is about two texts saying the same thing,
@@ -422,7 +489,17 @@ CREATE TABLE IF NOT EXISTS pursuits (
   -- The engaged artifact ids, JSON, in engagement order. What generation reads.
   sources      TEXT NOT NULL DEFAULT '[]',
   -- The generated artifact, once there is one.
-  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL
+  artifact_id  TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+  -- The leading clustered query's vector, carried forward when the pursuit is
+  -- written. A pursuit that closes unsatisfied is a gap, and a gap is a
+  -- question plus the vector it was found by — `queries` holds the words and
+  -- the words alone, and re-embedding them to group the gap would be a call
+  -- spent on a vector that was already computed. Null on a pursuit written
+  -- before this column existed, which is why `vec_dim > 0` is the test: an
+  -- uncomparable vector is exactly what `open_gaps` already leaves out.
+  query_vec    BLOB,
+  vec_dim      INTEGER NOT NULL DEFAULT 0,
+  embed_model  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 

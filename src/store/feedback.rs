@@ -79,11 +79,20 @@ pub struct Origin {
     /// The authenticated subject, for coalescing. `None` means unscoped, which
     /// folds only with other unscoped events from the same door.
     pub scope: Option<String>,
+    /// The live sitting this search belongs to, where there is one — a web
+    /// session id. `None` for every other door, which is what keeps the live
+    /// sitting out of the API and `/mcp`: an access token is not a
+    /// conversation. Read only by priming, and only when `sitting.prime` is on.
+    pub session: Option<String>,
 }
 
 impl From<Door> for Origin {
     fn from(door: Door) -> Self {
-        Origin { door, scope: None }
+        Origin {
+            door,
+            scope: None,
+            session: None,
+        }
     }
 }
 
@@ -93,7 +102,17 @@ impl Door {
         Origin {
             door: self,
             scope: Some(scope.into()),
+            session: None,
         }
+    }
+}
+
+impl Origin {
+    /// This search belongs to a live sitting. Only a door with a real session
+    /// identity may say so — see `Origin::session`.
+    pub fn in_sitting(mut self, session: Option<String>) -> Origin {
+        self.session = session;
+        self
     }
 }
 
@@ -142,14 +161,18 @@ pub struct RecordedEvent {
     pub shown: Vec<(String, Option<f32>)>,
 }
 
-fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+pub(crate) fn vec_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    // `as_chunks` rather than `chunks_exact`: the width is a constant, so the
+    // chunk arrives as `[u8; 4]` and `from_le_bytes` takes it whole instead of
+    // being handed a slice this has to re-assert the length of. `.0` drops the
+    // trailing bytes of a blob that is not a whole number of floats, which is
+    // what `chunks_exact` did with its remainder.
+    let (chunks, _) = b.as_chunks::<4>();
+    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 impl Store {
@@ -1373,7 +1396,10 @@ mod tests {
         // ever elapsing, and the sweep that waits for quiet never ran at all.
         assert_eq!(store.newest_event_at().await.unwrap(), Some(now));
         // The forget button takes the pursuits along.
-        store.insert_pursuit(now, &["q".into()], &[]).await.unwrap();
+        store
+            .insert_pursuit(now, &["q".into()], &[], None)
+            .await
+            .unwrap();
         store.purge_feedback().await.unwrap();
         assert!(store.recent_pursuits(10).await.unwrap().is_empty());
     }
