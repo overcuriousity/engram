@@ -34,6 +34,24 @@ const COVER_IN_FLIGHT: usize = 16;
 static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(COVER_IN_FLIGHT));
 
+/// How many gaps one capture is checked against.
+///
+/// `COVER_SLOTS` bounds how many queries are in the air, which is not a bound
+/// on how many there are. `open_gaps` caps each of four kinds at
+/// `MAX_OPEN_GAPS`, so one capture can ask two thousand questions of the vector
+/// store, and `settle_corpus` asks them once per document that reaches `ready`:
+/// an ingest of fifty documents is a hundred thousand round trips. Nothing
+/// bursts and nothing breaks — it is a couple of minutes of steady load on the
+/// store the search box queries, which is the one path with a person waiting on
+/// it, and it grows with the age of the base rather than with anything the
+/// operator did, because `unmatched` fills itself from the search log.
+///
+/// Taken off the front of a list `open_gaps` already sorted newest-first across
+/// the kinds, so what a capture is checked against is the holes someone is
+/// still trying to fill. A gap older than that is not checked by this capture —
+/// the honest cost of the ceiling, and the reason it is this high.
+const COVER_MAX_GAPS: usize = 200;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     /// Groups of `MIN_CLUSTER` or more: the ones that are stored and shown as
@@ -51,17 +69,17 @@ pub struct SweepReport {
 /// `weak_below` is closed — the same line that decided the gap was a gap in the
 /// first place, read the other way round.
 ///
-/// The queries are issued `COVER_IN_FLIGHT` at a time rather than one after
-/// another. There are four kinds of gap, each capped at `MAX_OPEN_GAPS`, and
-/// since the unmatched ones are derived from the search log without anybody
-/// judging anything, a base with capture on reaches those caps as a matter of
-/// course rather than as a worst case. A round trip apiece, in series, is then
+/// Bounded twice over, because the two bounds are different bounds. How many
+/// queries are in the air is `COVER_SLOTS`, held by the process so that
+/// concurrent captures share one budget: a round trip apiece in series is
 /// minutes of a capture sitting at its last step for work that is entirely
-/// waiting. Bounded rather than unbounded because the same reasoning applies to
-/// the other end: two thousand simultaneous queries is not concurrency, it is
-/// an outage in the vector store the whole memory shares. The bound is
-/// `COVER_SLOTS`, held by the process, so concurrent captures share the one
-/// budget instead of each being granted it.
+/// waiting, and two thousand at once is not concurrency but an outage in the
+/// vector store the whole memory shares. How many there are at all is
+/// `COVER_MAX_GAPS`, because concurrency is not a ceiling on the total — there
+/// are four kinds of gap, each capped at `MAX_OPEN_GAPS`, and since the
+/// unmatched ones are derived from the search log without anybody judging
+/// anything, a base with capture on reaches those caps as a matter of course
+/// rather than as a worst case.
 ///
 /// Filtered to this corpus on purpose: the question is whether *this capture*
 /// answered something. A hit from anywhere else answers a different question —
@@ -79,12 +97,21 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     if !core.feedback.enabled {
         return Ok(0);
     }
-    let open = core
+    let mut open = core
         .store
         .open_gaps(core.embedder.model(), core.weak_below)
         .await?;
     if open.gaps.is_empty() {
         return Ok(0);
+    }
+    if open.gaps.len() > COVER_MAX_GAPS {
+        tracing::debug!(
+            corpus_id,
+            open = open.gaps.len(),
+            checked = COVER_MAX_GAPS,
+            "more open gaps than one capture is checked against; the oldest are left out"
+        );
+        open.gaps.truncate(COVER_MAX_GAPS);
     }
     let filter = crate::vector::SearchFilter {
         tags: Vec::new(),

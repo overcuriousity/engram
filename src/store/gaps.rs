@@ -117,7 +117,17 @@ pub struct GapRow {
 /// A cap rather than the whole table, because both readers scale badly in this
 /// number and neither says so: `jobs::gaps::sweep` compares every pair of them
 /// on every retention tick, and `ui::capture_page` — the page the app opens on —
-/// walks the same list with its full query vectors on every load. `cluster`'s
+/// walks the same list with its full query vectors on every load.
+///
+/// Per kind, and there are four of them, so what either reader actually gets is
+/// up to four times this. The sweep's clustering is quadratic in that total and
+/// the capture page renders one row of it apiece, which is two million cosines
+/// on a timer and two thousand `<li>` before the first sweep has grouped
+/// anything. Both are the accepted cost of showing every kind of gap rather
+/// than the newest few hundred whatever kind they are — see `core::gaps::cluster`.
+/// What is *not* accepted at that width is `jobs::gaps::cover`, which turns
+/// each of them into a network round trip on a path a capture waits on; it
+/// takes the newest `COVER_MAX_GAPS` and leaves the rest. `cluster`'s
 /// "N is tens, so the quadratic pass is fine" was an assumption about an
 /// operator's habits, not a property of the query; a few thousand searches
 /// judged `gap` made both costs real.
