@@ -166,9 +166,13 @@ pub(crate) fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    // `as_chunks` rather than `chunks_exact`: the width is a constant, so the
+    // chunk arrives as `[u8; 4]` and `from_le_bytes` takes it whole instead of
+    // being handed a slice this has to re-assert the length of. `.0` drops the
+    // trailing bytes of a blob that is not a whole number of floats, which is
+    // what `chunks_exact` did with its remainder.
+    let (chunks, _) = b.as_chunks::<4>();
+    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 impl Store {
