@@ -153,6 +153,10 @@ pub struct Core {
     pub schedule: crate::config::ScheduleConfig,
     /// Whether the sitting may move a result. Carrying needs no setting.
     pub sitting: crate::config::SittingConfig,
+    /// Whether and how the area under the search box is filled. Read by the
+    /// sweep and on the page-view path, so it lives here rather than being
+    /// threaded down.
+    pub recommend: crate::config::RecommendConfig,
     /// Every live sitting, keyed by web session. Shared by every clone of
     /// `Core`, like the background queue — a per-clone map would be a per-clone
     /// working memory, which is no working memory at all.
@@ -240,6 +244,7 @@ impl Core {
             pursuit: cfg.pursuit.clone(),
             schedule: cfg.schedule.clone(),
             sitting: cfg.sitting.clone(),
+            recommend: cfg.recommend.clone(),
             sittings: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
@@ -310,6 +315,13 @@ impl Core {
     /// page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {
         self.completer.is_some()
+    }
+
+    /// Is the area under the search box filled? `false` means the placeholder
+    /// is not rendered, the endpoint records nothing, and the sweep does not
+    /// run — one gate, in one place.
+    pub fn recommends(&self) -> bool {
+        self.recommend.enabled
     }
 }
 
@@ -407,6 +419,10 @@ pub mod test_support {
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
             sitting: crate::config::SittingConfig::default(),
+            // Off, like the shipped default. The recommendation tests switch it
+            // on; every other test asserts nothing is offered and nothing is
+            // recorded.
+            recommend: crate::config::RecommendConfig::default(),
             sittings: Arc::new(Default::default()),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.

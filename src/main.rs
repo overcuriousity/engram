@@ -397,6 +397,7 @@ mod startup_tests {
             pursuit: engram::config::PursuitConfig::default(),
             schedule: engram::config::ScheduleConfig::default(),
             sitting: engram::config::SittingConfig::default(),
+            recommend: engram::config::RecommendConfig::default(),
         }
     }
 

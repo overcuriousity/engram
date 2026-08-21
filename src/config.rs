@@ -29,6 +29,8 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub sitting: SittingConfig,
+    #[serde(default)]
+    pub recommend: RecommendConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -300,6 +302,142 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// What each named block of the context vector is worth.
+///
+/// This is the whole of the encoder's argument in config form. Each block is
+/// normalised to length 1 and *then* scaled by its weight, so a block
+/// contributes exactly its weight however many dimensions it uses — seven
+/// one-hot slots for the weekday do not outweigh two for the hour because there
+/// are seven of them. That is what turns the encoding's implicit weighting,
+/// which nobody can tune, back into named numbers an operator can change.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct BlockWeights {
+    /// Interim, and load-bearing. Every scope shares one collection today, and
+    /// a point's multivector mixes the clusters of everyone who opened that
+    /// artifact — a payload filter cannot help, because it acts on the point
+    /// and not on elements of the set. A dominating `scope` block is what keeps
+    /// a foreign cluster from ever winning `max_sim`. When each user gets their
+    /// own collection this goes to 0 and nothing else changes.
+    pub scope: f32,
+    /// The hour, as an angle. See `core::context::encode`.
+    pub time_of_day: f32,
+    pub weekday: f32,
+    /// The part of the weekday that genuinely is gradual, kept apart from the
+    /// one-hot and kept weak.
+    pub weekend: f32,
+    pub device: f32,
+    pub viewport: f32,
+    pub locale: f32,
+    pub network: f32,
+    pub power: f32,
+    pub environment: f32,
+    /// Off. A monthly rhythm is real — rent, invoices — but nothing has shown
+    /// one here yet, and a block at zero costs two dimensions and no reasoning.
+    pub month_cycle: f32,
+}
+
+impl Default for BlockWeights {
+    fn default() -> Self {
+        Self {
+            scope: 10.0,
+            time_of_day: 1.0,
+            weekday: 1.0,
+            weekend: 0.3,
+            device: 0.8,
+            viewport: 0.4,
+            locale: 0.3,
+            network: 0.6,
+            power: 0.2,
+            environment: 0.2,
+            month_cycle: 0.0,
+        }
+    }
+}
+
+impl BlockWeights {
+    /// The weight of a block by name. A name nothing knows is worth nothing,
+    /// rather than a default: the block table and this lookup are edited
+    /// together, and a typo that silently gave a block weight 1.0 would be a
+    /// recommendation nobody could account for.
+    pub fn of(&self, block: &str) -> f32 {
+        match block {
+            "scope" => self.scope,
+            "time_of_day" => self.time_of_day,
+            "weekday" => self.weekday,
+            "weekend" => self.weekend,
+            "device" => self.device,
+            "viewport" => self.viewport,
+            "locale" => self.locale,
+            "network" => self.network,
+            "power" => self.power,
+            "environment" => self.environment,
+            "month_cycle" => self.month_cycle,
+            _ => 0.0,
+        }
+    }
+}
+
+/// Offering an artifact before it is asked for, from the situation the page was
+/// opened in.
+///
+/// One gate and a table of numbers, on purpose: `ROADMAP.md` under
+/// `[Core Platform]` objects to eight gates over one faculty, and this does not
+/// add a ninth. The learning cadence is not here either — see
+/// `jobs::context::INTERVAL_HOURS`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct RecommendConfig {
+    /// Off until there is a base with weeks of situations in it. A weekly
+    /// pattern needs weeks; shipping this on would show the bottom rung of the
+    /// ladder for a fortnight and teach the operator to ignore the area.
+    pub enabled: bool,
+    /// Cosine above which an event joins a cluster rather than opening its own.
+    pub cluster_merge_at: f32,
+    /// Per (scope, artifact). Multiple clusters are the point: a thing looked
+    /// up on Friday afternoons *and* occasionally on Monday mornings is two
+    /// situations, and their mean is a situation that never happened.
+    pub max_clusters: usize,
+    /// A pattern that stops fades rather than standing for ever.
+    pub half_life_days: f64,
+    /// A cluster below this is dropped. Also what protects against the single
+    /// accident: one event never reaches it.
+    pub min_weight: f64,
+    /// Context score — the vector with its `scope` block sliced off — at or
+    /// above which the offer is called a pattern.
+    ///
+    /// Scored without `scope` because that block decides *who* may be offered
+    /// something, at weight 10 against a total of under 5. Counting it here
+    /// would drag every same-scope score above 0.95 and leave these two
+    /// thresholds four hundredths apart.
+    pub strong_at: f32,
+    /// And above which it is called a resemblance. Below it the ladder falls
+    /// through to the sitting, and then to what has been forgotten.
+    pub weak_at: f32,
+    /// What an open of something this feature offered counts for, back into the
+    /// profile. Zero, because without it the first lucky guess grows into a
+    /// habit the system taught itself.
+    pub self_weight: f64,
+    /// See `BlockWeights`.
+    pub weights: BlockWeights,
+}
+
+impl Default for RecommendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cluster_merge_at: 0.82,
+            max_clusters: 5,
+            half_life_days: 45.0,
+            min_weight: 2.0,
+            strong_at: 0.75,
+            weak_at: 0.45,
+            self_weight: 0.0,
+            weights: BlockWeights::default(),
+        }
     }
 }
 
@@ -1736,6 +1874,65 @@ mod tests {
         // The floor below which extraction is reported as a failure rather
         // than stored as a corpus.
         assert_eq!(c.min_extracted_chars, 200);
+    }
+
+    #[test]
+    fn the_recommender_ships_off_with_its_weights_named() {
+        let r = RecommendConfig::default();
+        assert!(!r.enabled, "a faculty that learns from a log ships off");
+        // The scope block dominates so a foreign cluster can never win
+        // `max_sim`. When each user has their own collection this goes to 0
+        // and nothing else changes.
+        assert_eq!(r.weights.of("scope"), 10.0);
+        assert_eq!(r.weights.of("weekday"), 1.0);
+        assert_eq!(r.weights.of("month_cycle"), 0.0, "off by default");
+        // A block nobody named contributes nothing rather than a default. The
+        // block table and this lookup are edited together, and a typo that
+        // silently gave a block weight 1.0 would be a recommendation nobody
+        // could account for.
+        assert_eq!(r.weights.of("phase_of_the_moon"), 0.0);
+        // The two rungs are far enough apart to mean different things, which
+        // is only true because `scope` is left out of the score.
+        assert!(r.strong_at > r.weak_at + 0.2);
+        assert_eq!(r.self_weight, 0.0, "the offer does not teach itself");
+    }
+
+    #[test]
+    fn the_example_config_carries_the_recommend_block() {
+        // Every value here equals its struct default, which is the point — the
+        // example file documents what ships. That also makes a load-and-compare
+        // test vacuous on its own: it would pass with the block deleted, because
+        // `#[serde(default)]` would fill in the same numbers. So the file is
+        // read as text first, and only then parsed.
+        let path = std::path::Path::new("config.example.toml");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\n[recommend]\n"), "the block is documented");
+        assert!(
+            raw.contains("\n[recommend.weights]\n"),
+            "and so is every weight the offer rests on"
+        );
+        for block in [
+            "scope",
+            "time_of_day",
+            "weekday",
+            "weekend",
+            "device",
+            "viewport",
+            "locale",
+            "network",
+            "power",
+            "environment",
+            "month_cycle",
+        ] {
+            assert!(raw.contains(&format!("\n{block} = ")), "{block} is unnamed");
+        }
+
+        // And it parses: a mistyped value or a table the loader cannot reach
+        // fails here rather than at somebody's boot.
+        let cfg = Config::load(Some(path)).unwrap();
+        assert!(!cfg.recommend.enabled);
+        assert_eq!(cfg.recommend.max_clusters, 5);
+        assert_eq!(cfg.recommend.weights.of("network"), 0.6);
     }
 
     #[test]

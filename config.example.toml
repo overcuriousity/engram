@@ -481,6 +481,66 @@ min_sources = 2
 # pivoted 1.5, returned 2.0, confirmed 3.0.
 min_engagement = 3.0
 
+# ── A recommendation under the search box ────────────────────────────────────
+# The area under the search box, filled from the situation the page was opened
+# in: the time zone and local time the browser reports, the device, the
+# viewport, the network, the battery. A sweep learns which situations recur for
+# which artifact; a page view is one vector query against what it learned. No
+# model call and no embedding on this path, ever.
+#
+# Off until there is a base with weeks of situations in it — a weekly pattern
+# needs weeks, and until then every offer would sit on the bottom rung.
+[recommend]
+enabled = false
+# Cosine above which an event joins a cluster rather than opening its own.
+cluster_merge_at = 0.82
+# Situations kept per artifact, per person. More than one is the point: a thing
+# looked up on Friday afternoons and occasionally on Monday mornings is two
+# situations, and their mean is a situation that never happened.
+max_clusters = 5
+# A pattern that stops fades rather than standing for ever.
+half_life_days = 45.0
+# A cluster lighter than this is dropped. Also what protects against the single
+# accident: one event never reaches it.
+min_weight = 2.0
+# Score at or above which the offer is called a pattern, and above which it is
+# called a resemblance. Below the second, the ladder falls through to what this
+# sitting has touched, and then to what has been forgotten. Scored without the
+# `scope` block, which decides *who* may be offered something rather than how
+# well the situation matches.
+strong_at = 0.75
+weak_at = 0.45
+# What an open of something this offered counts for, back into the profile.
+# Zero: without it, the first lucky guess grows into a habit the system taught
+# itself.
+self_weight = 0.0
+
+# What each named block of the situation is worth. Each block is normalised to
+# length 1 and then scaled by its weight, so a block contributes exactly its
+# weight however many dimensions it uses — seven one-hot slots for the weekday
+# do not outweigh two for the hour because there are seven of them.
+[recommend.weights]
+# Interim, and load-bearing: every person shares one collection today, so this
+# is what keeps one person's situations from being offered to another. It goes
+# to 0 when each user has their own collection.
+scope = 10.0
+# The hour, as an angle — 23:30 and 00:30 are an hour apart, and 14:55 against a
+# 15:00 pattern costs almost nothing.
+time_of_day = 1.0
+# One-hot, because "Friday is three from Tuesday" means nothing and the pattern
+# is exactly Friday.
+weekday = 1.0
+# The part of the weekday that genuinely is gradual, kept separate and weak.
+weekend = 0.3
+device = 0.8
+viewport = 0.4
+locale = 0.3
+network = 0.6
+power = 0.2
+environment = 0.2
+# Off. A monthly rhythm is real, but nothing has shown one here yet.
+month_cycle = 0.0
+
 # ── Scheduling ───────────────────────────────────────────────────────────────
 # The queue is the scheduler. Whether somebody is waiting on a unit is a
 # constant per stage rather than a setting: a priority you can set wrong
