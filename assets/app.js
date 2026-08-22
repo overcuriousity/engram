@@ -4,6 +4,16 @@
 (function () {
   'use strict';
 
+  // What the code below fires when the box's *surroundings* changed — a file
+  // staged or dropped, an answer that finished, a capture that emptied the box
+  // — and the verb row has to be re-read. It used to fire `input`, which was
+  // true of nothing: nobody typed. `contextOffer` listens for the first
+  // keystroke on `input` and takes the offer away, so dragging a file onto a
+  // fresh page removed a card the operator had not touched, and if the offer
+  // fetch had not landed yet, `/ui/context/seen` never went and a real
+  // impression fell out of both halves of the hit rate.
+  var VERB_SYNC = 'engram:verbsync';
+
   // Registering the worker is what makes the browser offer to install engram
   // rather than bookmark it. Guarded on both the API and a secure context,
   // because plain HTTP on a LAN address has neither and must still work.
@@ -260,7 +270,7 @@
       for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
       // A box someone emptied while the answer streamed must not come back
       // with live verbs over nothing to act on.
-      if (!busy) box.dispatchEvent(new Event('input', { bubbles: true }));
+      if (!busy) box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
     // Count up beside the spinner while the stream is open.
@@ -844,6 +854,7 @@
     }
 
     box.addEventListener('input', function () { sync(); grow(); });
+    box.addEventListener(VERB_SYNC, function () { sync(); grow(); });
     sync();
     grow();
   }
@@ -864,14 +875,18 @@
     // not price one. app.js is one file for every installation, so what used
     // to be a template conditional rides an attribute instead.
     var EAGER = hint.getAttribute('data-eager') === '1';
-    box.addEventListener('input', function () {
+    function sizeHint() {
       var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
       hint.hidden = segments < 2;
       hint.textContent = EAGER
         ? 'About ' + segments + ' segments — roughly ' + segments +
           ' model calls before this is searchable.'
         : 'About ' + segments + ' segments — searchable as written, once embedded.';
-    });
+    }
+    box.addEventListener('input', sizeHint);
+    // The box is emptied by a capture that stored, and the hint must not go on
+    // pricing text that is no longer in it.
+    box.addEventListener(VERB_SYNC, sizeHint);
 
     var drop = document.getElementById('drop');
     var picker = drop && drop.querySelector('input[type=file]');
@@ -909,7 +924,7 @@
       if (picker) picker.value = '';
       // Capture may have been armed by this file alone. See `sync` in
       // boxVerbs, which listens for this.
-      box.dispatchEvent(new Event('input', { bubbles: true }));
+      box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
     // `restore` is the failed upload coming back: the same file, already
@@ -963,7 +978,7 @@
       }
       // A file over an empty box is still something Capture can act on. See
       // `sync` in boxVerbs, which listens for this.
-      box.dispatchEvent(new Event('input', { bubbles: true }));
+      box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
     function send(file) {
@@ -1133,7 +1148,7 @@
         var kept = document.getElementById('kept-from');
         if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
         box.value = '';
-        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
         refreshRail();
       });
     }
@@ -1311,12 +1326,19 @@
 
   // The rail is a list: arrows move through it, Enter opens what is focused.
   // j and k do the same, for hands that never left the home row.
+  //
+  // The arrows are gated on `typing()` too, not only the letters. They were
+  // not while the box was a single-line input, where Down meant nothing to the
+  // caret. The box is a textarea now — chapters get pasted into it, and
+  // /ui/capture?from_ask= opens it holding a whole model answer — so Down is
+  // "next line of what I am editing" long before it is "next result", and
+  // stealing focus out to the rail lost the keystroke as well as the place.
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     var down = e.key === 'ArrowDown' || e.key === 'j';
     var up = e.key === 'ArrowUp' || e.key === 'k';
     if (!down && !up) return;
-    if ((e.key === 'j' || e.key === 'k') && typing()) return;
+    if (typing()) return;
     var items = Array.prototype.slice.call(document.querySelectorAll('.rail-item'));
     if (!items.length) return;
     var i = items.indexOf(document.activeElement);
