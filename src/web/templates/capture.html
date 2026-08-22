@@ -4,7 +4,7 @@
    Recent was a full-width list stacked under the paste box while six hundred
    pixels beside that box stayed empty; it is the same list, in the space that
    was already there. #}
-{% block regions %}regions-focus-aside{% endblock %}
+{% block regions %}regions-focus{% endblock %}
 {% block content %}
 <div class="region-focus">
 {# The `captured` event is what puts the new capture under "Recent": this form
@@ -105,36 +105,6 @@
 </div>
 <div id="capture-result" style="margin-top:1rem"></div>
 
-{% if !pairs.is_empty() %}
-<h3>Needs you</h3>
-{% include "_decide.html" %}
-{# A capped list, said once underneath rather than as a link somewhere else:
-   there is no other page these live on. Clearing one of the five above brings
-   the next one up, so the number falls as the work gets done. #}
-{% if more_pairs > 0 %}
-<p class="muted">{{ more_pairs }} more waiting — the next comes up as you clear these.</p>
-{% endif %}
-{% endif %}
-
-{% include "_gaps.html" %}
-</div>
-
-<div class="region-aside">
-<h3>Recent</h3>
-{# Loaded rather than rendered inline, so the first paint and every refresh
-   afterwards go through exactly the same fragment. #}
-<div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
-
-{# Reachable, not advertised. What is left on Housekeeping is reference — what
-   is hidden, what is stale, what is retrying — and none of it is work waiting
-   on you; the part that was is moved up to "Needs you". Settings is the other
-   half of what that page used to be: what is true about this installation
-   rather than about what is in it. Neither belongs in the top row, which stays
-   three destinations wide. #}
-<p class="quiet-links">
-  <a class="quiet-link" href="/ui/insights">Insights</a>
-  <a class="quiet-link" href="/ui/settings">Settings</a>
-</p>
 </div>
 <script>
   (function () {

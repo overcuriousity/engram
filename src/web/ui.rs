@@ -434,14 +434,6 @@ struct CaptureTemplate {
     judge_pending: Option<i64>,
     /// Whether the ask door is open. See `state::ask_enabled`.
     ask_enabled: bool,
-    /// Decisions waiting on a person, shown where the work arrives rather than
-    /// on a page you have to remember to visit. Empty renders nothing at all.
-    /// Grouped, because one artifact against three others is one decision and
-    /// arrived as three — see `group_pairs`.
-    pairs: Vec<PairCluster>,
-    /// How many more are behind the ones shown. Said once under the list, so a
-    /// short list does not read as an empty queue when it is a capped one.
-    more_pairs: i64,
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the page offers text only rather than a picker that fails.
     vision_enabled: bool,
@@ -453,10 +445,6 @@ struct CaptureTemplate {
     /// "16 model calls" on a base that will make none is the page lying about
     /// what the button costs.
     eager: bool,
-    /// The holes, grouped and named by the sweep. Empty when feedback is off.
-    gaps: Vec<GapGroup>,
-    /// Open gaps the sweep has not grouped yet.
-    loose: Vec<GapMember>,
     /// An answer the operator asked to keep, dropped into the box for them to
     /// edit. Empty on an ordinary visit.
     ///
@@ -540,7 +528,7 @@ pub struct GapGroup {
     pub members: Vec<GapMember>,
 }
 
-fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
+pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
     use crate::store::gaps::GapKind;
     GapMember {
         kind: g.kind.as_str().into(),
@@ -950,8 +938,6 @@ async fn capture_page(
     _id: Identity,
     Query(p): Query<CapturePrefill>,
 ) -> Result<Response> {
-    let (pairs, more_pairs) = pair_rows(&st).await?;
-    let pairs = group_pairs(pairs);
     // A prefill that names an ask nobody recorded is not an error worth a page
     // for: the box is simply empty, which is what an ordinary visit looks like.
     let prefilled = match &p.from_ask {
@@ -962,36 +948,11 @@ async fn capture_page(
         Some(ev) => (ev.answer, ev.id, ev.question),
         None => (String::new(), String::new(), String::new()),
     };
-    // Read, never computed: the page shows what the sweep grouped and named,
-    // and whatever has been judged since sits under itself until the next
-    // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if st.core.learn.enabled {
-        let (rows, loose) = st
-            .core
-            .store
-            .gap_rows(st.core.embedder.model(), st.core.weak_below)
-            .await?;
-        (
-            rows.into_iter()
-                .map(|r| GapGroup {
-                    label: r.label,
-                    members: r.members.into_iter().map(gap_member).collect(),
-                })
-                .collect(),
-            loose.into_iter().map(gap_member).collect(),
-        )
-    } else {
-        (vec![], vec![])
-    };
     Ok(HtmlTemplate(CaptureTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
-        pairs,
-        more_pairs,
         vision_enabled: st.core.describer.is_some(),
         eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
-        gaps,
-        loose,
         prefill_text,
         prefill_ask,
         prefill_question,
@@ -2208,7 +2169,7 @@ const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
 /// Used by Capture, which shows them because that is where the work arrives,
 /// and by nothing else: Housekeeping is what is left over once the only part of
 /// Ops that needs a person has moved to the page people actually open.
-async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
+pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
         waiting += st.core.store.count_pairs_by_state(state).await?;
@@ -2328,7 +2289,7 @@ pub struct PairCluster {
 /// Order is the incoming order, which is `PAIR_STATES`' priority: the cluster
 /// containing the most urgent pair leads, and within a cluster the rows keep
 /// the order they were read in.
-fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
+pub(crate) fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
     let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
         let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
@@ -4525,6 +4486,75 @@ mod tests {
     /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
         app_with_cookie(core).await
+    }
+
+    /// A core holding one pair waiting on a person, so "Needs you" has
+    /// something to say on whichever page is supposed to be carrying it.
+    async fn app_with_a_waiting_pair() -> (axum::Router, String) {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "The reindex job holds a file descriptor on the old mount.".into(),
+                        corpus_span: None,
+                        title: Some("reindex holds an fd".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "The reindex job holds an fd on the old mount.".into(),
+                        corpus_span: None,
+                        title: Some("reindex holds an fd (again)".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_pair_with_detail(&made[0].id, &made[1].id, 0.94, "near duplicate")
+            .await
+            .unwrap();
+        app_for(core).await
+    }
+
+    /// The three surfaces that are maintenance rather than searching. Capture
+    /// is about to stop being a page at all, and none of these belonged on it
+    /// even while it was one: a merge decision, a hole in the base and a list
+    /// of what was just stored are all work *on* the base rather than work
+    /// with it.
+    #[tokio::test]
+    async fn the_three_maintenance_surfaces_are_on_insights_and_not_on_capture() {
+        let (app, cookie) = app_with_a_waiting_pair().await;
+
+        let insights = get(&app, "/ui/insights", &cookie).await;
+        assert!(insights.contains("Needs you"), "pairs are on Insights");
+        assert!(
+            insights.contains("Recent"),
+            "the capture queue is on Insights"
+        );
+        assert!(
+            insights.contains("/ui/queue"),
+            "and it loads the same fragment it always did"
+        );
+
+        let capture = get(&app, "/ui/capture", &cookie).await;
+        assert!(
+            !capture.contains("Needs you"),
+            "pairs left the capture page"
+        );
+        assert!(!capture.contains("/ui/queue"), "so did the queue");
     }
 
     /// Housekeeping is Insights now. The old door stays a door: it is in
@@ -7103,7 +7133,7 @@ mod tests {
             core.store.record_pair(&w[0], &w[1], 0.9).await.unwrap();
         }
 
-        let body = get_body(&app, &cookie, "/ui/capture").await;
+        let body = get_body(&app, &cookie, "/ui/insights").await;
         assert_eq!(
             body.matches("/supersede").count(),
             super::PAIR_LIMIT * 2,
@@ -7469,7 +7499,7 @@ mod tests {
 
         // On Capture, not on Housekeeping: this is the one part of Ops that
         // needs a person, so it belongs where the work arrives.
-        let html = get_body(&app, &cookie, "/ui/capture").await;
+        let html = get_body(&app, &cookie, "/ui/insights").await;
         assert!(html.contains("left one") && html.contains("right one"));
         assert!(
             html.contains("Keep “left one”"),
@@ -7579,11 +7609,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_pages_are_reachable_from_capture() {
+    async fn both_pages_are_reachable_once_capture_stops_being_one() {
         let (app, cookie) = app_with_session().await;
+
+        // Insights is a destination in the top row now, so it is reachable
+        // from every page rather than from one quiet paragraph at the bottom
+        // of a page that is about to stop existing.
         let page = get_body(&app, &cookie, "/ui/capture").await;
         assert!(page.contains("/ui/insights"), "{page}");
-        assert!(page.contains("/ui/settings"), "{page}");
+
+        // Settings had exactly one door, and it was that paragraph. It moved
+        // rather than went: an installation you cannot open the settings of
+        // is the regression this assertion exists to catch.
+        let insights = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(insights.contains("/ui/settings"), "{insights}");
     }
 
     #[tokio::test]
@@ -7986,7 +8025,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         let title = page
             .find("Speicherorte der MS Mail App")
             .expect("a title is on the card");
@@ -8368,13 +8407,13 @@ mod tests {
         let id = ids[0].clone();
 
         // Before the sweep: listed, not yet grouped.
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Knowledge gaps"), "{page}");
         assert!(page.contains("not yet grouped"), "{page}");
         assert!(page.contains("mount an E01"), "{page}");
 
         crate::jobs::gaps::sweep(&core).await.unwrap();
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Fake topic"), "{page}");
         assert!(
             page.contains(&format!("/ui/gaps/ask/{id}/dismiss")),
@@ -8390,7 +8429,7 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::OK);
         }
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             !page.contains("Knowledge gaps"),
             "a covered gap must leave the page: {page}"
@@ -8744,7 +8783,7 @@ mod tests {
             .await
             .unwrap();
 
-        let html = get_body(&app, &cookie, "/ui/capture").await;
+        let html = get_body(&app, &cookie, "/ui/insights").await;
         for badge in ["judged", "nothing near", "pursued"] {
             assert!(
                 html.contains(badge),
@@ -9331,18 +9370,17 @@ mod tests {
             "housekeeping is a table and has no reading measure: {ops}"
         );
 
-        // `regions-focus-aside`, not `regions-focus`: a substring check would
-        // pass on either, and the difference is the whole point — the prose
-        // keeps its measure and what used to be empty beside it holds the
-        // page's second thing.
+        // One column again. Recent was what the aside held, and Recent is on
+        // Insights now — an aside region with nothing in it is a column of
+        // empty space, not a layout.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains(r#"regions regions-focus-aside"#),
-            "capture is prose beside its record: {capture}"
+            capture.contains(r#"regions regions-focus"#),
+            "capture is prose and nothing beside it: {capture}"
         );
         assert!(
-            capture.contains(r#"class="region-aside""#),
-            "capture's Recent has nothing to sit in: {capture}"
+            !capture.contains(r#"class="region-aside""#),
+            "capture has nothing left to put in an aside: {capture}"
         );
 
         let ask = get_body(&app, &cookie, "/ui/ask").await;

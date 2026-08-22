@@ -2,6 +2,36 @@
 {% block title %}Housekeeping — engram{% endblock %}
 {% block regions %}regions-table{% endblock %}
 {% block content %}
+{# Work waiting on a person, first: this is the only thing on the page that
+   asks for anything. Everything below it is reference. #}
+{% if !pairs.is_empty() %}
+<h2>Needs you</h2>
+{% include "_decide.html" %}
+{# A capped list, said once underneath rather than as a link somewhere else:
+   there is no other page these live on. Clearing one of the five above brings
+   the next one up, so the number falls as the work gets done. #}
+{% if more_pairs > 0 %}
+<p class="muted">{{ more_pairs }} more waiting — the next comes up as you clear these.</p>
+{% endif %}
+{% endif %}
+
+{% include "_gaps.html" %}
+
+<h2>Recent</h2>
+{# Loaded rather than rendered inline, so the first paint and every refresh
+   afterwards go through exactly the same fragment. #}
+<div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
+
+{# Settings is the other half of what Housekeeping used to be: what is true
+   about this installation rather than about what is in it. It was reachable
+   from one quiet paragraph at the bottom of Capture, and Capture is a verb
+   now — this is the page it belongs to. #}
+<p class="quiet-links">
+  <a class="quiet-link" href="/ui/settings">Settings</a>
+</p>
+
+<h2>Housekeeping</h2>
+
 
 <p class="crumb"><a href="/ui/capture">Capture</a> › Housekeeping</p>
 

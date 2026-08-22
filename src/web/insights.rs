@@ -119,6 +119,21 @@ pub(crate) struct SweepRunRow {
 #[derive(Template)]
 #[template(path = "insights.html")]
 struct InsightsTemplate {
+    /// Decisions waiting on a person. Empty renders nothing at all. Grouped,
+    /// because one artifact against three others is one decision and arrived
+    /// as three — see `group_pairs`.
+    ///
+    /// It used to sit on Capture, "where the work arrives". Capture is a verb
+    /// now and not a page, and this was never work *with* the base anyway —
+    /// it is work on it, which is what this page is.
+    pairs: Vec<crate::web::ui::PairCluster>,
+    /// How many more are behind the ones shown. Said once under the list, so a
+    /// short list does not read as an empty queue when it is a capped one.
+    more_pairs: i64,
+    /// The holes, grouped and named by the sweep. Empty when feedback is off.
+    gaps: Vec<crate::web::ui::GapGroup>,
+    /// Open gaps the sweep has not grouped yet.
+    loose: Vec<crate::web::ui::GapMember>,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
     /// Whether the ask door is open. See `state::ask_enabled`.
@@ -200,6 +215,35 @@ pub(crate) struct MergedRow {
 
 async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use sqlx::Row;
+
+    let (pairs, more_pairs) = crate::web::ui::pair_rows(&st).await?;
+    let pairs = crate::web::ui::group_pairs(pairs);
+
+    // Read, never computed: the page shows what the sweep grouped and named,
+    // and whatever has been judged since sits under itself until the next
+    // pass. Nothing here embeds or calls a model.
+    let (gaps, loose) = if st.core.learn.enabled {
+        let (rows, loose) = st
+            .core
+            .store
+            .gap_rows(st.core.embedder.model(), st.core.weak_below)
+            .await?;
+        (
+            rows.into_iter()
+                .map(|r| crate::web::ui::GapGroup {
+                    label: r.label,
+                    members: r
+                        .members
+                        .into_iter()
+                        .map(crate::web::ui::gap_member)
+                        .collect(),
+                })
+                .collect(),
+            loose.into_iter().map(crate::web::ui::gap_member).collect(),
+        )
+    } else {
+        (vec![], vec![])
+    };
 
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&st.core.store.pool)
@@ -417,6 +461,10 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
+        pairs,
+        more_pairs,
+        gaps,
+        loose,
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
         retrying,
