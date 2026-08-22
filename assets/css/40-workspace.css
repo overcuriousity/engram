@@ -28,9 +28,26 @@
 body { overflow-x: hidden; }
 
 /* Composes `.label` for the type; keeps only the row it makes. */
+/* The label vocabulary is `.label` in 10-base.css — uppercase, letterspaced,
+   muted, one step. What this adds is the hairline that runs out from it to the
+   edge of its region, which is most of why a column of these reads as an
+   organised page rather than as three lists that happen to be adjacent.
+
+   `::after` on a flex row, so the rule takes whatever width the words leave
+   and needs no measuring. `min-width: 0` on the text, or a long label pushes
+   the rule out of the column instead of shortening it. */
 .pane-label {
-  display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 0.375rem;
+  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
 }
+.pane-label > * { min-width: 0; }
+.pane-label::after {
+  content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
+  background: var(--color-border-subtle);
+}
+/* Except where the label holds its own trailing control — a link back, a
+   count — which would be pushed off the end by a rule that takes what is
+   left. Those rows say where the rule goes themselves. */
+.pane-label:has(a)::after, .pane-label:has(button)::after { display: none; }
 
 /* Tall enough to stand beside the artifact rather than under a third of it,
    and still bounded: the source of a chapter is not a page to scroll here. */
@@ -198,9 +215,25 @@ body { overflow-x: hidden; }
    so already, and the identical card underneath them said otherwise. */
 .rail-assoc { border-style: dashed; background: transparent; }
 /* The count, above the list. */
+/* The rail's heading names the act that filled it: "3 results" while typing,
+   "Written from · 5" after an Ask. Same vocabulary as `.pane-label`, because
+   it is the same kind of statement about the same kind of region — and the
+   way back sits on the row with it, which is why the rule is on the row
+   rather than after the words. */
+.rail-act {
+  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
+}
+.rail-act::after {
+  content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
+  background: var(--color-border-subtle);
+}
+/* The way back to results, after an Ask. Last on the row, past the rule, so
+   the heading still reads as a heading. */
+.rail-act .quiet-link { order: 3; flex: 0 0 auto; font-size: var(--text-xs); }
+.rail-act::after { order: 2; }
 .result-count {
   font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--color-fg-muted); margin-bottom: 0.5rem;
+  color: var(--color-fg-muted); flex: 0 0 auto;
 }
 
 /* Where the ranked list's relevance falls off. The rows past it are still

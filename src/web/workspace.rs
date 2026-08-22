@@ -720,6 +720,38 @@ mod tests {
         .unwrap()
     }
 
+    /// Three destinations, because there are three places. Capture and Ask
+    /// were destinations while they were pages; they are verbs on the box now,
+    /// and the box is on this screen.
+    #[tokio::test]
+    async fn the_tab_bar_points_at_the_three_places_there_are() {
+        let html = workspace("/ui").await;
+        let bar = html
+            .split_once(r#"<nav class="tabbar""#)
+            .expect("the tab bar is there")
+            .1;
+        let bar = &bar[..bar.find("</nav>").expect("the tab bar ends")];
+        assert!(
+            bar.contains("/ui/insights"),
+            "Insights is a destination: {bar}"
+        );
+        assert!(
+            !bar.contains("/ui/capture"),
+            "Capture is not a place any more: {bar}"
+        );
+        assert!(!bar.contains("/ui/ask"), "and neither is Ask: {bar}");
+
+        // The same rule in the row above it, which is the same three places
+        // seen on a wider screen.
+        let top = html
+            .split_once(r#"<nav class="top""#)
+            .expect("the top row is there")
+            .1;
+        let top = &top[..top.find("</nav>").expect("the top row ends")];
+        assert!(!top.contains(r#"href="/ui/capture""#), "{top}");
+        assert!(!top.contains(r#"href="/ui/ask""#), "{top}");
+    }
+
     /// A door that fails silently is worse than one that fails.
     ///
     /// htmx swaps nothing on an error of any kind, so before this the rail
