@@ -606,8 +606,18 @@ they record why the trigger is what it is, and those reasons have not changed.
 - [ ] **Step 5: Register and delete**
 
 `src/web/mod.rs`: add `pub mod workspace;` and `.merge(crate::web::workspace::routes())`.
-Delete `src/web/templates/search.html` and `src/web/templates/_sitting.html`, and
-remove the `{% include "_sitting.html" %}` line from `ask.html`.
+Delete `src/web/templates/search.html` and `src/web/templates/_sitting.html`.
+
+**`ask.html` still exists at this point and depends on both things this step
+deletes.** It must be de-wired in the same commit or the build breaks:
+
+- remove the `{% include "_sitting.html" %}` line from `ask.html`,
+- remove the `sitting: Vec<SittingItem>` field from `AskTemplate`,
+- remove the `sitting: sitting_rail(&st, &id).await` line from `ask_page`, which
+  is the last caller of the function this step deletes.
+
+`ask_page` and `AskTemplate` go entirely in Task 5; this is the minimum to keep
+the tree compiling between here and there.
 
 - [ ] **Step 6: Run the tests**
 
@@ -1464,11 +1474,21 @@ async fn the_measures_read_what_the_base_already_recorded() {
     assert!(html.contains("MRR"), "and so is the other one");
     assert!(html.contains("held"), "how much is held");
 
-    // Read, never computed at request time: the page must not embed or call a
-    // model. The constraint at the top of ROADMAP.md holds here too.
-    let before = core.embedder.calls();
+}
+
+/// Read, never computed at request time: the page must not embed or call a
+/// model. The constraint at the top of `ROADMAP.md` holds here too.
+///
+/// `test_core_counting_embed_calls` is the existing helper for this
+/// (`src/core/mod.rs:361`); it hands back the `FakeEmbedder` whose `calls()`
+/// is the counter. There is no `Core::embedder.calls()` to reach for.
+#[tokio::test]
+async fn the_measures_embed_nothing() {
+    let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+    let (app, cookie) = app_for(core).await;
+    let before = embedder.calls();
     let _ = get(&app, "/ui/insights", &cookie).await;
-    assert_eq!(core.embedder.calls(), before, "the page embeds nothing");
+    assert_eq!(embedder.calls(), before, "the page embeds nothing");
 }
 ```
 
