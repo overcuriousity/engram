@@ -803,10 +803,18 @@ async fn resurface(
 
 async fn get_artifact(
     State(st): State<AppState>,
-    _id: Identity,
+    id: Identity,
     Path(cid): Path<String>,
 ) -> Result<Json<crate::store::artifacts::Chunk>> {
-    Ok(Json(st.core.store.get_artifact(&cid).await?))
+    let chunk = st.core.store.get_artifact(&cid).await?;
+    // Asking for one artifact by id is the same deliberate act the detail pane
+    // records, and it is the whole of what this door can honestly say: there
+    // is no navigation to have pivoted through, so no `via`, and no session to
+    // belong to, because a bearer token is not a conversation. Written after
+    // the read succeeds — a 404 engaged nothing.
+    st.core.mark_artifact_seen(&cid);
+    st.core.record_interaction(&cid, None, Some(&id.subject));
+    Ok(Json(chunk))
 }
 
 async fn patch_artifact(
@@ -1158,6 +1166,45 @@ pub(crate) mod tests {
                 "the report dropped `{key}`: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reading_an_artifact_over_the_api_is_an_open() {
+        // The API door was the one place a read left no trace at all: an agent
+        // could work through `GET /artifacts/{id}` all afternoon and teach the
+        // offer ladder, promotion and pursuits precisely nothing.
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let out = core
+            .ingest("a verbatim passage", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::passages::capture_verbatim(&core, &out.id)
+            .await
+            .unwrap();
+        let a = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let (app, token, core) = app_from_core(core).await;
+
+        let res = app
+            .oneshot(get(&format!("/api/v1/artifacts/{a}"), Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        core.background.wait_idle().await;
+        let got = core
+            .store
+            .interactions_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "the API read was not recorded: {got:?}");
+        assert_eq!(got[0].artifact_id, a);
+        assert_eq!(got[0].kind, "opened");
+        // The API has no navigation to pivot through and no session to belong
+        // to: a bearer token is not a conversation.
+        assert_eq!(got[0].via, None);
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {

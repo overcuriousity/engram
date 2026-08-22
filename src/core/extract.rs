@@ -22,12 +22,55 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
             el.attrs
                 .iter()
                 .find(|a| a.name.local.as_ref() == "alt")
-                .map(|a| a.value.trim().to_string())
+                .map(|a| a.value.trim())
                 .filter(|alt| !alt.is_empty())
-                .map(Into::into)
+                .map(|alt| escape_alt(alt).into())
         })
         .build()
 });
+
+/// An `alt` as an inline text node rather than as markdown.
+///
+/// htmd escapes the text nodes it walks itself, but whatever a handler returns
+/// is already-translated markdown as far as it is concerned and goes into the
+/// output verbatim. So `alt="# Overview"` on a decorative image lands as a
+/// real ATX heading, and `src/infer/split.rs` splits the artifact at a
+/// boundary the document never had — the same silent loss `setext_to_atx`
+/// below exists to prevent, arriving from the other direction. The equations
+/// this handler was written for are the second half of it: `{\displaystyle
+/// E=mc^{2}}` is a run of `\`, `_` and `{}` that markdown reads as emphasis.
+///
+/// Whitespace collapses first. An alt is one run of text wherever it sits in
+/// the prose, and a newline inside it would let the remainder open a block on
+/// a line of its own, past every leading-character check below.
+fn escape_alt(alt: &str) -> String {
+    let line = alt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(line.len() + 8);
+    // Only the first character can open a block, and only the markers that
+    // open one unconditionally are escaped here: a `-` or `+` needs the space
+    // after it, and htmd itself escapes no more than this.
+    let first = line.chars().next();
+    if matches!(first, Some('=' | '~' | '>' | '#'))
+        || (matches!(first, Some('-' | '+')) && line.chars().nth(1) == Some(' '))
+    {
+        out.push('\\');
+    }
+    for ch in line.chars() {
+        if matches!(ch, '\\' | '*' | '_' | '`' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    // An ordered item is a digit run and then `.` or `)`, and the escape goes
+    // before the dot: `\1` is not an escape, it is a backslash and a one.
+    if first.is_some_and(|c| c.is_ascii_digit())
+        && let Some(i) = out.find(|c: char| !c.is_ascii_digit())
+        && matches!(out.as_bytes()[i], b'.' | b')')
+    {
+        out.insert(i, '\\');
+    }
+    out
+}
 
 /// Rewrite setext headings as ATX ones.
 ///
@@ -392,6 +435,31 @@ mod tests {
         assert!(
             !md.contains("grey-placeholder"),
             "an alt-less spacer left a trace:\n{md}"
+        );
+    }
+
+    #[test]
+    fn an_alt_cannot_invent_a_heading_the_document_never_had() {
+        // A handler's output is inserted verbatim, so an alt is the one text
+        // on this path htmd does not escape. `src/infer/split.rs` splits on a
+        // leading `#`, which would put a segment boundary in the middle of a
+        // paragraph on the word of a decorative image.
+        let html = "<html><body><article>\
+            <p>A paragraph long enough that readability scores this document \
+            as content rather than as furniture, which is the whole of what \
+            this sentence is here to do.</p>\
+            <p><img src=\"/rule.png\" alt=\"# Overview\"> opens the section, \
+            and the prose runs on from there for a while yet.</p>\
+            </article></body></html>";
+        let md = html_to_markdown(html, None, 10).unwrap();
+        assert!(md.contains("Overview"), "the alt was dropped:\n{md}");
+        // The condition `is_heading` in that module matches, spelled out
+        // here because it is private to it.
+        assert!(
+            !md.lines().any(|l| l.trim_start().starts_with("# ")
+                || l.trim_start().starts_with("#")
+                    && l.trim_start().trim_start_matches('#').starts_with(' ')),
+            "an alt opened a heading:\n{md}"
         );
     }
 

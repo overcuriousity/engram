@@ -538,6 +538,33 @@ impl Core {
         }
     }
 
+    /// An answer cited this artifact, so the model drew on it. `ask_citations`
+    /// has said which those were since it was written; nothing read it as use.
+    ///
+    /// Deliberately not `mark_artifact_seen`: that stamps `last_seen_at`, and
+    /// the stale review list exists to put artifacts nobody has verified in
+    /// front of a person. A model citing one is not a person having looked at
+    /// it, so stamping would quietly remove it from the list that was trying
+    /// to get it looked at. What a citation is, is an engagement — the one kind
+    /// of bump that can promote.
+    pub fn mark_artifacts_cited(&self, ids: Vec<String>) {
+        if ids.is_empty() || !self.associating() {
+            return;
+        }
+        let core = self.clone();
+        let (delta, half_life) = (self.activation.cited, self.activation.half_life_days);
+        let at = now_secs();
+        self.background.spawn(async move {
+            if let Err(e) = core.store.bump_activation(&ids, delta, half_life, at).await {
+                tracing::warn!(error = %e, "could not raise activation for a citation");
+                return;
+            }
+            if let Err(e) = crate::jobs::promote::maybe_promote(&core, &ids, at).await {
+                tracing::warn!(error = %e, "could not check the promotion threshold");
+            }
+        });
+    }
+
     /// What happened after the list rendered: this artifact was opened, or
     /// reached from `via` — a neighbour, an association, a continuation. The
     /// pursuit sweep attaches it to a search by time and scope; nothing here

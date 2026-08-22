@@ -96,13 +96,13 @@ written, a seam that moves ranking waits.
 
 ## [What counts as use]
 
-Everything plastic in the base is downstream of one question, and it has one
-answer today: use means the web UI. `jobs::context` clusters `interactions`
-rows into the `ctx` vectors the recommendation rests on; `associate` replays the
-search log; `promote` reads an activation that only moves at a bump. All three
-are fed through a single production caller, and the first two items below are
-about widening that. Nothing else on this list is worth as much per line
-changed.
+Everything plastic in the base is downstream of one question. `jobs::context`
+clusters `interactions` rows into the `ctx` vectors the recommendation rests on;
+`associate` replays the search log; `promote` reads an activation that only
+moves at a bump. Use now means the web UI **and the API door**: asking for one
+artifact by id is the same deliberate act the detail pane records, and it says
+so in `get_artifact`. What `/mcp` counts as use is answered, and the answer is
+nothing beyond what it already does — see below.
 
 Built, and worth keeping the reasons for: Hebbian links from co-retrieval,
 decaying activation per artifact, bounded priming and one-hop association in the
@@ -118,40 +118,28 @@ web session (`src/core/sitting.rs`), expiring at `pursuit.idle_secs` so that the
 live definition and the reconstructed one agree by construction. It joins the
 doors and never writes activation, and there is a test saying so.
 
-- **Every door counts as engagement.** Retrieval is recorded everywhere:
-  `core::search` bumps activation whether the query came from the rail, the API
-  or `/mcp`, and `Origin` (`src/store/feedback.rs:77`) already carries the door,
-  the subject and — for the web — the session. Engagement is not.
-  `mark_artifact_seen` and `record_interaction` have exactly one production
-  caller between them, the dwell route at `src/web/ui.rs:3766`. An artifact a
-  Claude Code session read all afternoon is never opened, never promoted, never
-  part of a pursuit, and never a situation anybody learns from.
+And engagement at more than one door. `GET /api/v1/artifacts/{id}` is an open:
+it marks the artifact seen and records the interaction, with no `via` — the API
+has no navigation to have pivoted through — and no session, because a bearer
+token is not a conversation. A citation is an engagement: `ask_citations.used`
+already separated what an answer was shown from what it used, and the artifacts
+it used now bump `activation.cited` and are checked for promotion at the bump
+(`Core::mark_artifacts_cited`). It deliberately does not stamp `last_seen_at`
+the way an open does — the stale review list exists to put artifacts nobody has
+verified in front of a person, and a model citing one is not a person having
+looked at it.
 
-  The doors are not symmetrical, and that is where the actual work is.
-  `GET /api/v1/artifacts/{id}` is an open and can say so in one line. `/mcp` has
-  no open at all: its tools are search, ask and ingest, and a search returns the
-  whole artifact, so the read *is* the result. Counting every returned artifact
-  as engagement would only relearn what association already learns from display.
-  The honest signal at that door is the citation, which is why the next item is
-  half of this one.
-
-  **Worth:** the anticipating half of the application stops being blind at two
-  doors out of three. Today an operator who works through `/mcp` teaches the
-  offer ladder, promotion and pursuits precisely nothing, and the base's picture
-  of what is used is a picture of the web UI.
-  **Cost:** one line in the API artifact route, the citation bump below, and a
-  recorded decision about what MCP counts as use. **One commit.** No harness: it
-  changes what is learned, not how a fixed input is ranked, and no corpus in
-  this repository contains real multi-door use anyway.
-
-- **A citation is an engagement.** `ask_citations` already stores what the model
-  was shown and what it used (`src/store/asks.rs:153`, column `used`). An
-  artifact the model cited was used, and it bumps nothing.
-  **Worth:** closes the `/mcp` half of the item above with the one signal that
-  door honestly has, and retires the pursuit sweep's promotion call under Core
-  Platform — an ask-cited artifact is the only case that call still covers.
-  **Cost:** one call where the ask is recorded, minus `maybe_promote` in
-  `jobs/pursuit.rs` and the test pinning it. **One commit.**
+**What `/mcp` counts as use: nothing, and that is the decision rather than an
+omission.** Its search already bumps activation like every other door. It has no
+open at all — a search returns the whole artifact, so the read *is* the result —
+and counting every returned artifact as engagement would only relearn what
+association already learns from display. The honest signal at that door is the
+citation, and citations are recorded only where the question is: `record_ask`
+stays at the web door, because a question is personal data of the same kind as a
+query and API and MCP callers asked for the smallest footprint. So the bump
+rides with the recording rather than around it, and there is a test pinning
+that. Widening it means widening what is *recorded* first, which is a different
+decision from this one.
 
 - **Co-citation is a stronger link than co-display.** `associate` learns its
   Hebbian links by replaying the search log: two artifacts shown in one result
@@ -242,8 +230,9 @@ the search box, drawn from the situation the browser reports, on a ladder of
 four rungs down to a random card that claims nothing (spec
 `2026-08-21-context-recommendation-design.md`). Built, including the instrument
 that would let it be tuned — shown against clicked, by rung, over the last
-thirty days, on Ops. Everything left here is gated on that instrument having
-months behind it, not on anybody's judgement.
+thirty days, on Ops. Everything left here but the last item is gated on that
+instrument having months behind it, not on anybody's judgement; the last is
+the write-time half of the same question and carries an instrument of its own.
 
 - **Learned block weights.** The weights in `[recommend.weights]` are chosen,
   not measured, and the honest description of them is "chosen". Once the
@@ -281,6 +270,37 @@ months behind it, not on anybody's judgement.
   tenancy exists, and nothing else about the encoder changes with it.
   **Cost:** one weight to 0. **One commit**, blocked on **Multi-user tenancy**
   below.
+
+- **Speculative synthesis.** Promotion is retrospective: a window is rewritten
+  once its passages have earned it. The prospective half is to spend an idle
+  call on a window nobody has opened yet, chosen because the base can already
+  say what is about to be asked. Three predictors are already stored and none
+  of them is new machinery: the grouped **gaps**, which are a list of questions
+  the base failed to answer and which recur; the **Hebbian neighbours** of what
+  a pursuit just engaged, since activation spreads a hop and `maybe_promote`
+  reads none of it; and the **`ctx` clusters**, which know what is opened at
+  this hour on this device. Gaps are the cheapest and the most defensible —
+  nearest passages to a group's centroid, one window each, at most *n* a sweep.
+
+  Two things it must not do. It must not become `eager` by the back door: the
+  budget is per idle sweep, and the instrument is a hit rate — was a
+  speculatively written artifact ever retrieved, opened or confirmed within
+  *N* days — read on Ops beside shown-against-clicked, so a predictor that
+  cannot beat its own cost is turned off rather than tuned. And it must not
+  share `Provenance::Synthesized`. That is what the pursuit stopping rule reads
+  (`src/core/search.rs:1076`: a synthesized artifact at rank 1 and not weak
+  means the base answered), so speculative text under it would close pursuits
+  as satisfied on a guess nobody engaged, and the badge would name a use that
+  never happened. It is written on speculation and says so until something
+  retrieves it.
+  **Worth:** the first search of a subject stops being the one that returns
+  crude chunks. Everything earned today is earned by an operator who already
+  went unanswered once; this is the only item that spends a call to spare them
+  that, and the only one whose worth is measurable the day it ships.
+  **Cost:** a predictor over stored gaps, a `Speculative` provenance and its
+  migration, a per-sweep budget in `[promote]`, and the hit-rate panel without
+  which none of it can be argued. **A project**, and it wants a design record
+  in `docs/superpowers/specs/` before any code.
 
 ## [Ask]
 
@@ -538,18 +558,6 @@ that would otherwise have left the page disabled for good.
   On the list because scripted capture and export are the two things a shell is
   genuinely better at.
   **Cost:** a binary over the existing API. **A branch.** Near the bottom.
-
-- **The pursuit sweep's promotion call, which almost never has anything to do.**
-  A one-engaged-artifact pursuit calls `maybe_promote`, but every engagement
-  already calls it at the bump, and the sweep only runs once the sitting has been
-  idle for `idle_secs` — so it re-checks the same artifact against a *more*
-  decayed activation than the live call saw, and can only ever decline where that
-  one declined. The single case it covers is an artifact engaged solely by an ask
-  citation.
-  **Worth:** one fewer call that cannot do anything, and one fewer thing to
-  explain.
-  **Cost:** free — **A citation is an engagement** above removes the last case
-  and this deletes itself with it. Not a separate item so much as a consequence.
 
 - **DOCX, EPUB, XLSX and the rest.** `docling` is in the tree and already reads
   them; only a door and a `kind` are missing. Deliberately out of PDF capture.

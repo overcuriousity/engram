@@ -1049,6 +1049,12 @@ fn split_tags(t: Option<String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Past this the box is holding something to be kept, not something to be
+/// searched for. Generous on purpose: it is a bound on cost, not a rule about
+/// how to phrase a query, and a query phrased as a whole situation is still
+/// only a few hundred characters.
+const MAX_QUERY_CHARS: usize = 2000;
+
 pub(crate) async fn search_results(
     State(st): State<AppState>,
     id: Identity,
@@ -1060,7 +1066,16 @@ pub(crate) async fn search_results(
     // An empty box is the idle state, so the idle rail comes back: the base
     // introducing itself, with its heading swapped in out of band the same
     // way a result count is.
-    if p.q.trim().is_empty() {
+    // A box holding more than a query is the idle state too. The one box is
+    // also where a chapter gets pasted to be captured, and /ui/capture?from_ask=
+    // opens it holding a whole model answer: the template suppresses the `load`
+    // search for those doors, but the first keystroke afterwards fired one
+    // anyway, and an incremental search is an embedding call, an activation
+    // bump and a coalesced Judge-queue row — for a paragraph nobody was
+    // looking for. Nothing anyone types as a question comes near this; the
+    // limit is on the door rather than in app.js because it is the embedder's
+    // bill either way, whatever the client was.
+    if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
         return Ok(HtmlTemplate(rail_idle(&st).await?).into_response());
     }
 
@@ -6588,6 +6603,23 @@ mod tests {
             StatusCode::OK,
             "typing then clearing the box must not error"
         );
+    }
+
+    #[tokio::test]
+    async fn a_box_holding_a_document_is_idle_rather_than_a_query() {
+        // The one box is also where a chapter is pasted to be captured, and
+        // /ui/capture?from_ask= opens it holding a whole model answer. The
+        // template holds the `load` search back on those doors; this is what
+        // holds back the keystroke after it, which would otherwise spend an
+        // embedding call and a Judge-queue row on a paragraph nobody asked for.
+        let (app, cookie) = app_with_session().await;
+        let long = "answer+".repeat(MAX_QUERY_CHARS / 4);
+        let frag = get(&app, &format!("/ui/search/results?q={long}"), &cookie).await;
+        assert!(
+            frag.contains("This memory"),
+            "a pasted document must land on the idle rail:\n{frag}"
+        );
+        assert!(!frag.contains("No matches"), "and not as a verdict on it");
     }
 
     #[tokio::test]

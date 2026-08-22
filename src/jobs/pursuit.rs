@@ -182,8 +182,6 @@ pub struct Need {
 pub enum Decision {
     Satisfied(String),
     Unsatisfied(String),
-    /// One engaged artifact: its window, not a generation.
-    Promote(String),
     Generate,
 }
 
@@ -191,9 +189,6 @@ pub enum Decision {
 /// hit was engaged, the question was rephrased and rephrased, the last search
 /// was walked away from, the model declined to answer.
 ///
-/// Read twice — once here, once by the caller of a `Promote`, which has to say
-/// whether the need was met after finding out what the promotion did — and so
-/// it lives in one place rather than being spelled out in both.
 pub fn unsatisfied(n: &Need) -> bool {
     !n.strong_engaged || n.refined >= 2 || n.abandoned || n.abstained
 }
@@ -206,9 +201,6 @@ pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
     let total: f64 = n.engagement.iter().map(|(_, w)| *w).sum();
     let unsatisfied = unsatisfied(n);
     if n.engagement.len() < min_sources {
-        if n.engagement.len() == 1 {
-            return Decision::Promote(n.engagement[0].0.clone());
-        }
         return if unsatisfied {
             // Above the shipped `min_sources = 2` this is reachable with
             // artifacts engaged, and "nothing engaged" would then be a lie.
@@ -414,29 +406,6 @@ pub async fn run(core: &Core) -> Result<usize> {
                 core.store
                     .close_pursuit(&pid, "unsatisfied", &why, now)
                     .await?;
-            }
-            Decision::Promote(id) => {
-                // Promoted first, then closed: the reason is a statement about
-                // what happened, and every guard in `maybe_promote` can
-                // decline silently. A promotion case that armed nothing did
-                // nothing at all for this need, so it is only `satisfied` when
-                // nothing said otherwise — one open at the end of three
-                // rephrasings is not a need that was met.
-                let armed =
-                    crate::jobs::promote::maybe_promote(core, std::slice::from_ref(&id), now)
-                        .await?;
-                let (state, why) = match (armed > 0, unsatisfied(&need)) {
-                    (true, _) => (
-                        "satisfied",
-                        "one artifact engaged: its window is being re-read",
-                    ),
-                    (false, false) => ("satisfied", "one artifact engaged and searching stopped"),
-                    (false, true) => (
-                        "unsatisfied",
-                        "one artifact engaged, not enough to write from",
-                    ),
-                };
-                core.store.close_pursuit(&pid, state, why, now).await?;
             }
             Decision::Generate => {
                 // Nothing to arm without a generator. `run_claimed` would drop
@@ -741,10 +710,12 @@ mod tests {
         let mut n = need(&[("a", 5.0), ("b", 5.0)]);
         n.answered = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Satisfied(_)));
-        // One engaged artifact: promotion, not generation.
+        // One engaged artifact is below `min_sources` like any other shortfall.
+        // It used to be a promotion case of its own; the engagement that made
+        // it one now promotes at the bump, hours before this sweep runs.
         assert_eq!(
             decide(&need(&[("a", 9.0)]), 2, 3.0),
-            Decision::Promote("a".into())
+            Decision::Satisfied("nothing to assemble".into())
         );
         // Three strong opens in a row, then stopped: reading, not assembling.
         assert!(matches!(
@@ -1278,7 +1249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_engaged_artifact_is_a_promotion_case() {
+    async fn one_engaged_artifact_after_refining_closes_unsatisfied() {
         let core = pursuing_core().await;
         let out = core
             .ingest("a verbatim passage", "web", None)
@@ -1291,50 +1262,12 @@ mod tests {
             .id
             .clone();
         let now = crate::store::now();
-        // Enough activation that the promotion check passes when the sweep asks.
-        core.store
-            .bump_activation(std::slice::from_ref(&p), 5.0, 14.0, now)
-            .await
-            .unwrap();
-        search_event(&core, "that passage", vec![1.0, 0.0], &[&p], now - 100).await;
-        core.store
-            .record_interaction(&p, "opened", None, Some("me"), now - 99)
-            .await
-            .unwrap();
-        run(&core).await.unwrap();
-        assert_eq!(
-            core.store.segment_state(&out.id, 0).await.unwrap(),
-            Some(crate::store::segments::SegmentState::Pending),
-            "the window was not promoted"
-        );
-        // And the row says what was done, not which branch was taken.
-        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
-        assert_eq!(p.state, "satisfied", "{p:?}");
-        assert!(
-            p.reason.as_deref().unwrap_or_default().contains("re-read"),
-            "{p:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_promotion_that_armed_nothing_after_refining_closes_unsatisfied() {
-        let core = pursuing_core().await;
-        let out = core
-            .ingest("a verbatim passage", "web", None)
-            .await
-            .unwrap();
-        crate::jobs::passages::capture_verbatim(&core, &out.id)
-            .await
-            .unwrap();
-        let p = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
-            .id
-            .clone();
-        let now = crate::store::now();
-        // No activation: the promotion check will decline, so nothing at all
-        // happens for this need — and three phrasings of one question with a
-        // single open at the end is the shape of a need that went unmet.
-        // Inside one sitting: further apart than `idle_secs` and these would
-        // be three pursuits, not one need asked three ways.
+        // Three phrasings of one question with a single open at the end is the
+        // shape of a need that went unmet. Nothing the sweep does can help it:
+        // one engaged artifact is below `min_sources`, and the sweep no longer
+        // has a promotion of its own to try. Inside one sitting — further apart
+        // than `idle_secs` and these would be three pursuits, not one need
+        // asked three ways.
         search_event(&core, "where is it stored", vec![1.0, 0.0], &[&p], now - 40).await;
         search_event(&core, "where is it kept", vec![1.0, 0.0], &[&p], now - 36).await;
         search_event(&core, "storage location", vec![1.0, 0.0], &[&p], now - 32).await;

@@ -917,6 +917,17 @@ impl Core {
                     .collect()
             },
         };
+        // The same distinction, read the other way: what the answer used was
+        // engaged, and that is the one signal a question honestly gives about
+        // an artifact. Off the recording path's success — an insert that fails
+        // does not unmake the use.
+        self.mark_artifacts_cited(
+            ask.citations
+                .iter()
+                .filter(|c| c.used)
+                .map(|c| c.artifact_id.clone())
+                .collect(),
+        );
         match self.store.record_ask(ask).await {
             Ok(id) => response.event_id = Some(id),
             Err(e) => tracing::warn!(error = %e, "could not record the question"),
@@ -2095,6 +2106,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_artifacts_an_answer_cited_are_engaged_by_it() {
+        // `used` already separates shown from used, and an artifact the model
+        // cited was used. Every excerpt that merely fit the window is not — the
+        // association layer already learns from display.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("the answer rests on this [1]".into()),
+        }));
+        seed(&core, 3, 4).await;
+
+        let out = core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert!(out.citations.len() > 1, "need a shown-but-uncited one");
+        let ids: Vec<String> = out
+            .citations
+            .iter()
+            .map(|c| c.artifact_id.clone())
+            .collect();
+        // Every excerpt was retrieved by the same searches, so they share a
+        // baseline and the only difference left between them is the citation.
+        let act = core.store.activation_of(&ids).await.unwrap();
+        let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+        let uncited = of(&ids[1]);
+        for id in &ids[2..] {
+            assert_eq!(of(id), uncited, "the excerpts did not share a baseline");
+        }
+        assert!(
+            (of(&ids[0]) - uncited - core.activation.cited).abs() < 1e-6,
+            "cited {} against uncited {uncited}, expected a lift of {}",
+            of(&ids[0]),
+            core.activation.cited
+        );
+    }
+
+    #[tokio::test]
     async fn an_api_or_mcp_ask_is_never_recorded() {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -2104,6 +2152,39 @@ mod tests {
             assert!(out.event_id.is_none(), "{door:?} recorded a question");
         }
         assert_eq!(core.store.ask_stats().await.unwrap().asked, 0);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_or_api_ask_engages_nothing_by_citing_it() {
+        // The recorded decision about what `/mcp` counts as use: nothing. Its
+        // search already bumps activation like every other door, and counting
+        // what it returned as engagement on top would only relearn what
+        // association learns from display. The citation is the one honest
+        // signal a question gives, and it is only recorded at the web door —
+        // so the bump rides with the recording rather than around it.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("the answer rests on this [1]".into()),
+        }));
+        seed(&core, 3, 4).await;
+
+        for door in [Door::Api, Door::Mcp] {
+            let out = core.ask(&req("chunk"), door).await.unwrap();
+            core.background.wait_idle().await;
+            let ids: Vec<String> = out
+                .citations
+                .iter()
+                .map(|c| c.artifact_id.clone())
+                .collect();
+            let act = core.store.activation_of(&ids).await.unwrap();
+            let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+            assert_eq!(
+                of(&ids[0]),
+                of(&ids[1]),
+                "{door:?} engaged what its answer cited"
+            );
+        }
     }
 
     #[tokio::test]

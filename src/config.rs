@@ -277,6 +277,10 @@ pub struct ActivationConfig {
     pub opened: f64,
     /// Judged the answer to a real question. The strong signal.
     pub confirmed: f64,
+    /// Cited by an answer. A model's use of an artifact, not a person's, which
+    /// is why it weighs what an open weighs rather than what a confirmation
+    /// does: nothing here verified that the answer was right.
+    pub cited: f64,
 }
 
 impl Default for ActivationConfig {
@@ -286,6 +290,7 @@ impl Default for ActivationConfig {
             retrieved: 1.0,
             opened: 0.5,
             confirmed: 3.0,
+            cited: 0.5,
         }
     }
 }
