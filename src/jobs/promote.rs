@@ -291,6 +291,61 @@ mod tests {
         (core, out.id, p)
     }
 
+    /// The live half of what the pursuit sweep used to re-check hours later.
+    ///
+    /// A citation is the one signal `/ask` honestly gives about an artifact,
+    /// and it arrives at the bump — against an activation that has not decayed
+    /// yet, which is the whole reason the sweep's copy of this check could only
+    /// ever decline where this one declined.
+    #[tokio::test]
+    async fn an_artifact_an_answer_cited_can_promote_its_window() {
+        let (mut core, corpus, p) = earned_with_one_passage().await;
+        core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some("the answer rests on this [1]".into()),
+        }));
+        crate::jobs::embed::run(&core, &p).await.unwrap();
+        // The searches an ask runs bump retrieval too, and enough of it to
+        // carry a passage over the line on its own — which would leave this
+        // test passing with the citation deleted. Retrieval is silenced so
+        // that the only thing left that can move activation is the citation.
+        core.activation.retrieved = 0.0;
+        let now = crate::store::now();
+        // Just under the line, so the citation is what carries it over.
+        core.store
+            .bump_activation(
+                std::slice::from_ref(&p),
+                core.promote.activation_above - core.activation.cited + 0.1,
+                core.activation.half_life_days,
+                now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "the window was already promoted before the question"
+        );
+
+        core.ask(
+            &crate::core::ask::AskRequest {
+                q: "verbatim passage".into(),
+                limit: None,
+                tags: vec![],
+                category: None,
+            },
+            crate::store::feedback::Door::Ui.by("me"),
+        )
+        .await
+        .unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Pending),
+            "the citation engaged the artifact but armed nothing"
+        );
+    }
+
     fn unit(corpus: &str) -> String {
         crate::jobs::window::unit_target(corpus, 0)
     }

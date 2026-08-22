@@ -463,13 +463,18 @@ half_life_days = 14
 retrieved = 1.0
 opened = 0.5
 confirmed = 3.0
+# Cited by an answer /ask wrote. A model's use of an artifact, not a person's,
+# which is why it weighs what an open weighs and not what a confirmation does:
+# nothing here verified that the answer was right. Only the web door records
+# which artifacts an answer used, so only the web door raises this.
+cited = 0.5
 
 # ── Promotion ────────────────────────────────────────────────────────────────
 # At synthesis = "earned", when a passage has earned its window a synthesis
 # call. Read against [activation]: baseline 1.0 at capture, so 4.0 is one
 # confirmation after a retrieval and an open, or about three engaged openings.
-# Checked only when a passage is opened or confirmed — never when it merely
-# appears in results — and the window's new artifacts inherit the access the
+# Checked only when a passage is opened, confirmed or cited by an answer —
+# never when it merely appears in results — and the window's new artifacts inherit the access the
 # passages earned.
 [promote]
 activation_above = 4.0
