@@ -484,6 +484,25 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// The newest few captures, by the columns a list row shows. This is the
+    /// idle rail's read, and the idle rail renders on every box-clear:
+    /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
+    /// document, pulled to render a 60-character label. The prefix is chars,
+    /// not bytes — SQLite's `substr` on text counts characters — and 400 of
+    /// them is more than any label survives `markdown::snippet` with.
+    pub async fn recent_captures(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, Option<String>, String, i64, String)>> {
+        Ok(sqlx::query_as(
+            "SELECT id, title_hint, origin, created_at, substr(raw_text, 1, 400) \
+             FROM corpora ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Corpus>> {
         let rows =
             sqlx::query("SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")

@@ -2,8 +2,8 @@
   "name": "engram",
   "short_name": "engram",
   "description": "Paste a document once; find the paragraph that answers you a year later.",
-  "id": "/ui/search",
-  "start_url": "/ui/capture",
+  "id": "/ui",
+  "start_url": "/ui",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
@@ -16,8 +16,6 @@
     { "src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ],
   "shortcuts": [
-    { "name": "Capture", "url": "/ui/capture" },
-    { "name": "Search", "url": "/ui/search" },
-    { "name": "Ask", "url": "/ui/ask" }
+    { "name": "Insights", "url": "/ui/insights" }
   ]
 }

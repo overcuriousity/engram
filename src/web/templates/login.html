@@ -1,6 +1,11 @@
 {% extends "layout.html" %}
 {% block title %}Sign in — engram{% endblock %}
 {% block nav %}{% endblock %}
+{# The one page with no left anchor. Every other page starts at the shell's
+   left edge on purpose — that is what stops the content column moving as you
+   navigate — but there is nothing to navigate to from here and nothing beside
+   this card to line up with, so an off-centre card just reads as a mistake. #}
+{% block regions %}regions-center{% endblock %}
 {% block content %}
 <div class="card" style="max-width:22rem;margin:6rem auto">
   <div class="brand-lockup">

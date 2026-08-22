@@ -7,7 +7,10 @@
 <div class="empty">
   <h2>Nothing at this address</h2>
   <p class="muted">The page you asked for is not one this base has. Nothing is wrong with what you have stored.</p>
-  <p><a class="btn btn-ghost btn-sm" href="/ui/search">Search</a>
-     <a class="btn btn-ghost btn-sm" href="/ui/capture">Capture</a></p>
+  {# One way back, because there is one place to go back to. These were
+     Search and Capture while those were two pages; they are two verbs on one
+     box now, and both links resolved to the same empty workspace — two
+     buttons offering the reader a choice that was not one. #}
+  <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
 </div>
 {% endblock %}

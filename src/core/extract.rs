@@ -1,15 +1,50 @@
 use crate::error::{Error, Result};
+use htmd::element_handler::Handlers;
+use htmd::{Element, HtmlToMarkdown};
+use std::sync::LazyLock;
+
+/// The converter, assembled once.
+///
+/// The handler table is fixed, so building it per capture would be work
+/// repeated for nothing, and `HtmlToMarkdown` is `Send + Sync`.
+static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
+    HtmlToMarkdown::builder()
+        .add_handler(vec!["img"], |_: &dyn Handlers, el: Element| {
+            // A capture is text, so the image itself is not stored — but its
+            // `alt` is not always decoration. Wikipedia renders every equation
+            // as an image whose alt is the TeX, so dropping the element whole
+            // deletes the mathematics out of an article and leaves the prose
+            // around it pointing at formulae that are no longer there.
+            //
+            // `None` drops the element entirely, which is what an empty or
+            // whitespace-only alt deserves: a spacer, a tracking pixel, or the
+            // grey placeholder a news site ships ahead of the real photograph.
+            el.attrs
+                .iter()
+                .find(|a| a.name.local.as_ref() == "alt")
+                .map(|a| a.value.trim().to_string())
+                .filter(|alt| !alt.is_empty())
+                .map(Into::into)
+        })
+        .build()
+});
 
 /// Rewrite setext headings as ATX ones.
 ///
-/// `html2md` renders `<h1>` and `<h2>` underlined — `Title` over `-----` —
-/// which is valid markdown and invisible to `src/infer/split.rs`, whose
-/// `is_heading` matches a leading `#` and nothing else. Left alone, every
-/// captured page would hand the splitter a document with no boundaries in it
-/// at exactly the two levels an article uses most, which is the loss this
-/// module exists to prevent. Cheaper and far more predictable than teaching
-/// the splitter a second heading syntax it would then have to carry through
-/// windowing and line numbering.
+/// A setext heading is underlined — `Title` over `-----` — which is valid
+/// markdown and invisible to `src/infer/split.rs`, whose `is_heading` matches
+/// a leading `#` and nothing else. A document written that way hands the
+/// splitter no boundaries at exactly the two levels an article uses most,
+/// which is the loss this module exists to prevent. Cheaper and far more
+/// predictable than teaching the splitter a second heading syntax it would
+/// then have to carry through windowing and line numbering.
+///
+/// `htmd` emits ATX for every level, so on the capture path this is now a
+/// guard rather than a repair: it fires on nothing the current converter
+/// produces. It is kept because the cost is one pass over lines already in
+/// memory and the failure it prevents is silent — a converter that changed
+/// its heading style would cost every artifact downstream a worse slice with
+/// nothing in the output looking wrong.
 ///
 /// Fenced code is left exactly as it arrived. Inside a fence a `---` under a
 /// non-blank line is content — YAML front matter, a config snippet, a rule
@@ -139,9 +174,10 @@ pub fn html_to_markdown(
         article.content.to_string()
     };
 
-    let markdown = setext_to_atx(&html2md::parse_html(&content))
-        .trim()
-        .to_string();
+    let converted = CONVERTER
+        .convert(&content)
+        .map_err(|e| Error::Validation(format!("could not read the page: {e}")))?;
+    let markdown = setext_to_atx(&converted).trim().to_string();
 
     // Nothing at all is its own case, and it holds even where the floor does
     // not. A selection is exempt from the floor because the operator picked
@@ -288,6 +324,74 @@ mod tests {
         assert_eq!(
             setext_to_atx(md),
             "```\ncode\n```\n\n## Read-only first\n\nbody"
+        );
+    }
+
+    #[test]
+    fn a_citation_leaves_its_marker_and_none_of_its_markup() {
+        // Parsoid wraps every Wikipedia reference in a `<sup>` carrying a few
+        // hundred characters of `data-mw` JSON. The converter this module used
+        // before serialised that subtree back into the corpus verbatim — on one
+        // article, 43% of the stored bytes were markup of this shape, and it
+        // reached the passages, the artifacts and the paste.
+        let cited = format!(
+            "<html><body><article><p>{}</p>\
+             <p><sup about=\"#mwt4\" typeof=\"mw:Extension/ref\" \
+             data-mw=\"{{&quot;name&quot;:&quot;ref&quot;}}\">\
+             <a href=\"#cite_note-1\"><span><span>[</span>1<span>]</span></span></a>\
+             </sup></p></article></body></html>",
+            "The association provides an interface that lets the file stand in \
+             for a block special file, and this paragraph has to be long enough \
+             that readability scores it as content rather than as furniture."
+        );
+        let md = html_to_markdown(&cited, None, 10).unwrap();
+        assert!(!md.contains('<'), "markup survived extraction:\n{md}");
+        assert!(!md.contains("data-mw"), "attribute JSON survived:\n{md}");
+        assert!(
+            md.contains('1'),
+            "the citation marker itself was lost:\n{md}"
+        );
+    }
+
+    #[test]
+    fn a_heading_nested_in_a_section_still_reaches_the_splitter() {
+        // The failure that cost more than the markup did: on identical
+        // readability output the previous converter recovered no headings at
+        // all from pages that wrap each one in a `<section>`, so every window
+        // boundary fell back to a blank line and every artifact downstream was
+        // drawn from a slice the segmenter had to guess the edges of.
+        let sectioned = "<html><body><article>\
+            <section><h2>Read-only first</h2>\
+            <p>Always mount read-only until you have a hash of the source \
+               image, because a mount that replays a dirty journal writes to \
+               the evidence you were trying to preserve.</p></section>\
+            </article></body></html>";
+        let md = html_to_markdown(sectioned, None, 10).unwrap();
+        assert!(
+            md.contains("## Read-only first"),
+            "the heading must survive as an ATX one, got:\n{md}"
+        );
+    }
+
+    #[test]
+    fn an_images_alt_is_kept_as_text_and_an_empty_one_is_dropped() {
+        // Wikipedia renders every equation as an image whose alt is the TeX.
+        // Dropping the element whole deletes the mathematics out of the
+        // article; keeping the tag puts markup back in the corpus.
+        let with_math = "<html><body><article>\
+            <p>The relation is written \
+            <img src=\"/math/render/svg/2f92\" width=\"9\" height=\"2\" \
+                 alt=\"{\\displaystyle E=mc^{2}.}\"> and it holds in every \
+            frame, which this sentence lengthens so readability scores the \
+            paragraph as content rather than as furniture.</p>\
+            <p><img src=\"/grey-placeholder.png\" alt=\"\"></p>\
+            </article></body></html>";
+        let md = html_to_markdown(with_math, None, 10).unwrap();
+        assert!(md.contains("E=mc^{2}"), "the equation was deleted:\n{md}");
+        assert!(!md.contains('<'), "markup survived extraction:\n{md}");
+        assert!(
+            !md.contains("grey-placeholder"),
+            "an alt-less spacer left a trace:\n{md}"
         );
     }
 

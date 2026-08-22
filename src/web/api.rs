@@ -175,7 +175,7 @@ async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Resul
         crate::core::extract::html_to_markdown(&html, url.as_ref(), min_chars)
     })
     .await
-    // A `JoinError` is a panic in `dom_smoothie` or `html2md` — two parsers
+    // A `JoinError` is a panic in `dom_smoothie` or `htmd` — two parsers
     // fed whatever a remote page contained — or a cancelled runtime. Neither
     // is anything the caller did, so it must not come back as a 400 telling
     // them their page was malformed while the crash goes unrecorded.

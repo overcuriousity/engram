@@ -91,6 +91,11 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
 .regions-focus { grid-template-columns: minmax(0, 68rem); }
 .regions-focus > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
+/* One column, centred in the window rather than anchored to its left edge.
+   For the pages that are not part of the workspace and have nothing to line
+   up with: signing in, and pairing a browser extension. */
+.regions-center { grid-template-columns: minmax(0, 26rem); justify-content: center; }
+.regions-center > * { grid-column: 1 / -1; }
 .regions-table > * { grid-column: 1 / -1; }
 
 /* Two regions: what the page is for, and what it has already done with it.
@@ -137,9 +142,26 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    not using. `has-selection` is what the pane gains when an artifact is
    swapped into it, so its absence is exactly "nothing open yet".
    The pane is not filled on arrival instead: opening the top hit would spend
-   a read on every search, including the ones the rail already answers. */
-.regions-rail-focus-source:not(.has-selection) {
-  grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
+   a read on every search, including the ones the rail already answers.
+
+   `.answering` is the other thing the pane can hold. An answer is not swapped
+   into `#pane-content` and never gained `has-selection`, so it arrived into
+   whatever was left beside a 40rem rail — the widest the rail is ever allowed
+   to be, held there because nothing was open, while an answer was being
+   written into the column beside it.
+
+   Inside a container query because of what it is: a claim about how to divide
+   two columns, which is nonsense where there is only one. Three `:not()`s
+   outrank the single class the one-up block below sets `grid-template-columns`
+   with, and specificity does not care that the two rules answer different
+   widths — so an idle narrow screen kept this two-column track list, and the
+   pane it left beside a 40rem rail was twelve pixels wide. Bounded here rather
+   than fought there: the one-up block says what one column is, and this says
+   what to do when there are two. */
+@container shell (width > 60rem) {
+  .regions-rail-focus-source:not(.has-selection):not(.answering) {
+    grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
+  }
 }
 
 /* One-up: one region, the rest a navigation away. This is the phone, and it is
@@ -149,6 +171,11 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
   .regions { grid-template-columns: minmax(0, 1fr); }
   .regions > * { grid-column: 1 / -1; }
   .regions.has-selection .region-rail { display: none; }
+  /* An answer is the exception: the rail holds the excerpts it was written
+     from and the `[n]` links in it point into them, so this is the one act
+     that must not hide the rail. It goes under the answer instead — the
+     reading order the two have on a wide screen, in one column. */
+  .regions.answering .region-rail { order: 1; }
 }
 
 /* Full-bleed, so the rule under the header runs the width of the window
@@ -164,7 +191,7 @@ nav.top {
 }
 nav.top a {
   color: var(--color-fg-secondary); text-decoration: none;
-  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: 0.875rem;
+  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: var(--text-base);
   transition: background 120ms ease, color 120ms ease;
 }
 nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }

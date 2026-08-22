@@ -191,18 +191,24 @@
   // rendered and sanitized by the server — this driver moves HTML it was handed
   // and text it puts in text nodes, and never builds markup out of an answer.
   function askDriver() {
-    var form = document.getElementById('ask-form');
+    var form = document.getElementById('box-form');
     if (!form) return;
+    // No model, no button, no driver. The server renders no Ask verb where
+    // `Core::asks` is false, and this is the other end of that.
+    var askBtn = form.querySelector('[data-verb="ask"]');
+    if (!askBtn) return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
     // The disclosure around it: what is shown or hidden is the box, while the
     // text still streams into the div inside it.
     var reasoningBox = document.getElementById('ask-reasoning-box');
     var progress = document.getElementById('ask-progress');
-    var rail = document.getElementById('ask-rail');
+    var rail = document.getElementById('results');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
-    var spinner = document.getElementById('ask-spinner');
+    var spinner = document.getElementById('search-spinner');
     var stopBtn = document.getElementById('ask-stop');
     var source = null;
     // The wait is fifty seconds on a fan-out and nothing on the page predicted
@@ -223,8 +229,38 @@
       if (source) { source.close(); source = null; }
       if (ticker) { clearInterval(ticker); ticker = null; }
       stopBtn.hidden = true;
-      spinner.textContent = 'thinking…';
+      spinner.textContent = 'searching…';
       form.classList.remove('asking');
+      setBusy(false);
+    }
+
+    // One act in flight. From the press of Ask until the answer lands, the box
+    // and both verbs are disabled and only Stop is live.
+    //
+    // Disabling the box is what disables search-while-type: a disabled input
+    // fires no `keyup`, so the form's `hx-trigger` goes quiet on its own —
+    // there is no second mechanism and no flag to keep in sync with this one.
+    //
+    // The re-enable lives in `stop()` and nowhere else, because every exit
+    // already runs through it: the answer completing, the Stop button, and the
+    // transport error that `fail()` funnels into it. That last one is the
+    // reason it cannot live on the `done` handler — a dropped connection would
+    // leave the box disabled forever, with no way back but a reload.
+    function setBusy(busy) {
+      box.disabled = busy;
+      form.setAttribute('aria-busy', busy ? 'true' : 'false');
+      var vs = form.querySelectorAll('[data-verb]');
+      for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
+      // The chips fire the form too, and leaving them live was not a smaller
+      // hole than leaving the box live: a disabled control is left out of the
+      // serialization, so a chip clicked mid-answer sent `q` empty and swapped
+      // a "0 results" rail over the citations the answer was being written
+      // from.
+      var chips = form.querySelectorAll('#kind-chips input');
+      for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
+      // A box someone emptied while the answer streamed must not come back
+      // with live verbs over nothing to act on.
+      if (!busy) box.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     // Count up beside the spinner while the stream is open.
@@ -238,6 +274,17 @@
       }, 1000);
     }
 
+    // No search leaves this form while an ask owns the page. Disabling the
+    // box silences its `keyup`, but not a debounce timer that armed just
+    // before Ask was pressed, and not the "← results" anchor firing
+    // `submit` — and a disabled control serializes nothing, so either one
+    // sent `q` empty and swapped the idle rail over the citations the answer
+    // was being written from. `configRequest` is cancelable and is the one
+    // gate every htmx request from this form passes through.
+    form.addEventListener('htmx:configRequest', function (e) {
+      if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
+    });
+
     stopBtn.addEventListener('click', function () {
       if (!source) return;
       var secs = Math.round((Date.now() - started) / 1000);
@@ -250,6 +297,11 @@
 
     function fail(message) {
       stop();
+      // The rail was emptied when the ask began, and the heading over it is
+      // only rewritten by a citations event that is not coming. Left alone it
+      // kept claiming the last search's count over zero rows.
+      var head = document.getElementById('rail-head');
+      if (head) head.textContent = '';
       result.textContent = '';
       var box = document.createElement('div');
       box.className = 'flag';
@@ -279,8 +331,32 @@
         if (!current()) return;
         // Server-rendered, ids and all: the `cite-n` anchors in here are the
         // other end of the `[n]` links the answer arrives with.
-        rail.innerHTML = JSON.parse(e.data).rail;
+        var payload = JSON.parse(e.data);
+        rail.innerHTML = payload.rail;
         enhance(rail);
+        // The rail holds what the current act produced. The results that were
+        // here are gone, because they were produced by a different act and
+        // have nothing to do with the excerpts this answer was written from.
+        //
+        // The query is still in the box unedited, so nothing re-triggers the
+        // search on its own. This anchor is the way back — it re-fires the
+        // form's own request with whatever the box holds now, rather than
+        // storing a result set that would go stale the moment it was kept.
+        var head = document.getElementById('rail-head');
+        if (head) {
+          var n = rail.querySelectorAll('.rail-item').length;
+          head.innerHTML = '';
+          var label = document.createElement('span');
+          label.className = 'result-count';
+          label.textContent = 'Written from · ' + n;
+          var back = document.createElement('a');
+          back.className = 'quiet-link';
+          back.href = '#';
+          back.setAttribute('data-rerun', '');
+          back.textContent = '← results';
+          head.appendChild(label);
+          head.appendChild(back);
+        }
       });
       // The fanned-out retrieval, made visible. Without it the extra searches
       // are a silent pause in front of the answer, and the queries they ran are
@@ -362,9 +438,9 @@
       });
     }
 
-    form.addEventListener('submit', function (e) {
+    askBtn.addEventListener('click', function (e) {
       e.preventDefault();
-      var q = form.querySelector('input[name="q"]').value;
+      var q = box.value;
       if (!q.trim()) return;
       // A second ask supersedes the first at every stage, which `stop()` on its
       // own does not achieve: it closes a stream that is already open, and two
@@ -383,10 +459,27 @@
       progress.hidden = true;
       rail.textContent = '';
       result.textContent = '';
+      // The pane shows one act at a time: the artifact a result click left
+      // here belongs to the search this ask supersedes.
+      var pane = document.getElementById('pane-content');
+      if (pane) pane.textContent = '';
       live.hidden = true;
       reasoningBox.hidden = true;
       reasoningBox.open = false;
+      // The pane is now the act, and the layout has to be told: `has-selection`
+      // was set by a result swap and nothing else, so an ask claimed no room at
+      // all. Wide, the rail kept the 40rem it holds while nothing is open and
+      // the answer streamed into what was left; narrow, the rail comes first in
+      // the DOM and every excerpt sat above the answer.
+      //
+      // Its own class rather than `has-selection`, which narrow reads as
+      // "hide the rail": the excerpts are what this answer was written from and
+      // the `[n]` links point into them, so hiding them is the one thing that
+      // must not happen here. Narrow puts the rail after the answer instead.
+      var regions = document.querySelector('.regions');
+      if (regions) regions.classList.add('answering');
       form.classList.add('asking');
+      setBusy(true);
       startTicking();
 
       fetch('/ui/ask', {
@@ -523,83 +616,6 @@
     paint();
   }
 
-  // One input that reaches everything. The prefix decides where it goes: plain
-  // text searches, `>` asks, and a paste long enough to be a document offers to
-  // keep it rather than to look for it.
-  function commandBar() {
-    var overlay = document.querySelector('.cmdk');
-    if (!overlay) return;
-    var input = overlay.querySelector('[data-cmdk-input]');
-    // Long enough to be a document rather than a question. A sentence you are
-    // searching for does not run this far; a chapter always does.
-    var PASTE = 400;
-
-    function open() {
-      overlay.hidden = false;
-      input.value = '';
-      input.focus();
-    }
-    function close() { overlay.hidden = true; }
-
-    document.addEventListener('keydown', function (e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); open(); return; }
-      // Ahead of the global Escape handler by registration order, and it
-      // returns, so closing the bar never also fires "back".
-      if (e.key === 'Escape' && !overlay.hidden) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        close();
-      }
-    }, true);
-
-    // The backdrop, not the box: a click inside the box is a click in the box.
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
-
-    input.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      var v = input.value.trim();
-      if (!v) return;
-      if (v.charAt(0) === '>') {
-        location.href = '/ui/ask?q=' + encodeURIComponent(v.slice(1).trim());
-      } else if (v.length > PASTE) {
-        // Handed over in sessionStorage rather than in the URL. `/ui/capture`
-        // takes a `from_ask` and nothing else, so a `?text=` would arrive at a
-        // page that ignores it — and a chapter in a query string is past what
-        // a URL may be anyway. Nothing on the server has to learn about this.
-        try { sessionStorage.setItem('engram.paste', v); } catch (err) {}
-        location.href = '/ui/capture';
-      } else {
-        location.href = '/ui/search?q=' + encodeURIComponent(v);
-      }
-    });
-  }
-
-  // The other half of the command bar's paste. Claimed once and cleared, so a
-  // later visit to Capture does not refill a box you emptied on purpose —
-  // which means clearing it even when the box already has something in it and
-  // the paste is dropped. Clearing only on the path that used it left the text
-  // in storage to be injected on some later visit, the one thing this is
-  // supposed to prevent.
-  function claimPaste() {
-    var box = document.querySelector('textarea[name="text"]');
-    if (!box) return;
-    var text = null;
-    try {
-      text = sessionStorage.getItem('engram.paste');
-      if (text) sessionStorage.removeItem('engram.paste');
-    } catch (e) { return; }
-    if (!text || box.value) return;
-    box.value = text;
-    // Assigning `value` fires nothing, and the segment-and-cost hint on the
-    // capture page is bound to `input`. The command bar only routes here for a
-    // paste past PASTE characters — exactly the multi-segment case the hint
-    // exists to warn about — so without this it stayed hidden for every paste
-    // that needed it.
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    box.focus();
-  }
-
   // The situation this page view happened in.
   //
   // Synchronous, because htmx reads `hx-vals js:` synchronously. The two
@@ -716,7 +732,10 @@
   }
 
   function contextOffer() {
-    var box = document.querySelector('input[name=q]');
+    // The box is a textarea, and has been since the three pages became one.
+    // Matched as `input[name=q]` this never bound, so the offer outlived the
+    // first keystroke and kept logging impressions beside live queries.
+    var box = document.querySelector('textarea[name="q"]');
     if (!box) return;
     box.addEventListener('input', function () {
       offerDismissed = true;
@@ -724,15 +743,439 @@
     }, { once: true });
   }
 
+  // Say what went wrong where the answer was going to be.
+  //
+  // The server's own reason, verbatim, the same rule the upload path follows:
+  // a generic "something went wrong" would hide what actually goes wrong here
+  // — an embedder that is down, a vector store that cannot answer, a body over
+  // the limit. `textContent`, because an error string is the one payload on
+  // this page that went through no sanitizing renderer.
+  function failedSwap(target, xhr) {
+    if (!target || !target.id) return;
+    var reason = 'engram is unreachable.';
+    if (xhr) {
+      try {
+        reason = JSON.parse(xhr.responseText).error || ('engram answered ' + xhr.status + '.');
+      } catch (err) {
+        reason = 'engram answered ' + xhr.status + '.';
+      }
+    }
+    var box = document.createElement('div');
+    box.className = 'flag';
+    box.setAttribute('role', 'status');
+    // Not named `b`: `the_browser_sends_exactly_the_fields_this_struct_reads`
+    // reads the context bundle's fields off this file by looking for lines
+    // that start with `b.`, and a one-letter element handle here is
+    // indistinguishable from a bundle assignment.
+    var title = document.createElement('b');
+    title.textContent = 'That did not work';
+    var why = document.createElement('div');
+    why.textContent = reason;
+    var wrap = document.createElement('div');
+    wrap.appendChild(title);
+    wrap.appendChild(why);
+    box.appendChild(wrap);
+    target.textContent = '';
+    target.appendChild(box);
+    // The heading names the act that filled the rail, and nothing filled it.
+    var head = document.getElementById('rail-head');
+    if (head && target.id === 'results') head.textContent = '';
+  }
+
+  // The way back to results after an Ask. Bound on the document because the
+  // anchor is written into the rail by the stream driver, long after load.
+  function railBack() {
+    document.addEventListener('click', function (e) {
+      var back = e.target.closest && e.target.closest('[data-rerun]');
+      if (!back) return;
+      e.preventDefault();
+      var form = document.getElementById('box-form');
+      if (form) htmx.trigger(form, 'submit');
+    });
+  }
+
+  // ── The box, and what the two verbs may do with it ──────────────────
+  // Typing is the third verb and needs no button: it is the `hx-trigger` on
+  // the form. These two need one, because a model call and a write are both
+  // deliberate acts — what decides which of the three happens is never a
+  // length, a newline, or anything else the page noticed on its own.
+  function boxVerbs() {
+    var form = document.getElementById('box-form');
+    if (!form) return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
+    var buttons = form.querySelectorAll('[data-verb]');
+
+    // Neither verb has anything to act on while the box is empty — except
+    // Capture, whose act can also be a staged file. A photo over an empty box
+    // left Capture disabled and the file with no way into the base: the state
+    // rendered, the control did not exist. The staged box is read directly
+    // rather than mirrored into a flag, and stage()/unstage() fire `input` on
+    // the box so this runs when staging changes, not only when typing does.
+    function sync() {
+      // An act in flight owns the verbs, and `setBusy` in askDriver is what
+      // says so. Both write `disabled` on the same buttons, so without this
+      // anything that fires `input` mid-answer handed them back — staging a
+      // file does, and a file can be dropped on the page while an answer is
+      // streaming.
+      if (form.getAttribute('aria-busy') === 'true') return;
+      var hasText = !!box.value.trim();
+      var stagedEl = document.getElementById('staged');
+      var hasFile = !!(stagedEl && !stagedEl.hidden);
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].disabled = buttons[i].getAttribute('data-verb') === 'capture'
+          ? !(hasText || hasFile)
+          : !hasText;
+      }
+    }
+
+    // One line to start, growing to a ten-line cap and then scrolling inside
+    // itself. Measured off `scrollHeight` rather than counting newlines,
+    // because a pasted paragraph is many lines and carries none.
+    //
+    // This is not the box changing shape on its own in the sense the panel
+    // rules out: it never becomes a different control, and it never decides
+    // what the words in it are for. It only stops hiding them.
+    var CAP = 10;
+    function grow() {
+      box.style.height = 'auto';
+      var line = parseFloat(getComputedStyle(box).lineHeight) || 20;
+      box.style.height = Math.min(box.scrollHeight, line * CAP) + 'px';
+    }
+
+    box.addEventListener('input', function () { sync(); grow(); });
+    sync();
+    grow();
+  }
+
+  // ── Capture, as a verb ──────────────────────────────────────────────
+  // Everything the capture page used to do inline, on the one box. The
+  // reasons are the page's own and travel with the code.
+  function captureVerb() {
+    var form = document.getElementById('box-form');
+    if (!form) return;
+    var box = form.querySelector('textarea[name="q"]');
+    var hint = document.getElementById('size-hint');
+    var verb = form.querySelector('[data-verb="capture"]');
+    if (!box || !hint || !verb) return;
+    // Rough stand-in for the tokeniser: enough to warn, never to block.
+    var CHARS_PER_SEGMENT = 12000;
+    // At `earned` and `off` capture makes no synthesis call, so the hint must
+    // not price one. app.js is one file for every installation, so what used
+    // to be a template conditional rides an attribute instead.
+    var EAGER = hint.getAttribute('data-eager') === '1';
+    box.addEventListener('input', function () {
+      var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
+      hint.hidden = segments < 2;
+      hint.textContent = EAGER
+        ? 'About ' + segments + ' segments — roughly ' + segments +
+          ' model calls before this is searchable.'
+        : 'About ' + segments + ' segments — searchable as written, once embedded.';
+    });
+
+    var drop = document.getElementById('drop');
+    var picker = drop && drop.querySelector('input[type=file]');
+    var noteBox = document.querySelector('input[name="note"]');
+    // Same reason as EAGER: read off the picker the server rendered, which
+    // names `image/*` only where `[infer.vision]` is configured.
+    var VISION = !!picker && (picker.getAttribute('accept') || '').indexOf('image/*') >= 0;
+
+    // ── What is waiting to be sent ────────────────────────────────────────
+    // A file arriving is not a capture. It is held here until Capture is
+    // pressed, so the note beside it can be written and the wrong photo can be
+    // removed — on a phone the camera hands the picture back the moment it is
+    // taken, and uploading on arrival meant the operator never got a say.
+    var staged = null, stagedUrl = null;
+    var stagedBox = document.getElementById('staged');
+    var stagedName = document.getElementById('staged-name');
+    var stagedThumb = document.getElementById('staged-thumb');
+    var stagedClear = document.getElementById('staged-clear');
+
+    function unstage() {
+      staged = null;
+      // The object URL holds the picture in memory until it is let go.
+      if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
+      stagedThumb.removeAttribute('src');
+      stagedThumb.hidden = true;
+      stagedName.hidden = true;
+      stagedClear.hidden = true;
+      // The whole box goes: it is not an invitation any more, it is the thing
+      // waiting to be sent. The picker in the verb row is the invitation, and
+      // it costs a search nothing.
+      if (stagedBox) stagedBox.hidden = true;
+      if (drop) drop.hidden = false;
+      // Or picking the same file twice in a row fires no `change` the second
+      // time, and the drop zone looks broken.
+      if (picker) picker.value = '';
+      // Capture may have been armed by this file alone. See `sync` in
+      // boxVerbs, which listens for this.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // `restore` is the failed upload coming back: the same file, already
+    // described, and no reason to reach for the note a second time.
+    // Where a capture answers. One press can be two captures — a staged file
+    // and the text above it — and both used to write this node whole: whichever
+    // request landed last wiped the other's line, an upload's error included.
+    // A line each, cleared once per press.
+    function receipt() {
+      var host = document.getElementById('capture-result');
+      var slot = document.createElement('p');
+      if (host) host.appendChild(slot);
+      return slot;
+    }
+    function clearReceipts() {
+      var host = document.getElementById('capture-result');
+      if (host) host.textContent = '';
+    }
+
+    function stage(file, restore) {
+      if (!file) return;
+      // Said now rather than after the operator has written a note for a file
+      // this server was never going to read.
+      if (file.type.indexOf('image/') === 0 && !VISION) {
+        clearReceipts();
+        receipt().textContent = 'Image capture is not configured on this server.';
+        unstage();
+        return;
+      }
+      unstage();
+      staged = file;
+      stagedName.textContent = (file.name || 'photo.jpg') +
+        ' — ready. Press Capture.';
+      if (file.type.indexOf('image/') === 0) {
+        stagedUrl = URL.createObjectURL(file);
+        stagedThumb.src = stagedUrl;
+        stagedThumb.hidden = false;
+      }
+      stagedName.hidden = false;
+      stagedClear.hidden = false;
+      // The invitation steps aside for the file that accepted it: one box,
+      // saying one thing at a time.
+      if (stagedBox) stagedBox.hidden = false;
+      if (drop) drop.hidden = true;
+      // Only where a pointer says there is a hardware keyboard — the rule the
+      // paste box and the search box already follow. On a phone this would
+      // throw the software keyboard over the thumbnail the operator is
+      // checking, which is the picture they just took.
+      if (noteBox && !restore && window.matchMedia('(hover: hover)').matches) {
+        noteBox.focus();
+      }
+      // A file over an empty box is still something Capture can act on. See
+      // `sync` in boxVerbs, which listens for this.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function send(file) {
+      if (!file) return;
+      var isImage = file.type.indexOf('image/') === 0;
+      // By name as well as by type: a drop from some file managers carries no
+      // type at all, and the door judges those by their name too.
+      var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+      var result = receipt();
+      if (isImage && !VISION) {
+        result.textContent = 'Image capture is not configured on this server.';
+        return;
+      }
+      // The upload does not go through htmx, so the spinner beside the button
+      // never lit for it. On a phone a photo is the slowest thing this page
+      // sends and pressing Capture looked like it had done nothing.
+      result.textContent = 'Sending…';
+      var payload = new FormData();
+      if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
+      // The fallback name matters: a PDF that arrived unnamed and went up as
+      // `paste.txt` would be refused by the very door it belongs to.
+      var fallbackName = isImage ? 'photo.jpg' : (isPdf ? 'capture.pdf' : 'paste.txt');
+      payload.append(isImage ? 'image' : 'file', file, file.name || fallbackName);
+      var url = isImage ? '/api/v1/corpora/image' : '/api/v1/corpora/upload';
+      // The session cookie authenticates this: it is same-origin, so no token
+      // is involved.
+      fetch(url, { method: 'POST', body: payload })
+        // Not every failure answers in JSON. A file over the body limit is
+        // rejected before the handler sees it, and that reply is plain text —
+        // parsing it threw, and with nothing catching the throw the drop zone
+        // sat there having visibly done nothing.
+        .then(function (r) {
+          return r.json()
+            .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
+            .then(function (j) { return [r.ok, j]; });
+        })
+        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
+        .then(function (pair) {
+          // The server's reason, verbatim. A generic "upload failed" would
+          // hide what actually goes wrong here: wrong type, wrong encoding,
+          // an image door that is closed.
+          result.textContent = pair[0]
+            ? (isImage ? 'Captured — the photo is queued to be read.'
+               : isPdf ? 'Captured — the PDF is queued to be extracted.'
+               : 'Captured.')
+            : (pair[1].error || 'Upload failed.');
+          if (pair[0]) {
+            if (noteBox) noteBox.value = '';
+            refreshRail();
+          } else {
+            // It never left. Put it back where it was, so the fix is a second
+            // press rather than a second trip to the camera.
+            stage(file, true);
+          }
+        });
+    }
+    if (picker) picker.addEventListener('change', function () { stage(picker.files[0]); });
+
+    // The whole page is the drop target, because a browser that is not offered
+    // the file takes it: a photo dropped an inch wide of the box replaced
+    // engram with the picture, and the capture the operator was in the middle
+    // of writing went with it. The box below still says where to aim; missing
+    // it is no longer punished.
+    //
+    // Only for drags carrying files. Dragging selected text into the paste box
+    // is a drop too, and cancelling that one would break a thing that works.
+    function carriesFiles(e) {
+      var types = e.dataTransfer && e.dataTransfer.types;
+      if (!types) return false;
+      for (var i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
+      return false;
+    }
+    // `dragenter` and `dragleave` fire again for every element the pointer
+    // crosses on the way in, so a depth count is what tells the page's edge
+    // from the boundary between two paragraphs inside it.
+    var depth = 0;
+    // Both the staged box and the picker light up, because only one of them is
+    // on screen at a time: before anything is staged the box is `display:
+    // none`, so a class on it alone made the first drop — the common one —
+    // a drag with no visible target anywhere on the page.
+    function dim(on) {
+      if (stagedBox) stagedBox.classList.toggle('dropping', on);
+      if (drop) drop.classList.toggle('dropping', on);
+    }
+    function undim() { depth = 0; dim(false); }
+    document.addEventListener('dragenter', function (e) {
+      if (!carriesFiles(e)) return;
+      depth++;
+      dim(true);
+    });
+    document.addEventListener('dragleave', function (e) {
+      if (!carriesFiles(e)) return;
+      if (--depth <= 0) undim();
+    });
+    // Without cancelling `dragover` the drop never happens — the browser reads
+    // the absence as "nothing here takes this" and opens the file itself.
+    document.addEventListener('dragover', function (e) {
+      if (carriesFiles(e)) e.preventDefault();
+    });
+    document.addEventListener('drop', function (e) {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      undim();
+      var files = e.dataTransfer.files;
+      if (files && files[0]) stage(files[0]);
+    });
+
+    if (stagedClear) stagedClear.addEventListener('click', unstage);
+
+    // The Capture verb. A staged file is what it sends; with nothing staged it
+    // posts what is in the box. Text typed above a staged file is not thrown
+    // away — it goes as the capture it is, in the same press.
+    //
+    // The box's own form is a GET that searches, so the text cannot ride it:
+    // this posts to the same `/ui/capture` the old form did, with the same
+    // fields, and lands in the same fragment.
+    // The rail after a capture. A synthetic `input` keeps the verbs honest
+    // but matches nothing in the form's trigger list, so the rail kept
+    // showing results for text that no longer existed. The form's own submit
+    // is the refresh: with the box just emptied the results endpoint answers
+    // with the idle rail, whose "Last captured" row is the capture landing.
+    function refreshRail() {
+      htmx.trigger(form, 'submit');
+    }
+
+    // Hands back its promise: the press that carries a file too runs the two
+    // one after the other, and this is how the second one knows to start.
+    function postText() {
+      var text = box.value.trim();
+      if (!text) return Promise.resolve();
+      var fromAsk = document.querySelector('input[name="from_ask"]');
+      // htmx settles this promise for every answer the server gives, a 500
+      // among them — it rejects only for a request that never completed at
+      // all — so the promise on its own says nothing about whether anything
+      // was stored, and the clear below ran on the failures too. The verdict
+      // is on `htmx:afterRequest`, which fires before the promise settles.
+      //
+      // Matched on the path because the box's own search is firing requests
+      // from the same body at the same time, and either one's status would
+      // otherwise be read as this one's.
+      var stored = false;
+      function verdict(e) {
+        var path = e.detail && e.detail.pathInfo;
+        if (!path || path.requestPath !== '/ui/capture') return;
+        stored = !!e.detail.successful;
+      }
+      document.body.addEventListener('htmx:afterRequest', verdict);
+      return htmx.ajax('POST', '/ui/capture', {
+        target: '#capture-result',
+        // Appended, not replaced: an upload sent by the same press has its own
+        // line in here, and a receipt that overwrites the other one is how the
+        // page came to report only whichever request was slower.
+        swap: 'beforeend',
+        values: { text: text, from_ask: fromAsk ? fromAsk.value : '' }
+      // A transport failure rejects, and nothing catching it was an unhandled
+      // rejection on top of a capture that visibly did nothing.
+      }).catch(function () {}).then(function () {
+        document.body.removeEventListener('htmx:afterRequest', verdict);
+        // Cleared only on the path that stored something: a failed capture
+        // that emptied the box would lose the text it failed to keep, and the
+        // error fragment beside it is not where the text went.
+        if (!stored) return;
+        // The provenance was about the text that just went in, and the box
+        // stays open. Left standing, the next thing pasted into it was stored
+        // as the same model answer — `origin = "ask"`, that question, those
+        // citations — for words the operator typed themselves.
+        var kept = document.getElementById('kept-from');
+        if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
+        box.value = '';
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        refreshRail();
+      });
+    }
+    verb.addEventListener('click', function (e) {
+      e.preventDefault();
+      clearReceipts();
+      var file = null;
+      if (staged) { file = staged; unstage(); }
+      // Never both in flight. They write the same node, and a failed swap
+      // empties it — so the upload's line is written last, or a text capture
+      // that fails takes the photo's receipt down with it.
+      postText().then(function () { if (file) send(file); });
+    });
+    // A pasted screenshot goes the same way as a dropped one — unless the
+    // paste is on its way somewhere that takes text. A clipboard from Sheets,
+    // Excel or Word carries the selection twice, as text and as a picture of
+    // itself, so taking the picture while the caret sat in the note box
+    // staged a screenshot and swallowed the paste the user asked for.
+    document.addEventListener('paste', function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+          e.preventDefault();
+          stage(items[i].getAsFile());
+          return;
+        }
+      }
+    });
+    }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
-    commandBar();
-    claimPaste();
     themeToggle();
     keyHint();
     primeSlow();
     contextOffer();
     restoreReading();
+    boxVerbs();
+    railBack();
+    captureVerb();
     askDriver();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
@@ -746,9 +1189,23 @@
     // must not be answered with a full-page redirect into a login. Handled
     // here instead, and it names the page so signing in comes back to it.
     document.body.addEventListener('htmx:responseError', function (e) {
-      if (!e.detail || !e.detail.xhr || e.detail.xhr.status !== 401) return;
-      var here = window.location.pathname + window.location.search;
-      window.location.assign('/auth/login?go=' + encodeURIComponent(here));
+      if (!e.detail || !e.detail.xhr) return;
+      if (e.detail.xhr.status === 401) {
+        var here = window.location.pathname + window.location.search;
+        window.location.assign('/auth/login?go=' + encodeURIComponent(here));
+        return;
+      }
+      failedSwap(e.detail.target, e.detail.xhr);
+    });
+    // The other half of the same problem. htmx swaps nothing on an error of
+    // any kind, and 401 was the only one this handler knew about — so a search
+    // against a base whose embedder is down did visibly nothing at all: you
+    // typed, and the rail stayed exactly as empty as it was before. A door
+    // that fails silently is worse than one that fails, because the only
+    // reading left is that the base has nothing.
+    document.body.addEventListener('htmx:sendError', function (e) {
+      if (!e.detail) return;
+      failedSwap(e.detail.target, null);
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       // The offer's own fetch can land after the first keystroke has already
@@ -762,7 +1219,12 @@
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.regions');
-      if (ws && e.target.id === 'pane') ws.classList.add('has-selection');
+      if (ws && e.target.id === 'pane-content') {
+        // An artifact is the act now; the answer that had the pane is cleared
+        // just below.
+        ws.classList.remove('answering');
+        ws.classList.add('has-selection');
+      }
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
@@ -771,7 +1233,7 @@
       // rail now, so that what a search replaces is the results and not the
       // sitting beside them.
       if (e.target.id === 'results') {
-        if (ws) ws.classList.remove('has-selection');
+        if (ws) ws.classList.remove('has-selection', 'answering');
         // Back to the top of the answer. Nothing moved the scroll on a swap,
         // and the two layouts strand it in different places for the same
         // reason: whatever you had scrolled to in the last list is kept, and
@@ -801,7 +1263,20 @@
       // Matched on the href rather than on the click, because the pane is also
       // swapped by the Related and Seen-together links inside it, and those
       // move the selection just as truly as a click in the rail does.
-      if (e.target.id === 'pane') {
+      if (e.target.id === 'pane-content') {
+        // An artifact filled the slot, so whatever an ask left around it —
+        // the streamed text, the reasoning, the progress line, the rendered
+        // answer, a capture receipt — is over. The nodes survive the swap by
+        // design (they are the ask's only targets); they must not keep
+        // talking over the artifact.
+        ['ask-live', 'ask-reasoning-box', 'ask-progress'].forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) el.hidden = true;
+        });
+        ['ask-result', 'ask-status', 'capture-result'].forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = '';
+        });
         var open = window.location.pathname;
         document.querySelectorAll('.rail-item').forEach(function (el) {
           el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
@@ -812,10 +1287,16 @@
 
   // Focused only where a pointer says there is a hardware keyboard. On a touch
   // screen the software keyboard covers what the page was opened to show — the
-  // results on Search, the pending decisions and recent captures on Capture,
-  // which is the app's start page — and in an installed window there is no URL
-  // bar to dismiss it from. This is why neither field carries `autofocus`.
-  var field = document.querySelector('input[name="q"], textarea[name="text"]');
+  // rail, and on the start page the base introducing itself — and in an
+  // installed window there is no URL bar to dismiss it from. This is why the
+  // box carries no `autofocus`.
+  //
+  // `textarea[name="q"]` is the box. It was matched as `input[name="q"]` and
+  // `textarea[name="text"]` until the three pages folded into one, which is
+  // two selectors for elements the workspace no longer has: the box was not
+  // focused on any pointer device, on any route. The input form is still here
+  // for the assign box on Insights.
+  var field = document.querySelector('textarea[name="q"], input[name="q"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
   // Whether something is being typed into. Every letter shortcut below is
@@ -854,8 +1335,11 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     if (e.key === '/' && !typing()) {
-      var q = document.querySelector('input[name="q"]');
-      if (q) { e.preventDefault(); q.focus(); q.select(); }
+      // The box is a textarea, and has been since the three pages became one.
+      // `select()` because `/` means "start a new query", not "append to the
+      // last one" — the same as it always did.
+      var q = document.querySelector('textarea[name="q"]');
+      if (q && !q.disabled) { e.preventDefault(); q.focus(); q.select(); }
       return;
     }
     if (e.key === 'Escape') {

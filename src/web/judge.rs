@@ -61,8 +61,6 @@ struct JudgeTemplate {
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     stats: Stats,
     recall: String,
     mrr: String,
@@ -119,7 +117,7 @@ pub fn diagnosis(rank: Option<i64>, verdict: Verdict) -> &'static str {
 
 /// Roughly how long ago, in the words someone would use out loud. Precision
 /// past "days" would suggest the timestamp matters; it is here to jog a memory.
-fn ago(then: i64) -> String {
+pub(crate) fn ago(then: i64) -> String {
     let days = (crate::store::now() - then).max(0) / 86_400;
     match days {
         0 => "today".into(),
@@ -222,7 +220,6 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.learn.enabled.then_some(stats.pending),
-        ask_enabled: crate::web::state::ask_enabled(&st),
         recall: format!("{:.2}", stats.recall_at_10),
         mrr: format!("{:.2}", stats.mrr),
         target: FIRST_SWEEP_AT,

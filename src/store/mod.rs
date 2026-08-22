@@ -6,6 +6,7 @@ pub mod context;
 pub mod corpora;
 pub mod feedback;
 pub mod gaps;
+pub mod insights;
 pub mod jobs;
 pub mod lineage;
 pub mod links;

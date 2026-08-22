@@ -48,22 +48,14 @@
   {% block nav %}
   <header class="topbar">
     <nav class="top">
-      <a href="/ui/search" class="brand" aria-label="engram">
+      <a href="/ui" class="brand" aria-label="engram">
         <img src="/assets/logo.svg" alt="" width="22" height="22">
         <span>engram</span>
       </a>
-      {# Three destinations, four where searches are being recorded. Browse is
-         gone — recent captures live under Capture and everything else is found
-         by searching for what it says — and Ops moved behind one quiet link at
-         the bottom of Capture, where the only part of it that needs a person
-         already appears. #}
-      <a href="/ui/capture">Capture</a>
-      <a href="/ui/search">Search</a>
-      {# Present only where there is a model to answer. No greyed-out entry,
-         no page behind it that says so: the door is simply not there. #}
-      {% if ask_enabled %}
-      <a href="/ui/ask">Ask</a>
-      {% endif %}
+      {# Capture, Search and Ask are gone from here. They are not places any
+         more: they are the three things the one box does, chosen by a button
+         on it. A link that navigates somewhere to change which verb you meant
+         is the thing this whole surface exists to remove. #}
       {# A fourth destination only where searches are actually being recorded.
          It was reachable from one conditional sentence on Ops before, which is
          a page you open when something is wrong — the wrong place for the one
@@ -73,6 +65,11 @@
       <a href="/ui/judge">Judge{% if n > &0 %}
         <span class="badge badge-accent">{{ n }}</span>{% endif %}</a>
       {% endif %}
+      {# What is true about this installation, and what needs a person: the
+         maintenance Housekeeping always held, plus the surfaces that used to
+         sit on Capture. A destination rather than a quiet link at the bottom
+         of a page, because it is now the only other place there is. #}
+      <a href="/ui/insights">Insights</a>
       <span class="spacer"></span>
       {# The light palette has been in the stylesheet since the port and nobody
          has ever seen it, because it activated only on prefers-color-scheme.
@@ -100,31 +97,11 @@
      only identity. Hidden above 40rem, where the top row does the same job.
      The same links as the top row, so an installed window and a desktop tab
      are the same app rather than two arrangements of one. #}
-  {# One input that reaches everything, from any page. The tabs stay: the bar
-     is the fast path, not the only path, and a shortcut is no substitute for a
-     door you can see — least of all on a phone, where there is no key to press.
-
-     Outside `.shell`, so it is not inside the container the region grid
-     queries and cannot be caught by a rule meant for page content. #}
-  <div class="cmdk" hidden>
-    <div class="cmdk-box" role="dialog" aria-modal="true" aria-label="Command">
-      <input class="input" type="text" data-cmdk-input autocomplete="off"
-             spellcheck="false" placeholder="Search, or > to ask…">
-      <p class="cmdk-hint">
-        <kbd>↵</kbd> go <kbd>&gt;</kbd> ask <kbd>esc</kbd> close
-      </p>
-    </div>
-  </div>
-
   <nav class="tabbar" aria-label="Sections">
-    <a href="/ui/capture">
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Capture</a>
-    <a href="/ui/search">
+    {# Three entries, not five. Capture and Ask were destinations when they were
+       pages; they are verbs on the box now, and the box is on this screen. #}
+    <a href="/ui">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="9" cy="9" r="5.5"/><path d="M13 13l4 4"/></svg>Search</a>
-    {% if ask_enabled %}
-    <a href="/ui/ask">
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M7 7.5a3 3 0 115 2.2c-.8.7-1.2 1.2-1.2 2.3M10 15.5v.01"/></svg>Ask</a>
-    {% endif %}
     {# Same rule as the top row: present only where there is something to judge
        at all. A dot rather than a number, because the tab is 52px tall and the
        count is not the point — that anything is waiting is. #}
@@ -133,6 +110,8 @@
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>Judge{% if n > &0 %}
       <span class="tab-dot" aria-label="{{ n }} waiting"></span>{% endif %}</a>
     {% endif %}
+    <a href="/ui/insights">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 16V9M10 16V5M16 16v-4"/></svg>Insights</a>
   </nav>
 </body>
 </html>

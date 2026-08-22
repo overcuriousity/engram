@@ -1,9 +1,8 @@
-{# Nothing to say on the ordinary path: the capture arrives in "Recent" below
-   within the same second, carrying the same link and the same progress badge,
-   and a card repeating it directly above the list was the same row said twice.
-   What survives is what the list cannot say — a paste that was already stored,
-   or one parked pending a decision, both of which look like nothing happening
-   unless they are named here. #}
+{# One line on the ordinary path. The queue that used to repeat this fragment
+   lives on Insights now, so nothing else on the workspace says the paste
+   landed — and a box that empties itself with no acknowledgment is
+   indistinguishable from data loss. The idle rail's "Last captured" carries
+   the same link a moment later; this is the receipt for the press itself. #}
 {% if duplicate || near_dupe_of.is_some() %}
 <div class="card">
   <div class="card-head">
@@ -21,9 +20,12 @@
     This looks {{ near_dupe_percent }}% like
     <a href="/ui/corpora/{{ other }}">an existing source</a>, so it is stored but
     not processed until someone decides between them.
-    <a href="/ui/ops">Decide on Ops</a>.
+    <a href="/ui/insights">Decide on Insights</a>.
   </p>
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>
+{% else %}
+<p class="muted" role="status">Captured —
+  <a href="/ui/corpora/{{ id }}">view source</a>.</p>
 {% endif %}
