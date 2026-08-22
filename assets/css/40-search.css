@@ -525,8 +525,21 @@ body { overflow-x: hidden; }
 /* The area under the search box. `min-height` is what keeps the answer landing
    from pushing the hint and the chips down a page that has already been read —
    the fetch is one round trip after `load`, which is long enough to see. */
-.offer { min-height: 3.25rem; margin: 0.25rem 0 0.5rem; }
-.offer-title { font-size: var(--text-base); color: var(--color-fg-primary); }
+.offer { min-height: 3.25rem; margin: 0.5rem 0 0.75rem; }
+/* A line, not a card — the area under the search box is a suggestion, and
+   giving it a result's border and background would have it competing with the
+   results it sits above. What it does need is to look chosen: the anchor was
+   inheriting the browser's underline and nothing else, which reads as an
+   unstyled link dropped under the chips rather than as an offer. Weight and no
+   rule by default; the underline comes back on hover, which is the idiom the
+   capture page's links already use. */
+.offer-title {
+  font-size: var(--text-base); color: var(--color-fg-primary);
+  font-weight: 600; text-decoration: none;
+}
+.offer-title:hover, .offer-title:focus-visible {
+  text-decoration: underline; text-decoration-color: var(--color-border-strong);
+}
 .offer-why { font-size: var(--text-xs); margin: 0.125rem 0 0; }
 .offer-detail { display: inline; }
 .offer-detail summary { display: inline; cursor: pointer; color: var(--color-accent); }
