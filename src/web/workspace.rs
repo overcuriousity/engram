@@ -14,11 +14,12 @@
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Form, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
 use crate::auth::Identity;
+use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::error::Result;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -33,6 +34,9 @@ pub fn routes() -> Router<AppState> {
         // A deep link, and what a bookmark from before this change points at.
         .route("/ui/search", get(page))
         .route("/ui/search/results", get(search_results))
+        // The capture door. GET is the workspace with the box filled; POST is
+        // what the button on it and the browser extension both send.
+        .route("/ui/capture", get(capture_door).post(capture_submit))
 }
 
 #[derive(Template)]
@@ -56,6 +60,33 @@ struct WorkspaceTemplate {
     category: String,
     /// Whether the area under the box exists at all. See `Core::recommends`.
     recommend: bool,
+    /// Whether the image door is open, i.e. `[infer.vision]` is configured.
+    /// Off, the control offers text only rather than a picker that fails.
+    vision_enabled: bool,
+    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
+    ///
+    /// At `earned` and `off` it spends none: the text is embedded as written,
+    /// and at `earned` a window is rewritten later only where reading has
+    /// earned it. The page has to say which of those is happening — promising
+    /// "16 model calls" on a base that will make none is the page lying about
+    /// what the button costs.
+    eager: bool,
+    /// The ask the box was filled from, carried through the form so the
+    /// capture records where the text came from. Empty on an ordinary visit.
+    ///
+    /// The id rather than the prose: a note is a string someone can edit away,
+    /// while this is the join back to the question and the artifacts the
+    /// answer was built from, and `capture_submit` turns it into stored
+    /// provenance.
+    prefill_ask: String,
+    /// The question this answer answered, in the operator's own words.
+    ///
+    /// The provenance already recorded it — `with_ask` carries the question
+    /// and the citations into the corpus metadata. What was missing was saying
+    /// so on the page: the box arrived holding an answer with no sign of what
+    /// it was an answer to, and the operator deciding whether to keep it is
+    /// the person who most needs to see the question.
+    prefill_question: String,
     /// What app.js should do on first paint: `""`, `"ask"` or `"capture"`.
     /// Search needs no value — typing already covers it. Rendered into
     /// `data-open-with`, so the decision is made here and the template holds
@@ -94,6 +125,10 @@ async fn base_template(st: &AppState, q: String, category: String) -> Result<Wor
         facets,
         category,
         recommend: st.core.recommends(),
+        vision_enabled: st.core.describer.is_some(),
+        eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
+        prefill_ask: String::new(),
+        prefill_question: String::new(),
         open_with: "",
     })
 }
@@ -104,5 +139,117 @@ async fn page(
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     let t = base_template(&st, p.q, p.category.unwrap_or_default()).await?;
+    Ok(HtmlTemplate(t).into_response())
+}
+
+/// What the capture page accepts in its query string.
+///
+/// `from_ask` rather than the answer itself: an answer runs to thousands of
+/// characters and a URL does not, so passing the text would break on exactly
+/// the long answers worth keeping. The id is short, and the page reads the
+/// stored row.
+#[derive(serde::Deserialize)]
+struct CapturePrefill {
+    #[serde(default)]
+    from_ask: Option<String>,
+}
+
+/// Text and nothing else. The label field is gone: a name arrives from
+/// synthesis, which has read the document, rather than from someone who has
+/// just pasted it and does not yet know what it says.
+#[derive(serde::Deserialize)]
+struct CaptureForm {
+    text: String,
+    /// Set when the box was prefilled from an answer. Carries the ask through
+    /// the edit, so what is stored records that the text was model-written and
+    /// what it was written from — even if the operator rewrote every word of it.
+    #[serde(default)]
+    from_ask: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "_captured.html")]
+struct CapturedTemplate {
+    id: String,
+    duplicate: bool,
+    /// Set when the capture was parked as a near-duplicate. Without it the page
+    /// says "processing" for a capture that nothing will ever process, and the
+    /// only hint is a queue on Ops the writer has no reason to open.
+    near_dupe_of: Option<String>,
+    near_dupe_percent: i64,
+}
+
+async fn capture_submit(
+    State(st): State<AppState>,
+    _id: Identity,
+    Form(f): Form<CaptureForm>,
+) -> Result<Response> {
+    // An answer the operator chose to keep is still a paste, and is stored as
+    // one — the same pipeline, the same synthesis, no special case downstream.
+    // What differs is only the trace: the origin says a model wrote it, and the
+    // metadata says from which question and which artifacts. That is the whole
+    // of the concession the roadmap makes here, and it is a record rather than
+    // a mechanism.
+    //
+    // The two travel together or not at all. An ask can vanish between the page
+    // load and the save — retention deletes unjudged questions — and storing
+    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
+    // model authorship while carrying none of the provenance that assertion is
+    // supposed to buy. A claim that cannot be checked is worse than no claim, so
+    // a lost row falls back to an ordinary paste, which is what it now is.
+    let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
+        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
+            Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
+                &ev.id,
+                &ev.question,
+                &ev.citations,
+            ),
+            None => {
+                tracing::warn!(
+                    ask_id,
+                    "capture named an ask that is no longer stored; keeping it as an ordinary paste"
+                );
+                crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB)
+            }
+        },
+        None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
+    };
+    let out = st.core.ingest_capture(capture).await?;
+    Ok(HtmlTemplate(CapturedTemplate {
+        id: out.id,
+        duplicate: out.duplicate,
+        near_dupe_percent: out
+            .near_duplicate
+            .as_ref()
+            .map(|n| (n.similarity * 100.0).round() as i64)
+            .unwrap_or(0),
+        near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
+    })
+    .into_response())
+}
+
+/// The capture door: the workspace with the box already filled.
+///
+/// The extension posts here and so does *keep this answer*, and neither knows
+/// anything about the three pages having folded into one. A prefill that names
+/// an ask nobody recorded is not an error worth a page for: the box is simply
+/// empty, which is what an ordinary visit looks like.
+async fn capture_door(
+    State(st): State<AppState>,
+    _id: Identity,
+    Query(p): Query<CapturePrefill>,
+) -> Result<Response> {
+    let prefilled = match &p.from_ask {
+        Some(id) => st.core.store.ask_event(id).await?,
+        None => None,
+    };
+    let (q, prefill_ask, prefill_question) = match prefilled {
+        Some(ev) => (ev.answer, ev.id, ev.question),
+        None => (String::new(), String::new(), String::new()),
+    };
+    let mut t = base_template(&st, q, String::new()).await?;
+    t.open_with = "capture";
+    t.prefill_ask = prefill_ask;
+    t.prefill_question = prefill_question;
     Ok(HtmlTemplate(t).into_response())
 }

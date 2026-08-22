@@ -1,5 +1,5 @@
 use crate::auth::Identity;
-use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
+use crate::core::ingest::ORIGIN_ASK;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -427,50 +427,6 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-#[derive(Template)]
-#[template(path = "capture.html")]
-struct CaptureTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// Whether the image door is open, i.e. `[infer.vision]` is configured.
-    /// Off, the page offers text only rather than a picker that fails.
-    vision_enabled: bool,
-    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
-    ///
-    /// At `earned` and `off` it spends none: the text is embedded as written,
-    /// and at `earned` a window is rewritten later only where reading has
-    /// earned it. The page has to say which of those is happening — promising
-    /// "16 model calls" on a base that will make none is the page lying about
-    /// what the button costs.
-    eager: bool,
-    /// An answer the operator asked to keep, dropped into the box for them to
-    /// edit. Empty on an ordinary visit.
-    ///
-    /// Prefilled and not saved: the save stays the operator's decision. That is
-    /// the line the roadmap draws — this is a person keeping something the
-    /// model wrote, recorded as such, and not the system writing memory to
-    /// itself.
-    prefill_text: String,
-    /// The ask this text came from, carried through the form so the capture
-    /// records where it came from. Empty when the box was not prefilled.
-    ///
-    /// The id rather than the prose: a note is a string someone can edit away,
-    /// while this is the join back to the question and the artifacts the answer
-    /// was built from, and `capture_submit` turns it into stored provenance.
-    prefill_ask: String,
-    /// The question this answer answered, in the operator's own words.
-    ///
-    /// The provenance already recorded it — `with_ask` carries the question and
-    /// the citations into the corpus metadata. What was missing was saying so
-    /// on the page: the box arrived holding an answer with no sign of what it
-    /// was an answer to, and the operator deciding whether to keep it is the
-    /// person who most needs to see the question. The line does not move; it is
-    /// only better documented.
-    prefill_question: String,
-}
-
 /// One hole in the base, as the capture page lists it.
 pub struct GapMember {
     /// The `GapKind`, for the dismiss route.
@@ -501,18 +457,6 @@ pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
         id: g.id,
         text: g.text,
     }
-}
-
-#[derive(Template)]
-#[template(path = "_captured.html")]
-struct CapturedTemplate {
-    id: String,
-    duplicate: bool,
-    /// Set when the capture was parked as a near-duplicate. Without it the page
-    /// says "processing" for a capture that nothing will ever process, and the
-    /// only hint is a queue on Ops the writer has no reason to open.
-    near_dupe_of: Option<String>,
-    near_dupe_percent: i64,
 }
 
 #[derive(Template)]
@@ -856,45 +800,6 @@ struct AskCarriedTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-/// What the capture page accepts in its query string.
-///
-/// `from_ask` rather than the answer itself: an answer runs to thousands of
-/// characters and a URL does not, so passing the text would break on exactly
-/// the long answers worth keeping. The id is short, and the page reads the
-/// stored row.
-#[derive(serde::Deserialize)]
-struct CapturePrefill {
-    #[serde(default)]
-    from_ask: Option<String>,
-}
-
-async fn capture_page(
-    State(st): State<AppState>,
-    _id: Identity,
-    Query(p): Query<CapturePrefill>,
-) -> Result<Response> {
-    // A prefill that names an ask nobody recorded is not an error worth a page
-    // for: the box is simply empty, which is what an ordinary visit looks like.
-    let prefilled = match &p.from_ask {
-        Some(id) => st.core.store.ask_event(id).await?,
-        None => None,
-    };
-    let (prefill_text, prefill_ask, prefill_question) = match prefilled {
-        Some(ev) => (ev.answer, ev.id, ev.question),
-        None => (String::new(), String::new(), String::new()),
-    };
-    Ok(HtmlTemplate(CaptureTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        vision_enabled: st.core.describer.is_some(),
-        eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
-        prefill_text,
-        prefill_ask,
-        prefill_question,
-    })
-    .into_response())
-}
-
 async fn gap_dismiss(
     State(st): State<AppState>,
     _id: Identity,
@@ -904,68 +809,6 @@ async fn gap_dismiss(
         .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
     st.core.store.dismiss_gap(kind, &id).await?;
     Ok(axum::http::StatusCode::OK.into_response())
-}
-
-/// Text and nothing else. The label field is gone: a name arrives from
-/// synthesis, which has read the document, rather than from someone who has
-/// just pasted it and does not yet know what it says.
-#[derive(serde::Deserialize)]
-struct CaptureForm {
-    text: String,
-    /// Set when the box was prefilled from an answer. Carries the ask through
-    /// the edit, so what is stored records that the text was model-written and
-    /// what it was written from — even if the operator rewrote every word of it.
-    #[serde(default)]
-    from_ask: Option<String>,
-}
-
-async fn capture_submit(
-    State(st): State<AppState>,
-    _id: Identity,
-    Form(f): Form<CaptureForm>,
-) -> Result<Response> {
-    // An answer the operator chose to keep is still a paste, and is stored as
-    // one — the same pipeline, the same synthesis, no special case downstream.
-    // What differs is only the trace: the origin says a model wrote it, and the
-    // metadata says from which question and which artifacts. That is the whole
-    // of the concession the roadmap makes here, and it is a record rather than
-    // a mechanism.
-    //
-    // The two travel together or not at all. An ask can vanish between the page
-    // load and the save — retention deletes unjudged questions — and storing
-    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
-    // model authorship while carrying none of the provenance that assertion is
-    // supposed to buy. A claim that cannot be checked is worse than no claim, so
-    // a lost row falls back to an ordinary paste, which is what it now is.
-    let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
-        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
-            Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
-                &ev.id,
-                &ev.question,
-                &ev.citations,
-            ),
-            None => {
-                tracing::warn!(
-                    ask_id,
-                    "capture named an ask that is no longer stored; keeping it as an ordinary paste"
-                );
-                crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB)
-            }
-        },
-        None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
-    };
-    let out = st.core.ingest_capture(capture).await?;
-    Ok(HtmlTemplate(CapturedTemplate {
-        id: out.id,
-        duplicate: out.duplicate,
-        near_dupe_percent: out
-            .near_duplicate
-            .as_ref()
-            .map(|n| (n.similarity * 100.0).round() as i64)
-            .unwrap_or(0),
-        near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
-    })
-    .into_response())
 }
 
 /// Chips per row. Long enough to cover a real vocabulary, short enough that the
@@ -3353,7 +3196,6 @@ pub fn ui_router() -> Router<AppState> {
         // had no answer for `/`, and a browser typing the domain got a 404 —
         // signed in or not, because an unmatched path never reaches the
         // authentication that would have redirected it to a login.
-        .route("/ui/capture", get(capture_page).post(capture_submit))
         .route("/ui/context", post(context_offer))
         .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
@@ -4423,6 +4265,56 @@ mod tests {
         app_for(core).await
     }
 
+    /// The capture door, which is the workspace with the box already filled.
+    /// The extension posts here and so does *keep this answer*, and neither
+    /// knows anything about the page having folded into one.
+    #[tokio::test]
+    async fn the_capture_door_fills_the_one_box_and_keeps_its_provenance() {
+        let (app, cookie, _core, _html, id) = ask_recorded().await;
+
+        let html = get(&app, &format!("/ui/capture?from_ask={id}"), &cookie).await;
+        assert!(
+            html.contains(r#"data-open-with="capture""#),
+            "the page opens capturing: {html}"
+        );
+        assert!(html.contains("data-workspace"), "and it is the workspace");
+        assert!(
+            html.contains(&format!(r#"name="from_ask" value="{id}""#)),
+            "the ask rides the form as provenance: {html}"
+        );
+        assert!(
+            html.contains("Kept from"),
+            "the question it answered is named"
+        );
+
+        // The plain door is the same page with an empty box.
+        let plain = get(&app, "/ui/capture", &cookie).await;
+        assert!(plain.contains("data-workspace"), "still the workspace");
+        assert!(
+            !plain.contains("Kept from"),
+            "an ordinary visit claims no provenance: {plain}"
+        );
+    }
+
+    /// The file control offers what the installation can actually read. Off,
+    /// it offers text only rather than a picker that fails.
+    #[tokio::test]
+    async fn the_file_control_offers_images_only_when_vision_is_configured() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("image/*"), "the picker accepts images");
+        assert!(
+            html.contains(r#"name="note""#),
+            "the context field is there"
+        );
+
+        let (app, cookie) =
+            app_for(crate::core::test_support::test_core_without_vision().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(!html.contains("image/*"));
+        assert!(html.contains(r#"accept=".txt,text/plain,.pdf,application/pdf""#));
+    }
+
     /// The one page. Capture, search and ask were three of them, and moving
     /// between them meant retyping or carrying a prefill: the same words are a
     /// query on one, a question on the second and a document on the third, and
@@ -4657,21 +4549,31 @@ mod tests {
         let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/capture", &cookie).await;
         assert!(
-            html.contains("kept as you wrote it"),
-            "the standing line still prices a call: {html}"
-        );
-        assert!(html.contains("var EAGER = false"));
-        assert!(
-            !html.contains("one model call each"),
-            "the standing line still prices a call: {html}"
+            html.contains(r#"data-eager="0""#),
+            "the page tells the hint this mode makes no model call: {html}"
         );
 
         let mut core = crate::core::test_support::test_core().await;
         core.synthesis = crate::config::SynthesisMode::Eager;
         let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(html.contains("one model call each"));
-        assert!(html.contains("var EAGER = true"));
+        assert!(html.contains(r#"data-eager="1""#), "{html}");
+
+        // The standing sentence is gone with the page it stood on — on a
+        // workspace where capture is one verb of three, a permanent line about
+        // what pasting costs is furniture. What replaced it says the same
+        // thing only once it is true, and app.js must still price both modes
+        // rather than the one it was written against.
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("model calls before this is searchable"),
+            "the eager branch no longer prices the calls it will make"
+        );
+        assert!(
+            js.contains("searchable as written, once embedded"),
+            "the earned branch prices a call it will not make"
+        );
     }
 
     #[tokio::test]
@@ -8766,18 +8668,20 @@ mod tests {
         let note = page
             .find(r#"name="note""#)
             .expect("the note input is on the page");
-        // The button, not the nav link of the same name above it.
+        // The verb, not the nav link of the same name above it.
         let button = page
-            .find(r#"type="submit" form="capture""#)
-            .expect("the capture button is there");
+            .find(r#"data-verb="capture""#)
+            .expect("the capture verb is there");
         assert!(
             note < button,
-            "the note field must precede the button that sits under it: {page}"
+            "the note field must precede the button that sends it: {page}"
         );
 
-        // Outside the posted form still: that form posts urlencoded and the
-        // file this note describes goes multipart to a different endpoint.
-        assert!(page.contains(r#"form="capture""#), "{page}");
+        // The box's own form is a GET that searches on every keystroke. The
+        // staged file and its note sit inside it now, so the serialisation is
+        // pinned to the two fields the search actually takes — without this,
+        // every keystroke carries a filename and a note into the query string.
+        assert!(page.contains(r#"hx-params="q,category""#), "{page}");
 
         // The order the work happens in: the file arrives and is held, the note
         // says what it is, the button sends both. A photo taken on a phone used
@@ -9256,17 +9160,12 @@ mod tests {
             "housekeeping is a table and has no reading measure: {ops}"
         );
 
-        // One column again. Recent was what the aside held, and Recent is on
-        // Insights now — an aside region with nothing in it is a column of
-        // empty space, not a layout.
+        // Capture is a door into the workspace now, not a page of its own, so
+        // it declares what the workspace declares.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains(r#"regions regions-focus"#),
-            "capture is prose and nothing beside it: {capture}"
-        );
-        assert!(
-            !capture.contains(r#"class="region-aside""#),
-            "capture has nothing left to put in an aside: {capture}"
+            capture.contains("regions-rail-focus-source"),
+            "the capture door is the workspace: {capture}"
         );
 
         let ask = get_body(&app, &cookie, "/ui/ask").await;

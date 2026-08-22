@@ -26,6 +26,7 @@
                   keyup changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() %},
                   load{% endif %}"
+      hx-params="q,category"
       hx-indicator="#search-spinner">
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
@@ -43,6 +44,43 @@
   <textarea class="box" name="q" rows="1"
             placeholder="Describe the situation, ask a question, or paste anything worth keeping…"
             aria-describedby="box-hint">{{ q }}</textarea>
+{# The file, when there is one. It used to be an always-open drop zone and a
+     staged box under it — two places for one idea, on a page that grew a row as
+     you used it. Here the picker lives in the verb row and this appears only
+     once something is waiting, so the workspace costs nothing to a search.
+  
+     Outside the form above on purpose: that form is a GET and the file goes
+     multipart to the API endpoint instead. The label is what makes the box
+     clickable, and on a phone that is what opens the camera.
+  
+     A photo taken on a phone used to upload the instant the camera handed it
+     back: nothing had been pressed and the note underneath was unfillable by
+     then — the picture was simply gone into the base. A file waits here until
+     Capture is pressed, which is the same deliberate act pasted text has always
+     needed.
+  
+     The thumbnail is for the camera above all: on a phone the only thing that
+     says which photo this is, is the photo. #}
+  <div id="staged" class="staged" hidden>
+    <label class="muted" id="drop">
+      {% if vision_enabled %}
+      <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf,image/*" hidden>
+      <span>Drop a <code>.txt</code> file, a PDF or an image — on a phone, tap to take a photo.</span>
+      {% else %}
+      <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf" hidden>
+      <span>Drop a <code>.txt</code> file or a PDF.</span>
+      {% endif %}
+    </label>
+    <img id="staged-thumb" alt="" hidden>
+    <span id="staged-name" class="mono" hidden></span>
+    {# Context for the file: a sentence about what it is. Sent with it, then
+       cleared. For an image the vision model reads it too. Inside the staged box
+       because it is about the staged file and nothing else — on its own row it
+       was a permanent empty field on a page that mostly never sees a file. #}
+    <input class="input" type="text" name="note" maxlength="2000"
+           placeholder="Note for the file (optional) — what is it, why keep it?">
+    <button class="btn btn-ghost btn-sm" type="button" id="staged-clear">Remove</button>
+  </div>
   {# The two verbs that need a button. Typing is the third and needs none: it
      is the trigger on the form above. Both are disabled while the box is
      empty, because neither has anything to act on. #}
@@ -87,6 +125,22 @@
     more than keywords do — paste what you are looking at.</p>
 </form>
 
+
+{# Present only when the box was filled from an answer. It rides the capture so
+   that what gets stored records the question and the artifacts the answer was
+   written from — kept even if the operator rewrites every word above, because
+   the claim it makes is about where the text came from, not what it says. #}
+{% if !prefill_ask.is_empty() %}
+<p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo; — an answer engram
+  wrote. Edit it as you like; saving is yours, and the capture records the
+  question it came from.</p>
+<input type="hidden" name="from_ask" value="{{ prefill_ask }}" form="capture-form">
+{% endif %}
+{# Rough stand-in for the tokeniser, filled by app.js: enough to warn, never to
+   block. At `earned` and `off` capture makes no synthesis call, so the hint
+   must not price one. #}
+<p id="size-hint" class="muted" data-eager="{% if eager %}1{% else %}0{% endif %}" hidden></p>
+
 {# The offer is for the state "no intent expressed yet". app.js removes it on
    the first keystroke, and it does not come back when the box is cleared: once
    there is an intent the offer is wrong, and reappearing because someone
@@ -122,7 +176,8 @@
 </div>
 
 <div id="pane" class="region-focus pane">
-  <p class="muted">Search to see an artifact here, beside the lines it
-    came from.</p>
+  <div id="capture-result"></div>
+  <p id="pane-idle" class="muted">Search to see an artifact here, beside the
+    lines it came from.</p>
 </div>
 {% endblock %}

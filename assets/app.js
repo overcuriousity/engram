@@ -724,6 +724,302 @@
     }, { once: true });
   }
 
+  // ── The box, and what the two verbs may do with it ──────────────────
+  // Typing is the third verb and needs no button: it is the `hx-trigger` on
+  // the form. These two need one, because a model call and a write are both
+  // deliberate acts — what decides which of the three happens is never a
+  // length, a newline, or anything else the page noticed on its own.
+  function boxVerbs() {
+    var form = document.getElementById('box-form');
+    if (!form) return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
+    var buttons = form.querySelectorAll('[data-verb]');
+
+    // Neither verb has anything to act on while the box is empty.
+    function sync() {
+      var empty = !box.value.trim();
+      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = empty;
+    }
+
+    // One line to start, growing to a ten-line cap and then scrolling inside
+    // itself. Measured off `scrollHeight` rather than counting newlines,
+    // because a pasted paragraph is many lines and carries none.
+    //
+    // This is not the box changing shape on its own in the sense the panel
+    // rules out: it never becomes a different control, and it never decides
+    // what the words in it are for. It only stops hiding them.
+    var CAP = 10;
+    function grow() {
+      box.style.height = 'auto';
+      var line = parseFloat(getComputedStyle(box).lineHeight) || 20;
+      box.style.height = Math.min(box.scrollHeight, line * CAP) + 'px';
+    }
+
+    box.addEventListener('input', function () { sync(); grow(); });
+    sync();
+    grow();
+
+    // What the door asked for. Search needs no value: typing is already the
+    // whole of it, and the form's `load` trigger has run by now.
+    var bar = document.querySelector('[data-workspace]');
+    var opens = bar && bar.getAttribute('data-open-with');
+    if (opens === 'capture' && window.matchMedia('(hover: hover)').matches) {
+      box.focus();
+    }
+  }
+
+  // ── Capture, as a verb ──────────────────────────────────────────────
+  // Everything the capture page used to do inline, on the one box. The
+  // reasons are the page's own and travel with the code.
+  function captureVerb() {
+    var form = document.getElementById('box-form');
+    if (!form) return;
+    var box = form.querySelector('textarea[name="q"]');
+    var hint = document.getElementById('size-hint');
+    var verb = form.querySelector('[data-verb="capture"]');
+    if (!box || !hint || !verb) return;
+    // Rough stand-in for the tokeniser: enough to warn, never to block.
+    var CHARS_PER_SEGMENT = 12000;
+    // At `earned` and `off` capture makes no synthesis call, so the hint must
+    // not price one. app.js is one file for every installation, so what used
+    // to be a template conditional rides an attribute instead.
+    var EAGER = hint.getAttribute('data-eager') === '1';
+    box.addEventListener('input', function () {
+      var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
+      hint.hidden = segments < 2;
+      hint.textContent = EAGER
+        ? 'About ' + segments + ' segments — roughly ' + segments +
+          ' model calls before this is searchable.'
+        : 'About ' + segments + ' segments — searchable as written, once embedded.';
+    });
+
+    var drop = document.getElementById('drop');
+    var picker = drop && drop.querySelector('input[type=file]');
+    var noteBox = document.querySelector('input[name="note"]');
+    // Same reason as EAGER: read off the picker the server rendered, which
+    // names `image/*` only where `[infer.vision]` is configured.
+    var VISION = !!picker && (picker.getAttribute('accept') || '').indexOf('image/*') >= 0;
+
+    // ── What is waiting to be sent ────────────────────────────────────────
+    // A file arriving is not a capture. It is held here until Capture is
+    // pressed, so the note beside it can be written and the wrong photo can be
+    // removed — on a phone the camera hands the picture back the moment it is
+    // taken, and uploading on arrival meant the operator never got a say.
+    var staged = null, stagedUrl = null;
+    var stagedBox = document.getElementById('staged');
+    var stagedName = document.getElementById('staged-name');
+    var stagedThumb = document.getElementById('staged-thumb');
+    var stagedClear = document.getElementById('staged-clear');
+
+    function unstage() {
+      staged = null;
+      // The object URL holds the picture in memory until it is let go.
+      if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
+      stagedThumb.removeAttribute('src');
+      stagedThumb.hidden = true;
+      stagedName.hidden = true;
+      stagedClear.hidden = true;
+      // The whole box goes: it is not an invitation any more, it is the thing
+      // waiting to be sent. The picker in the verb row is the invitation, and
+      // it costs a search nothing.
+      if (stagedBox) stagedBox.hidden = true;
+      if (drop) drop.hidden = false;
+      // Or picking the same file twice in a row fires no `change` the second
+      // time, and the drop zone looks broken.
+      if (picker) picker.value = '';
+    }
+
+    // `restore` is the failed upload coming back: the same file, already
+    // described, and no reason to reach for the note a second time.
+    function stage(file, restore) {
+      if (!file) return;
+      var result = document.getElementById('capture-result');
+      // Said now rather than after the operator has written a note for a file
+      // this server was never going to read.
+      if (file.type.indexOf('image/') === 0 && !VISION) {
+        result.textContent = 'Image capture is not configured on this server.';
+        unstage();
+        return;
+      }
+      unstage();
+      staged = file;
+      stagedName.textContent = (file.name || 'photo.jpg') +
+        ' — ready. Press Capture.';
+      if (file.type.indexOf('image/') === 0) {
+        stagedUrl = URL.createObjectURL(file);
+        stagedThumb.src = stagedUrl;
+        stagedThumb.hidden = false;
+      }
+      stagedName.hidden = false;
+      stagedClear.hidden = false;
+      // The invitation steps aside for the file that accepted it: one box,
+      // saying one thing at a time.
+      if (stagedBox) stagedBox.hidden = false;
+      if (drop) drop.hidden = true;
+      // Only where a pointer says there is a hardware keyboard — the rule the
+      // paste box and the search box already follow. On a phone this would
+      // throw the software keyboard over the thumbnail the operator is
+      // checking, which is the picture they just took.
+      if (noteBox && !restore && window.matchMedia('(hover: hover)').matches) {
+        noteBox.focus();
+      }
+    }
+
+    function send(file) {
+      if (!file) return;
+      var isImage = file.type.indexOf('image/') === 0;
+      // By name as well as by type: a drop from some file managers carries no
+      // type at all, and the door judges those by their name too.
+      var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+      var result = document.getElementById('capture-result');
+      if (isImage && !VISION) {
+        result.textContent = 'Image capture is not configured on this server.';
+        return;
+      }
+      // The upload does not go through htmx, so the spinner beside the button
+      // never lit for it. On a phone a photo is the slowest thing this page
+      // sends and pressing Capture looked like it had done nothing.
+      result.textContent = 'Sending…';
+      var payload = new FormData();
+      if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
+      // The fallback name matters: a PDF that arrived unnamed and went up as
+      // `paste.txt` would be refused by the very door it belongs to.
+      var fallbackName = isImage ? 'photo.jpg' : (isPdf ? 'capture.pdf' : 'paste.txt');
+      payload.append(isImage ? 'image' : 'file', file, file.name || fallbackName);
+      var url = isImage ? '/api/v1/corpora/image' : '/api/v1/corpora/upload';
+      // The session cookie authenticates this: it is same-origin, so no token
+      // is involved.
+      fetch(url, { method: 'POST', body: payload })
+        // Not every failure answers in JSON. A file over the body limit is
+        // rejected before the handler sees it, and that reply is plain text —
+        // parsing it threw, and with nothing catching the throw the drop zone
+        // sat there having visibly done nothing.
+        .then(function (r) {
+          return r.json()
+            .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
+            .then(function (j) { return [r.ok, j]; });
+        })
+        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
+        .then(function (pair) {
+          // The server's reason, verbatim. A generic "upload failed" would
+          // hide what actually goes wrong here: wrong type, wrong encoding,
+          // an image door that is closed.
+          result.textContent = pair[0]
+            ? (isImage ? 'Captured — the photo is queued to be read.'
+               : isPdf ? 'Captured — the PDF is queued to be extracted.'
+               : 'Captured.')
+            : (pair[1].error || 'Upload failed.');
+          if (pair[0]) {
+            if (noteBox) noteBox.value = '';
+            htmx.trigger(document.body, 'captured');
+          } else {
+            // It never left. Put it back where it was, so the fix is a second
+            // press rather than a second trip to the camera.
+            stage(file, true);
+          }
+        });
+    }
+    if (drop) picker.addEventListener('change', function () { stage(picker.files[0]); });
+
+    // The whole page is the drop target, because a browser that is not offered
+    // the file takes it: a photo dropped an inch wide of the box replaced
+    // engram with the picture, and the capture the operator was in the middle
+    // of writing went with it. The box below still says where to aim; missing
+    // it is no longer punished.
+    //
+    // Only for drags carrying files. Dragging selected text into the paste box
+    // is a drop too, and cancelling that one would break a thing that works.
+    function carriesFiles(e) {
+      var types = e.dataTransfer && e.dataTransfer.types;
+      if (!types) return false;
+      for (var i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
+      return false;
+    }
+    // `dragenter` and `dragleave` fire again for every element the pointer
+    // crosses on the way in, so a depth count is what tells the page's edge
+    // from the boundary between two paragraphs inside it.
+    var depth = 0;
+    function undim() { depth = 0; if (stagedBox) stagedBox.classList.remove('dropping'); }
+    document.addEventListener('dragenter', function (e) {
+      if (!carriesFiles(e)) return;
+      depth++;
+      if (stagedBox) stagedBox.classList.add('dropping');
+    });
+    document.addEventListener('dragleave', function (e) {
+      if (!carriesFiles(e)) return;
+      if (--depth <= 0) undim();
+    });
+    // Without cancelling `dragover` the drop never happens — the browser reads
+    // the absence as "nothing here takes this" and opens the file itself.
+    document.addEventListener('dragover', function (e) {
+      if (carriesFiles(e)) e.preventDefault();
+    });
+    document.addEventListener('drop', function (e) {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      undim();
+      var files = e.dataTransfer.files;
+      if (files && files[0]) stage(files[0]);
+    });
+
+    if (stagedClear) stagedClear.addEventListener('click', unstage);
+
+    // The one button. A staged file is what it sends; with nothing staged it is
+    // the form's own submit and behaves exactly as it always did. Text typed
+    // above a staged file is not thrown away — it goes as the capture it is,
+    // in the same press.
+    // The Capture verb. A staged file is what it sends; with nothing staged it
+    // posts what is in the box. Text typed above a staged file is not thrown
+    // away — it goes as the capture it is, in the same press.
+    //
+    // The box's own form is a GET that searches, so the text cannot ride it:
+    // this posts to the same `/ui/capture` the old form did, with the same
+    // fields, and lands in the same fragment.
+    function postText() {
+      var text = box.value.trim();
+      if (!text) return;
+      var fromAsk = document.querySelector('input[name="from_ask"]');
+      htmx.ajax('POST', '/ui/capture', {
+        target: '#capture-result',
+        swap: 'innerHTML',
+        values: { text: text, from_ask: fromAsk ? fromAsk.value : '' }
+      }).then(function () {
+        // Cleared only on the path that stored something: a failed capture
+        // that emptied the box would lose the text it failed to keep.
+        box.value = '';
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        htmx.trigger(document.body, 'captured');
+      });
+    }
+    verb.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (staged) {
+        var file = staged;
+        unstage();
+        send(file);
+      }
+      postText();
+    });
+    // A pasted screenshot goes the same way as a dropped one — unless the
+    // paste is on its way somewhere that takes text. A clipboard from Sheets,
+    // Excel or Word carries the selection twice, as text and as a picture of
+    // itself, so taking the picture while the caret sat in the note box
+    // staged a screenshot and swallowed the paste the user asked for.
+    document.addEventListener('paste', function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+          e.preventDefault();
+          stage(items[i].getAsFile());
+          return;
+        }
+      }
+    });
+    }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     commandBar();
@@ -733,6 +1029,8 @@
     primeSlow();
     contextOffer();
     restoreReading();
+    boxVerbs();
+    captureVerb();
     askDriver();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
