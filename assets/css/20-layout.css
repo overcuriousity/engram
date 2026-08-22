@@ -169,7 +169,7 @@ nav.top {
 }
 nav.top a {
   color: var(--color-fg-secondary); text-decoration: none;
-  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: 0.875rem;
+  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: var(--text-base);
   transition: background 120ms ease, color 120ms ease;
 }
 nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }

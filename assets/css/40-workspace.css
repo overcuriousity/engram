@@ -38,7 +38,7 @@ body { overflow-x: hidden; }
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
   border-radius: var(--radius-md); overflow: auto; max-height: min(60vh, 45rem);
 }
-.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8125rem; }
+.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Wrapped, with the continuation hanging under its own line rather than under
    the line-number column — which is what made `pre` the right answer before: a
    command broken across two flush rows read as two commands, in a pane whose
@@ -69,11 +69,11 @@ body { overflow-x: hidden; }
   display: flex; gap: 0.625rem; align-items: flex-start;
   border: 1px solid var(--color-warning); background: var(--color-warning-dim);
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
-  font-size: 0.8125rem; margin-bottom: 0.75rem;
+  font-size: var(--text-sm); margin-bottom: 0.75rem;
 }
 .flag b { color: var(--color-warning); }
 
-.crumb { font-size: 0.8125rem; color: var(--color-fg-muted); margin-bottom: 0.75rem; }
+.crumb { font-size: var(--text-sm); color: var(--color-fg-muted); margin-bottom: 0.75rem; }
 
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
@@ -164,13 +164,13 @@ body { overflow-x: hidden; }
    has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
-.rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
-.rail-title { font-weight: 600; font-size: 0.875rem; }
+.rail-rank { font-size: var(--text-xs); color: var(--color-fg-muted); }
+.rail-title { font-weight: 600; font-size: var(--text-base); }
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */
 .rail-snippet {
-  font-size: 0.8125rem; color: var(--color-fg-secondary); margin-top: 0.25rem;
+  font-size: var(--text-sm); color: var(--color-fg-secondary); margin-top: 0.25rem;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.4em;
 }
@@ -189,17 +189,17 @@ body { overflow-x: hidden; }
    through and treating a recalled hit as the next-best answer. */
 .assoc-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border-subtle);
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
-.rail-why { font-size: 0.8125rem; color: var(--color-fg-muted); margin-top: 0.25rem; }
+.rail-why { font-size: var(--text-sm); color: var(--color-fg-muted); margin-top: 0.25rem; }
 /* Recalled by association, not ranked against the query — so it must not
    borrow the shape of something that was. The rule and the heading above said
    so already, and the identical card underneath them said otherwise. */
 .rail-assoc { border-style: dashed; background: transparent; }
 /* The count, above the list. */
 .result-count {
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted); margin-bottom: 0.5rem;
 }
 
@@ -207,7 +207,7 @@ body { overflow-x: hidden; }
    ranked — they placed — but they no longer read as answers. */
 .cliff-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--color-border-subtle);
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
 /* Demoted, not unreadable. At 0.55 over the dark base this was very likely
@@ -258,14 +258,14 @@ body { overflow-x: hidden; }
 .lin-tick { color: var(--color-fg-muted); font-family: var(--font-mono); line-height: 1.4; }
 .lin-body { min-width: 0; }
 .lin-head { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
-.lin-title { font-size: 0.875rem; }
+.lin-title { font-size: var(--text-base); }
 /* What kind of artifact this is, and whether the one above replaced it. Quiet:
    the title is what is being read, these are what qualify it. */
 .lin-kind {
-  font-size: 0.6875rem; color: var(--color-fg-muted);
+  font-size: var(--text-xs); color: var(--color-fg-muted);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.lin-sub { font-size: 0.75rem; color: var(--color-fg-muted); }
+.lin-sub { font-size: var(--text-xs); color: var(--color-fg-muted); }
 /* A source deleted since. Struck through rather than dropped: the text above
    still carries what it said. */
 .lin-gone .lin-title { text-decoration: line-through; }
@@ -274,18 +274,18 @@ body { overflow-x: hidden; }
    and this line in the rest: the card carries element ids and cannot be
    repeated, but the claim is real and the band would otherwise read as if only
    the other artifact came out of it. */
-.band-echo { font-size: 0.8125rem; margin: 0 0 0.5rem; }
+.band-echo { font-size: var(--text-sm); margin: 0 0 0.5rem; }
 
 /* The fallback for a source there is nothing to band. */
 .raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
-            overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8125rem; }
+            overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-sm); }
 
 /* One column on a narrow screen: the source first, then what came of it. */
 @media (max-width: 60rem) { .band { grid-template-columns: 1fr; } }
 
 /* What tells two rows with one title apart: when it was written, and how it
    opens. Quiet, because it is a disambiguator and not a second title. */
-.row-sub { font-size: 0.75rem; }
+.row-sub { font-size: var(--text-xs); }
 /* Four underlined links in a row read as a wall. The artifact each row is
    about keeps its underline; what it was written from stays reachable and
    recedes until pointed at. */
@@ -358,7 +358,7 @@ body { overflow-x: hidden; }
    needed before you have typed anything. */
 .keyhint {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-  margin: 0 0 0.75rem; font-size: 0.75rem; color: var(--color-fg-muted);
+  margin: 0 0 0.75rem; font-size: var(--text-xs); color: var(--color-fg-muted);
 }
 /* The row ships `hidden` and app.js decides. An author `display` beats the
    UA's `[hidden]` rule whatever its specificity, so without this the hint was
@@ -366,7 +366,7 @@ body { overflow-x: hidden; }
    teach — and "Got it" set an attribute that changed nothing. */
 .keyhint[hidden] { display: none; }
 .keyhint kbd {
-  font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
+  font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6;
   padding: 0 5px; border: 1px solid var(--color-border);
   border-radius: var(--radius-sm); background: var(--color-bg-surface);
   color: var(--color-fg-secondary);
@@ -585,7 +585,7 @@ body { overflow-x: hidden; }
 
 /* Said under the passage it belongs to, quietly: it is a way onward, not a
    warning that something is wrong. */
-.continues { margin: 0.5rem 0 0; font-size: 0.8125rem; }
+.continues { margin: 0.5rem 0 0; font-size: var(--text-sm); }
 
 /* The area under the search box. `min-height` is what keeps the answer landing
    from pushing the hint and the chips down a page that has already been read —
@@ -648,7 +648,7 @@ body { overflow-x: hidden; }
   display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
   margin-top: 0.6rem; padding: 0.6rem 0.625rem;
   border: 1px solid var(--color-border); border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated); font-size: 0.8125rem;
+  background: var(--color-bg-elevated); font-size: var(--text-sm);
 }
 .staged:has(#drop:not([hidden])) {
   border-style: dashed; background: none;
@@ -688,7 +688,7 @@ body { overflow-x: hidden; }
    against an excerpt. */
 .answer-live {
   margin: 0 0 1rem; padding: 0.75rem;
-  font-family: var(--font-mono); font-size: 0.875rem; line-height: 1.6;
+  font-family: var(--font-mono); font-size: var(--text-base); line-height: 1.6;
   white-space: pre-wrap; overflow-wrap: anywhere;
   color: var(--color-fg-secondary);
   background: var(--color-bg-surface);
@@ -700,7 +700,7 @@ body { overflow-x: hidden; }
    it grow would push the answer it precedes off the screen. */
 .reasoning {
   margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
-  font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap;
+  font-size: var(--text-sm); line-height: 1.5; white-space: pre-wrap;
   color: var(--color-fg-muted);
   border-left: 2px solid var(--color-border-strong);
   max-height: 12rem; overflow-y: auto;
@@ -725,7 +725,7 @@ body { overflow-x: hidden; }
    for as long as the model is thinking. */
 .reasoning-box { margin-bottom: 0.75rem; }
 .reasoning-box > summary {
-  cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted);
+  cursor: pointer; font-size: var(--text-sm); color: var(--color-fg-muted);
 }
 .reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
 
