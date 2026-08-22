@@ -154,7 +154,9 @@
 <p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo; — an answer engram
   wrote. Edit it as you like; saving is yours, and the capture records the
   question it came from.</p>
-<input type="hidden" name="from_ask" value="{{ prefill_ask }}" form="capture-form">
+{# Outside every form on purpose: the box's own form is a GET that searches,
+   and app.js reads this by name when Capture posts. #}
+<input type="hidden" name="from_ask" value="{{ prefill_ask }}">
 {% endif %}
 {# Rough stand-in for the tokeniser, filled by app.js: enough to warn, never to
    block. At `earned` and `off` capture makes no synthesis call, so the hint
@@ -236,7 +238,15 @@
   <p id="ask-status" class="sr-only" role="status"></p>
   <div id="ask-result"></div>
   <div id="capture-result"></div>
-  <p id="pane-idle" class="muted">Search to see an artifact here, beside the
-    lines it came from.</p>
+  {# The artifact swaps in *here*, never over the whole pane: the ask and
+     capture targets above exist nowhere else on the page, and a result click
+     that replaced the pane's innerHTML destroyed them — after which Ask
+     streamed into detached nodes and Capture had nowhere to answer, until a
+     full reload. app.js clears the ask remnants when this fills, and clears
+     this when an Ask starts, so the pane still shows one act at a time. #}
+  <div id="pane-content">
+    <p id="pane-idle" class="muted">Search to see an artifact here, beside the
+      lines it came from.</p>
+  </div>
 </div>
 {% endblock %}

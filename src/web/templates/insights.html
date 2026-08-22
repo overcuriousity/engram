@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% block title %}Housekeeping — engram{% endblock %}
+{% block title %}Insights — engram{% endblock %}
 {% block regions %}regions-table{% endblock %}
 {% block content %}
 {# ── What this memory is like ──────────────────────────────────────────────
@@ -83,8 +83,6 @@
 
 <h2>Housekeeping</h2>
 
-
-<p class="crumb"><a href="/ui">engram</a> › Housekeeping</p>
 
 {# The counts as a sentence rather than as `done: 17`-style badges: this is a
    page you open to reassure yourself, and a row of key-value chips reads as a
@@ -252,10 +250,9 @@
 {% if pursuit_enabled %}
 <h3>Pursuits</h3>
 {# No table here any more. A pursuit that ended unsatisfied is a hole in the
-   base, and holes have one list — on the capture page, where capturing
-   happens, beside the searches and questions that said the same thing another
-   way. One that ended satisfied needs nobody, and one that was written up is
-   under Generated above. #}
+   base, and holes have one list — the gap list above, on this page. One that
+   ended satisfied needs nobody, and one that was written up is under Generated
+   above. #}
 {% if pursuit_recent == 0 %}
 <p class="muted">No run of searches has gone quiet yet.</p>
 {% else %}
@@ -263,7 +260,7 @@
   {{ pursuit_recent }} recent{% if pursuit_unsatisfied > 0 %},
   of which {{ pursuit_unsatisfied }} went unanswered and
   {% if pursuit_unsatisfied == 1 %}is{% else %}are{% endif %}
-  <a href="/ui/capture#gaps">on the gap list</a>{% endif %}.
+  <a href="#gaps">on the gap list</a>{% endif %}.
 </p>
 {% endif %}
 {% endif %}

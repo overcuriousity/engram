@@ -127,9 +127,9 @@ mod tests {
 
     #[tokio::test]
     async fn housekeeping_is_one_name_and_one_url() {
-        // The nav says Housekeeping, the URL says /ui/ops, the page title said
-        // Ops — and /ui/housekeeping, the name a reader would type, was the
-        // browser's own error page.
+        // /ui/housekeeping is the name a reader was shown for a while, and it
+        // goes straight to the page — one hop, not a chain through the
+        // /ui/ops shim.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -142,8 +142,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT, "{res:?}");
-        assert_eq!(res.headers()["location"], "/ui/ops");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        assert_eq!(res.headers()["location"], "/ui/insights");
     }
 
     #[tokio::test]

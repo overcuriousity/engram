@@ -36,27 +36,39 @@ impl Store {
     /// Counts, in one round trip each. Cheap enough that the page needs no
     /// cache and no staleness to explain.
     pub async fn held(&self) -> Result<Held> {
+        // One round trip, not four in a row: this renders on Insights and,
+        // through the idle rail, on the start page. `synthesized` is named,
+        // not negated — `!= 'captured'` swept in `passage` rows, which are
+        // the document's own words verbatim, the opposite of what it counts.
+        // `Provenance::is_model_written` is the predicate, and those are its
+        // two values.
+        let (corpora, artifacts, segments, synthesized) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM corpora), \
+                    (SELECT count(*) FROM artifacts WHERE status = 'active'), \
+                    (SELECT count(*) FROM segments), \
+                    (SELECT count(*) FROM artifacts \
+                     WHERE status = 'active' AND provenance IN ('merged', 'synthesized'))",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok(Held {
-            corpora: sqlx::query_scalar("SELECT count(*) FROM corpora")
-                .fetch_one(&self.pool)
-                .await?,
-            artifacts: sqlx::query_scalar("SELECT count(*) FROM artifacts WHERE status = 'active'")
-                .fetch_one(&self.pool)
-                .await?,
-            segments: sqlx::query_scalar("SELECT count(*) FROM segments")
-                .fetch_one(&self.pool)
-                .await?,
-            // Named, not negated. `!= 'captured'` swept in `passage` rows,
-            // which are the document's own words verbatim — the opposite of
-            // what this counts. `Provenance::is_model_written` is the
-            // predicate, and these are its two values.
-            synthesized: sqlx::query_scalar(
-                "SELECT count(*) FROM artifacts \
-                 WHERE status = 'active' AND provenance IN ('merged', 'synthesized')",
-            )
-            .fetch_one(&self.pool)
-            .await?,
+            corpora,
+            artifacts,
+            segments,
+            synthesized,
         })
+    }
+
+    /// The two counts the idle rail introduces the base with. `held()`
+    /// computes two more that the rail throws away, and the rail renders on
+    /// every box-clear.
+    pub async fn held_brief(&self) -> Result<(i64, i64)> {
+        Ok(sqlx::query_as(
+            "SELECT (SELECT count(*) FROM corpora), \
+                    (SELECT count(*) FROM artifacts WHERE status = 'active')",
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// What is fading, bucketed.
@@ -76,26 +88,19 @@ impl Store {
     /// Four bands rather than a histogram: the question is "what is falling
     /// out of reach", which the bottom band answers. The shape of the curve is
     /// not a question anybody has.
-    pub async fn fading(&self, half_life_secs: i64, now: i64) -> Result<Vec<Bucket>> {
+    pub async fn fading(&self, half_life_days: f64, now: i64) -> Result<Vec<Bucket>> {
         let rows: Vec<(f64, i64)> = sqlx::query_as(
             "SELECT activation, activated_at FROM artifacts WHERE status = 'active'",
         )
         .fetch_all(&self.pool)
         .await?;
-        // A non-positive half-life turns decay off — the same reading
-        // `links::decayed` gives it, and the one the query path acts on.
-        // Clamping it to a second instead said the opposite: every artifact
-        // computed to ~0 and the whole base reported as out of reach, while
-        // search treated all of it as fully activated.
+        // `links::decayed` is the arithmetic the query path applies — the
+        // same formula, the same "non-positive turns decay off" reading. A
+        // copy of it here is a copy that can drift, and this page's whole
+        // claim is "what a search would find now".
         let (mut reachable, mut settling, mut fading, mut gone) = (0i64, 0i64, 0i64, 0i64);
         for (activation, at) in rows {
-            let a = match half_life_secs > 0 {
-                true => {
-                    let age = (now - at).max(0) as f64;
-                    activation * 0.5f64.powf(age / half_life_secs as f64)
-                }
-                false => activation,
-            };
+            let a = super::links::decayed(activation, at, now, half_life_days);
             match a {
                 _ if a >= 0.75 => reachable += 1,
                 _ if a >= 0.40 => settling += 1,
@@ -193,14 +198,14 @@ mod tests {
         let year = 365 * 86_400;
         store.set_activation(&made[0].id, 1.0, 0).await.unwrap();
 
-        let off = store.fading(0, year).await.unwrap();
+        let off = store.fading(0.0, year).await.unwrap();
         assert_eq!(off[0].label, "reachable");
         assert_eq!(off[0].count, 1, "with decay off, a year changes nothing");
         assert_eq!(off[3].count, 0);
 
         // And with decay on it still decays, which is the other half of the
         // claim this function's doc comment makes.
-        let on = store.fading(30 * 86_400, year).await.unwrap();
+        let on = store.fading(30.0, year).await.unwrap();
         assert_eq!(on[3].label, "out of reach");
         assert_eq!(on[3].count, 1);
     }

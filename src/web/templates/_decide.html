@@ -63,18 +63,15 @@
           data-keep="{{ p.a_title }}"
           onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Housekeeping.')">
       <input type="hidden" name="keep" value="{{ p.a_id }}">
-      <input type="hidden" name="to" value="/ui/capture">
       <button class="btn btn-sm {% if p.keeps_a %}btn-accent{% endif %}" type="submit">Keep “{{ p.a_title }}”</button>
     </form>
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
           data-keep="{{ p.b_title }}"
           onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Housekeeping.')">
       <input type="hidden" name="keep" value="{{ p.b_id }}">
-      <input type="hidden" name="to" value="/ui/capture">
       <button class="btn btn-sm {% if p.keeps_b %}btn-accent{% endif %}" type="submit">Keep “{{ p.b_title }}”</button>
     </form>
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
-      <input type="hidden" name="to" value="/ui/capture">
       <button class="btn btn-sm btn-ghost" type="submit">Dismiss</button>
     </form>
   </div>

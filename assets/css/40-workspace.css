@@ -36,11 +36,11 @@ body { overflow-x: hidden; }
    `::after` on a flex row, so the rule takes whatever width the words leave
    and needs no measuring. `min-width: 0` on the text, or a long label pushes
    the rule out of the column instead of shortening it. */
-.pane-label {
+.pane-label, .rail-act {
   display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
 }
 .pane-label > * { min-width: 0; }
-.pane-label::after {
+.pane-label::after, .rail-act::after {
   content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
   background: var(--color-border-subtle);
 }
@@ -214,23 +214,14 @@ body { overflow-x: hidden; }
    borrow the shape of something that was. The rule and the heading above said
    so already, and the identical card underneath them said otherwise. */
 .rail-assoc { border-style: dashed; background: transparent; }
-/* The count, above the list. */
 /* The rail's heading names the act that filled it: "3 results" while typing,
-   "Written from · 5" after an Ask. Same vocabulary as `.pane-label`, because
-   it is the same kind of statement about the same kind of region — and the
-   way back sits on the row with it, which is why the rule is on the row
-   rather than after the words. */
-.rail-act {
-  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
-}
+   "Written from · 5" after an Ask. The row-and-hairline itself is shared with
+   `.pane-label` above, because it is the same kind of statement about the
+   same kind of region; what differs is below. */
 /* The heading slot carries this class permanently (see workspace.html), and
    before anything has filled it — or after a failed swap empties it — a
    visible row would be the hairline hanging alone over the rail. */
 .rail-act:empty { display: none; }
-.rail-act::after {
-  content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
-  background: var(--color-border-subtle);
-}
 /* The way back to results, after an Ask. Last on the row, past the rule, so
    the heading still reads as a heading. */
 .rail-act .quiet-link { order: 3; flex: 0 0 auto; font-size: var(--text-xs); }
@@ -621,7 +612,8 @@ body { overflow-x: hidden; }
      for a pane to grow past the window instead of scrolling inside it. */
   .regions-rail-focus-source .rail { max-height: none; }
   .regions-rail-focus-source > .region-focus { display: flex; flex-direction: column; }
-  .regions-rail-focus-source .pane > [data-terms] {
+  .regions-rail-focus-source .pane > #pane-content,
+  .regions-rail-focus-source #pane-content > [data-terms] {
     display: flex; flex-direction: column; flex: 1; min-height: 0;
   }
   .regions-rail-focus-source .split { flex: 1; min-height: 0; align-items: stretch; }

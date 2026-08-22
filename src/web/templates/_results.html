@@ -48,7 +48,7 @@
     <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
        href="/ui/artifacts/{{ r.artifact_id }}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
-       hx-target="#pane" hx-swap="innerHTML transition:true" hx-push-url="true">
+       hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
       <div class="rail-head">
         {% if r.weak %}
         <span class="badge badge-warning">loose</span>
@@ -122,7 +122,7 @@
     <a class="rail-item rail-assoc" role="option" aria-selected="false"
        href="/ui/artifacts/{{ r.artifact_id }}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
-       hx-target="#pane" hx-swap="innerHTML transition:true" hx-push-url="true">
+       hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
       <div class="rail-head">
         {% if !r.title.is_empty() %}
         <span class="rail-title">{{ r.title }}</span>

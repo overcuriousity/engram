@@ -274,6 +274,17 @@
       }, 1000);
     }
 
+    // No search leaves this form while an ask owns the page. Disabling the
+    // box silences its `keyup`, but not a debounce timer that armed just
+    // before Ask was pressed, and not the "← results" anchor firing
+    // `submit` — and a disabled control serializes nothing, so either one
+    // sent `q` empty and swapped the idle rail over the citations the answer
+    // was being written from. `configRequest` is cancelable and is the one
+    // gate every htmx request from this form passes through.
+    form.addEventListener('htmx:configRequest', function (e) {
+      if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
+    });
+
     stopBtn.addEventListener('click', function () {
       if (!source) return;
       var secs = Math.round((Date.now() - started) / 1000);
@@ -286,6 +297,11 @@
 
     function fail(message) {
       stop();
+      // The rail was emptied when the ask began, and the heading over it is
+      // only rewritten by a citations event that is not coming. Left alone it
+      // kept claiming the last search's count over zero rows.
+      var head = document.getElementById('rail-head');
+      if (head) head.textContent = '';
       result.textContent = '';
       var box = document.createElement('div');
       box.className = 'flag';
@@ -443,6 +459,10 @@
       progress.hidden = true;
       rail.textContent = '';
       result.textContent = '';
+      // The pane shows one act at a time: the artifact a result click left
+      // here belongs to the search this ask supersedes.
+      var pane = document.getElementById('pane-content');
+      if (pane) pane.textContent = '';
       live.hidden = true;
       reasoningBox.hidden = true;
       reasoningBox.open = false;
@@ -700,7 +720,10 @@
   }
 
   function contextOffer() {
-    var box = document.querySelector('input[name=q]');
+    // The box is a textarea, and has been since the three pages became one.
+    // Matched as `input[name=q]` this never bound, so the offer outlived the
+    // first keystroke and kept logging impressions beside live queries.
+    var box = document.querySelector('textarea[name="q"]');
     if (!box) return;
     box.addEventListener('input', function () {
       offerDismissed = true;
@@ -962,7 +985,7 @@
             : (pair[1].error || 'Upload failed.');
           if (pair[0]) {
             if (noteBox) noteBox.value = '';
-            htmx.trigger(document.body, 'captured');
+            refreshRail();
           } else {
             // It never left. Put it back where it was, so the fix is a second
             // press rather than a second trip to the camera.
@@ -970,7 +993,7 @@
           }
         });
     }
-    if (drop) picker.addEventListener('change', function () { stage(picker.files[0]); });
+    if (picker) picker.addEventListener('change', function () { stage(picker.files[0]); });
 
     // The whole page is the drop target, because a browser that is not offered
     // the file takes it: a photo dropped an inch wide of the box replaced
@@ -1030,6 +1053,15 @@
     // The box's own form is a GET that searches, so the text cannot ride it:
     // this posts to the same `/ui/capture` the old form did, with the same
     // fields, and lands in the same fragment.
+    // The rail after a capture. A synthetic `input` keeps the verbs honest
+    // but matches nothing in the form's trigger list, so the rail kept
+    // showing results for text that no longer existed. The form's own submit
+    // is the refresh: with the box just emptied the results endpoint answers
+    // with the idle rail, whose "Last captured" row is the capture landing.
+    function refreshRail() {
+      htmx.trigger(form, 'submit');
+    }
+
     function postText() {
       var text = box.value.trim();
       if (!text) return;
@@ -1064,7 +1096,7 @@
         if (!stored) return;
         box.value = '';
         box.dispatchEvent(new Event('input', { bubbles: true }));
-        htmx.trigger(document.body, 'captured');
+        refreshRail();
       });
     }
     verb.addEventListener('click', function (e) {
@@ -1148,7 +1180,7 @@
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.regions');
-      if (ws && e.target.id === 'pane') ws.classList.add('has-selection');
+      if (ws && e.target.id === 'pane-content') ws.classList.add('has-selection');
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
@@ -1187,7 +1219,20 @@
       // Matched on the href rather than on the click, because the pane is also
       // swapped by the Related and Seen-together links inside it, and those
       // move the selection just as truly as a click in the rail does.
-      if (e.target.id === 'pane') {
+      if (e.target.id === 'pane-content') {
+        // An artifact filled the slot, so whatever an ask left around it —
+        // the streamed text, the reasoning, the progress line, the rendered
+        // answer, a capture receipt — is over. The nodes survive the swap by
+        // design (they are the ask's only targets); they must not keep
+        // talking over the artifact.
+        ['ask-live', 'ask-reasoning-box', 'ask-progress'].forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) el.hidden = true;
+        });
+        ['ask-result', 'ask-status', 'capture-result'].forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = '';
+        });
         var open = window.location.pathname;
         document.querySelectorAll('.rail-item').forEach(function (el) {
           el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');

@@ -493,36 +493,47 @@ pub(crate) struct IdleRecentRow {
     pub(crate) when: String,
 }
 
-/// Counts and the last few captures. The same cheap reads Insights makes —
-/// `held` is four scalar queries — because the idle rail is on the most-opened
-/// screen and must cost nothing to render.
+/// The name a capture goes by before synthesis titles it: the hint, or its
+/// opening words — with a word for the two origins that have none to open
+/// with. One rule, because the queue and the idle rail naming the same row
+/// differently would read as two captures.
+fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> String {
+    title_hint.unwrap_or_else(|| {
+        if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_IMAGE {
+            "photo".into()
+        } else if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_PDF {
+            // A PDF has no opening words until the extraction lands. Without
+            // this the row renders an empty anchor: nothing to read and
+            // nothing to click through to the corpus.
+            "document".into()
+        } else {
+            markdown::snippet(raw_text, 60)
+        }
+    })
+}
+
+/// Two counts and the last few captures, off the slimmest reads there are:
+/// the idle rail is on the most-opened screen, re-renders on every box-clear,
+/// and must cost nothing.
 pub(crate) async fn rail_idle(st: &AppState) -> Result<RailIdleTemplate> {
-    let held = st.core.store.held().await?;
+    let (corpora, artifacts) = st.core.store.held_brief().await?;
     let recent = st
         .core
         .store
-        .list_corpora(5, 0)
+        .recent_captures(5)
         .await?
         .into_iter()
-        .map(|s| IdleRecentRow {
-            when: crate::web::judge::ago(s.created_at),
-            // The same naming the queue uses: the title synthesis gave it, or
-            // the opening words — the only thing anything knows about it.
-            label: s.title_hint.clone().unwrap_or_else(|| {
-                if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
-                    "photo".into()
-                } else if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_PDF {
-                    "document".into()
-                } else {
-                    markdown::snippet(&s.raw_text, 60)
-                }
-            }),
-            id: s.id,
-        })
+        .map(
+            |(id, title_hint, origin, created_at, opening)| IdleRecentRow {
+                when: crate::web::judge::ago(created_at),
+                label: corpus_label(title_hint, &opening, &origin),
+                id,
+            },
+        )
         .collect();
     Ok(RailIdleTemplate {
-        artifacts: held.artifacts,
-        corpora: held.corpora,
+        artifacts,
+        corpora,
         recent,
     })
 }
@@ -1317,18 +1328,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // is what says the name is still coming; the label itself is not
             // the place to say it.
             opening: markdown::snippet(&s.raw_text, 60),
-            label: s.title_hint.clone().unwrap_or_else(|| {
-                if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
-                    "photo".into()
-                } else if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_PDF {
-                    // A PDF has no opening words until the extraction lands.
-                    // Without this the row renders an empty anchor: nothing to
-                    // read and nothing to click through to the corpus.
-                    "document".into()
-                } else {
-                    markdown::snippet(&s.raw_text, 60)
-                }
-            }),
+            label: corpus_label(s.title_hint.clone(), &s.raw_text, &s.origin),
             unnamed: s.title_hint.is_none() && in_flight,
             in_flight,
             settled: matches!(s.status, CorpusStatus::Ready),
@@ -2223,7 +2223,7 @@ async fn resolve_near_dupe_ui(
 
 /// Where a lifecycle button should land afterwards.
 ///
-/// The same four actions are offered from two places: the Ops review lists,
+/// The same four actions are offered from two places: the Insights review lists,
 /// where the queue is the thing being worked through, and an artifact's own
 /// page, where being thrown onto Ops for pressing "Confirm still accurate"
 /// loses the reader's place. The page that rendered the button says where it
@@ -2845,11 +2845,15 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
-        // One name for the page. The nav word is Housekeeping and the route is
-        // `/ui/ops`; a reader who types the word they were shown lands here.
+        // The page's spoken names. Housekeeping was the nav word for a while,
+        // and `/ui/ops` still answers as the old door — but this goes straight
+        // to the page rather than chaining through that shim, and it takes an
+        // `Identity` like every other `/ui` route: a redirect that answers
+        // before the session is checked tells an anonymous caller which paths
+        // exist.
         .route(
             "/ui/housekeeping",
-            get(|| async { Redirect::permanent("/ui/ops") }),
+            get(|_id: Identity| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
@@ -6401,19 +6405,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capturing_text_stores_it_and_says_nothing() {
-        // The confirmation is the row that appears under "Recent" — same link,
-        // same progress badge. A card above the list saying it again was the
-        // one capture reported twice.
+    async fn capturing_text_stores_it_and_says_so() {
+        // One line of receipt, with the link to what was stored. The queue
+        // that used to repeat this fragment lives on Insights now, so an
+        // empty answer left the box clearing itself with no acknowledgment —
+        // indistinguishable from data loss.
         let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(html.contains("Captured"), "{html}");
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
         assert!(
-            body_of(res).await.trim().is_empty(),
-            "an ordinary capture repeats what the queue already shows"
+            html.contains(&format!("/ui/corpora/{}", stored.id)),
+            "the receipt links what it stored: {html}"
         );
         assert_eq!(
             core.store.list_corpora(10, 0).await.unwrap().len(),
@@ -8332,7 +8340,7 @@ mod tests {
 
         let one = get_body(&app, &cookie, "/ui/insights").await;
         assert!(one.contains("1 went unanswered"), "{one}");
-        assert!(one.contains("is\n  <a href=\"/ui/capture#gaps\""), "{one}");
+        assert!(one.contains("is\n  <a href=\"#gaps\""), "{one}");
     }
 
     #[tokio::test]

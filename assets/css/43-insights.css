@@ -19,10 +19,6 @@
 .regions-table table.grid td:last-child,
 .regions-table table.grid th:last-child { width: 1%; white-space: nowrap; }
 
-/* The line under a title in a cell: what it was, when. Smaller than the link
-   above it, and never the thing that sets the row's height. */
-.row-sub { font-size: var(--text-xs); }
-
 /* Wide content scrolls in its own box rather than dragging the page sideways.
    `body { overflow-x: hidden }` is the backstop; this is what stops a table
    needing it. */

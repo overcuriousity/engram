@@ -490,10 +490,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         fading: st
             .core
             .store
-            .fading(
-                (st.core.activation.half_life_days * 86_400.0) as i64,
-                crate::store::now(),
-            )
+            .fading(st.core.activation.half_life_days, crate::store::now())
             .await?,
         // Read only where searches are being recorded at all. The measure is
         // read off judged searches, and on an installation that records none

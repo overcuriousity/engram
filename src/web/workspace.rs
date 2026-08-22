@@ -825,6 +825,30 @@ mod tests {
     }
 
     /// The command overlay was a second text surface for the problem the
+    /// A result click must never swap away the ask and capture targets: they
+    /// exist nowhere but the workspace's first paint, so a fragment that
+    /// replaced the whole pane left Ask streaming into detached nodes and
+    /// Capture with nowhere to answer, until a full reload.
+    #[tokio::test]
+    async fn opening_a_result_leaves_the_ask_and_capture_targets_standing() {
+        let html = workspace("/ui").await;
+        for id in ["ask-live", "ask-result", "capture-result", "pane-content"] {
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "{id} is on first paint"
+            );
+        }
+        let tpl = include_str!("templates/_results.html");
+        assert!(
+            !tpl.contains(r##"hx-target="#pane""##),
+            "a result swapping the whole pane destroys the ask/capture targets"
+        );
+        assert!(
+            tpl.contains(r##"hx-target="#pane-content""##),
+            "results open inside the pane's content slot"
+        );
+    }
+
     /// first one now solves. `/` focuses the real box instead.
     #[tokio::test]
     async fn the_second_text_surface_is_gone() {
