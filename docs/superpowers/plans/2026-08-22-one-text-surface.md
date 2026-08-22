@@ -1539,11 +1539,28 @@ wc -l src/web/templates/workspace.html assets/css/40-workspace.css \
 Write them into the table below, beside the before-figures from spec §9. The
 spec claims a reduction in templates and CSS; this is the evidence.
 
-| File | Before | After |
-|---|---|---|
-| templates (search + capture + ask + _sitting) | 604 | |
-| CSS (40-search + 41-capture + 45-ask) | 813 | |
-| `src/web/ui.rs` | 10,880 | |
+| File | Before | After | |
+|---|---|---|---|
+| templates (search + capture + ask + _sitting) | 604 | **211** (`workspace.html`) | −393 |
+| CSS (40-search + 41-capture + 45-ask) | 813 | **764** (`40-workspace.css`) | −49 |
+| `src/web/ui.rs` | 10,880 | **9,842** | −1,038 |
+| `assets/app.js` | 943 | 1,305 | +362 |
+
+The templates are where the claim held: three page arrangements became
+one, and `capture.html`'s file furniture now renders only when a file is
+staged. The CSS moved rather than shrank — 218 of its lines went to
+`43-insights.css` with the sections that left the workspace, so the real
+figure against 813 is 982 across two files, and the honest reading is
+that consolidating three stylesheets bought less than the plan supposed.
+
+`app.js` grew, and that is the trade this design makes: `capture.html`
+carried 180 lines of inline script that a single page cannot have three
+copies of, so it moved into the bundle rather than disappearing.
+
+`ui.rs` lost 1,038 lines to two new files (`workspace.rs` 934,
+`insights.rs` 635) plus what was deleted outright — the sitting rail,
+the three page handlers, the command bar. It is still 9,842 lines and
+still too large; this work took out the part it rewrote and no more.
 
 - [ ] **Step 2: Strike the roadmap item**
 
