@@ -251,6 +251,13 @@
       form.setAttribute('aria-busy', busy ? 'true' : 'false');
       var vs = form.querySelectorAll('[data-verb]');
       for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
+      // The chips fire the form too, and leaving them live was not a smaller
+      // hole than leaving the box live: a disabled control is left out of the
+      // serialization, so a chip clicked mid-answer sent `q` empty and swapped
+      // a "0 results" rail over the citations the answer was being written
+      // from.
+      var chips = form.querySelectorAll('#kind-chips input');
+      for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
       // A box someone emptied while the answer streamed must not come back
       // with live verbs over nothing to act on.
       if (!busy) box.dispatchEvent(new Event('input', { bubbles: true }));
@@ -577,25 +584,6 @@
     paint();
   }
 
-  function claimPaste() {
-    var box = document.querySelector('textarea[name="text"]');
-    if (!box) return;
-    var text = null;
-    try {
-      text = sessionStorage.getItem('engram.paste');
-      if (text) sessionStorage.removeItem('engram.paste');
-    } catch (e) { return; }
-    if (!text || box.value) return;
-    box.value = text;
-    // Assigning `value` fires nothing, and the segment-and-cost hint on the
-    // capture page is bound to `input`. The command bar only routes here for a
-    // paste past PASTE characters — exactly the multi-segment case the hint
-    // exists to warn about — so without this it stayed hidden for every paste
-    // that needed it.
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    box.focus();
-  }
-
   // The situation this page view happened in.
   //
   // Synchronous, because htmx reads `hx-vals js:` synchronously. The two
@@ -783,10 +771,27 @@
     if (!box) return;
     var buttons = form.querySelectorAll('[data-verb]');
 
-    // Neither verb has anything to act on while the box is empty.
+    // Neither verb has anything to act on while the box is empty — except
+    // Capture, whose act can also be a staged file. A photo over an empty box
+    // left Capture disabled and the file with no way into the base: the state
+    // rendered, the control did not exist. The staged box is read directly
+    // rather than mirrored into a flag, and stage()/unstage() fire `input` on
+    // the box so this runs when staging changes, not only when typing does.
     function sync() {
-      var empty = !box.value.trim();
-      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = empty;
+      // An act in flight owns the verbs, and `setBusy` in askDriver is what
+      // says so. Both write `disabled` on the same buttons, so without this
+      // anything that fires `input` mid-answer handed them back — staging a
+      // file does, and a file can be dropped on the page while an answer is
+      // streaming.
+      if (form.getAttribute('aria-busy') === 'true') return;
+      var hasText = !!box.value.trim();
+      var stagedEl = document.getElementById('staged');
+      var hasFile = !!(stagedEl && !stagedEl.hidden);
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].disabled = buttons[i].getAttribute('data-verb') === 'capture'
+          ? !(hasText || hasFile)
+          : !hasText;
+      }
     }
 
     // One line to start, growing to a ten-line cap and then scrolling inside
@@ -806,14 +811,6 @@
     box.addEventListener('input', function () { sync(); grow(); });
     sync();
     grow();
-
-    // What the door asked for. Search needs no value: typing is already the
-    // whole of it, and the form's `load` trigger has run by now.
-    var bar = document.querySelector('[data-workspace]');
-    var opens = bar && bar.getAttribute('data-open-with');
-    if (opens === 'capture' && window.matchMedia('(hover: hover)').matches) {
-      box.focus();
-    }
   }
 
   // ── Capture, as a verb ──────────────────────────────────────────────
@@ -875,6 +872,9 @@
       // Or picking the same file twice in a row fires no `change` the second
       // time, and the drop zone looks broken.
       if (picker) picker.value = '';
+      // Capture may have been armed by this file alone. See `sync` in
+      // boxVerbs, which listens for this.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     // `restore` is the failed upload coming back: the same file, already
@@ -911,6 +911,9 @@
       if (noteBox && !restore && window.matchMedia('(hover: hover)').matches) {
         noteBox.focus();
       }
+      // A file over an empty box is still something Capture can act on. See
+      // `sync` in boxVerbs, which listens for this.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     function send(file) {
@@ -987,11 +990,19 @@
     // crosses on the way in, so a depth count is what tells the page's edge
     // from the boundary between two paragraphs inside it.
     var depth = 0;
-    function undim() { depth = 0; if (stagedBox) stagedBox.classList.remove('dropping'); }
+    // Both the staged box and the picker light up, because only one of them is
+    // on screen at a time: before anything is staged the box is `display:
+    // none`, so a class on it alone made the first drop — the common one —
+    // a drag with no visible target anywhere on the page.
+    function dim(on) {
+      if (stagedBox) stagedBox.classList.toggle('dropping', on);
+      if (drop) drop.classList.toggle('dropping', on);
+    }
+    function undim() { depth = 0; dim(false); }
     document.addEventListener('dragenter', function (e) {
       if (!carriesFiles(e)) return;
       depth++;
-      if (stagedBox) stagedBox.classList.add('dropping');
+      dim(true);
     });
     document.addEventListener('dragleave', function (e) {
       if (!carriesFiles(e)) return;
@@ -1012,10 +1023,6 @@
 
     if (stagedClear) stagedClear.addEventListener('click', unstage);
 
-    // The one button. A staged file is what it sends; with nothing staged it is
-    // the form's own submit and behaves exactly as it always did. Text typed
-    // above a staged file is not thrown away — it goes as the capture it is,
-    // in the same press.
     // The Capture verb. A staged file is what it sends; with nothing staged it
     // posts what is in the box. Text typed above a staged file is not thrown
     // away — it goes as the capture it is, in the same press.
@@ -1027,13 +1034,34 @@
       var text = box.value.trim();
       if (!text) return;
       var fromAsk = document.querySelector('input[name="from_ask"]');
+      // htmx settles this promise for every answer the server gives, a 500
+      // among them — it rejects only for a request that never completed at
+      // all — so the promise on its own says nothing about whether anything
+      // was stored, and the clear below ran on the failures too. The verdict
+      // is on `htmx:afterRequest`, which fires before the promise settles.
+      //
+      // Matched on the path because the box's own search is firing requests
+      // from the same body at the same time, and either one's status would
+      // otherwise be read as this one's.
+      var stored = false;
+      function verdict(e) {
+        var path = e.detail && e.detail.pathInfo;
+        if (!path || path.requestPath !== '/ui/capture') return;
+        stored = !!e.detail.successful;
+      }
+      document.body.addEventListener('htmx:afterRequest', verdict);
       htmx.ajax('POST', '/ui/capture', {
         target: '#capture-result',
         swap: 'innerHTML',
         values: { text: text, from_ask: fromAsk ? fromAsk.value : '' }
-      }).then(function () {
+      // A transport failure rejects, and nothing catching it was an unhandled
+      // rejection on top of a capture that visibly did nothing.
+      }).catch(function () {}).then(function () {
+        document.body.removeEventListener('htmx:afterRequest', verdict);
         // Cleared only on the path that stored something: a failed capture
-        // that emptied the box would lose the text it failed to keep.
+        // that emptied the box would lose the text it failed to keep, and the
+        // error fragment beside it is not where the text went.
+        if (!stored) return;
         box.value = '';
         box.dispatchEvent(new Event('input', { bubbles: true }));
         htmx.trigger(document.body, 'captured');
@@ -1069,7 +1097,6 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
-    claimPaste();
     themeToggle();
     keyHint();
     primeSlow();
@@ -1171,10 +1198,16 @@
 
   // Focused only where a pointer says there is a hardware keyboard. On a touch
   // screen the software keyboard covers what the page was opened to show — the
-  // results on Search, the pending decisions and recent captures on Capture,
-  // which is the app's start page — and in an installed window there is no URL
-  // bar to dismiss it from. This is why neither field carries `autofocus`.
-  var field = document.querySelector('input[name="q"], textarea[name="text"]');
+  // rail, and on the start page the base introducing itself — and in an
+  // installed window there is no URL bar to dismiss it from. This is why the
+  // box carries no `autofocus`.
+  //
+  // `textarea[name="q"]` is the box. It was matched as `input[name="q"]` and
+  // `textarea[name="text"]` until the three pages folded into one, which is
+  // two selectors for elements the workspace no longer has: the box was not
+  // focused on any pointer device, on any route. The input form is still here
+  // for the assign box on Insights.
+  var field = document.querySelector('textarea[name="q"], input[name="q"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
   // Whether something is being typed into. Every letter shortcut below is

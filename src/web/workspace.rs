@@ -99,11 +99,29 @@ struct WorkspaceTemplate {
     /// it was an answer to, and the operator deciding whether to keep it is
     /// the person who most needs to see the question.
     prefill_question: String,
-    /// What app.js should do on first paint: `""`, `"ask"` or `"capture"`.
-    /// Search needs no value — typing already covers it. Rendered into
-    /// `data-open-with`, so the decision is made here and the template holds
-    /// no logic of its own.
+    /// Which door this is: `""` for the workspace and its search deep link,
+    /// `"ask"` or `"capture"` for the two that arrive with the box already
+    /// filled.
+    ///
+    /// It gates the form's `load` trigger. A filled box is a search to run
+    /// only where a search filled it; the other two doors fill it with a
+    /// question or with an answer being kept, and running a search over
+    /// either was a query nobody typed — an embedding call, an activation
+    /// bump and a Judge-queue row for the capture door especially, whose box
+    /// holds a whole model answer.
+    ///
+    /// Also rendered into `data-open-with`, which is how the page says out
+    /// loud which door opened it.
     open_with: &'static str,
+    /// The idle rail, pre-rendered: the base introducing itself when the page
+    /// opens with an empty box, and an empty string when it opens to a query
+    /// — the `load` trigger fills the rail with results then, and rendering
+    /// an introduction under them for one round trip would be flicker.
+    ///
+    /// Rendered here rather than composed in the template because the same
+    /// fragment is what the results endpoint returns when the box is emptied
+    /// — one account of the idle state, however it is reached.
+    idle: String,
 }
 
 /// Everything every door renders, before the door says what it opened for.
@@ -130,6 +148,13 @@ async fn base_template(st: &AppState, q: String, category: String) -> Result<Wor
     // while the results are not, and there is no chip to click to get back
     // out.
     ensure_facet(&mut facets.categories, &category);
+    let idle = match q.is_empty() {
+        true => crate::web::ui::rail_idle(st)
+            .await?
+            .render()
+            .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
+        false => String::new(),
+    };
     Ok(WorkspaceTemplate {
         judge_pending: crate::web::state::judge_pending(st).await,
         ask_enabled: crate::web::state::ask_enabled(st),
@@ -142,6 +167,7 @@ async fn base_template(st: &AppState, q: String, category: String) -> Result<Wor
         prefill_ask: String::new(),
         prefill_question: String::new(),
         open_with: "",
+        idle,
     })
 }
 

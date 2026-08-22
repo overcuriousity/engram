@@ -117,7 +117,7 @@ pub fn diagnosis(rank: Option<i64>, verdict: Verdict) -> &'static str {
 
 /// Roughly how long ago, in the words someone would use out loud. Precision
 /// past "days" would suggest the timestamp matters; it is here to jog a memory.
-fn ago(then: i64) -> String {
+pub(crate) fn ago(then: i64) -> String {
     let days = (crate::store::now() - then).max(0) / 86_400;
     match days {
         0 => "today".into(),

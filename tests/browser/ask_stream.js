@@ -39,8 +39,22 @@ let child = null;
 const HARNESS = `
   document.addEventListener('DOMContentLoaded', function () {
     var ask = function () {
-      document.querySelector('textarea[name="q"]').value = 'what is alpha';
-      document.querySelector('[data-verb="ask"]').click();
+      var box = document.querySelector('textarea[name="q"]');
+      box.value = 'what is alpha';
+      // Both verbs are disabled while the box is empty, and assigning the
+      // value fires nothing — so without this the button was still disabled,
+      // click() returned early the way it does on any disabled control, and
+      // this suite passed by never asking anything at all.
+      // (No backticks in here: the whole harness is a template literal.)
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      var btn = document.querySelector('[data-verb="ask"]');
+      // The double scenario drives two asks into the driver at once. The
+      // button disables itself for the length of an ask, which is the page's
+      // own guard and not the one under test here: what this scenario proves
+      // is that the driver supersedes the first ask rather than leaving its
+      // stream open and unclosable.
+      btn.disabled = false;
+      btn.click();
     };
     setTimeout(ask, 50);
     ${SCENARIO === 'double' ? 'setTimeout(ask, 70);' : ''}
@@ -61,7 +75,11 @@ const HARNESS = `
           liveText: document.getElementById('ask-live').textContent,
           liveHidden: document.getElementById('ask-live').hidden,
           reasoningText: document.getElementById('ask-reasoning').textContent,
-          reasoningHidden: document.getElementById('ask-reasoning').hidden,
+          // The disclosure, not the div inside it: the driver hides the box
+          // and leaves the text where it is, so the next ask reuses it. Read
+          // off the inner div this said the aside was still on screen after
+          // every answer.
+          reasoningHidden: document.getElementById('ask-reasoning-box').hidden,
           statusText: document.getElementById('ask-status').textContent,
           progressText: document.getElementById('ask-progress').textContent,
           railIds: Array.prototype.map.call(

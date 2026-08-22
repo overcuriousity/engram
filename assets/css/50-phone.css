@@ -105,21 +105,24 @@
     background: var(--color-bg-surface);
     border-top: 1px solid var(--color-border);
   }
-  /* Not thumb furniture. The bar keeps the box and the two verbs — those are
-     the application — and sheds everything that belongs to a page you are
-     reading rather than to a box you are typing into with one hand: the hint
-     that survives the first keystroke, the chip row, the key teaching, and the
-     staged file with its note.
+  /* Not thumb furniture. The bar keeps the box, the verbs and the staged file
+     — those are the application — and sheds everything that belongs to a page
+     you are reading rather than to a box you are typing into with one hand:
+     the hint that survives the first keystroke, the chip row, the key
+     teaching.
 
-     The staged box especially: it is the tallest thing that can appear here,
-     and a file being sent is not something you watch from the thumb. It stays
-     in the flow above, where it is next to the Capture that sends it. */
+     The staged box used to be in this list, on the argument that it "stays in
+     the flow above" — but it never was in the flow above: it lives inside
+     this fixed bar, so hiding it here hid it entirely, and a photo taken from
+     the camera staged invisibly — no thumbnail to check, no note to write, no
+     Remove, and a Capture that sent it blind. It is tall, and that is the
+     price of seeing the one thing that says which photo this is; it appears
+     only while a file waits, which is a state the operator just chose. */
   .regions-rail-focus-source .region-bar .hint,
   .regions-rail-focus-source .region-bar .facets,
   .regions-rail-focus-source .region-bar .chips,
   .regions-rail-focus-source .region-bar .facet-label,
   .regions-rail-focus-source .region-bar .keyhint,
-  .regions-rail-focus-source .region-bar .staged,
   .regions-rail-focus-source .region-bar .offer,
   .regions-rail-focus-source .region-bar .row { display: none; }
 
@@ -174,6 +177,10 @@
 
   /* No scroller inside a scroller: the page is the only thing that scrolls. */
   .rail, .raw { max-height: none; }
+
+  /* The idle rail's recent rows are links, and a thumb needs the same room
+     here that every other target gets. */
+  .idle-row { min-height: 44px; align-items: center; }
 
   /* The metadata column is fixed-width and the title is what gives: with a
      timestamp in the row, a name truncated to "Fake title: al…" was all that

@@ -471,6 +471,62 @@ struct ResultsTemplate {
     terms: String,
 }
 
+/// The rail before anything is asked: the base introducing itself.
+///
+/// Rendered twice by design — inlined into the workspace page when it opens
+/// with an empty box, and returned by the results endpoint when the box is
+/// emptied — so the idle state is one account however it is reached, and
+/// clearing a query goes back to it rather than to a "No matches." nobody
+/// searched for.
+#[derive(Template)]
+#[template(path = "_rail_idle.html")]
+pub(crate) struct RailIdleTemplate {
+    pub(crate) artifacts: i64,
+    pub(crate) corpora: i64,
+    pub(crate) recent: Vec<IdleRecentRow>,
+}
+
+pub(crate) struct IdleRecentRow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    /// "today", "3 days ago" — a jog, not a timestamp. See `judge::ago`.
+    pub(crate) when: String,
+}
+
+/// Counts and the last few captures. The same cheap reads Insights makes —
+/// `held` is four scalar queries — because the idle rail is on the most-opened
+/// screen and must cost nothing to render.
+pub(crate) async fn rail_idle(st: &AppState) -> Result<RailIdleTemplate> {
+    let held = st.core.store.held().await?;
+    let recent = st
+        .core
+        .store
+        .list_corpora(5, 0)
+        .await?
+        .into_iter()
+        .map(|s| IdleRecentRow {
+            when: crate::web::judge::ago(s.created_at),
+            // The same naming the queue uses: the title synthesis gave it, or
+            // the opening words — the only thing anything knows about it.
+            label: s.title_hint.clone().unwrap_or_else(|| {
+                if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
+                    "photo".into()
+                } else if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_PDF {
+                    "document".into()
+                } else {
+                    markdown::snippet(&s.raw_text, 60)
+                }
+            }),
+            id: s.id,
+        })
+        .collect();
+    Ok(RailIdleTemplate {
+        artifacts: held.artifacts,
+        corpora: held.corpora,
+        recent,
+    })
+}
+
 #[derive(Template)]
 #[template(path = "_queue.html")]
 struct QueueTemplate {
@@ -988,15 +1044,13 @@ pub(crate) async fn search_results(
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // Clearing the box fires a request with an empty query. That is not an
-    // error; it just means there is nothing to show.
+    // error, and it is not "No matches." either — an empty ResultsTemplate
+    // rendered exactly that, which is a claim about a base nobody searched.
+    // An empty box is the idle state, so the idle rail comes back: the base
+    // introducing itself, with its heading swapped in out of band the same
+    // way a result count is.
     if p.q.trim().is_empty() {
-        return Ok(HtmlTemplate(ResultsTemplate {
-            results: vec![],
-            associated: vec![],
-            all_weak: false,
-            terms: String::new(),
-        })
-        .into_response());
+        return Ok(HtmlTemplate(rail_idle(&st).await?).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -3768,11 +3822,24 @@ mod tests {
         app_for(core).await
     }
 
+    /// The box form's `hx-trigger`, on its own. `html.contains("load")` is
+    /// not the same question: the context offer carries `hx-trigger="load"`
+    /// too, and so does the word inside half the prose on the page.
+    fn trigger_of(html: &str) -> String {
+        let form = html.split(r#"id="box-form""#).nth(1).expect("the box form");
+        let trigger = form.split(r#"hx-trigger=""#).nth(1).expect("its trigger");
+        trigger.split('"').next().unwrap().to_string()
+    }
+
     /// The ask door, which is the workspace with the question already in the
-    /// box and an answer requested on first paint. A gap's "ask again" links
-    /// here.
+    /// box and Ask one press away. A gap's "ask again" links here.
+    ///
+    /// Filled and still. A filled box otherwise carries a `load` trigger that
+    /// searches it on arrival, and through this door that meant the question
+    /// was searched for rather than asked — the one thing the door is named
+    /// after was the one thing it did not do.
     #[tokio::test]
-    async fn the_ask_door_fills_the_one_box_and_asks_on_arrival() {
+    async fn the_ask_door_fills_the_one_box_and_runs_nothing_on_arrival() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui/ask?q=why+did+the+reindex+fail", &cookie).await;
         assert!(
@@ -3782,6 +3849,10 @@ mod tests {
         assert!(
             html.contains("why did the reindex fail"),
             "the box carries the question: {html}"
+        );
+        assert!(
+            !trigger_of(&html).contains("load"),
+            "and nothing is searched for on the way in: {html}"
         );
         // Every id the stream driver writes into has to survive the move; the
         // browser suite targets each of these by name.
@@ -3837,6 +3908,14 @@ mod tests {
         assert!(
             html.contains(r#"data-open-with="capture""#),
             "the page opens capturing: {html}"
+        );
+        // The box holds a whole model answer. Searching for it on arrival was
+        // an embedding call, an activation bump on whatever it retrieved and,
+        // where searches are recorded, a Judge-queue row — for a paragraph the
+        // operator is about to store, not look for.
+        assert!(
+            !trigger_of(&html).contains("load"),
+            "and the answer in the box is not searched for: {html}"
         );
         assert!(html.contains("data-workspace"), "and it is the workspace");
         assert!(
@@ -3901,7 +3980,58 @@ mod tests {
         // keystroke, because no keystroke is coming.
         let html = get(&app, "/ui/search?q=volume+move", &cookie).await;
         assert!(html.contains("volume move"), "the box comes back filled");
-        assert!(html.contains("load"), "and the results are fetched on load");
+        assert!(
+            trigger_of(&html).contains("load"),
+            "and the results are fetched on load: {html}"
+        );
+    }
+
+    /// The idle state is designed, not left over. With an empty box the rail
+    /// introduces the base instead of standing empty, and the file picker is
+    /// on the page from first paint: it once lived inside the staged box,
+    /// which is hidden until a file is staged — a state that rendered
+    /// correctly and a control nobody could reach.
+    #[tokio::test]
+    async fn the_idle_page_introduces_the_base_and_the_picker_is_reachable() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core.clone()).await;
+
+        // Empty base: the one instruction that matters.
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("Nothing here yet"), "the empty base says so");
+        assert!(
+            html.contains(r#"<label class="btn btn-ghost" id="drop""#),
+            "the picker is in the verb row, not inside the hidden staged box"
+        );
+        let staged = html.split(r#"id="staged""#).nth(1).unwrap();
+        assert!(
+            !staged[..staged.find("</div>").unwrap()].contains("type=\"file\""),
+            "and the staged box holds only the file, never the way to pick one"
+        );
+
+        // A base with something in it introduces itself.
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("This memory"), "the rail names its idle act");
+        assert!(
+            html.contains("Last captured"),
+            "and shows what last went in"
+        );
+        assert!(
+            html.contains("LevelDB tombstones"),
+            "in the operator's words"
+        );
+
+        // Clearing the box returns to idle, not to "No matches." — which
+        // would be a claim about a base nobody searched.
+        let frag = get(&app, "/ui/search/results?q=", &cookie).await;
+        assert!(frag.contains("This memory"), "an empty query is idle again");
+        assert!(!frag.contains("No matches"), "not a verdict on the base");
     }
 
     /// The list is retired; the sitting behind it is not. Its own comment gave
