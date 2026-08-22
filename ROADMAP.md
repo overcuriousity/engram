@@ -230,8 +230,9 @@ the search box, drawn from the situation the browser reports, on a ladder of
 four rungs down to a random card that claims nothing (spec
 `2026-08-21-context-recommendation-design.md`). Built, including the instrument
 that would let it be tuned — shown against clicked, by rung, over the last
-thirty days, on Ops. Everything left here is gated on that instrument having
-months behind it, not on anybody's judgement.
+thirty days, on Ops. Everything left here but the last item is gated on that
+instrument having months behind it, not on anybody's judgement; the last is
+the write-time half of the same question and carries an instrument of its own.
 
 - **Learned block weights.** The weights in `[recommend.weights]` are chosen,
   not measured, and the honest description of them is "chosen". Once the
@@ -269,6 +270,37 @@ months behind it, not on anybody's judgement.
   tenancy exists, and nothing else about the encoder changes with it.
   **Cost:** one weight to 0. **One commit**, blocked on **Multi-user tenancy**
   below.
+
+- **Speculative synthesis.** Promotion is retrospective: a window is rewritten
+  once its passages have earned it. The prospective half is to spend an idle
+  call on a window nobody has opened yet, chosen because the base can already
+  say what is about to be asked. Three predictors are already stored and none
+  of them is new machinery: the grouped **gaps**, which are a list of questions
+  the base failed to answer and which recur; the **Hebbian neighbours** of what
+  a pursuit just engaged, since activation spreads a hop and `maybe_promote`
+  reads none of it; and the **`ctx` clusters**, which know what is opened at
+  this hour on this device. Gaps are the cheapest and the most defensible —
+  nearest passages to a group's centroid, one window each, at most *n* a sweep.
+
+  Two things it must not do. It must not become `eager` by the back door: the
+  budget is per idle sweep, and the instrument is a hit rate — was a
+  speculatively written artifact ever retrieved, opened or confirmed within
+  *N* days — read on Ops beside shown-against-clicked, so a predictor that
+  cannot beat its own cost is turned off rather than tuned. And it must not
+  share `Provenance::Synthesized`. That is what the pursuit stopping rule reads
+  (`src/core/search.rs:1076`: a synthesized artifact at rank 1 and not weak
+  means the base answered), so speculative text under it would close pursuits
+  as satisfied on a guess nobody engaged, and the badge would name a use that
+  never happened. It is written on speculation and says so until something
+  retrieves it.
+  **Worth:** the first search of a subject stops being the one that returns
+  crude chunks. Everything earned today is earned by an operator who already
+  went unanswered once; this is the only item that spends a call to spare them
+  that, and the only one whose worth is measurable the day it ships.
+  **Cost:** a predictor over stored gaps, a `Speculative` provenance and its
+  migration, a per-sweep budget in `[promote]`, and the hit-rate panel without
+  which none of it can be argued. **A project**, and it wants a design record
+  in `docs/superpowers/specs/` before any code.
 
 ## [Ask]
 
