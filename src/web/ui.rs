@@ -471,46 +471,6 @@ struct CaptureTemplate {
     prefill_question: String,
 }
 
-/// One artifact this sitting has been in, as the rail lists it.
-pub struct SittingItem {
-    pub id: String,
-    pub title: String,
-}
-
-/// How many of the sitting's touched artifacts a page shows.
-///
-/// Six, against a carried twenty. The rail is a way back to what you were just
-/// reading, not a history: a list long enough to need reading is a second set
-/// of results beside the real ones.
-const SITTING_RAIL: usize = 6;
-
-/// What this sitting has touched, most recent first, ready to render.
-///
-/// Empty for a cold sitting and for every door that has no session — which is
-/// the whole of what keeps this at the web door. An artifact deleted since is
-/// simply absent: the sitting holds ids and the store is the truth.
-async fn sitting_rail(st: &AppState, id: &Identity) -> Vec<SittingItem> {
-    let Some(sess) = &id.session else {
-        return Vec::new();
-    };
-    let carried =
-        st.core
-            .sittings
-            .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64);
-    let mut out = Vec::new();
-    for aid in carried.touched.iter().take(SITTING_RAIL) {
-        if let Ok(c) = st.core.store.get_artifact(aid).await
-            && c.in_results()
-        {
-            out.push(SittingItem {
-                title: title_of(&c),
-                id: c.id,
-            });
-        }
-    }
-    out
-}
-
 /// One hole in the base, as the capture page lists it.
 pub struct GapMember {
     /// The `GapKind`, for the dismiss route.
@@ -553,29 +513,6 @@ struct CapturedTemplate {
     /// only hint is a queue on Ops the writer has no reason to open.
     near_dupe_of: Option<String>,
     near_dupe_percent: i64,
-}
-
-#[derive(Template)]
-#[template(path = "search.html")]
-struct SearchTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// Kept so a reload or a deep link restores the box with its results.
-    q: String,
-    /// What this collection can actually be narrowed by. Rendered as chips, so
-    /// choosing a category never means knowing in advance that it exists.
-    facets: crate::vector::Facets,
-    /// The chip a deep link arrived with, so the form comes back selected
-    /// rather than reset to "all".
-    category: String,
-    /// What this sitting has been in. Absent on a cold sitting — an empty box
-    /// saying "nothing yet" is worse than no box.
-    sitting: Vec<SittingItem>,
-    /// Whether the area under the search box exists at all. See
-    /// `Core::recommends`.
-    recommend: bool,
 }
 
 #[derive(Template)]
@@ -844,8 +781,6 @@ struct AskTemplate {
     /// A question to prefill the box with — a gap's "ask again", or the query
     /// this sitting was just searching for.
     q: String,
-    /// What this sitting has been in. See `SearchTemplate::sitting`.
-    sitting: Vec<SittingItem>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1035,42 +970,7 @@ async fn capture_submit(
 
 /// Chips per row. Long enough to cover a real vocabulary, short enough that the
 /// row stays a row.
-const FACET_LIMIT: usize = 12;
-
-async fn search_page(
-    State(st): State<AppState>,
-    id: Identity,
-    Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
-    // A vector store that cannot answer must not take the search page down with
-    // it: without chips the page is what it was yesterday, with them it is
-    // better, and neither is worth a 500.
-    let mut facets = st
-        .core
-        .vectors
-        .facets(FACET_LIMIT)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
-            Default::default()
-        });
-    let category = p.category.unwrap_or_default();
-    // A deep link can name a value that falls outside the top `FACET_LIMIT`, or
-    // one nothing carries at all. The rail is narrowed by it either way, so the
-    // chip row has to show it: otherwise the page reads as unfiltered while the
-    // results are not, and there is no chip to click to get back out.
-    ensure_facet(&mut facets.categories, &category);
-    Ok(HtmlTemplate(SearchTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        q: p.q,
-        facets,
-        category,
-        sitting: sitting_rail(&st, &id).await,
-        recommend: st.core.recommends(),
-    })
-    .into_response())
-}
+pub(crate) const FACET_LIMIT: usize = 12;
 
 /// One offer, flattened for the template. Every decision — which rung, which
 /// blocks, how the stamp reads — is made here, so the template holds no logic
@@ -1262,7 +1162,7 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
 /// because the two reasons it is missing — nothing carries it, or it was
 /// crowded out of the top `FACET_LIMIT` — are not distinguishable from here;
 /// the template renders no number rather than a wrong one.
-fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
+pub(crate) fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
     if value.is_empty() || row.iter().any(|f| f.value == value) {
         return;
     }
@@ -1273,13 +1173,13 @@ fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
 }
 
 #[derive(serde::Deserialize)]
-struct UiSearchParams {
+pub(crate) struct UiSearchParams {
     #[serde(default)]
-    q: String,
+    pub(crate) q: String,
     #[serde(default)]
-    tags: Option<String>,
+    pub(crate) tags: Option<String>,
     #[serde(default)]
-    category: Option<String>,
+    pub(crate) category: Option<String>,
 }
 
 /// Function words carry no signal and appear in every chunk, so highlighting
@@ -1309,7 +1209,7 @@ fn split_tags(t: Option<String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-async fn search_results(
+pub(crate) async fn search_results(
     State(st): State<AppState>,
     id: Identity,
     Query(p): Query<UiSearchParams>,
@@ -2708,7 +2608,6 @@ async fn ask_page(
         judge_pending: crate::web::state::judge_pending(&st).await,
         ask_enabled: crate::web::state::ask_enabled(&st),
         q,
-        sitting: sitting_rail(&st, &id).await,
     })
     .into_response())
 }
@@ -3454,11 +3353,7 @@ pub fn ui_router() -> Router<AppState> {
         // had no answer for `/`, and a browser typing the domain got a 404 —
         // signed in or not, because an unmatched path never reaches the
         // authentication that would have redirected it to a login.
-        .route("/", get(|| async { Redirect::to("/ui/search") }))
-        .route("/ui", get(|| async { Redirect::to("/ui/search") }))
         .route("/ui/capture", get(capture_page).post(capture_submit))
-        .route("/ui/search", get(search_page))
-        .route("/ui/search/results", get(search_results))
         .route("/ui/context", post(context_offer))
         .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
@@ -3642,7 +3537,6 @@ mod tests {
             judge_pending: None,
             ask_enabled: true,
             q: String::new(),
-            sitting: vec![],
         })
         .unwrap()
     }
@@ -4527,6 +4421,51 @@ mod tests {
             .await
             .unwrap();
         app_for(core).await
+    }
+
+    /// The one page. Capture, search and ask were three of them, and moving
+    /// between them meant retyping or carrying a prefill: the same words are a
+    /// query on one, a question on the second and a document on the third, and
+    /// the operator navigated to say which.
+    #[tokio::test]
+    async fn the_workspace_is_one_page_carrying_the_box_and_the_three_regions() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+
+        for uri in ["/ui", "/ui/search"] {
+            let html = get(&app, uri, &cookie).await;
+            assert!(
+                html.contains("regions-rail-focus-source"),
+                "{uri}: the grid"
+            );
+            assert!(html.contains("name=\"q\""), "{uri}: the box");
+            assert!(
+                html.contains("hx-get=\"/ui/search/results\""),
+                "{uri}: typing still asks the same endpoint"
+            );
+        }
+
+        // A deep link restores the box and asks for its results without a
+        // keystroke, because no keystroke is coming.
+        let html = get(&app, "/ui/search?q=volume+move", &cookie).await;
+        assert!(html.contains("volume move"), "the box comes back filled");
+        assert!(html.contains("load"), "and the results are fetched on load");
+    }
+
+    /// The list is retired; the sitting behind it is not. Its own comment gave
+    /// the reason it existed — "the pages had nothing between them, so a hit
+    /// opened on search and wanted again on ask meant searching for it twice"
+    /// — and this is the commit that removes the pages.
+    #[tokio::test]
+    async fn the_read_just_now_list_is_gone_but_the_sitting_is_not() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(!html.contains("Read just now"), "the list is retired");
+
+        // The mechanism it read from stays: Ask's carried citations ride on
+        // it and `[sitting] prime` reads it. That half is covered
+        // behaviourally by `marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band`
+        // — an assertion on `citations[..].carried`, which is false unless
+        // `sittings.touched()` still runs on every artifact open.
     }
 
     /// The three surfaces that are maintenance rather than searching. Capture
@@ -6545,9 +6484,9 @@ mod tests {
             detail.contains(r#"class="label pane-label""#),
             "the pane label does not compose .label"
         );
-        let search = include_str!("templates/search.html");
+        let workspace = include_str!("templates/workspace.html");
         assert!(
-            search.contains(r#"class="label facet-label""#),
+            workspace.contains(r#"class="label facet-label""#),
             "the facet label does not compose .label"
         );
     }
@@ -8542,59 +8481,6 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(!page.contains("Read just now"), "{page}");
-    }
-
-    #[tokio::test]
-    async fn what_this_sitting_opened_is_a_way_back_to_it() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let a = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
-                    text: "mounting an E01".into(),
-                    corpus_span: None,
-                    title: Some("Mounting an E01".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: Some(0),
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
-
-        get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
-
-        let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(page.contains("Read just now"), "{page}");
-        assert!(page.contains("Mounting an E01"), "{page}");
-
-        // And it is still there after a search. The filter form replaces what
-        // it targets wholesale, so a sitting inside that target was wiped by
-        // the first keystroke and never came back — visible only on a search
-        // page with no query, which is the one moment it has nothing to say.
-        let form = page
-            .split("<form id=\"filters\"")
-            .nth(1)
-            .expect("the search page has a filter form");
-        let target = form
-            .split("hx-target=\"")
-            .nth(1)
-            .and_then(|t| t.split('"').next())
-            .expect("the filter form names a target");
-        let swapped = page
-            .split(&format!("id=\"{}\"", target.trim_start_matches('#')))
-            .nth(1)
-            .expect("the target is on the page");
-        assert!(
-            !swapped.contains("Read just now"),
-            "a search replaces {target}, and the sitting is inside it: {swapped}"
-        );
     }
 
     #[tokio::test]

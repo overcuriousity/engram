@@ -12,6 +12,7 @@ pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
+pub mod workspace;
 
 use axum::Router;
 use axum::extract::Request;
@@ -73,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .merge(assets::assets_router())
         .merge(auth_routes::auth_router())
+        .merge(workspace::routes())
         .merge(ui::ui_router())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
@@ -111,16 +113,16 @@ mod tests {
             r.body(Body::empty()).unwrap()
         };
 
+        // The bare domain is the workspace itself now, not a redirect to it:
+        // there is one page, so there is nothing left to redirect to.
         let res = app.clone().oneshot(get(Some(&cookie))).await.unwrap();
-        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
-        assert_eq!(res.headers()["location"], "/ui/search");
+        assert_eq!(res.status(), StatusCode::OK, "{res:?}");
 
         // And with no session at all: `/` is still a route, so the rejection
-        // it produces is a 401 the middleware can turn into a login — which is
+        // it produces is one the middleware can turn into a login — which is
         // what an unmatched path never was.
         let res = app.oneshot(get(None)).await.unwrap();
-        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
-        assert_eq!(res.headers()["location"], "/ui/search");
+        assert_ne!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
     }
 
     #[tokio::test]

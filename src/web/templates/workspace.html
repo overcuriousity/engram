@@ -1,0 +1,128 @@
+{% extends "layout.html" %}
+{% block title %}engram{% endblock %}
+{% block regions %}regions-rail-focus-source{% endblock %}
+{% block content %}
+<div class="region-bar" data-workspace data-open-with="{{ open_with }}">
+{# One form around the box and the chips, so a chip carries the query with it
+   and the query carries the chips. `change` fires for the chips, `keyup` only
+   for the box: a radio does not need a debounce and the box does. `change` is
+   scoped to the chip row because it bubbles, and the box fires its own on blur
+   — which is fired by the very click that opens a result, so an unscoped
+   `change` replaced the list out from under the pointer and the first click on
+   a result did nothing at all. The selector has to be one word: htmx reads
+   `from:` up to the first space. `submit` is listed so htmx cancels it.
+
+   120ms rather than 250. A quarter second is a pause you can feel between a
+   phrase and its answer, and the query path is the same work either way: one
+   embedding, one vector search, never a generation.
+
+   `hx-sync="this:replace"` because of that halving, not despite it: two
+   requests from the same box are only ordered by luck, and the slower one
+   lands last. Replace aborts the request in flight, so the answer shown is
+   always the answer to the last thing typed. #}
+<form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
+      hx-sync="this:replace"
+      hx-trigger="change from:#kind-chips,
+                  keyup changed delay:120ms from:textarea[name=q],
+                  submit{% if !q.is_empty() %},
+                  load{% endif %}"
+      hx-indicator="#search-spinner">
+  {# A textarea from the first keystroke to the last. It grows to a ten-line
+     cap and then scrolls inside itself; it never switches element type, and it
+     never infers a verb from a length or a newline. What decides which of the
+     three happens is a button.
+
+     No `autofocus`: on a touch screen it opens the keyboard over the results
+     the page was opened to show. app.js focuses it where a pointer says there
+     is a hardware keyboard already.
+
+     The placeholder names all three verbs because the box does all three. A
+     query is embedded whole, so a sentence carries more signal than the two
+     nouns from it a reader would otherwise type — and the hint below survives
+     the first keystroke, which the placeholder does not. #}
+  <textarea class="box" name="q" rows="1"
+            placeholder="Describe the situation, ask a question, or paste anything worth keeping…"
+            aria-describedby="box-hint">{{ q }}</textarea>
+  {# The two verbs that need a button. Typing is the third and needs none: it
+     is the trigger on the form above. Both are disabled while the box is
+     empty, because neither has anything to act on. #}
+  <div class="verbs">
+    {% if ask_enabled %}
+    <button class="btn btn-accent" type="button" data-verb="ask" disabled>Ask</button>
+    {% endif %}
+    <button class="btn" type="button" data-verb="capture" disabled>Capture</button>
+    {# A way out of a wait whose length nothing on the page predicts. Closing
+       the stream is what it does — the model call is already paid for either
+       way — so the tokens that did arrive stay where they are. #}
+    <button id="ask-stop" class="btn btn-ghost btn-sm" type="button" hidden>Stop</button>
+    <span id="search-spinner" class="spinner">searching…</span>
+    <span class="verbs-spacer"></span>
+    {# One row, and one taxonomy in it. They qualify what typing does and
+       nothing else, which is why they live with the box rather than over the
+       rail. Nothing here carries a tag any more — subject words have no
+       vocabulary that can be closed, so `forensics` and `forensik` sat beside
+       each other as two filters over one idea. #}
+    {% if !facets.categories.is_empty() %}
+    {# Labelled in the page, not only in `aria-label`: the row starts with
+       "All", and an unlabelled "All" is not a statement about anything. #}
+    <span class="label facet-label">Kind</span>
+    {# Named because the form's `change` trigger listens here: the event bubbles
+       out of the radios to this row and no further than the box. #}
+    <div class="chips" id="kind-chips" role="group" aria-label="Kind">
+      <label class="chip">
+        <input type="radio" name="category" value="" {% if category.is_empty() %}checked{% endif %}>
+        <span>All</span>
+      </label>
+      {% for f in facets.categories %}
+      <label class="chip">
+        <input type="radio" name="category" value="{{ f.value }}"
+               {% if category == f.value %}checked{% endif %}>
+        <span>{{ f.value }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <p id="box-hint" class="muted hint">A sentence or a whole paragraph finds
+    more than keywords do — paste what you are looking at.</p>
+</form>
+
+{# The offer is for the state "no intent expressed yet". app.js removes it on
+   the first keystroke, and it does not come back when the box is cleared: once
+   there is an intent the offer is wrong, and reappearing because someone
+   corrected a typo is flicker. It returns on the next page view.
+
+   `q.is_empty()` as well as the switch, because that state is a claim about
+   the page and not about the switch: a deep link, a reload or a
+   back-navigation renders the box filled with its results below, and app.js
+   only removes the area on a *keystroke* — which never comes on any of those.
+   Without this it sat beside real results and wrote a `recommended_shown` row
+   per view, inflating the denominator of the one hit rate it is measured by. #}
+{% if recommend && q.is_empty() %}
+<div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
+     hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
+{% endif %}
+
+{# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
+   a hint that cannot be dismissed is a banner. Hidden until app.js decides
+   there is a keyboard to use it with. #}
+<p class="keyhint" hidden>
+  <kbd>/</kbd> box <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
+  <kbd>s</kbd> hide source <kbd>r</kbd> reading
+  <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
+</p>
+</div>
+
+{# The rail holds what the current act produced, and says which act that was.
+   The heading is filled by whichever fragment fills the list under it, so the
+   two cannot disagree about what they are showing. #}
+<div id="rail" class="region-rail rail">
+  <div id="rail-head"></div>
+  <div id="results" role="listbox" aria-label="Results"></div>
+</div>
+
+<div id="pane" class="region-focus pane">
+  <p class="muted">Search to see an artifact here, beside the lines it
+    came from.</p>
+</div>
+{% endblock %}
