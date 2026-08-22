@@ -1,3 +1,10 @@
+/* The workspace: the box, its verbs, the rail, the reading pane and its
+   source. One stylesheet, because there is one page.
+
+   It was three — 40-search, 41-capture, 45-ask — and most of what they
+   disagreed about was width, which the region grid in 20-layout.css owns and
+   always did. What is left here is what the workspace actually holds. */
+
 /* Search: the ranked rail, the artifact beside it, and the source lines it
    claims — with the controls and the lineage that hang off an artifact. */
 
@@ -78,8 +85,11 @@ body { overflow-x: hidden; }
 
 .rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
 /* The results are their own element inside the rail, so that a search replaces
-   them and not the sitting above them — and the rail's own column layout has to
-   carry through to it, or every card loses the gap between it and the next. */
+   them and not the heading above them — the heading names the act that filled
+   the rail, and a swap that took it with the list would leave the rail
+   unlabelled for as long as the next request takes. The rail's own column
+   layout has to carry through to it, or every card loses the gap between it
+   and the next. */
 #results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
 .rail-item {
   display: block; text-decoration: none; color: inherit;
@@ -152,9 +162,6 @@ body { overflow-x: hidden; }
 .is-on { color: var(--color-accent); }
 
 /* The holes, on the capture page. */
-.gaps details { margin: 0.25rem 0; }
-.gaps summary { cursor: pointer; }
-.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
 
 /* Neighbours under the artifact. Narrower than the rail on purpose: this is a
@@ -559,3 +566,95 @@ body { overflow-x: hidden; }
   white-space: pre-wrap; word-break: break-all;
   margin: 0.375rem 0 0; font-size: var(--text-xs);
 }
+/* ── A file, waiting to be sent ──────────────────────────────────────────── */
+
+/* The drop zone and the file it caught are the same box, which is why the
+   border is dashed while it is empty and solid once something is in it: dashed
+   is the page saying "put it here", and there is nothing left to invite once
+   the file has arrived. Above the note that describes it, because that is the
+   order the work happens in: it arrived, say what it is, send it. */
+.staged {
+  display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
+  margin-top: 0.6rem; padding: 0.6rem 0.625rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); font-size: 0.8125rem;
+}
+.staged:has(#drop:not([hidden])) {
+  border-style: dashed; background: none;
+}
+/* The whole box opens the picker — on a phone, the camera. */
+#drop { cursor: pointer; color: var(--color-fg-muted); flex: 1 1 auto; min-width: 0; }
+/* A file is somewhere over the window. Said on the box rather than under the
+   pointer, because the box is where it is going to land whatever it is
+   dropped on. */
+.staged.dropping {
+  border-color: var(--color-accent); border-style: dashed;
+  background: var(--color-bg-hover);
+}
+/* Small: it identifies the photo, it does not display it. Capped in both
+   directions so a portrait shot from a phone cannot become the page. */
+.staged img {
+  max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
+  object-fit: cover; flex: none;
+}
+#staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
+/* Away from the name, so a long filename does not push it under the thumb. */
+#staged-clear { margin-left: auto; }
+
+
+/* Ask, as it streams. */
+
+/* ── Ask, as it streams ──────────────────────────────────────────────────── */
+
+/* Visible for as long as the stream is open. The htmx indicator class does not
+   apply here: this request is a fetch and an EventSource, neither of which htmx
+   knows about. */
+#box-form.asking .spinner { visibility: visible; }
+
+/* The answer while it is being written: plain text, wrapped, and deliberately
+   quieter than the rendered version that replaces it — what is on screen here
+   is not finished, has no citations yet, and nothing in it has been checked
+   against an excerpt. */
+.answer-live {
+  margin: 0 0 1rem; padding: 0.75rem;
+  font-family: var(--font-mono); font-size: 0.875rem; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--color-fg-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
+}
+
+/* What the model said on the way. Dimmer and smaller again than the draft
+   answer, and capped: it is a long aside that no one has to read, and letting
+   it grow would push the answer it precedes off the screen. */
+.reasoning {
+  margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap;
+  color: var(--color-fg-muted);
+  border-left: 2px solid var(--color-border-strong);
+  max-height: 12rem; overflow-y: auto;
+}
+
+/* A citation in the prose. Small and raised, so `[1]` reads as a mark on the
+   sentence rather than as a word in it. */
+.cite {
+  font-family: var(--font-mono); font-size: 0.75em;
+  vertical-align: super; line-height: 0;
+  text-decoration: none; padding: 0 0.1em;
+}
+.cite:hover { text-decoration: underline; }
+
+/* The excerpt a citation was just followed to. The same emphasis a selected
+   result carries, because it means the same thing — this is the row the page is
+   pointing at. */
+.rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+
+/* Bounded once it is open: the reasoning runs to several times the length of
+   the answer it precedes, and an unbounded box pushes that answer off screen
+   for as long as the model is thinking. */
+.reasoning-box { margin-bottom: 0.75rem; }
+.reasoning-box > summary {
+  cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted);
+}
+.reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
+
