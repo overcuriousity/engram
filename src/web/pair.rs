@@ -91,8 +91,6 @@ fn is_loopback(host: &str) -> bool {
 #[template(path = "pair.html")]
 struct PairTemplate {
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     origin: String,
     redirect_uri: String,
     state: String,
@@ -137,7 +135,6 @@ async fn pair_page(
     }
     Ok(HtmlTemplate(PairTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         origin: request_origin(&headers).unwrap_or_default(),
         redirect_uri: p.redirect_uri,
         state: p.state,

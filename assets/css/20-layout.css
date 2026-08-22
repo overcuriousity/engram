@@ -91,6 +91,11 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
 .regions-focus { grid-template-columns: minmax(0, 68rem); }
 .regions-focus > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
+/* One column, centred in the window rather than anchored to its left edge.
+   For the pages that are not part of the workspace and have nothing to line
+   up with: signing in, and pairing a browser extension. */
+.regions-center { grid-template-columns: minmax(0, 26rem); justify-content: center; }
+.regions-center > * { grid-column: 1 / -1; }
 .regions-table > * { grid-column: 1 / -1; }
 
 /* Two regions: what the page is for, and what it has already done with it.

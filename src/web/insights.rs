@@ -130,14 +130,18 @@ struct InsightsTemplate {
     /// How many more are behind the ones shown. Said once under the list, so a
     /// short list does not read as an empty queue when it is a capped one.
     more_pairs: i64,
+    /// Whether the ask door is open. See `state::ask_enabled`.
+    ///
+    /// The nav has no use for it any more — Ask is a verb on the box, not a
+    /// place to go — but `_gaps.html` still offers "ask again" beside a hole,
+    /// and that link must not exist where there is nothing to answer with.
+    ask_enabled: bool,
     /// The holes, grouped and named by the sweep. Empty when feedback is off.
     gaps: Vec<crate::web::ui::GapGroup>,
     /// Open gaps the sweep has not grouped yet.
     loose: Vec<crate::web::ui::GapMember>,
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -461,12 +465,12 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
+        ask_enabled: crate::web::state::ask_enabled(&st),
         pairs,
         more_pairs,
         gaps,
         loose,
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         retrying,
         parked,
         superseded,

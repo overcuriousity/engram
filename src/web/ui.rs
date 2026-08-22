@@ -485,8 +485,6 @@ struct QueueTemplate {
 struct CorpusTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     id: String,
     status: String,
     badge: &'static str,
@@ -590,8 +588,6 @@ struct ArtifactDetailFragment {
 struct ArtifactDetailPage {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     d: ArtifactDetail,
 }
 
@@ -642,8 +638,6 @@ pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i
 struct SettingsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -737,6 +731,15 @@ pub(crate) const FACET_LIMIT: usize = 12;
 pub struct OfferView {
     pub id: String,
     pub title: String,
+    /// The first line or so of what the artifact says.
+    ///
+    /// A title is not enough to decide whether to open something. On the two
+    /// established rungs the reason line carries the rest of the card, but the
+    /// random card claims no reason by design — and a card that is a title and
+    /// nothing else asks to be clicked on faith. This says what the thing is
+    /// without claiming why it is here, which is the one thing the random rung
+    /// must not do.
+    pub snippet: String,
     /// What the line leads with. Fixed wording for the two established rungs;
     /// for a thin one it is the count in words, because "Twice before" is the
     /// honest thing to say about two occurrences and "Pattern" is not. Empty
@@ -808,8 +811,19 @@ async fn context_offer(
     // where nothing would have been clicked. That is a structural zero
     // folded into the denominator of the one number the block weights are
     // meant to be fitted against later. `/ui/context/seen` is the other half.
+    // Fetched here rather than carried on `Offer`: the recommender ranks
+    // artifacts and has no business knowing how a card reads. A row that has
+    // gone since the profile was built leaves an empty snippet, which is the
+    // card it was before this line existed rather than an error.
+    let snippet = match &offer {
+        Some(o) => match st.core.store.get_artifact(&o.artifact_id).await {
+            Ok(c) => markdown::snippet(&c.text, 160),
+            Err(_) => String::new(),
+        },
+        None => String::new(),
+    };
     Ok(HtmlTemplate(ContextTemplate {
-        offer: offer.map(offer_view),
+        offer: offer.map(|o| offer_view(o, snippet)),
     })
     .into_response())
 }
@@ -856,7 +870,7 @@ async fn context_seen(
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
-fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
+fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
     use crate::core::recommend::Rung;
     OfferView {
         rung: match o.rung {
@@ -912,6 +926,7 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
         slot: o.slot.map(|s| s.to_string()).unwrap_or_default(),
         id: o.artifact_id,
         title: o.title,
+        snippet,
         detail: o.detail,
     }
 }
@@ -1598,7 +1613,6 @@ async fn corpus_detail(
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -2051,7 +2065,6 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
 async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
         feedback: match st.core.learn.enabled {
             true => Some(st.core.store.feedback_stats().await?),
@@ -2648,7 +2661,6 @@ async fn artifact_detail(
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         d,
     })
     .into_response())
@@ -2693,8 +2705,6 @@ async fn mark_artifact_reviewed(
 struct NotFoundTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
 }
 
 /// The app's own answer to a path it does not have.
@@ -2735,7 +2745,6 @@ pub async fn not_found(
     }
     let page = NotFoundTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
     };
     match askama::Template::render(&page) {
         Ok(html) => (
@@ -2930,7 +2939,6 @@ mod tests {
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
         askama::Template::render(&SettingsTemplate {
             judge_pending: None,
-            ask_enabled: true,
             tokens,
             feedback: None,
             asks: None,
@@ -2954,13 +2962,13 @@ mod tests {
         }
         let html = askama::Template::render(&Gaps {
             gaps: vec![],
+            ask_enabled: true,
             loose: vec![GapMember {
                 kind: "ask".into(),
                 badge: "asked",
                 id: "g1".into(),
                 text: "wie werden bei chipkarten die private keys geschützt?".into(),
             }],
-            ask_enabled: true,
         })
         .unwrap();
         assert!(
@@ -9498,10 +9506,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_an_ask_model_the_link_is_there() {
+    async fn with_an_ask_model_the_verb_is_there() {
         let (app, cookie) = app_with_session().await;
-        let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(page.contains("href=\"/ui/ask\""), "{page}");
+        let page = get_body(&app, &cookie, "/ui").await;
+        // A button on the box, not a link in the nav. Ask stopped being a
+        // place to go the moment the box learned to do it — but the rule the
+        // sibling test pins is unchanged: where there is no model there is no
+        // door, and this is the other half of it.
+        assert!(page.contains(r#"data-verb="ask""#), "{page}");
     }
 
     #[tokio::test]

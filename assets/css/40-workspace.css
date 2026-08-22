@@ -78,6 +78,64 @@ body { overflow-x: hidden; }
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
 
+/* ── The box, and its two verbs ──────────────────────────────────────────── */
+
+/* The one text surface. A textarea from the first keystroke to the last, so it
+   inherits none of `.input`'s single-line assumptions and needs its own rule —
+   `.input` is 44px tall and centred, which is wrong for something a chapter
+   gets pasted into.
+
+   `width: 100%` is not cosmetic: a textarea's intrinsic width is its `cols`
+   attribute, about twenty characters, so without this the box that is supposed
+   to be the application sits in the top-left corner of a full-width bar.
+
+   `resize: none` because app.js sizes it: it grows to a ten-line cap on input,
+   and a drag handle fighting that is two mechanisms for one height.
+
+   `font: inherit` for the same reason a textarea needs saying: the UA default
+   is monospace, and what goes in here is prose. */
+.box {
+  display: block; width: 100%; box-sizing: border-box;
+  min-height: 2.75rem; padding: 0.625rem 0.75rem;
+  font: inherit; font-size: var(--text-md); line-height: 1.5;
+  color: var(--color-fg-primary); background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-md);
+  resize: none; overflow-y: auto;
+}
+.box::placeholder { color: var(--color-fg-muted); }
+.box:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-dim);
+}
+/* A box someone is waiting on is still a box someone is reading. The UA greys
+   disabled text towards the background, which says "broken" where this means
+   "busy" — the question you asked stays worth reading while you wait for it. */
+.box:disabled {
+  color: var(--color-fg-secondary); opacity: 1; cursor: wait;
+  background: var(--color-bg-surface);
+}
+
+/* The row under the box. Two verbs on the left, what narrows the typing on the
+   right, and the spinner between them. It wraps, because the chip row grows
+   with the vocabulary and a bar that scrolls sideways is a bar that hides one
+   of its verbs. */
+.verbs {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.verbs-spacer { flex: 1 1 auto; }
+/* Both verbs are disabled while the box is empty, and while an ask is in
+   flight. Dimmed rather than hidden: what the box can do does not change, only
+   whether it can do it now. */
+.verbs .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* `.btn` sets `display: inline-flex`, which beats the UA's `[hidden]` rule
+   whatever its specificity — the same trap `.keyhint` documents below. Without
+   this the Stop button is on screen from first paint, offering to stop an ask
+   nobody has started. */
+.btn[hidden] { display: none; }
+.facet-label { flex: 0 0 auto; }
+
 /* The grid itself lives in 20-layout.css now: the rail beside the artifact is
    the region model rather than a layout this one page invented, and the
    one-region-at-a-time rule that used to live here is `.regions.has-selection`
@@ -559,6 +617,14 @@ body { overflow-x: hidden; }
 .offer-title:hover, .offer-title:focus-visible {
   text-decoration: underline; text-decoration-color: var(--color-border-strong);
 }
+/* What the artifact says, under what it is called. The measure is the card's,
+   not the page's: two lines at most, because this is a card you decide about
+   rather than a thing you read here. */
+.offer-snippet {
+  margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .offer-why { font-size: var(--text-xs); margin: 0.125rem 0 0; }
 .offer-detail { display: inline; }
 .offer-detail summary { display: inline; cursor: pointer; color: var(--color-accent); }
@@ -573,6 +639,11 @@ body { overflow-x: hidden; }
    is the page saying "put it here", and there is nothing left to invite once
    the file has arrived. Above the note that describes it, because that is the
    order the work happens in: it arrived, say what it is, send it. */
+/* Same trap as `.btn` above: `display: flex` beats the UA's `[hidden]`, and
+   the box that is supposed to appear only when a file is waiting was on screen
+   from first paint — an empty drop zone, a note field for a file nobody
+   chose, and a Remove button with nothing to remove. */
+.staged[hidden] { display: none; }
 .staged {
   display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
   margin-top: 0.6rem; padding: 0.6rem 0.625rem;
