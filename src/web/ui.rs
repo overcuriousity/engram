@@ -1,5 +1,4 @@
 use crate::auth::Identity;
-use crate::core::ingest::ORIGIN_ASK;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -9,7 +8,6 @@ use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
@@ -715,89 +713,6 @@ struct TokenCreatedTemplate {
     token: String,
 }
 
-#[derive(Template)]
-#[template(path = "ask.html")]
-struct AskTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// A question to prefill the box with — a gap's "ask again", or the query
-    /// this sitting was just searching for.
-    q: String,
-}
-
-#[derive(serde::Deserialize)]
-struct AskPrefill {
-    #[serde(default)]
-    q: String,
-}
-
-#[derive(Template)]
-#[template(path = "_answer.html")]
-struct AnswerTemplate {
-    answer: String,
-    citations: Vec<RenderedResult>,
-    dropped: usize,
-    /// The answer stops where its ceiling did. Shown beside `dropped` for the
-    /// same reason: a cut-off answer is otherwise indistinguishable from a
-    /// finished one.
-    truncated: bool,
-    /// The answer said "not in the base"; badged so the operator sees what
-    /// the harness will count.
-    abstained: bool,
-    /// Literals the answer carries that no cited excerpt does. Badged, and
-    /// marked in `answer`, so a reader can tell what the base holds from what
-    /// the model wrote.
-    unsupported: Vec<String>,
-    /// Set when the question was recorded; the verdict bar exists only then.
-    event_id: Option<String>,
-    /// The bar, rendered — empty when there is no event.
-    verdict_bar: String,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_rail.html")]
-struct AskRailTemplate {
-    citations: Vec<RenderedResult>,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_verdict.html")]
-struct AskVerdictTemplate {
-    event_id: String,
-    /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
-    verdict: Option<String>,
-    /// Marks the bar to swap itself out-of-band. Set when it rides along with
-    /// something else — the carrier toggle — and not when it is the response
-    /// the click already targets.
-    oob: bool,
-}
-
-/// What the keep button leaves behind: the outcome of storing the answer.
-#[derive(Template)]
-#[template(path = "_ask_kept.html")]
-struct AskKeptTemplate {
-    /// The corpus the answer is now — the new one, or the one that already
-    /// held the same bytes.
-    id: String,
-    duplicate: bool,
-    /// Stored but not processed: it resembles something already in the base
-    /// closely enough that an operator decides on Ops first.
-    parked: bool,
-    near_dupe_percent: i64,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_carried.html")]
-struct AskCarriedTemplate {
-    event_id: String,
-    n: i64,
-    carried: bool,
-    /// The bar, rendered, to swap out-of-band. Always `Some` from the route.
-    bar: Option<String>,
-}
-
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn gap_dismiss(
@@ -1160,7 +1075,7 @@ fn ranked_titles(
         .collect()
 }
 
-fn render_hit(
+pub(crate) fn render_hit(
     position: usize,
     h: crate::core::search::SearchResult,
     titles: &std::collections::HashMap<String, String>,
@@ -2420,239 +2335,6 @@ async fn verify_ui(
     artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
-async fn ask_page(
-    State(st): State<AppState>,
-    id: Identity,
-    Query(p): Query<AskPrefill>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // A query typed on the rail and then retyped into ask is the cost of two
-    // pages with nothing carried between them. Only when the box is empty: a
-    // question the operator arrived with — a gap's "ask again" — is never
-    // overwritten by what they searched for a minute ago.
-    let q = match p.q.trim().is_empty() {
-        true => match &id.session {
-            Some(sess) => st
-                .core
-                .sittings
-                .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64)
-                .queries
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-            None => String::new(),
-        },
-        false => p.q,
-    };
-    Ok(HtmlTemplate(AskTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        q,
-    })
-    .into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct AskForm {
-    q: String,
-}
-
-/// Parks the question and hands back the id that streams it.
-///
-/// The model call belongs to the GET that follows, not here: `EventSource` is
-/// GET-only, so the alternative is a GET that runs inference and writes a row —
-/// exactly what history, prefetchers and link scanners replay. The id is the
-/// guard, and it is spent on first use.
-async fn ask_submit(
-    State(st): State<AppState>,
-    id: Identity,
-    Form(f): Form<AskForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // Refused before anything is parked, so an empty box costs no entry in the
-    // map and no second round trip to find out.
-    if f.q.trim().is_empty() {
-        return Err(Error::Validation("question is empty".into()));
-    }
-    let handoff = st.ask_handoff_park(
-        crate::core::ask::AskRequest {
-            q: f.q,
-            limit: None,
-            tags: vec![],
-            category: None,
-        },
-        &id.subject,
-    );
-    Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
-}
-
-/// One ask, as it happens.
-///
-/// Takes an `Identity` like every other `/ui` route: this one runs a model
-/// call, and an endpoint that runs inference for whoever guesses a URL is a
-/// free-inference hole rather than a page.
-///
-/// A reader who leaves before `Done` records nothing. That is not an oversight:
-/// the recorded id reaches the page only in `Done`, so an abandoned ask has no
-/// verdict bar, nothing to judge, and retention deletes an unjudged row anyway.
-async fn ask_stream(
-    State(st): State<AppState>,
-    id: Identity,
-    Path(handoff): Path<String>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    use tokio_stream::StreamExt as _;
-
-    // Unknown, already spent, expired, or somebody else's — all one answer.
-    // Never a fresh ask against an empty question, which would spend a model
-    // call on a replay; never another subject's question, which would be
-    // answered to the wrong person and recorded under their name.
-    let req = st
-        .ask_handoff_take(&handoff, &id.subject)
-        .ok_or(Error::NotFound)?;
-    let core = st.core.clone();
-    let origin = crate::store::feedback::Door::Ui.by(id.subject);
-    let events = async_stream::stream! {
-        let s = core.ask_events(&req, origin);
-        tokio::pin!(s);
-        while let Some(ev) = s.next().await {
-            yield match ev {
-                Ok(e) => sse_event(e),
-                // Terminal by construction: the producer is a `try_stream!` and
-                // ends at its first error, so the page sees one `error` event
-                // and nothing after it.
-                Err(e) => Ok(SseEvent::default().event("error").data(e.to_string())),
-            };
-        }
-    };
-    // Kept alive because a slow model thinks for longer than a proxy's idle
-    // timeout, and a connection closed mid-answer looks to the page exactly
-    // like an answer that ended.
-    Ok(Sse::new(events)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-/// One `AskEvent` as one named SSE event carrying JSON.
-///
-/// JSON rather than bare text for every payload, because SSE frames data by
-/// line: a token that ends in a newline, or an answer whose markdown carries
-/// blank lines, does not survive the wire as itself.
-fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
-    use crate::core::ask::stream::AskEvent::*;
-    let (name, data) = match ev {
-        Retrieved {
-            round,
-            retrieved,
-            shown,
-            dropped,
-            cliff_at,
-        } => (
-            "retrieved",
-            serde_json::json!({
-                "round": round,
-                "retrieved": retrieved,
-                "shown": shown,
-                "dropped": dropped,
-                "cliff_at": cliff_at,
-            }),
-        ),
-        // A list rather than a string: the page joins it, so the separator is
-        // one decision made where the sentence is written rather than here.
-        Needs(what) => ("needs", serde_json::json!({ "queries": what })),
-        Citations(hits) => (
-            "citations",
-            serde_json::json!({ "rail": rail_fragment(hits)? }),
-        ),
-        Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
-        Token(t) => ("token", serde_json::json!({ "text": t })),
-        Done(d) => (
-            "done",
-            serde_json::json!({
-                "event_id": d.event_id,
-                "html": answer_fragment(*d)?,
-            }),
-        ),
-    };
-    Ok(SseEvent::default().event(name).data(data.to_string()))
-}
-
-/// The rail, rendered here rather than in the browser.
-///
-/// One fragment rather than a list of fields, because the ids in it are the
-/// other end of the links `link_citations` writes into the answer, and both
-/// ends are then numbered by the same server-side pass. Rendering the rail in
-/// the browser would put the two halves of a citation in two languages, where
-/// only a person clicking could tell they still agree.
-///
-/// Each excerpt's markdown has already been through the sanitizing renderer, so
-/// the page inserts HTML it was handed and never renders markdown itself.
-fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String> {
-    AskRailTemplate {
-        citations: hits
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
-            .collect(),
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
-/// The finished answer, as the page swaps it in.
-///
-/// The same template the blocking render used, for the same reason it existed:
-/// one account of what an answer looks like. Only its delivery moved.
-fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
-    // The answer is model output too, so it goes through the same sanitizing
-    // renderer as chunk text. Marking comes after sanitizing: it works on the
-    // escaped text a reader sees, and nothing it inserts needs cleaning.
-    // Linking comes last, so a `[1]` that marking has just wrapped is still
-    // found and neither pass has to know about the other's markup.
-    let answer = link_citations(
-        &crate::core::ask::check::mark_unsupported(
-            &markdown::render(&out.answer),
-            &out.unsupported,
-        ),
-        out.citations.len(),
-    );
-    AnswerTemplate {
-        answer,
-        citations: out
-            .citations
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
-            .collect(),
-        dropped: out.dropped,
-        truncated: out.truncated,
-        abstained: out.abstained,
-        unsupported: out.unsupported,
-        verdict_bar: match &out.event_id {
-            Some(id) => AskVerdictTemplate {
-                event_id: id.clone(),
-                verdict: None,
-                oob: false,
-            }
-            .render()
-            .map_err(|e| Error::Internal(e.to_string()))?,
-            None => String::new(),
-        },
-        event_id: out.event_id,
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
 /// Turns each `[n]` the answer cites into a link to that excerpt's rail item.
 ///
 /// Bounded by `n`, the number of excerpts actually shown: a model writes `[7]`
@@ -2673,7 +2355,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
 /// on a base whose answers are full of code. Fabricated provenance is the one
 /// failure this codebase exists to prevent, and a wrong link is worse than no
 /// link.
-fn link_citations(html: &str, n: usize) -> String {
+pub(crate) fn link_citations(html: &str, n: usize) -> String {
     if n == 0 {
         return html.to_string();
     }
@@ -2709,130 +2391,6 @@ fn link_text(text: &str, n: usize) -> String {
     }
     out.push_str(rest);
     out
-}
-
-#[derive(serde::Deserialize)]
-struct VerdictForm {
-    verdict: String,
-}
-
-fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
-    use crate::store::asks::AskVerdict::*;
-    match v {
-        Right => "right",
-        Wrong => "wrong",
-        NothingHere => "nothing here",
-    }
-    .into()
-}
-
-async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
-    let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
-    AskVerdictTemplate {
-        event_id: ev.id,
-        verdict: ev.verdict.map(verdict_label),
-        oob,
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
-async fn ask_verdict(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-    Form(f): Form<VerdictForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    match f.verdict.as_str() {
-        "none" => st.core.store.unjudge_ask(&id).await?,
-        v => {
-            let verdict = crate::store::asks::AskVerdict::parse(v)
-                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            st.core.store.judge_ask(&id, verdict).await?;
-        }
-    }
-    Ok(axum::response::Html(ask_verdict_bar(&st, &id, false).await?).into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct CarriedForm {
-    n: i64,
-}
-
-async fn ask_carried(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-    Form(f): Form<CarriedForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    let carried = st.core.store.toggle_carried(&id, f.n).await?;
-    let bar = ask_verdict_bar(&st, &id, true).await?;
-    Ok(HtmlTemplate(AskCarriedTemplate {
-        event_id: id,
-        n: f.n,
-        carried,
-        bar: Some(bar),
-    })
-    .into_response())
-}
-
-/// Keep an answer: store it as a source, here, without a detour through the
-/// capture box.
-///
-/// The same pipeline as any paste — one corpus, segmented, embedded, searchable
-/// — and the same concession the capture door already made: `origin = "ask"`
-/// and the `ask` metadata, so what the base holds says a model wrote it, from
-/// which question, and from which artifacts. Nothing about it is special
-/// downstream, which is why this works whatever `synthesis` is set to: at
-/// `eager` the windows go to the synthesiser, at `off` and `earned` they are
-/// captured verbatim, and both end in artifacts with vectors.
-///
-/// The answer as the model wrote it, not as the operator retyped it: an
-/// operator who wants to edit first has `edit first` beside this, which is the
-/// old path unchanged.
-async fn ask_keep(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // Unlike the capture door, there is no text to fall back to here: the row
-    // is where the answer lives. A question that retention has already taken
-    // has nothing left to keep, and saying so is better than storing an empty
-    // source or an unprovenanced one.
-    let ev = st.core.store.ask_event(&id).await?.ok_or(Error::NotFound)?;
-    let out = st
-        .core
-        .ingest_capture(
-            crate::core::ingest::Capture::new(&ev.answer, ORIGIN_ASK).with_ask(
-                &ev.id,
-                &ev.question,
-                &ev.citations,
-            ),
-        )
-        .await?;
-    Ok(HtmlTemplate(AskKeptTemplate {
-        id: out.id,
-        duplicate: out.duplicate,
-        parked: out.near_duplicate.is_some(),
-        near_dupe_percent: out
-            .near_duplicate
-            .as_ref()
-            .map(|n| (n.similarity * 100.0).round() as i64)
-            .unwrap_or(0),
-    })
-    .into_response())
 }
 
 /// Neighbours shown beside an artifact. A short list, because this is a way
@@ -3223,11 +2781,6 @@ pub fn ui_router() -> Router<AppState> {
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
-        .route("/ui/ask", get(ask_page).post(ask_submit))
-        .route("/ui/ask/{id}/stream", get(ask_stream))
-        .route("/ui/ask/{id}/verdict", post(ask_verdict))
-        .route("/ui/ask/{id}/carried", post(ask_carried))
-        .route("/ui/ask/{id}/keep", post(ask_keep))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
         // One name for the page. The nav word is Housekeeping and the route is
         // `/ui/ops`; a reader who types the word they were shown lands here.
@@ -3372,29 +2925,6 @@ mod tests {
             keeps_a: false,
             keeps_b: false,
         }
-    }
-
-    fn ask_page_fixture() -> String {
-        askama::Template::render(&AskTemplate {
-            judge_pending: None,
-            ask_enabled: true,
-            q: String::new(),
-        })
-        .unwrap()
-    }
-
-    fn answer_fixture(dropped: usize) -> String {
-        askama::Template::render(&AnswerTemplate {
-            answer: "<p>An answer.</p>".into(),
-            citations: vec![],
-            dropped,
-            truncated: false,
-            abstained: false,
-            unsupported: vec![],
-            event_id: None,
-            verdict_bar: String::new(),
-        })
-        .unwrap()
     }
 
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
@@ -3576,41 +3106,6 @@ mod tests {
         assert!(
             !page.contains("has-selection"),
             "a fresh search already claims something is open: {page}"
-        );
-    }
-
-    #[test]
-    fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
-        // "18 excerpt(s) omitted for context budget" is the accounting, and
-        // the "(s)" is the plural nobody wrote out.
-        let html = answer_fixture(18);
-        assert!(!html.contains("excerpt(s)"), "{html}");
-        assert!(!html.contains("context budget"), "{html}");
-        assert!(html.contains("18 more excerpts did not fit"), "{html}");
-        let one = answer_fixture(1);
-        assert!(one.contains("1 more excerpt did not fit"), "{one}");
-    }
-
-    #[test]
-    fn an_ask_in_flight_offers_a_way_to_stop_it() {
-        // Fifty seconds signalled by a small grey "thinking…" beside the
-        // button, and nothing on the page to end it with.
-        let html = ask_page_fixture();
-        assert!(html.contains(r#"id="ask-stop""#), "{html}");
-    }
-
-    #[test]
-    fn an_ask_page_does_not_open_with_the_models_reasoning_showing() {
-        // The deployment streamed the chain of thought into the page for fifty
-        // seconds, restating the prompt's own constraints verbatim — "Answer
-        // *only* using the provided knowledge-base excerpts" — above the empty
-        // space where the answer was going to be.
-        let html = ask_page_fixture();
-        assert!(html.contains("ask-reasoning-box"), "{html}");
-        assert!(
-            !html.contains("<details open")
-                && !html.contains("<details id=\"ask-reasoning-box\" open"),
-            "reasoning must start closed: {html}"
         );
     }
 
@@ -4263,6 +3758,64 @@ mod tests {
             .await
             .unwrap();
         app_for(core).await
+    }
+
+    /// The ask door, which is the workspace with the question already in the
+    /// box and an answer requested on first paint. A gap's "ask again" links
+    /// here.
+    #[tokio::test]
+    async fn the_ask_door_fills_the_one_box_and_asks_on_arrival() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui/ask?q=why+did+the+reindex+fail", &cookie).await;
+        assert!(
+            html.contains(r#"data-open-with="ask""#),
+            "the page opens asking: {html}"
+        );
+        assert!(
+            html.contains("why did the reindex fail"),
+            "the box carries the question: {html}"
+        );
+        // Every id the stream driver writes into has to survive the move; the
+        // browser suite targets each of these by name.
+        for id in [
+            "ask-live",
+            "ask-result",
+            "ask-status",
+            "ask-stop",
+            "ask-progress",
+        ] {
+            assert!(html.contains(id), "the driver's target {id} is on the page");
+        }
+    }
+
+    /// No ask model, no ask door: not a greyed-out button over a page that
+    /// explains itself, and not a route that 500s. The door is simply absent.
+    #[tokio::test]
+    async fn the_ask_door_is_absent_without_a_model() {
+        let core = crate::core::test_support::test_core_without_ask().await;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(
+            !html.contains(r#"data-verb="ask""#),
+            "no button where there is no model: {html}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ask")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "and the door is not there"
+        );
     }
 
     /// The capture door, which is the workspace with the box already filled.
@@ -8346,26 +7899,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_query_typed_on_search_arrives_in_the_ask_box() {
-        // Two pages with nothing carried between them cost a retyped query
-        // every time. Nothing here changes an order.
-        let (app, cookie, core) = app_session_and_core().await;
-        get_body(
-            &app,
-            &cookie,
-            "/ui/search/results?q=how%20do%20I%20mount%20an%20E01",
-        )
-        .await;
-
-        let ask = get_body(&app, &cookie, "/ui/ask").await;
-        assert!(
-            ask.contains("how do I mount an E01"),
-            "the query was not carried: {ask}"
-        );
-        let _ = core;
-    }
-
-    #[tokio::test]
     async fn a_question_the_operator_arrived_with_is_never_overwritten() {
         // A gap's "ask again" is a question they chose. The sitting fills an
         // empty box and nothing else.
@@ -9168,17 +8701,14 @@ mod tests {
             "the capture door is the workspace: {capture}"
         );
 
+        // Ask is a door into the workspace now, not a page of its own. The
+        // excerpts land in the same rail the results were in, because the rail
+        // holds what the current act produced and an ask is a different act
+        // from the search before it.
         let ask = get_body(&app, &cookie, "/ui/ask").await;
         assert!(
-            ask.contains(r#"regions regions-focus-aside"#),
-            "ask is an answer beside what it was written from: {ask}"
-        );
-        // The excerpts must not be a rail region. `r` is gated on one, and
-        // reading mode rewrites the grid to a spine beside a single column —
-        // which would take this page apart on a key that means nothing here.
-        assert!(
-            !ask.contains("region-rail"),
-            "ask's excerpts would answer to reading mode: {ask}"
+            ask.contains("regions-rail-focus-source"),
+            "the ask door is the workspace: {ask}"
         );
 
         // No measure on the one page whose whole subject is an artifact and
@@ -9216,7 +8746,10 @@ mod tests {
     async fn the_ask_page_prefills_a_question_from_the_query_string() {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
-        assert!(page.contains(r#"value="mount an E01""#), "{page}");
+        // A textarea carries its value as content rather than as an
+        // attribute, which is the one visible consequence of the box being a
+        // textarea from the first keystroke to the last.
+        assert!(page.contains(">mount an E01</textarea>"), "{page}");
     }
 
     #[tokio::test]
@@ -9467,43 +9000,6 @@ mod tests {
         );
     }
 
-    /// The driver listens for every frame the server sends.
-    ///
-    /// A frame nobody handles fails silently and only on the asks that send it:
-    /// the fan-out's frames fire only when a plan named something, so an ask
-    /// page that drops them would look perfect on every question the base
-    /// already covered. The names are pulled from `sse_event`'s own source
-    /// rather than listed here, so adding an event without a handler fails this
-    /// test instead of shipping.
-    #[tokio::test]
-    async fn the_stream_driver_handles_every_event_the_server_names() {
-        let ui = include_str!("ui.rs");
-        let body = &ui[ui.find("fn sse_event(").expect("sse_event is in this file")..];
-        let body = &body[..body.find("\n}\n").unwrap()];
-        // The first string of each arm's `(name, data)` tuple, whether the
-        // arm is one line or many.
-        let names: Vec<String> = body
-            .split('(')
-            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
-            .filter_map(|rest| rest.split('"').next())
-            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
-            .map(str::to_string)
-            .collect();
-        assert!(
-            names.len() >= 6,
-            "the event names could not be read out of sse_event: {names:?}"
-        );
-
-        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
-        let js = String::from_utf8(js.data.into_owned()).unwrap();
-        for name in names {
-            assert!(
-                js.contains(&format!("addEventListener('{name}'")),
-                "the server sends a `{name}` frame and the driver ignores it"
-            );
-        }
-    }
-
     /// Every `from:` in a template names one element, in one word.
     ///
     /// htmx reads a `from:` selector up to the first space or comma. A
@@ -9582,9 +9078,19 @@ mod tests {
         // The old path is gone rather than sitting beside the new one: two
         // submitters on one form would park the question twice and spend a
         // model call on the copy nobody reads.
+        //
+        // Scoped to the box's own form. The page has other `hx-post`s on it
+        // now — the context offer under the box is one — and asserting over
+        // the whole document would pass or fail on things that have nothing to
+        // do with how a question is parked.
+        let form = page
+            .split(r#"<form id="box-form""#)
+            .nth(1)
+            .and_then(|f| f.split("</form>").next())
+            .expect("the workspace has a box form");
         assert!(
-            !page.contains("hx-post"),
-            "the ask form still posts through htmx: {page}"
+            !form.contains("hx-post"),
+            "the box form still posts through htmx: {form}"
         );
     }
 

@@ -191,18 +191,24 @@
   // rendered and sanitized by the server — this driver moves HTML it was handed
   // and text it puts in text nodes, and never builds markup out of an answer.
   function askDriver() {
-    var form = document.getElementById('ask-form');
+    var form = document.getElementById('box-form');
     if (!form) return;
+    // No model, no button, no driver. The server renders no Ask verb where
+    // `Core::asks` is false, and this is the other end of that.
+    var askBtn = form.querySelector('[data-verb="ask"]');
+    if (!askBtn) return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
     // The disclosure around it: what is shown or hidden is the box, while the
     // text still streams into the div inside it.
     var reasoningBox = document.getElementById('ask-reasoning-box');
     var progress = document.getElementById('ask-progress');
-    var rail = document.getElementById('ask-rail');
+    var rail = document.getElementById('results');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
-    var spinner = document.getElementById('ask-spinner');
+    var spinner = document.getElementById('search-spinner');
     var stopBtn = document.getElementById('ask-stop');
     var source = null;
     // The wait is fifty seconds on a fan-out and nothing on the page predicted
@@ -362,9 +368,9 @@
       });
     }
 
-    form.addEventListener('submit', function (e) {
+    askBtn.addEventListener('click', function (e) {
       e.preventDefault();
-      var q = form.querySelector('input[name="q"]').value;
+      var q = box.value;
       if (!q.trim()) return;
       // A second ask supersedes the first at every stage, which `stop()` on its
       // own does not achieve: it closes a stream that is already open, and two

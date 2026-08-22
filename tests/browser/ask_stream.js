@@ -39,8 +39,8 @@ let child = null;
 const HARNESS = `
   document.addEventListener('DOMContentLoaded', function () {
     var ask = function () {
-      document.querySelector('input[name="q"]').value = 'what is alpha';
-      document.getElementById('ask-form').requestSubmit();
+      document.querySelector('textarea[name="q"]').value = 'what is alpha';
+      document.querySelector('[data-verb="ask"]').click();
     };
     setTimeout(ask, 50);
     ${SCENARIO === 'double' ? 'setTimeout(ask, 70);' : ''}
@@ -65,9 +65,9 @@ const HARNESS = `
           statusText: document.getElementById('ask-status').textContent,
           progressText: document.getElementById('ask-progress').textContent,
           railIds: Array.prototype.map.call(
-            document.querySelectorAll('#ask-rail [id]'), function (e) { return e.id; }),
+            document.querySelectorAll('#results [id]'), function (e) { return e.id; }),
           activeId: (document.querySelector('.rail-active') || {}).id || null,
-          formAsking: document.getElementById('ask-form').classList.contains('asking'),
+          formAsking: document.getElementById('box-form').classList.contains('asking'),
           errors: window.__errors || []
         })});
       }, 300);
@@ -80,13 +80,18 @@ const HARNESS = `
 
 const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Ask</title>
 <link rel="stylesheet" href="/assets/app.css"><script src="/assets/htmx.min.js" defer></script><script src="/assets/app.js" defer></script></head><body>
-<form id="ask-form" class="row"><input class="input" name="q" value="" placeholder="Ask a question…">
-<button class="btn btn-accent" type="submit">Ask</button>
-<span id="ask-spinner" class="spinner">thinking…</span></form>
-<div id="ask-reasoning" class="reasoning" hidden></div>
+<form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-params="q,category">
+<textarea class="box" name="q" rows="1" placeholder="Describe the situation…"></textarea>
+<div class="verbs"><button class="btn btn-accent" type="button" data-verb="ask">Ask</button>
+<button class="btn" type="button" data-verb="capture">Capture</button>
+<button id="ask-stop" class="btn btn-ghost btn-sm" type="button" hidden>Stop</button>
+<span id="search-spinner" class="spinner">searching…</span></div></form>
 <p id="ask-progress" class="ask-progress" hidden></p>
+<details id="ask-reasoning-box" class="reasoning-box" hidden><summary>Reasoning</summary>
+<div id="ask-reasoning" class="reasoning"></div></details>
 <pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
-<div id="ask-rail" class="rail" role="listbox" aria-label="Excerpts"></div>
+<div id="rail" class="rail"><div id="rail-head"></div>
+<div id="results" role="listbox" aria-label="Results"></div></div>
 <p id="ask-status" class="sr-only" role="status"></p>
 <div id="ask-result"></div>
 <img src="/hang" alt="" style="display:none">
@@ -105,7 +110,7 @@ const DONE =
   'hx-target="#ask-verdict" hx-swap="outerHTML">Right</button></div>';
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/ui/ask' && req.method === 'GET') {
+  if ((req.url === '/ui' || req.url === '/ui/ask') && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     return res.end(PAGE);
   }
@@ -195,7 +200,7 @@ server.listen(0, '127.0.0.1', () => {
       '--disable-gpu',
       '--dump-dom',
       '--user-data-dir=' + fs.mkdtempSync(require('os').tmpdir() + '/engram-chrome-'),
-      'http://127.0.0.1:' + port + '/ui/ask'
+      'http://127.0.0.1:' + port + '/ui'
     ],
     { stdio: 'ignore' }
   );

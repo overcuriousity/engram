@@ -176,6 +176,34 @@
 </div>
 
 <div id="pane" class="region-focus pane">
+  {# What the retrieval did before the model was asked anything, when there was
+     more of it than usual. Silent on an ask the first round already covered.
+     When a plan does name something, those searches are otherwise a silent
+     pause of unknown length in front of the answer, and what they went looking
+     for is nowhere on the page. #}
+  <p id="ask-progress" class="muted" hidden></p>
+  {# What the model said on the way to the answer. Behind a disclosure and
+     closed, rather than dim and out of the way: it is not the answer, nothing
+     in it is cited, and what it actually contains is the prompt's own
+     constraints restated back at whoever is reading — "Answer *only* using the
+     provided knowledge-base excerpts", for fifty seconds, above an empty space
+     where the answer will be. Kept because it is what a tuning session wants
+     to see; closed because nobody else asked for it. #}
+  <details id="ask-reasoning-box" class="reasoning-box" hidden>
+    <summary>Reasoning</summary>
+    <div id="ask-reasoning" class="reasoning"></div>
+  </details>
+  {# The answer as it is being written, in plain text; the markdown is rendered
+     by the server and swapped in whole at the end. `aria-live="polite"` so a
+     reader who cannot see it knows the answer is arriving — the announcement is
+     the appended text and nothing else, because rewriting the region or moving
+     focus into it on every token would talk over the reader for the whole
+     answer. #}
+  <pre id="ask-live" class="answer-live" aria-live="polite" hidden></pre>
+  {# The one announcement of the finished answer. Off-screen, because the
+     answer below it is the signal for everyone who can see it. #}
+  <p id="ask-status" class="sr-only" role="status"></p>
+  <div id="ask-result"></div>
   <div id="capture-result"></div>
   <p id="pane-idle" class="muted">Search to see an artifact here, beside the
     lines it came from.</p>
