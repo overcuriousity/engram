@@ -4,8 +4,15 @@
 <div data-terms="{{ terms }}">
   {# Counted off the list rather than passed in beside it, so the number and
      the rows cannot disagree. Said once above them: a ranked list with no
-     count is a list you cannot tell is complete. #}
-  <div class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}</div>
+     count is a list you cannot tell is complete.
+
+     Out of band, into the rail's heading, because the rail says which act
+     filled it: `3 results` here, `Written from · 5` after an Ask. The heading
+     is outside the swapped target, so the fragment that fills the list is also
+     what names it and the two cannot disagree. #}
+  <div class="rail-act" hx-swap-oob="innerHTML:#rail-head">
+    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}</span>
+  </div>
   {# Said once, above the list, rather than repeated on every card: when the
      whole answer is loose the useful statement is about the search, not about
      each result. Retrieval always returns its best candidates however bad they

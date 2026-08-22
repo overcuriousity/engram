@@ -7041,8 +7041,19 @@ mod tests {
         );
         let frag = body_of(res).await;
         assert!(frag.contains("result-count"), "the count is stated: {frag}");
+        // Out of band into the rail's heading, which sits outside the swapped
+        // list: the fragment that fills the rail is also what names the act
+        // that filled it.
         assert!(
-            !frag.contains("embed ") && !frag.contains("hx-swap-oob"),
+            frag.contains(r#"hx-swap-oob="innerHTML:#rail-head""#),
+            "the count does not reach the rail heading: {frag}"
+        );
+        // The timing fragment this test was written against is what must stay
+        // gone. It used to ride the same response as an out-of-band swap, so
+        // the assertion names the timing rather than the mechanism — the
+        // mechanism is legitimately in use above.
+        assert!(
+            !frag.contains("embed ") && !frag.contains("server-timing"),
             "timing is not operator-facing: {frag}"
         );
     }

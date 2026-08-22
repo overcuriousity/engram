@@ -720,6 +720,50 @@ mod tests {
         .unwrap()
     }
 
+    /// One act in flight. Pressing Ask disables the box, and disabling the box
+    /// is what disables search-while-type: a disabled input fires no `keyup`,
+    /// so the form's `hx-trigger` goes quiet with no second mechanism and no
+    /// flag to keep in sync.
+    ///
+    /// The re-enable belongs in `stop()` and nowhere else. Every exit already
+    /// runs through it — the answer completing, the Stop button, and the
+    /// transport error that `fail()` funnels into it. Put it on the `done`
+    /// handler instead and a dropped connection leaves the box disabled
+    /// forever, with no way back but a reload.
+    #[test]
+    fn the_ask_disables_the_surface_and_only_stop_gives_it_back() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let stop = js
+            .split_once("function stop() {")
+            .expect("the driver has no stop()")
+            .1;
+        let stop = &stop[..stop.find("\n    }").expect("stop() does not end")];
+        assert!(
+            stop.contains("setBusy(false)"),
+            "stop() does not give the surface back: {stop}"
+        );
+
+        let busy = js
+            .split_once("function setBusy(")
+            .expect("the driver has no setBusy()")
+            .1;
+        let busy = &busy[..busy.find("\n    }").expect("setBusy() does not end")];
+        assert!(
+            busy.contains("box.disabled"),
+            "setBusy does not disable the box, so typing still searches: {busy}"
+        );
+
+        // The other half: nothing else may re-enable it. A second caller is a
+        // second thing to keep in step with the three exits.
+        assert_eq!(
+            js.matches("setBusy(false)").count(),
+            1,
+            "setBusy(false) is called from more than one place"
+        );
+    }
+
     #[test]
     fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
         // "18 excerpt(s) omitted for context budget" is the accounting, and

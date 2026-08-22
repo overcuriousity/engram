@@ -229,8 +229,31 @@
       if (source) { source.close(); source = null; }
       if (ticker) { clearInterval(ticker); ticker = null; }
       stopBtn.hidden = true;
-      spinner.textContent = 'thinking…';
+      spinner.textContent = 'searching…';
       form.classList.remove('asking');
+      setBusy(false);
+    }
+
+    // One act in flight. From the press of Ask until the answer lands, the box
+    // and both verbs are disabled and only Stop is live.
+    //
+    // Disabling the box is what disables search-while-type: a disabled input
+    // fires no `keyup`, so the form's `hx-trigger` goes quiet on its own —
+    // there is no second mechanism and no flag to keep in sync with this one.
+    //
+    // The re-enable lives in `stop()` and nowhere else, because every exit
+    // already runs through it: the answer completing, the Stop button, and the
+    // transport error that `fail()` funnels into it. That last one is the
+    // reason it cannot live on the `done` handler — a dropped connection would
+    // leave the box disabled forever, with no way back but a reload.
+    function setBusy(busy) {
+      box.disabled = busy;
+      form.setAttribute('aria-busy', busy ? 'true' : 'false');
+      var vs = form.querySelectorAll('[data-verb]');
+      for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
+      // A box someone emptied while the answer streamed must not come back
+      // with live verbs over nothing to act on.
+      if (!busy) box.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     // Count up beside the spinner while the stream is open.
@@ -285,8 +308,32 @@
         if (!current()) return;
         // Server-rendered, ids and all: the `cite-n` anchors in here are the
         // other end of the `[n]` links the answer arrives with.
-        rail.innerHTML = JSON.parse(e.data).rail;
+        var payload = JSON.parse(e.data);
+        rail.innerHTML = payload.rail;
         enhance(rail);
+        // The rail holds what the current act produced. The results that were
+        // here are gone, because they were produced by a different act and
+        // have nothing to do with the excerpts this answer was written from.
+        //
+        // The query is still in the box unedited, so nothing re-triggers the
+        // search on its own. This anchor is the way back — it re-fires the
+        // form's own request with whatever the box holds now, rather than
+        // storing a result set that would go stale the moment it was kept.
+        var head = document.getElementById('rail-head');
+        if (head) {
+          var n = rail.querySelectorAll('.rail-item').length;
+          head.innerHTML = '';
+          var label = document.createElement('span');
+          label.className = 'result-count';
+          label.textContent = 'Written from · ' + n;
+          var back = document.createElement('a');
+          back.className = 'quiet-link';
+          back.href = '#';
+          back.setAttribute('data-rerun', '');
+          back.textContent = '← results';
+          head.appendChild(label);
+          head.appendChild(back);
+        }
       });
       // The fanned-out retrieval, made visible. Without it the extra searches
       // are a silent pause in front of the answer, and the queries they ran are
@@ -393,6 +440,7 @@
       reasoningBox.hidden = true;
       reasoningBox.open = false;
       form.classList.add('asking');
+      setBusy(true);
       startTicking();
 
       fetch('/ui/ask', {
@@ -730,6 +778,18 @@
     }, { once: true });
   }
 
+  // The way back to results after an Ask. Bound on the document because the
+  // anchor is written into the rail by the stream driver, long after load.
+  function railBack() {
+    document.addEventListener('click', function (e) {
+      var back = e.target.closest && e.target.closest('[data-rerun]');
+      if (!back) return;
+      e.preventDefault();
+      var form = document.getElementById('box-form');
+      if (form) htmx.trigger(form, 'submit');
+    });
+  }
+
   // ── The box, and what the two verbs may do with it ──────────────────
   // Typing is the third verb and needs no button: it is the `hx-trigger` on
   // the form. These two need one, because a model call and a write are both
@@ -1036,6 +1096,7 @@
     contextOffer();
     restoreReading();
     boxVerbs();
+    railBack();
     captureVerb();
     askDriver();
     trackDwell();
