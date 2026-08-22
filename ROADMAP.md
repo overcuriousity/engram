@@ -6,9 +6,19 @@ engram is a memory, and from here on it is designed as an **expansion of a
 biological one**. It keeps the one capability the brain lacks — verbatim recall
 with provenance — and borrows the brain's mechanisms for everything that decides
 how a memory is reached: association, activation, priming, forgetting, sleep.
-The search box stays the application. Nothing here is a screen to look at; it
-is what makes the answer to the situation you are in come first, while you are
-still typing it.
+
+It answers in two ways, and they are one mechanism read from two ends. A typed
+question is answered semantically, out of the stored text, with the lines it
+came from. And before anything is typed, the situation itself — the device, the
+hour, the viewport, the network, what this sitting has already been in — is a
+query the operator never had to write. The search box stays the application.
+
+Nothing here is a screen to look at, and nothing here is a reading list. This is
+not an application for revisiting what you once knew; it is one that puts the
+answer to the situation you are in first, while you are still typing it, or
+before. Anything whose product is "here is something you had forgotten" belongs
+to a different application and has been cut from this one — see the end of
+[What counts as use].
 
 What is built: the pipeline from capture to ranked artifact; the last hop from
 a ranked artifact back to its corpus lines; synthesis verified against what it
@@ -65,167 +75,261 @@ a layer crossing without a measured retrieval gain does not go in. The harness
 is the only figure comparable across months; a default that changes ranking
 moves only after it has been run.
 
-Most of what is left is not a mechanism but a seam. Three of them are now
-closed — the queue is the scheduler, the sitting is live, and the four ways of
-saying *the base did not answer* end on one list
-(`docs/superpowers/specs/2026-08-20-one-system-design.md`). What is left below
-is what those three make easier rather than what they replace. The list is
-grouped by subject, as it always was, but read end to end it is one project —
-and roughly in the order it would be built, because a seam that only joins two
-surfaces ships when it is written, while a seam that moves ranking waits for
-the harness.
+## How to read the two lines under each item
 
-## [Associative Memory]
+Everything not yet built carries a **Worth** and a **Cost**.
 
-Spec: `docs/superpowers/specs/2026-08-16-associative-memory-design.md` — built:
-Hebbian links learned from co-retrieval, decaying activation per artifact,
-bounded priming and one-hop association in the results, a sparse judge on
-strong cross-corpus links, switched on with `[associate]` and `[activation]`
-in config. The items below are the mechanisms that come after it, in order.
+*Worth* is the difference, not the feature: what an operator or the base can do
+afterwards that it could not before. Where the honest answer is "little", it
+says so, and the item stays on the list at the bottom rather than being dressed
+up.
 
-- **Sleep as an explicit cycle.** Built, and not as a cycle. The queue was
-  already three-quarters of a scheduler; it has a priority column now
-  (`jobs.class` — is somebody waiting on this?), ageing on the repair pass, and
-  five fewer tickers: a sweep arms itself one interval out when it finishes, so
-  `run_after` is the cursor saying when it last ran. Ordering is expressed the
-  way the tree already expressed dependencies, by arming — the association
-  sweep pulls the pursuit sweep forward, replay before pursue. The account is
-  `sweep_runs`, one row per run, shown on Ops as the last day with the history
-  under it.
+*Cost* names what has to be touched and then one of three sizes. **One commit**
+is a day or less, one or two files, nothing to measure. **A branch** is several
+files across layers, tests of its own, possibly a migration. **A project** wants
+a design record in `docs/superpowers/specs/` before any code. An item that moves
+ranking carries a cost that is not code at all: a harness run, which needs a
+live Qdrant, a real embedding endpoint and a corpus that is not in this
+repository. That cost is named separately, because it is the one that decides
+the order of this list — a seam that only joins two surfaces ships when it is
+written, a seam that moves ranking waits.
 
-  What did not survive contact is the *cycle*. Units on their own periods do
-  not line up into one night, and grouping them by an invented cycle identity
-  would be inventing it — so there is no "last sleep", there is the last day.
-  Repair stays outside the schedule: it is what recovers an interrupted one.
-- **Working memory.** Built, carrying only. A live sitting keyed by web
-  session (`src/core/sitting.rs`), in memory, expiring at `pursuit.idle_secs` —
-  the same number the sweep uses, so the live definition and the reconstructed
-  one agree by construction. It joins the doors: the query carries from search
-  into ask, an answer kept from ask shows the question it answered, and both
-  pages carry a rail of what this sitting has been in. It never writes
-  activation, and there is a test saying so.
+## [What counts as use]
 
-  Priming from it is behind `[sitting] prime`, off, sharing the one budget
-  `associate.prime_lift` bounds. It is the one thing here that moves ranking,
-  so it waits for the harness — see below.
-- **`[sitting] prime` is unmeasured.** The one default here that would move
-  ranking, and the harness has not been run either way: it needs a live Qdrant,
-  a real embedding endpoint and a corpus that is not in this repository. Until
-  it has, the flag stays `false`. It moves in a commit of its own, carrying
-  both numbers in its message, or it does not move.
-- **Every door counts as engagement.** Retrieval is recorded at every door —
-  `core.search` bumps activation whether the query came from the rail, the API
-  or `/mcp`. Engagement is not: `mark_artifact_seen` and `record_interaction`
-  have exactly one production caller between them, the dwell route at
-  `src/web/ui.rs:2909`. So an artifact a Claude Code session read all afternoon
-  is never opened, never promoted and never part of a pursuit, and the base's
-  picture of what is used is a picture of the web UI only. A sitting is a
-  sitting whichever door it came through.
-- **Access reconsolidation.** A judged hit says "for this query, that artifact".
-  The query becomes an additional access cue for the artifact — a second
-  vector or a stored cue list — so the next similar situation finds it
-  directly. Ask verdicts are the second source and the better one: a carried
-  excerpt says the same thing about a question a person asked in earnest. Text
-  untouched; changes what vectors are built from, so it waits for the harness
-  to say it helps.
+Everything plastic in the base is downstream of one question, and it has one
+answer today: use means the web UI. `jobs::context` clusters `interactions`
+rows into the `ctx` vectors the recommendation rests on; `associate` replays the
+search log; `promote` reads an activation that only moves at a bump. All three
+are fed through a single production caller, and the first two items below are
+about widening that. Nothing else on this list is worth as much per line
+changed.
 
-  *There is a cheaper shape of it that does not wait on re-embedding.* Qdrant's
-  `recommend` with `strategy: "best_score"` carries the cue as a second
-  positive example at query time: the stored vector is left alone, and a
-  candidate is scored by `max` over the examples rather than by their mean, so
-  the query and the remembered question stay two independent ways in instead of
-  collapsing to a midpoint that is neither. `average_vector` is the wrong knob
-  here for exactly that reason. It still moves ranking, so it is still the
-  harness's call; what it changes is the cost of being wrong, from a
-  re-embedding pass to a flag.
-- **A forgotten list with a direction.** `resurface` samples at random —
-  `{"sample": "random"}` in `vector/qdrant.rs` under payload filters — old,
-  unseen, otherwise arbitrary, which is a list you read once. Qdrant's context
-  search takes pairs where a query would go and scores a candidate by which
-  side of each pair it falls on, so the sitting's rail is the positive side and
-  `superseded`/`deprecated` the negative one, and what comes back is old and
-  unseen *and* near what this sitting has been in. The property that makes
-  context search a poor search — everything inside the admitted zone ties, so
-  the order within it is arbitrary — is the right property here: a forgotten
-  list wants spread within a subject, not the same five every time. Alone among
-  the three Qdrant items on this list it moves no ranking, because the
-  forgotten list is its own list. It needs no harness and can go first.
-- **Error-driven re-synthesis.** An artifact shown often and never confirmed,
-  or judged noise, is misleading — a title that over-claims, a passage that
-  lost its context. It is re-synthesised **from its source segment**, never from
-  itself, with before/after on Ops. The exposure and confirmation counts the
-  activation work provides are the detector.
-- **Usage-informed supersede.** `auto_supersede` keeps the newest member of a
-  near-identical group. Activation knows which member people actually
-  confirmed. First shown on the undo list; changed only if it turns out to
-  matter.
-- **Corpus map.** The distance-matrix API over a filtered subset, plus the link
-  table, drawn. Nice to look at, not a way to use the app; last.
+Built, and worth keeping the reasons for: Hebbian links from co-retrieval,
+decaying activation per artifact, bounded priming and one-hop association in the
+results, a sparse judge on strong cross-corpus links (`[associate]`,
+`[activation]`; spec `2026-08-16-associative-memory-design.md`). Sleep, but not
+as a cycle — the queue was already three-quarters of a scheduler, so it got a
+priority column (`jobs.class`), ageing on the repair pass, and five fewer
+tickers: a sweep arms itself one interval out when it finishes, and ordering is
+expressed by arming rather than by a schedule. Units on their own periods do not
+line up into one night, so there is no "last sleep", there is the last day
+(`sweep_runs`, on Ops). Working memory, carrying only: a live sitting keyed by
+web session (`src/core/sitting.rs`), expiring at `pursuit.idle_secs` so that the
+live definition and the reconstructed one agree by construction. It joins the
+doors and never writes activation, and there is a test saying so.
 
-<!-- NOT COPIED from the brain, on purpose: confabulation (no answer cards, no
-     generated answers standing in for stored text — a synthesised digest
-     competes with the exact wording it was derived from, which is fidelity
-     loss by design), content decay (activation fades, artifacts do not),
-     interference (a new capture never overwrites an old one; a conflict goes
-     to a person). These are where the expansion is deliberately better than
-     the thing it expands. -->
+- **Every door counts as engagement.** Retrieval is recorded everywhere:
+  `core::search` bumps activation whether the query came from the rail, the API
+  or `/mcp`, and `Origin` (`src/store/feedback.rs:77`) already carries the door,
+  the subject and — for the web — the session. Engagement is not.
+  `mark_artifact_seen` and `record_interaction` have exactly one production
+  caller between them, the dwell route at `src/web/ui.rs:3766`. An artifact a
+  Claude Code session read all afternoon is never opened, never promoted, never
+  part of a pursuit, and never a situation anybody learns from.
 
-## [Ask]
+  The doors are not symmetrical, and that is where the actual work is.
+  `GET /api/v1/artifacts/{id}` is an open and can say so in one line. `/mcp` has
+  no open at all: its tools are search, ask and ingest, and a search returns the
+  whole artifact, so the read *is* the result. Counting every returned artifact
+  as engagement would only relearn what association already learns from display.
+  The honest signal at that door is the citation, which is why the next item is
+  half of this one.
 
-Ask is the part of engram that is allowed to think, and it is built (spec
-`2026-08-17-streaming-ask-design.md`). It streams to the page — reasoning
-tokens included, when the model emits them — packs excerpts to the relevance
-cliff rather than to the context window, reaches one hop sideways for
-candidates, checks its own literals against the excerpts it was shown, and
-offers the answer back as a paste the operator approves. `[infer.ask] plan`
-adds one bounded round of planned retrieval and ships **on**: after the first
-round the model names the subjects the excerpts miss, each becomes a search of
-its own, and up to three run at once and merge into one set of excerpts. One
-plan, never a second, and never a loop.
+  **Worth:** the anticipating half of the application stops being blind at two
+  doors out of three. Today an operator who works through `/mcp` teaches the
+  offer ladder, promotion and pursuits precisely nothing, and the base's picture
+  of what is used is a picture of the web UI.
+  **Cost:** one line in the API artifact route, the citation bump below, and a
+  recorded decision about what MCP counts as use. **One commit.** No harness: it
+  changes what is learned, not how a fixed input is ranked, and no corpus in
+  this repository contains real multi-door use anyway.
 
-Two things it did not give up. An answer cannot carry a literal the excerpts
-did not — `verify::missing_literals`, the same guard synthesis runs, now
-applied to generation. And nothing is written to memory without a person: the
-keep-this-answer link prefills the capture box and saves nothing, so the trace
-records that a model wrote the text and what it was written from.
-
-Model tiers are built. The config carries named tiers under `[infer.tiers.*]`
-and each chat role points at one, resolved at parse time into the same concrete
-role structs the completers already took — so nothing downstream changed. The
-inline shape still parses and warns, naming its replacement. The capability the
-rename existed to express is now used: the planning call runs on the efficient
-tier while the answer it feeds runs on the deep one.
-
-The ask harness and ask feedback are built (spec
-`2026-08-17-ask-harness-design.md`): verdicts on the answer page with carriers,
-`questions.json` in the export, `evaluate_ask` measuring citation recall,
-abstention accuracy and faithfulness by literals and by claim check, plus an
-unsupported-literal count, and "nothing here" surfaced as knowledge gaps on the
-capture page.
-
-What is left here is one number nobody has run yet: whether the planning call
-earns itself, and whether packing to the cliff helps on a base with no reranker
-configured. A search's own fused scores are smooth enough that a cliff may
-rarely form without one — the rail has always lived with that, and ask now
-inherits it. Both are harness questions, not design ones.
-
-What ask learns about retrieval it still mostly keeps. Three edges are missing,
-and none of them costs a call:
+- **A citation is an engagement.** `ask_citations` already stores what the model
+  was shown and what it used (`src/store/asks.rs:153`, column `used`). An
+  artifact the model cited was used, and it bumps nothing.
+  **Worth:** closes the `/mcp` half of the item above with the one signal that
+  door honestly has, and retires the pursuit sweep's promotion call under Core
+  Platform — an ask-cited artifact is the only case that call still covers.
+  **Cost:** one call where the ask is recorded, minus `maybe_promote` in
+  `jobs/pursuit.rs` and the test pinning it. **One commit.**
 
 - **Co-citation is a stronger link than co-display.** `associate` learns its
   Hebbian links by replaying the search log: two artifacts shown in one result
   list are drawn together. Two artifacts the model *cited in one answer* were
-  used together, which is the same claim with the noise taken out. The
-  citations are already stored with the ask.
-- **A citation is an engagement.** It bumps nothing. This is the same hole the
-  pursuit sweep's promotion call papers over under **Core Platform** below,
-  seen from the other end — and giving the citation its own bump is the fix
-  that entry names, which retires the sweep's call as a side effect.
+  used together — the same claim with the noise taken out. The rows exist, and
+  `used` already separates shown from used.
+  **Worth:** better links per unit of evidence, and an association graph that
+  stops being a graph of what was displayed.
+  **Cost:** a second replay source in `jobs/associate.rs` (1,579 lines today),
+  a weight for it against co-display, tests. **A branch**, plus a harness run —
+  links feed priming, so this reaches ranking.
+
+- **Access reconsolidation.** A judged hit says "for this query, that artifact".
+  The query becomes an additional access cue for the artifact — a second vector
+  or a stored cue list — so the next similar situation finds it directly. Ask
+  verdicts are the second source and the better one: a carried excerpt says the
+  same thing about a question a person asked in earnest. Text untouched; it
+  changes what vectors are built from.
+
+  *There is a cheaper shape that does not wait on re-embedding.* Qdrant's
+  `recommend` with `strategy: "best_score"` carries the cue as a second positive
+  example at query time: the stored vector is left alone, and a candidate is
+  scored by `max` over the examples rather than by their mean, so the query and
+  the remembered question stay two independent ways in instead of collapsing to
+  a midpoint that is neither. `average_vector` is the wrong knob for exactly
+  that reason.
+  **Worth:** the largest ranking gain still on this list. The second time a
+  situation comes round, the artifact that answered it the first time is reached
+  directly instead of re-derived from scratch.
+  **Cost:** the cue store, plus either a re-embedding pass or — in the cheap
+  shape — the `best_score` call in `vector/qdrant.rs`, its emulation in
+  `vector/memory.rs` and a flag. **A branch**, plus a harness run. What the
+  cheap shape really changes is the cost of being wrong: a flag rather than a
+  re-embedding pass.
+
+- **Error-driven re-synthesis.** An artifact shown often and never confirmed, or
+  judged noise, is misleading — a title that over-claims, a passage that lost its
+  context. It is re-synthesised **from its source segment**, never from itself,
+  with before/after on Ops.
+  **Worth:** the artifacts that mislead get repaired instead of accumulating,
+  and the detector is free — the exposure and confirmation counts activation
+  already keeps.
+  **Cost:** a job beside `jobs/synthesize.rs`, re-synthesis from the segment,
+  before/after on Ops, an undo path. **A branch.** No harness — it changes text
+  through the guards that already exist, not ranking.
+
+- **Usage-informed supersede.** `auto_supersede` keeps the newest member of a
+  near-identical group; activation knows which member people actually confirmed.
+  **Worth:** small, and only where those two disagree. First shown on the undo
+  list, changed only if it turns out to matter.
+  **Cost:** a column read in `jobs/dedupe.rs` and a line on the undo list.
+  **One commit**, once anyone has seen it matter.
+
+<!-- CUT: a forgotten list with a direction. The item said: replace
+     `resurface`'s `{"sample": "random"}` with Qdrant context search, the
+     sitting's rail as the positive side and superseded/deprecated as the
+     negative, so what comes back is old and unseen *and* near what this sitting
+     has been in. It is cut on the opening thesis rather than on cost: its
+     product is "here is something you had forgotten", which is an application
+     for learning knowledge, not one for answering a situation. The base already
+     surfaces old material the only way that fits — because the situation asked
+     for it, through the offer.
+     Note what is NOT cut: `resurface` itself, `GET /api/v1/resurface` and the
+     trait method stay exactly as they are. They are wired, cheap and answer a
+     question somebody may legitimately ask over the API. What goes is the
+     roadmap item — no context search, no Qdrant work, no page. If the appetite
+     ever returns, the shape is not a list but a fifth rung of the offer ladder
+     between `Tentative` and `Random`: situation unknown, but this sitting has a
+     rail, so draw something old that is near it. It cannot replace the `Random`
+     floor either way — on a base started this morning it returns nothing, which
+     is the one moment that floor exists for (`src/core/recommend.rs:262`,
+     `src/store/context.rs:117`).
+     CUT: corpus map — the distance-matrix API over a filtered subset, plus the
+     link table, drawn. Nice to look at, and by the opening thesis that is the
+     whole objection.
+     NOT COPIED from the brain, on purpose: confabulation (no answer cards, no
+     generated answers standing in for stored text — a synthesised digest
+     competes with the exact wording it was derived from, which is fidelity loss
+     by design), content decay (activation fades, artifacts do not), interference
+     (a new capture never overwrites an old one; a conflict goes to a person).
+     These are where the expansion is deliberately better than the thing it
+     expands. -->
+
+## [Anticipation]
+
+The half that answers before anything is typed, and the newest: an offer under
+the search box, drawn from the situation the browser reports, on a ladder of
+four rungs down to a random card that claims nothing (spec
+`2026-08-21-context-recommendation-design.md`). Built, including the instrument
+that would let it be tuned — shown against clicked, by rung, over the last
+thirty days, on Ops. Everything left here is gated on that instrument having
+months behind it, not on anybody's judgement.
+
+- **Learned block weights.** The weights in `[recommend.weights]` are chosen,
+  not measured, and the honest description of them is "chosen". Once the
+  shown/clicked rate has history, they can be fitted to it.
+  **Worth:** the offer stops being a guess with a good story behind it. It is
+  also the precondition for the item below.
+  **Cost:** a fit over `offer_rates` history and the restraint to leave the
+  defaults alone until the history exists. **A branch**, gated on data rather
+  than on code. Fitting them before the data exists is guessing with extra
+  steps.
+
+- **Conjunctions across scopes.** The context vector can already hold "on the
+  phone the hour matters, at the desk it does not"; nothing yet learns which of
+  those conjunctions are real.
+  **Worth:** the difference between an encoder that *can* express a conjunction
+  and a base that knows which ones hold. Unknown until the weights are fitted —
+  it may turn out the fitted weights already say it.
+  **Cost:** **a project**, and it waits on the item above.
+
+- **`[sitting] prime` is unmeasured.** The live sitting can prime the next
+  search, sharing the one budget `associate.prime_lift` bounds, and the flag is
+  `false`. The harness has not been run either way.
+  **Worth:** unknown, which is the point. It is the one default here that would
+  move ranking.
+  **Cost:** no code — the mechanism is built. A harness run either way, and a
+  commit of its own carrying both numbers in its message. It moves that way or
+  it does not move.
+
+- **Dropping the `scope` block.** At weight 10 against a total under 5, that
+  block is what keeps one person's situations from being ranked first for
+  another. The read path cuts foreign clusters exactly, so the block is a
+  ranking aid rather than the guarantee — but it stays until each user has their
+  own collection.
+  **Worth:** none for a single operator. It is a correctness item for the day
+  tenancy exists, and nothing else about the encoder changes with it.
+  **Cost:** one weight to 0. **One commit**, blocked on **Multi-user tenancy**
+  below.
+
+## [Ask]
+
+Ask is the part of engram that is allowed to think, and it is built (spec
+`2026-08-17-streaming-ask-design.md`). It streams to the page — reasoning tokens
+included, when the model emits them — packs excerpts to the relevance cliff
+rather than to the context window, reaches one hop sideways for candidates,
+checks its own literals against the excerpts it was shown, and offers the answer
+back as a paste the operator approves. `[infer.ask] plan` adds one bounded round
+of planned retrieval and ships **on**: after the first round the model names the
+subjects the excerpts miss, each becomes a search of its own, and up to three
+run at once and merge into one set of excerpts. One plan, never a second, and
+never a loop.
+
+Two things it did not give up. An answer cannot carry a literal the excerpts did
+not — `verify::missing_literals`, the same guard synthesis runs, applied to
+generation. And nothing is written to memory without a person: the
+keep-this-answer link prefills the capture box and saves nothing, so the trace
+records that a model wrote the text and what it was written from.
+
+Model tiers are built: named tiers under `[infer.tiers.*]`, each chat role
+pointing at one, resolved at parse time into the same concrete role structs the
+completers already took. The planning call runs on the efficient tier while the
+answer it feeds runs on the deep one. The ask harness and ask feedback are built
+too (`2026-08-17-ask-harness-design.md`): verdicts with carriers,
+`questions.json` in the export, `evaluate_ask` measuring citation recall,
+abstention accuracy and faithfulness by literals and by claim check, and
+"nothing here" surfaced as a knowledge gap.
+
 - **The plan's uncovered subjects are gap candidates.** When `[infer.ask] plan`
   names the subjects the excerpts miss, it has said out loud what the base does
-  not hold, one bounded round per question, in the model's own words. Today
-  each becomes a search and is then thrown away. A subject whose fan-out search
-  came back with nothing is a knowledge gap that cost nothing to find.
+  not hold, in the model's own words, one bounded round per question. Today each
+  becomes a search and is then thrown away. A subject whose fan-out search came
+  back with nothing is a knowledge gap that cost nothing to find.
+  **Worth:** gaps from a call already paid for, and the most specific ones on
+  the queue — a named subject beats "this search scored low".
+  **Cost:** keep what the plan already computed and write it as a fifth
+  `GapKind` (`src/store/gaps.rs:10`), with the same coverage and dismissal paths
+  the other four use. **One commit.**
+
+- **Whether the planning call earns itself, and whether packing to the cliff
+  helps with no reranker configured.** A search's own fused scores are smooth
+  enough that a cliff may rarely form without one; the rail has always lived
+  with that and ask now inherits it. Both are harness questions, not design
+  ones.
+  **Worth:** either the default stays on with a number behind it, or one model
+  call per ask disappears.
+  **Cost:** no code. Two runs of the ask harness against a corpus that is not in
+  this repository, and a commit carrying the numbers. **One commit.**
 
 <!-- CUT: situation vectors — at ingest, the model writing the three to five
      situations an artifact answers, each embedded as an extra named vector, so
@@ -235,64 +339,87 @@ and none of them costs a call:
      this is a narrower objection than the one against answer cards — but it is
      the same objection. Access is the plastic half by design; a generated
      paraphrase deciding what surfaces is not the kind of plasticity meant.
+     Note the distinction from [Anticipation] above, which is not this: a `ctx`
+     vector is measured from situations that actually happened, never written by
+     a model.
      CUT: automatic answer cards, and answers stored as artifacts without the
      operator asking. A synthesised digest competing in search with the exact
      wording it was derived from is fidelity loss by design; the keep-this-answer
      link is the operator's decision, recorded as such, and that is the line.
-     CUT: LLM excerpt compression at query time (extract the relevant
-     sentences before answering). One more call to shave tokens off the next
-     one; the cliff and the reranker do the same for free. -->
+     CUT: LLM excerpt compression at query time (extract the relevant sentences
+     before answering). One more call to shave tokens off the next one; the
+     cliff and the reranker do the same for free. -->
 
 ## [Retrieval]
 
 What ask learns at write time, search inherits. Ask verdicts join judged
 searches as access cues under **access reconsolidation** above. The cliff is
-built (`search::cliff`) and ask now packs to it. The items here are search's
-own.
+built (`search::cliff`, `src/core/search.rs:256`) and ask packs to it. The items
+here are search's own, and all but the first move ranking.
 
 - **Continues in.** A hit whose neighbour in its corpus (adjacent ordinal) is
   also above the cliff says so, and one click reads on. The answer to a
-  situation is often the paragraph after the one that matched. *Most of the
-  machinery arrived with ask's sideways reach:* `Store::adjacent_artifacts`
-  exists, and `ask/retrieve.rs` already decides which hits are reliable enough
-  to reach from. What is left is the presentation — saying so on the rail, and
-  the click.
-- **Server-side grouping — now a prerequisite, not a nice-to-have.** The
-  per-corpus cap is applied client-side over a candidate pool three times the
-  limit; a corpus whose artifacts fill the pool leaves nothing to promote. At
-  `synthesis = "off"` a 10,000-token document yields ~26 passages rather than
-  ~8 artifacts, adjacent passages are additionally similar through their
-  shared heading, and one long document fills the pool reliably. The
-  tiered-synthesis spec (§5, "What `off` makes mandatory") names Qdrant's
-  `query/groups` as part of the design; what landed is the fallback only —
-  `cap_per_corpus` in `src/core/search.rs` now counts a merge against each of
-  its origin corpora (`VectorPayload.origin_corpora`). Still to build: the
-  `query/groups` call in `vector/qdrant.rs`, its emulation in
-  `vector/memory.rs`, and the measurement against the judged-pair set, since
-  it moves ranking. Until then a very long document at `off` can dominate a
-  result list.
+  situation is often the paragraph after the one that matched. Most of the
+  machinery arrived with ask's sideways reach: `Store::adjacent_artifacts`
+  exists (`src/store/artifacts.rs:660`), and `ask/retrieve.rs` already decides
+  which hits are reliable enough to reach from. What is left is the presentation
+  — saying so on the rail, and the click.
+  **Worth:** the paragraph after the match stops being something the operator
+  has to go and find. Highest worth-per-line in this section, and the only item
+  here that needs no measurement.
+  **Cost:** a badge on the rail and a route behind the click. **One commit.**
+
+- **Server-side grouping — a prerequisite, not a nice-to-have.** The per-corpus
+  cap is applied client-side over a candidate pool three times the limit; a
+  corpus whose artifacts fill the pool leaves nothing to promote. At
+  `synthesis = "off"` a 10,000-token document yields ~26 passages rather than ~8
+  artifacts, adjacent passages are additionally similar through their shared
+  heading, and one long document fills the pool reliably. The tiered-synthesis
+  spec (§5) names Qdrant's `query/groups` as part of the design; what landed is
+  the fallback only — `cap_per_corpus` now counts a merge against each of its
+  origin corpora (`VectorPayload.origin_corpora`).
+  **Worth:** without it, a single very long document at `off` can dominate a
+  result list. This is a correctness ceiling on a shipped setting, not an
+  improvement.
+  **Cost:** the `query/groups` call in `vector/qdrant.rs`, its emulation in
+  `vector/memory.rs`, and the judged-pair measurement. **A branch**, plus a
+  harness run.
+
 - **A dismissal that changes the next search.** Verdicts and dismissals are
   recorded and read — by gaps, by pursuits, by activation — and `verdict`
-  appears in `src/core/search.rs` exactly once, in a comment. A hit sent away
-  is therefore back tomorrow for the same question. As a negative example in a
+  appears in `src/core/search.rs` exactly once, in a comment. A hit sent away is
+  therefore back tomorrow for the same question. As a negative example in a
   `best_score` recommend it is not: the penalty there is squared and
-  sign-flipped, so it reaches the neighbours of the dismissed chunk and not
-  only the chunk, where a payload exclusion reaches exactly one point. This is
-  the one whose cause the operator set themselves — an effect on your own last
-  action reads as a base that listened, where the same effect with no visible
-  cause reads as noise. It moves ranking, and it is worth the measurement it
-  costs.
+  sign-flipped, so it reaches the neighbours of the dismissed chunk and not only
+  the chunk, where a payload exclusion reaches exactly one point.
+  **Worth:** the one effect whose cause the operator set themselves. An effect
+  on your own last action reads as a base that listened; the same effect with no
+  visible cause reads as noise.
+  **Cost:** negative examples threaded through the search path, sharing the
+  `best_score` machinery with access reconsolidation — build the two in
+  sequence, not apart. **A branch**, plus a harness run.
+
 - **Reranking on by default**, once there is a default endpoint worth assuming.
-  A cross-encoder, not a model call; the harness — both of them — decides.
+  A cross-encoder, not a model call.
+  **Worth:** likely the largest single-stage gain in ordinary retrieval, and it
+  is the stage that makes a cliff form at all — which is why the ask questions
+  above are downstream of it.
+  **Cost:** a config default. The real cost is the dependency and both harnesses
+  saying it earns it. **One commit**, plus two harness runs.
+
 - **Why this hit is where it is, as one object.** A rank is now the product of
   hybrid fusion, the recency stage, the pinned boost, the reranker,
   `cap_per_corpus`, `prime`, the cliff and the one-hop reach — eight stages
   layered in the order they were built, each saying what it did in its own way
-  or not at all. The rail badges some of it, MCP's meta line badges a different
-  some of it, the API a third. One explanation carried on the hit — lifted two
-  places on activation, recalled through this link, past the cliff — is what
-  lets all three doors say the same thing, and it is the only honest way to
-  keep adding stages to a ranking the operator is asked to trust.
+  or not at all. The rail badges some of it, MCP's meta line a different some,
+  the API a third.
+  **Worth:** one explanation carried on the hit — lifted two places on
+  activation, recalled through this link, past the cliff — is what lets all three
+  doors say the same thing. It is the only honest way to keep adding stages to a
+  ranking the operator is asked to trust, and every ranking item above adds one.
+  **Cost:** an explanation struct threaded through eight stages in
+  `src/core/search.rs`, then read by the rail, MCP's meta line and the API.
+  **A branch.** No harness — it changes nothing about the order.
 
 <!-- CUT: late-interaction reranking (ColBERT-style multivectors). Not for the
      reason first written here, which said storage and memory both. Memory is
@@ -308,66 +435,41 @@ own.
 
 ## [What the base says about itself]
 
-The opening of this file says nothing here is a screen to look at, and that
-holds for the mechanisms. It does not hold for their results. Three things the
-base already knows are currently spread across four pages in four vocabularies,
-and a mechanism the operator cannot see the effect of is one they cannot decide
-to trust.
+These are screens, and the opening of this file says nothing here is a screen to
+look at. The exception is narrow and deliberate: these are instruments, not
+reading material. Three defaults on this list — `[sitting] prime`, the block
+weights, reranking — are held at their current values because nobody can see
+their effect, and an instrument is what unblocks them. Anything on this page
+that is not load-bearing in that sense has been cut.
 
-- **One queue for "the base did not answer".** Built. Four `GapKind`s on the
-  one list the capture page already had, each badged with what asked it:
-  *judged*, *asked*, *nothing near*, *pursued*. Closable three ways — a capture
-  that covers it, a pursuit that earns itself, or dismissal — and a capture
-  that answered something says so on its own queue row, which is the loop
-  shutting where the operator can see it.
+Built: one queue for "the base did not answer" — four `GapKind`s on the list the
+capture page already had, each badged with what asked it (*judged*, *asked*,
+*nothing near*, *pursued*), closable by a capture that covers it, a pursuit that
+earns itself, or dismissal, with coverage stored in `gap_coverage` so nothing an
+automatic score decided overwrites what a person judged. And the offer's hit
+rate on Ops, shown against clicked, by rung, over thirty days.
 
-  The fourth source is distance, not behaviour: a search whose best candidate
-  fell under `vector.weak_below`. *Abandoned* was the first draft and it was
-  wrong twice — not clicking a result can mean the list was useless or that the
-  titles told you what you needed, and an open is only recorded when pursuits
-  *and* feedback are on, so with pursuits off every search looks abandoned.
-  Coverage is stored in `gap_coverage` rather than on the judged row, so
-  nothing an automatic score decided overwrites what a person judged, and
-  deleting the capture that closed a gap reopens it.
 - **Ops as the state of the memory, not the housekeeping table.** It lists
-  merges, deprecations, hidden near-duplicates, retries. What it does not say
-  is what the memory is *like*: how much is held and how densely, what is
-  activated and what is fading, recall@10 and MRR over months rather than as
-  today's number on the judge page. Four figures in four places, and the one
-  page named for the answer has none of them. What the sweeps did is answered
-  now — the last day, and the history under it — which leaves the shape of the
-  base itself.
-- **Where an artifact came from, end to end.** Corpus lines, passage, the
-  window whose reading earned a synthesis, the merge, the pursuit, the answer
-  it was cited in. `store/lineage.rs` and `web/lineage_view.rs` hold the middle
-  of this. The thesis of the whole application is that rewriting is *earned* —
-  and an artifact cannot currently tell the operator what earned it, or what it
-  has ever answered. Last of the three, and the one that makes the other two
-  worth reading.
+  merges, deprecations, hidden near-duplicates, retries, and now what the sweeps
+  did — the last day, with the history under it. What it does not say is what the
+  memory is *like*: how much is held and how densely, what is activated and what
+  is fading, recall@10 and MRR over months rather than as today's number on the
+  judge page.
+  **Worth:** four figures currently in four places, and the one page named for
+  the answer has none of them. It is also where a months-long series has to live
+  before **Learned block weights** is anything but a guess.
+  **Cost:** aggregates over tables that already exist, and a section on the Ops
+  page. **A branch.**
 
-- **The offer's hit rate is on Ops.** Built. Shown against clicked, by rung,
-  over the last thirty days. The block weights the recommendation rests on are
-  chosen, not measured, and this is the instrument that would let them be
-  fitted — fitting them before the data exists would be guessing with extra
-  steps. It is here for the reason `[sitting] prime` is still `false`: a
-  default nobody can see the effect of never moves.
-
-- **Dropping the `scope` block.** Not built, and it waits on per-user
-  collections rather than on anyone's judgement. At weight 10 against a total
-  under 5, that block is what keeps one person's situations from being ranked
-  first for another; the read path cuts foreign clusters exactly, so the block
-  is a ranking aid rather than the guarantee, but it stays until each user has
-  their own collection. Then it goes to 0 and nothing else about the encoder
-  changes.
-
-- **Learned block weights.** Not built. Once the shown/clicked rate has months
-  behind it, the weights in `[recommend.weights]` can be fitted to it. Until
-  then they are the defaults in the design record, and the honest description
-  of them is "chosen".
-
-- **Conjunctions across scopes.** Not built. The context vector can hold
-  "on the phone the hour matters, at the desk it does not"; nothing yet learns
-  which of those conjunctions are real.
+- **Where an artifact came from, end to end.** Corpus lines, passage, the window
+  whose reading earned a synthesis, the merge, the pursuit, the answer it was
+  cited in. `store/lineage.rs` and `web/lineage_view.rs` hold the middle of this.
+  **Worth:** the thesis of the whole application is that rewriting is *earned*,
+  and an artifact cannot currently say what earned it or what it has ever
+  answered. Real, but the weakest of the three: it is the one instrument here
+  that unblocks no default.
+  **Cost:** the two ends joined to the middle that exists, and a view.
+  **A branch.** Last of this section.
 
 ## [Core Platform & Tooling]
 
@@ -377,71 +479,103 @@ to trust.
   second and a document on the third, and the operator navigates to say which.
   The extension's panel does not. It is one box that never changes shape, with
   the verb chosen by a button — typing searches, **Ask** spends the model call,
-  **Capture** stores what is in the box — and no state hidden between them.
-  That is the thesis at the top of this file made literal: the box is the
-  application, and the page you are on stops being a thing to decide. It ships
-  in the extension first because a side panel is 350 pixels of one column,
+  **Capture** stores what is in the box — and no state hidden between them. It
+  ships in the extension first because a side panel is 350 pixels of one column,
   which is the cheapest possible place to find out whether one surface really
-  does hold three verbs without any of them getting in the way. If it does, the
-  three pages fold into `/ui/search` and the others become deep links to it.
-  What has to be answered there and not here: where the rail, the filter chips
-  and the judged-verdict bar live when the box is doing all three jobs.
-- **One dial instead of eight gates.** Three of them are gone: `[learn]` is now
-  the single switch over recording, association and pursuits, and the sections
-  below it keep their thresholds and no switch of their own. That was the half
-  of this item where the flags were not really independent — two of their
-  combinations were refused at startup and a third was a warning, which is how
-  you find out a setting has been written three times. What is left is the half
-  where they are genuinely different questions: `[activation]`, `[promote]` and
-  `[consolidate]` still depend on each other in ways only the config comments
-  admit — promotion reads an activation that only moves while `[learn]` is on,
-  and priming exists only to be fed by activation. A named mode — off,
-  learning, full — setting a coherent bundle across those, with the individual
-  keys still there for whoever wants them, is what would finish it.
-- **A CLI.** PDF capture is built: `docling` reads an uploaded PDF into markdown
-  in `Stage::Extract`, locally and without a model, and the corpus is text like
-  any other from there. Spans into it are line spans labelled `extraction`, not
-  `page 42` — a page map is a second coordinate system beside every stored span,
-  and the label was not worth it.
+  holds three verbs without any of them getting in the way.
+  **Worth:** the thesis at the top of this file made literal — the box is the
+  application, and the page you are on stops being a thing to decide. It is also
+  what makes the anticipated offer sit in the one place the operator always is.
+  **Cost:** the panel exists; folding the three pages into `/ui/search` and
+  making the others deep links is the rest. What has to be answered there and
+  not here: where the rail, the filter chips and the judged-verdict bar live
+  when the box is doing all three jobs. **A project** for the web UI, **a
+  branch** for the panel it starts in.
+
+- **One dial instead of eight gates.** Three are gone: `[learn]` is now the
+  single switch over recording, association and pursuits, and the sections below
+  it keep their thresholds and no switch of their own. What is left is the half
+  where the flags are genuinely different questions: `[activation]`,
+  `[promote]` and `[consolidate]` still depend on each other in ways only the
+  config comments admit — promotion reads an activation that only moves while
+  `[learn]` is on, and priming exists only to be fed by activation.
+  **Worth:** a named mode — off, learning, full — setting a coherent bundle, with
+  the individual keys still there for whoever wants them. Every combination
+  currently refused at startup is a setting that was written more than once.
+  **Cost:** a mode in `config.rs` resolving to the existing keys, and the
+  startup refusals reduced to the ones that remain possible. **One commit.**
+
 - **Structure in a PDF.** The default `pdf-text` build recovers words and
-  reading order and *no* headings or tables — measured, and pinned by a test
-  that fails if that improves. The splitter falls back to blank lines, so every
-  window loses the heading it would have carried. `--features pdf-ml` adds the
-  layout and table models, at the price of the ONNX runtime, pdfium as a native
-  library and a model download; a scan is refused with that reason until it is
-  switched on. Making it the default waits on someone wanting it enough to pay
-  for it.
-- **Images in a source, shown where the source is read.** *(The text itself is
+  reading order and *no* headings or tables — measured, and pinned by a test that
+  fails if that improves. The splitter falls back to blank lines, so every window
+  loses the heading it would have carried. `--features pdf-ml` adds the layout
+  and table models, at the price of the ONNX runtime, pdfium as a native library
+  and a model download; a scan is refused with that reason until it is switched
+  on.
+  **Worth:** every window in a PDF currently loses its heading, which is the one
+  piece of context synthesis most wants. Real and measurable.
+  **Cost:** none in code — it is built behind a feature flag. The cost is the
+  dependency, and making it the default waits on someone wanting it enough to
+  pay for it. **One commit**, whenever that is true.
+
+- **Images in a source, shown where the source is read.** The text itself is
   clean now: `core::pdf::normalise` folds a detached bullet glyph — a symbol
   font's private-use one or a real U+2022 — into a markdown list marker and
-  collapses blank-line runs, leaving indentation and every glyph that is not
-  standing in for a marker where they are, pinned by
-  `tests/fixtures/bullet-list.pdf`.)* A PDF's figures are dropped by extraction,
-  and the corpus page has no place for them anyway: it shows the photo of an
-  image capture and the text of everything else. Showing
-  a document's figures inline — on the raw corpus and on the passages that
-  claim their lines — needs three things that do not exist: the images pulled
-  out of the PDF and stored (attachments are one row per corpus today, and this
-  is many), a span or anchor tying each to the place in the markdown it came
-  from, and a renderer for it. Worth doing after the text itself is clean.
+  collapses blank-line runs, pinned by `tests/fixtures/bullet-list.pdf`. A PDF's
+  figures are dropped by extraction, and the corpus page has no place for them
+  anyway: it shows the photo of an image capture and the text of everything else.
+  **Worth:** a figure is often the answer, and today it is not in the base at
+  all. Bounded, though — it changes reading, not retrieval.
+  **Cost:** three things that do not exist: the images pulled out of the PDF and
+  stored (attachments are one row per corpus today, and this is many), a span or
+  anchor tying each to the place in the markdown it came from, and a renderer.
+  **A project.**
+
+- **A CLI.** There is no door to the base from a shell that is not `curl`.
+  **Worth:** low while `/mcp` exists and is the door an agent already uses.
+  On the list because scripted capture and export are the two things a shell is
+  genuinely better at.
+  **Cost:** a binary over the existing API. **A branch.** Near the bottom.
+
 - **The pursuit sweep's promotion call, which almost never has anything to do.**
   A one-engaged-artifact pursuit calls `maybe_promote`, but every engagement
-  already calls it at the bump — `search::mark_artifact_seen` on an open,
-  `associate` on a confirmation — and the sweep only runs once the sitting has
-  been idle for `idle_secs`. It therefore re-checks the same artifact against a
-  *more* decayed activation than the live call saw, and can only ever decline
-  where that one declined. The one case it does cover: an artifact engaged
-  solely by an ask citation, which counts toward the pursuit but bumps no
-  activation. Either give a citation its own bump and drop the call, or leave
-  it as the cheap backstop it is.
+  already calls it at the bump, and the sweep only runs once the sitting has been
+  idle for `idle_secs` — so it re-checks the same artifact against a *more*
+  decayed activation than the live call saw, and can only ever decline where that
+  one declined. The single case it covers is an artifact engaged solely by an ask
+  citation.
+  **Worth:** one fewer call that cannot do anything, and one fewer thing to
+  explain.
+  **Cost:** free — **A citation is an engagement** above removes the last case
+  and this deletes itself with it. Not a separate item so much as a consequence.
+
 - **DOCX, EPUB, XLSX and the rest.** `docling` is in the tree and already reads
   them; only a door and a `kind` are missing. Deliberately out of PDF capture.
+  **Worth:** whole classes of source that currently cannot be captured at all,
+  for almost no new machinery.
+  **Cost:** a `kind`, a door, and the extraction path pointed at it.
+  **One commit** per format after the first, **a branch** for the first.
+
 - **Backup and restore.** Qdrant snapshots plus the SQLite file, restored
-  together, so recovery does not mean paying for every embedding again.
+  together.
+  **Worth:** recovery that does not mean paying for every embedding again. The
+  only item on this list whose absence can cost real money.
+  **Cost:** a snapshot call, a file copy, a restore path that checks the two
+  agree. **A branch.**
+
 - **OAuth 2.1 for `/mcp`.** OIDC login for the web UI is built; the MCP surface
   still authenticates on its own terms.
+  **Worth:** one identity model instead of two — and `/mcp` is about to become
+  the door that teaches the base, which makes "who is this" load-bearing rather
+  than administrative.
+  **Cost:** the MCP surface moved onto the existing OIDC path. **A branch.**
+
 - **Multi-user tenancy.** *(de-prioritised)* Payload-partitioned rather than a
   collection per user. Single-operator use is the design point.
+  **Worth:** none for the design point. It unblocks **Dropping the `scope`
+  block** and nothing else.
+  **Cost:** **a project**, and it stays de-prioritised.
+
 - `clippy` is not run locally in every environment; CI is the only gate.
 
 <!-- CUT: quantization and on-disk payload for small hosts. Hydrating artifacts
