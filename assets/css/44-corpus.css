@@ -15,7 +15,7 @@
   border-radius: var(--radius-md); overflow-x: auto;
 }
 .band-src table { border-collapse: collapse; width: 100%;
-                  font-family: var(--font-mono); font-size: 0.8125rem; }
+                  font-family: var(--font-mono); font-size: var(--text-sm); }
 .band-src td { padding: 1px 0.5rem 1px 2rem; vertical-align: top;
                white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -1.5rem; }
 .band-src td.ln {
@@ -32,5 +32,5 @@
   display: flex; gap: 0.5rem; align-items: center; justify-content: space-between;
   flex-wrap: wrap;
 }
-.band-gap-label { font-size: 0.8125rem; color: var(--color-danger); }
+.band-gap-label { font-size: var(--text-sm); color: var(--color-danger); }
 

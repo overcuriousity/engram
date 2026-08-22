@@ -380,6 +380,14 @@ pub mod test_support {
         core
     }
 
+    /// An installation with no `[infer.ask]`. `Core::asks` is false, so the
+    /// ask door is not there at all — no button, no route, no MCP tool.
+    pub async fn test_core_without_ask() -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.completer = None;
+        core
+    }
+
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {

@@ -292,7 +292,7 @@ style = "tei"
 - **`infer.ask.max_output_tokens`** comes out of `context_tokens`: `ask`
   reserves it and packs excerpts into the remainder, so raising it buys longer
   answers by showing the model fewer of them. Never more than half the window.
-- **`/ui/ask` needs JavaScript** — the answer streams over SSE.
+- **Asking needs JavaScript** — the answer streams over SSE.
   `POST /api/v1/ask` and the MCP `ask` tool are the JS-free ways in.
 
 `config.example.toml` carries every key with the reasoning behind each default.

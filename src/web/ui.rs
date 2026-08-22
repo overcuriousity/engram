@@ -1,5 +1,4 @@
 use crate::auth::Identity;
-use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -9,7 +8,6 @@ use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
@@ -224,39 +222,6 @@ pub struct SeenTogether {
     pub cross_corpus: bool,
 }
 
-/// Work that hit something and is waiting to try again by itself.
-pub struct RetryingRow {
-    pub stage: String,
-    pub target_id: String,
-    pub attempts: i64,
-    pub due: String,
-    pub last_error: String,
-}
-
-/// A parked capture, with enough of the corpus it resembles to decide without
-/// opening both.
-pub struct ParkedRow {
-    pub id: String,
-    pub title: String,
-    pub bytes: usize,
-    pub other_id: String,
-    pub other_title: String,
-    pub percent: i64,
-}
-
-/// An artifact the sweep hid, with the one it lost to.
-pub struct SupersededRow {
-    pub id: String,
-    pub title: String,
-    /// When it was written and how it opens. Two artifacts can carry the same
-    /// title — a merge of two documents that named a section identically
-    /// produces exactly that — and a table of them is unreadable without
-    /// something that differs between the rows.
-    pub subtitle: String,
-    pub winner_id: String,
-    pub winner_title: String,
-}
-
 /// A pair waiting on a person.
 pub struct PairRow {
     pub id: i64,
@@ -295,19 +260,6 @@ pub struct PairRow {
     /// still resolvable, just with nothing recommended.
     pub keeps_a: bool,
     pub keeps_b: bool,
-}
-
-/// An artifact flagged stale with no specific replacement.
-pub struct DeprecatedRow {
-    pub id: String,
-    pub title: String,
-}
-
-/// An active artifact nobody has confirmed or retrieved in a while.
-pub struct StaleRow {
-    pub id: String,
-    pub title: String,
-    pub last_verified: String,
 }
 
 pub struct TokenRow {
@@ -366,7 +318,7 @@ pub fn fmt_duration(secs: i64) -> String {
 /// An identifier with no wording yet returns unchanged rather than blank: a
 /// stage added later must show up as *something*. `every_stage_the_queue_can_run_has_a_word_for_it`
 /// is what makes sure that fallback stays theoretical.
-fn sweep_label(stage: &str) -> &str {
+pub(crate) fn sweep_label(stage: &str) -> &str {
     match stage {
         "synthesize" => "Writing artifacts",
         "enrich" => "Enriching",
@@ -473,102 +425,6 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-#[derive(Template)]
-#[template(path = "capture.html")]
-struct CaptureTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// Decisions waiting on a person, shown where the work arrives rather than
-    /// on a page you have to remember to visit. Empty renders nothing at all.
-    /// Grouped, because one artifact against three others is one decision and
-    /// arrived as three — see `group_pairs`.
-    pairs: Vec<PairCluster>,
-    /// How many more are behind the ones shown. Said once under the list, so a
-    /// short list does not read as an empty queue when it is a capped one.
-    more_pairs: i64,
-    /// Whether the image door is open, i.e. `[infer.vision]` is configured.
-    /// Off, the page offers text only rather than a picker that fails.
-    vision_enabled: bool,
-    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
-    ///
-    /// At `earned` and `off` it spends none: the text is embedded as written,
-    /// and at `earned` a window is rewritten later only where reading has
-    /// earned it. The page has to say which of those is happening — promising
-    /// "16 model calls" on a base that will make none is the page lying about
-    /// what the button costs.
-    eager: bool,
-    /// The holes, grouped and named by the sweep. Empty when feedback is off.
-    gaps: Vec<GapGroup>,
-    /// Open gaps the sweep has not grouped yet.
-    loose: Vec<GapMember>,
-    /// An answer the operator asked to keep, dropped into the box for them to
-    /// edit. Empty on an ordinary visit.
-    ///
-    /// Prefilled and not saved: the save stays the operator's decision. That is
-    /// the line the roadmap draws — this is a person keeping something the
-    /// model wrote, recorded as such, and not the system writing memory to
-    /// itself.
-    prefill_text: String,
-    /// The ask this text came from, carried through the form so the capture
-    /// records where it came from. Empty when the box was not prefilled.
-    ///
-    /// The id rather than the prose: a note is a string someone can edit away,
-    /// while this is the join back to the question and the artifacts the answer
-    /// was built from, and `capture_submit` turns it into stored provenance.
-    prefill_ask: String,
-    /// The question this answer answered, in the operator's own words.
-    ///
-    /// The provenance already recorded it — `with_ask` carries the question and
-    /// the citations into the corpus metadata. What was missing was saying so
-    /// on the page: the box arrived holding an answer with no sign of what it
-    /// was an answer to, and the operator deciding whether to keep it is the
-    /// person who most needs to see the question. The line does not move; it is
-    /// only better documented.
-    prefill_question: String,
-}
-
-/// One artifact this sitting has been in, as the rail lists it.
-pub struct SittingItem {
-    pub id: String,
-    pub title: String,
-}
-
-/// How many of the sitting's touched artifacts a page shows.
-///
-/// Six, against a carried twenty. The rail is a way back to what you were just
-/// reading, not a history: a list long enough to need reading is a second set
-/// of results beside the real ones.
-const SITTING_RAIL: usize = 6;
-
-/// What this sitting has touched, most recent first, ready to render.
-///
-/// Empty for a cold sitting and for every door that has no session — which is
-/// the whole of what keeps this at the web door. An artifact deleted since is
-/// simply absent: the sitting holds ids and the store is the truth.
-async fn sitting_rail(st: &AppState, id: &Identity) -> Vec<SittingItem> {
-    let Some(sess) = &id.session else {
-        return Vec::new();
-    };
-    let carried =
-        st.core
-            .sittings
-            .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64);
-    let mut out = Vec::new();
-    for aid in carried.touched.iter().take(SITTING_RAIL) {
-        if let Ok(c) = st.core.store.get_artifact(aid).await
-            && c.in_results()
-        {
-            out.push(SittingItem {
-                title: title_of(&c),
-                id: c.id,
-            });
-        }
-    }
-    out
-}
-
 /// One hole in the base, as the capture page lists it.
 pub struct GapMember {
     /// The `GapKind`, for the dismiss route.
@@ -586,7 +442,7 @@ pub struct GapGroup {
     pub members: Vec<GapMember>,
 }
 
-fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
+pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
     use crate::store::gaps::GapKind;
     GapMember {
         kind: g.kind.as_str().into(),
@@ -599,41 +455,6 @@ fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
         id: g.id,
         text: g.text,
     }
-}
-
-#[derive(Template)]
-#[template(path = "_captured.html")]
-struct CapturedTemplate {
-    id: String,
-    duplicate: bool,
-    /// Set when the capture was parked as a near-duplicate. Without it the page
-    /// says "processing" for a capture that nothing will ever process, and the
-    /// only hint is a queue on Ops the writer has no reason to open.
-    near_dupe_of: Option<String>,
-    near_dupe_percent: i64,
-}
-
-#[derive(Template)]
-#[template(path = "search.html")]
-struct SearchTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// Kept so a reload or a deep link restores the box with its results.
-    q: String,
-    /// What this collection can actually be narrowed by. Rendered as chips, so
-    /// choosing a category never means knowing in advance that it exists.
-    facets: crate::vector::Facets,
-    /// The chip a deep link arrived with, so the form comes back selected
-    /// rather than reset to "all".
-    category: String,
-    /// What this sitting has been in. Absent on a cold sitting — an empty box
-    /// saying "nothing yet" is worse than no box.
-    sitting: Vec<SittingItem>,
-    /// Whether the area under the search box exists at all. See
-    /// `Core::recommends`.
-    recommend: bool,
 }
 
 #[derive(Template)]
@@ -650,6 +471,73 @@ struct ResultsTemplate {
     terms: String,
 }
 
+/// The rail before anything is asked: the base introducing itself.
+///
+/// Rendered twice by design — inlined into the workspace page when it opens
+/// with an empty box, and returned by the results endpoint when the box is
+/// emptied — so the idle state is one account however it is reached, and
+/// clearing a query goes back to it rather than to a "No matches." nobody
+/// searched for.
+#[derive(Template)]
+#[template(path = "_rail_idle.html")]
+pub(crate) struct RailIdleTemplate {
+    pub(crate) artifacts: i64,
+    pub(crate) corpora: i64,
+    pub(crate) recent: Vec<IdleRecentRow>,
+}
+
+pub(crate) struct IdleRecentRow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    /// "today", "3 days ago" — a jog, not a timestamp. See `judge::ago`.
+    pub(crate) when: String,
+}
+
+/// The name a capture goes by before synthesis titles it: the hint, or its
+/// opening words — with a word for the two origins that have none to open
+/// with. One rule, because the queue and the idle rail naming the same row
+/// differently would read as two captures.
+fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> String {
+    title_hint.unwrap_or_else(|| {
+        if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_IMAGE {
+            "photo".into()
+        } else if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_PDF {
+            // A PDF has no opening words until the extraction lands. Without
+            // this the row renders an empty anchor: nothing to read and
+            // nothing to click through to the corpus.
+            "document".into()
+        } else {
+            markdown::snippet(raw_text, 60)
+        }
+    })
+}
+
+/// Two counts and the last few captures, off the slimmest reads there are:
+/// the idle rail is on the most-opened screen, re-renders on every box-clear,
+/// and must cost nothing.
+pub(crate) async fn rail_idle(st: &AppState) -> Result<RailIdleTemplate> {
+    let (corpora, artifacts) = st.core.store.held_brief().await?;
+    let recent = st
+        .core
+        .store
+        .recent_captures(5)
+        .await?
+        .into_iter()
+        .map(
+            |(id, title_hint, origin, created_at, opening)| IdleRecentRow {
+                when: crate::web::judge::ago(created_at),
+                label: corpus_label(title_hint, &opening, &origin),
+                id,
+            },
+        )
+        .collect();
+    Ok(RailIdleTemplate {
+        artifacts,
+        corpora,
+        recent,
+    })
+}
+
 #[derive(Template)]
 #[template(path = "_queue.html")]
 struct QueueTemplate {
@@ -664,8 +552,6 @@ struct QueueTemplate {
 struct CorpusTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     id: String,
     status: String,
     badge: &'static str,
@@ -769,8 +655,6 @@ struct ArtifactDetailFragment {
 struct ArtifactDetailPage {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     d: ArtifactDetail,
 }
 
@@ -793,29 +677,8 @@ const SWEEP_WORDS: &[(&str, &str, &str)] = &[
     ("pursuit", "pursuits", "pursuits opened"),
 ];
 
-/// One phrase of the last day: "412 links forgotten".
-struct SweepCount {
-    n: i64,
-    what: String,
-}
-
-/// One recorded run, as the history renders it.
-struct SweepRunRow {
-    when: String,
-    /// The stage in words. The identifier it was worded from is on the cell as
-    /// a `title`, because the log and the config still call it that and a
-    /// reader who greps for `arm_dedupe` should find it here too.
-    stage: String,
-    stage_id: String,
-    /// Empty unless it failed, in which case it is why.
-    error: String,
-    took: String,
-    /// The counts, already worded. Empty for a run that did nothing.
-    counts: Vec<SweepCount>,
-}
-
 /// Add up one run's `detail` into `totals`, keyed by the words it earns.
-fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {
+pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
         return;
     };
@@ -838,73 +701,10 @@ fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {
 }
 
 #[derive(Template)]
-#[template(path = "ops.html")]
-struct OpsTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    job_counts: Vec<(String, i64)>,
-    oldest_pending_secs: Option<i64>,
-    artifact_count: i64,
-    vector_count: u64,
-    retrying: Vec<RetryingRow>,
-    parked: Vec<ParkedRow>,
-    superseded: Vec<SupersededRow>,
-    /// Artifacts the dedupe pass wrote out of several others, with what they
-    /// were written from and an undo.
-    merged: Vec<MergedRow>,
-    /// The list is capped; there are rows this page is not showing. Said out
-    /// loud, because a table that stops without saying so reads as a table of
-    /// everything there is.
-    more_merged: bool,
-    more_superseded: bool,
-    /// `TABLE_CAP`, so the line that says how many rows are showing says the
-    /// number the code actually truncated to. Written out twice in the
-    /// template, it drifted from the constant the first time either moved.
-    table_cap: i64,
-    deprecated: Vec<DeprecatedRow>,
-    stale: Vec<StaleRow>,
-    /// `None` when nothing is being learned, which renders nothing at all: a
-    /// count of links on a base that records no searches is a line about a
-    /// feature that is switched off.
-    links: Option<crate::store::links::LinkCounts>,
-    /// Artifacts written from pursuits, newest first, each one click from
-    /// deprecated.
-    generated: Vec<GeneratedRow>,
-    /// Recent pursuits, only when the feature is on. A count and not a table:
-    /// a pursuit that ended unsatisfied is a hole in the base and belongs on
-    /// the one list of those, not on a second list of its own; one that ended
-    /// satisfied needs nobody; and one that was written up is in `generated`
-    /// above.
-    pursuit_enabled: bool,
-    pursuit_recent: usize,
-    pursuit_unsatisfied: usize,
-    /// What the sweeps did in the last twenty-four hours, added up. Not "last
-    /// night": units that reschedule themselves on their own periods do not
-    /// line up into one cycle, and there is no cycle identity to group them by.
-    last_day: Vec<SweepCount>,
-    /// Runs in the last day that failed. Said separately, because a summary of
-    /// what got done cannot report what did not.
-    last_day_failures: usize,
-    /// The runs themselves, newest first. What a single overwritten summary
-    /// could never give: whether this started yesterday or has been going
-    /// wrong for a week.
-    sweep_history: Vec<SweepRunRow>,
-    /// Shown against clicked, by rung. Empty when the offer is switched off, or
-    /// when it has been on and never had anything to say — either way there is
-    /// no table, because a heading over no rows is a claim that something is
-    /// being measured when nothing is.
-    offer_rates: Vec<crate::store::pursuits::OfferRate>,
-}
-
-#[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -914,27 +714,6 @@ struct SettingsTemplate {
     /// only the searches let an operator clear their query log without knowing
     /// the judged questions went with it.
     asks: Option<crate::store::asks::AskStats>,
-}
-
-/// One generated artifact on Ops.
-struct GeneratedRow {
-    id: String,
-    title: String,
-    subtitle: String,
-    cues: Vec<String>,
-    sources: Vec<SourceRow>,
-}
-
-struct MergedRow {
-    id: String,
-    title: String,
-    /// See `SupersededRow::subtitle`: what tells two rows with one title apart.
-    subtitle: String,
-    /// What it was written from, in the order the lineage stores them.
-    sources: Vec<SourceRow>,
-    /// True when a source has been deleted since, so the artifact claims less
-    /// provenance than its text carries.
-    orphaned: bool,
 }
 
 pub struct SourceRow {
@@ -950,7 +729,7 @@ pub struct SourceRow {
 
 /// When an artifact was written and how it opens, for a table where the title
 /// alone may not be unique.
-fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
+pub(crate) fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
     format!(
         "{} · {}",
         fmt_time(c.created_at),
@@ -963,7 +742,7 @@ fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
 /// identical (same self-guard, same tolerance for deleted sources, same
 /// corpus fallback), and a copy in each is how they come to disagree about
 /// what a merge was made of.
-async fn source_rows(
+pub(crate) async fn source_rows(
     store: &crate::store::Store,
     merged_id: &str,
     roots: &[String],
@@ -995,158 +774,7 @@ struct TokenCreatedTemplate {
     token: String,
 }
 
-#[derive(Template)]
-#[template(path = "ask.html")]
-struct AskTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
-    /// A question to prefill the box with — a gap's "ask again", or the query
-    /// this sitting was just searching for.
-    q: String,
-    /// What this sitting has been in. See `SearchTemplate::sitting`.
-    sitting: Vec<SittingItem>,
-}
-
-#[derive(serde::Deserialize)]
-struct AskPrefill {
-    #[serde(default)]
-    q: String,
-}
-
-#[derive(Template)]
-#[template(path = "_answer.html")]
-struct AnswerTemplate {
-    answer: String,
-    citations: Vec<RenderedResult>,
-    dropped: usize,
-    /// The answer stops where its ceiling did. Shown beside `dropped` for the
-    /// same reason: a cut-off answer is otherwise indistinguishable from a
-    /// finished one.
-    truncated: bool,
-    /// The answer said "not in the base"; badged so the operator sees what
-    /// the harness will count.
-    abstained: bool,
-    /// Literals the answer carries that no cited excerpt does. Badged, and
-    /// marked in `answer`, so a reader can tell what the base holds from what
-    /// the model wrote.
-    unsupported: Vec<String>,
-    /// Set when the question was recorded; the verdict bar exists only then.
-    event_id: Option<String>,
-    /// The bar, rendered — empty when there is no event.
-    verdict_bar: String,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_rail.html")]
-struct AskRailTemplate {
-    citations: Vec<RenderedResult>,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_verdict.html")]
-struct AskVerdictTemplate {
-    event_id: String,
-    /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
-    verdict: Option<String>,
-    /// Marks the bar to swap itself out-of-band. Set when it rides along with
-    /// something else — the carrier toggle — and not when it is the response
-    /// the click already targets.
-    oob: bool,
-}
-
-/// What the keep button leaves behind: the outcome of storing the answer.
-#[derive(Template)]
-#[template(path = "_ask_kept.html")]
-struct AskKeptTemplate {
-    /// The corpus the answer is now — the new one, or the one that already
-    /// held the same bytes.
-    id: String,
-    duplicate: bool,
-    /// Stored but not processed: it resembles something already in the base
-    /// closely enough that an operator decides on Ops first.
-    parked: bool,
-    near_dupe_percent: i64,
-}
-
-#[derive(Template)]
-#[template(path = "_ask_carried.html")]
-struct AskCarriedTemplate {
-    event_id: String,
-    n: i64,
-    carried: bool,
-    /// The bar, rendered, to swap out-of-band. Always `Some` from the route.
-    bar: Option<String>,
-}
-
 // ── Handlers ────────────────────────────────────────────────────────────────
-
-/// What the capture page accepts in its query string.
-///
-/// `from_ask` rather than the answer itself: an answer runs to thousands of
-/// characters and a URL does not, so passing the text would break on exactly
-/// the long answers worth keeping. The id is short, and the page reads the
-/// stored row.
-#[derive(serde::Deserialize)]
-struct CapturePrefill {
-    #[serde(default)]
-    from_ask: Option<String>,
-}
-
-async fn capture_page(
-    State(st): State<AppState>,
-    _id: Identity,
-    Query(p): Query<CapturePrefill>,
-) -> Result<Response> {
-    let (pairs, more_pairs) = pair_rows(&st).await?;
-    let pairs = group_pairs(pairs);
-    // A prefill that names an ask nobody recorded is not an error worth a page
-    // for: the box is simply empty, which is what an ordinary visit looks like.
-    let prefilled = match &p.from_ask {
-        Some(id) => st.core.store.ask_event(id).await?,
-        None => None,
-    };
-    let (prefill_text, prefill_ask, prefill_question) = match prefilled {
-        Some(ev) => (ev.answer, ev.id, ev.question),
-        None => (String::new(), String::new(), String::new()),
-    };
-    // Read, never computed: the page shows what the sweep grouped and named,
-    // and whatever has been judged since sits under itself until the next
-    // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if st.core.learn.enabled {
-        let (rows, loose) = st
-            .core
-            .store
-            .gap_rows(st.core.embedder.model(), st.core.weak_below)
-            .await?;
-        (
-            rows.into_iter()
-                .map(|r| GapGroup {
-                    label: r.label,
-                    members: r.members.into_iter().map(gap_member).collect(),
-                })
-                .collect(),
-            loose.into_iter().map(gap_member).collect(),
-        )
-    } else {
-        (vec![], vec![])
-    };
-    Ok(HtmlTemplate(CaptureTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        pairs,
-        more_pairs,
-        vision_enabled: st.core.describer.is_some(),
-        eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
-        gaps,
-        loose,
-        prefill_text,
-        prefill_ask,
-        prefill_question,
-    })
-    .into_response())
-}
 
 async fn gap_dismiss(
     State(st): State<AppState>,
@@ -1159,106 +787,9 @@ async fn gap_dismiss(
     Ok(axum::http::StatusCode::OK.into_response())
 }
 
-/// Text and nothing else. The label field is gone: a name arrives from
-/// synthesis, which has read the document, rather than from someone who has
-/// just pasted it and does not yet know what it says.
-#[derive(serde::Deserialize)]
-struct CaptureForm {
-    text: String,
-    /// Set when the box was prefilled from an answer. Carries the ask through
-    /// the edit, so what is stored records that the text was model-written and
-    /// what it was written from — even if the operator rewrote every word of it.
-    #[serde(default)]
-    from_ask: Option<String>,
-}
-
-async fn capture_submit(
-    State(st): State<AppState>,
-    _id: Identity,
-    Form(f): Form<CaptureForm>,
-) -> Result<Response> {
-    // An answer the operator chose to keep is still a paste, and is stored as
-    // one — the same pipeline, the same synthesis, no special case downstream.
-    // What differs is only the trace: the origin says a model wrote it, and the
-    // metadata says from which question and which artifacts. That is the whole
-    // of the concession the roadmap makes here, and it is a record rather than
-    // a mechanism.
-    //
-    // The two travel together or not at all. An ask can vanish between the page
-    // load and the save — retention deletes unjudged questions — and storing
-    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
-    // model authorship while carrying none of the provenance that assertion is
-    // supposed to buy. A claim that cannot be checked is worse than no claim, so
-    // a lost row falls back to an ordinary paste, which is what it now is.
-    let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
-        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
-            Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
-                &ev.id,
-                &ev.question,
-                &ev.citations,
-            ),
-            None => {
-                tracing::warn!(
-                    ask_id,
-                    "capture named an ask that is no longer stored; keeping it as an ordinary paste"
-                );
-                crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB)
-            }
-        },
-        None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
-    };
-    let out = st.core.ingest_capture(capture).await?;
-    Ok(HtmlTemplate(CapturedTemplate {
-        id: out.id,
-        duplicate: out.duplicate,
-        near_dupe_percent: out
-            .near_duplicate
-            .as_ref()
-            .map(|n| (n.similarity * 100.0).round() as i64)
-            .unwrap_or(0),
-        near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
-    })
-    .into_response())
-}
-
 /// Chips per row. Long enough to cover a real vocabulary, short enough that the
 /// row stays a row.
-const FACET_LIMIT: usize = 12;
-
-async fn search_page(
-    State(st): State<AppState>,
-    id: Identity,
-    Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
-    // A vector store that cannot answer must not take the search page down with
-    // it: without chips the page is what it was yesterday, with them it is
-    // better, and neither is worth a 500.
-    let mut facets = st
-        .core
-        .vectors
-        .facets(FACET_LIMIT)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "facets unavailable; rendering search without chips");
-            Default::default()
-        });
-    let category = p.category.unwrap_or_default();
-    // A deep link can name a value that falls outside the top `FACET_LIMIT`, or
-    // one nothing carries at all. The rail is narrowed by it either way, so the
-    // chip row has to show it: otherwise the page reads as unfiltered while the
-    // results are not, and there is no chip to click to get back out.
-    ensure_facet(&mut facets.categories, &category);
-    Ok(HtmlTemplate(SearchTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        q: p.q,
-        facets,
-        category,
-        sitting: sitting_rail(&st, &id).await,
-        recommend: st.core.recommends(),
-    })
-    .into_response())
-}
+pub(crate) const FACET_LIMIT: usize = 12;
 
 /// One offer, flattened for the template. Every decision — which rung, which
 /// blocks, how the stamp reads — is made here, so the template holds no logic
@@ -1267,6 +798,15 @@ async fn search_page(
 pub struct OfferView {
     pub id: String,
     pub title: String,
+    /// The first line or so of what the artifact says.
+    ///
+    /// A title is not enough to decide whether to open something. On the two
+    /// established rungs the reason line carries the rest of the card, but the
+    /// random card claims no reason by design — and a card that is a title and
+    /// nothing else asks to be clicked on faith. This says what the thing is
+    /// without claiming why it is here, which is the one thing the random rung
+    /// must not do.
+    pub snippet: String,
     /// What the line leads with. Fixed wording for the two established rungs;
     /// for a thin one it is the count in words, because "Twice before" is the
     /// honest thing to say about two occurrences and "Pattern" is not. Empty
@@ -1338,8 +878,19 @@ async fn context_offer(
     // where nothing would have been clicked. That is a structural zero
     // folded into the denominator of the one number the block weights are
     // meant to be fitted against later. `/ui/context/seen` is the other half.
+    // Fetched here rather than carried on `Offer`: the recommender ranks
+    // artifacts and has no business knowing how a card reads. A row that has
+    // gone since the profile was built leaves an empty snippet, which is the
+    // card it was before this line existed rather than an error.
+    let snippet = match &offer {
+        Some(o) => match st.core.store.get_artifact(&o.artifact_id).await {
+            Ok(c) => markdown::snippet(&c.text, 160),
+            Err(_) => String::new(),
+        },
+        None => String::new(),
+    };
     Ok(HtmlTemplate(ContextTemplate {
-        offer: offer.map(offer_view),
+        offer: offer.map(|o| offer_view(o, snippet)),
     })
     .into_response())
 }
@@ -1386,7 +937,7 @@ async fn context_seen(
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
-fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
+fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
     use crate::core::recommend::Rung;
     OfferView {
         rung: match o.rung {
@@ -1442,6 +993,7 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
         slot: o.slot.map(|s| s.to_string()).unwrap_or_default(),
         id: o.artifact_id,
         title: o.title,
+        snippet,
         detail: o.detail,
     }
 }
@@ -1450,7 +1002,7 @@ fn offer_view(o: crate::core::recommend::Offer) -> OfferView {
 /// because the two reasons it is missing — nothing carries it, or it was
 /// crowded out of the top `FACET_LIMIT` — are not distinguishable from here;
 /// the template renders no number rather than a wrong one.
-fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
+pub(crate) fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
     if value.is_empty() || row.iter().any(|f| f.value == value) {
         return;
     }
@@ -1461,13 +1013,13 @@ fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
 }
 
 #[derive(serde::Deserialize)]
-struct UiSearchParams {
+pub(crate) struct UiSearchParams {
     #[serde(default)]
-    q: String,
+    pub(crate) q: String,
     #[serde(default)]
-    tags: Option<String>,
+    pub(crate) tags: Option<String>,
     #[serde(default)]
-    category: Option<String>,
+    pub(crate) category: Option<String>,
 }
 
 /// Function words carry no signal and appear in every chunk, so highlighting
@@ -1497,21 +1049,19 @@ fn split_tags(t: Option<String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-async fn search_results(
+pub(crate) async fn search_results(
     State(st): State<AppState>,
     id: Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // Clearing the box fires a request with an empty query. That is not an
-    // error; it just means there is nothing to show.
+    // error, and it is not "No matches." either — an empty ResultsTemplate
+    // rendered exactly that, which is a claim about a base nobody searched.
+    // An empty box is the idle state, so the idle rail comes back: the base
+    // introducing itself, with its heading swapped in out of band the same
+    // way a result count is.
     if p.q.trim().is_empty() {
-        return Ok(HtmlTemplate(ResultsTemplate {
-            results: vec![],
-            associated: vec![],
-            all_weak: false,
-            terms: String::new(),
-        })
-        .into_response());
+        return Ok(HtmlTemplate(rail_idle(&st).await?).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -1605,7 +1155,7 @@ fn ranked_titles(
         .collect()
 }
 
-fn render_hit(
+pub(crate) fn render_hit(
     position: usize,
     h: crate::core::search::SearchResult,
     titles: &std::collections::HashMap<String, String>,
@@ -1778,18 +1328,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             // is what says the name is still coming; the label itself is not
             // the place to say it.
             opening: markdown::snippet(&s.raw_text, 60),
-            label: s.title_hint.clone().unwrap_or_else(|| {
-                if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_IMAGE {
-                    "photo".into()
-                } else if s.raw_text.is_empty() && s.origin == crate::core::ingest::ORIGIN_PDF {
-                    // A PDF has no opening words until the extraction lands.
-                    // Without this the row renders an empty anchor: nothing to
-                    // read and nothing to click through to the corpus.
-                    "document".into()
-                } else {
-                    markdown::snippet(&s.raw_text, 60)
-                }
-            }),
+            label: corpus_label(s.title_hint.clone(), &s.raw_text, &s.origin),
             unnamed: s.title_hint.is_none() && in_flight,
             in_flight,
             settled: matches!(s.status, CorpusStatus::Ready),
@@ -2128,7 +1667,6 @@ async fn corpus_detail(
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -2278,7 +1816,7 @@ async fn delete_artifact_ui(
     // where deleting one leaves you.
     Ok(match corpus_id {
         Some(cid) => Redirect::to(&format!("/ui/corpora/{cid}")).into_response(),
-        None => Redirect::to("/ui/ops").into_response(),
+        None => Redirect::to("/ui/insights").into_response(),
     })
 }
 
@@ -2357,7 +1895,7 @@ const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
 /// Used by Capture, which shows them because that is where the work arrives,
 /// and by nothing else: Housekeeping is what is left over once the only part of
 /// Ops that needs a person has moved to the page people actually open.
-async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
+pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
         waiting += st.core.store.count_pairs_by_state(state).await?;
@@ -2477,7 +2015,7 @@ pub struct PairCluster {
 /// Order is the incoming order, which is `PAIR_STATES`' priority: the cluster
 /// containing the most urgent pair leads, and within a cluster the rows keep
 /// the order they were read in.
-fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
+pub(crate) fn group_pairs(pairs: Vec<PairRow>) -> Vec<PairCluster> {
     let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     fn find(parent: &mut std::collections::HashMap<String, String>, x: &str) -> String {
         let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
@@ -2581,7 +2119,6 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
 async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         tokens: token_rows(&st).await?,
         feedback: match st.core.learn.enabled {
             true => Some(st.core.store.feedback_stats().await?),
@@ -2595,278 +2132,6 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
     .into_response())
 }
 
-/// Rows of one housekeeping table before it says there are more.
-///
-/// These tables are read to answer "what happened to X", and the answer to
-/// that is a search for X rather than a scroll — so the cap is stated and the
-/// rest arrive as these are cleared, instead of growing a pager nobody would
-/// page through.
-const TABLE_CAP: i64 = 25;
-
-async fn ops(State(st): State<AppState>, _id: Identity) -> Result<Response> {
-    use sqlx::Row;
-
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&st.core.store.pool)
-        .await?
-        .get("n");
-
-    // Not a queue of chores: work that hit something and is waiting to try
-    // again on its own. Nothing here needs a person.
-    let retrying: Vec<RetryingRow> = st
-        .core
-        .store
-        .retrying_jobs(50)
-        .await?
-        .into_iter()
-        .map(|j| RetryingRow {
-            stage: j.stage,
-            target_id: j.target_id,
-            attempts: j.attempts,
-            due: fmt_duration(j.next_attempt_secs),
-            last_error: j.last_error.unwrap_or_else(|| "—".into()),
-        })
-        .collect();
-
-    // A parked capture is the one corpus state no worker advances. It has to be
-    // shown here or it sits unprocessed with nothing saying why.
-    let mut parked = Vec::new();
-    for c in st.core.store.parked_corpora(50).await? {
-        let other_id = c.near_dupe_of.clone().unwrap_or_default();
-        let other_title = match st.core.store.get_corpus(&other_id).await {
-            Ok(o) => o.title_hint.unwrap_or_else(|| "untitled".into()),
-            Err(_) => "(deleted)".into(),
-        };
-        parked.push(ParkedRow {
-            percent: (c.near_dupe_score.unwrap_or(0.0) * 100.0).round() as i64,
-            bytes: c.raw_text.len(),
-            title: c.title_hint.clone().unwrap_or_else(|| "untitled".into()),
-            id: c.id,
-            other_id,
-            other_title,
-        });
-    }
-
-    let mut superseded = Vec::new();
-    // One past the cap, so the page can say it is capped rather than truncate
-    // in silence — a table that stops at 25 with nothing said reads as a table
-    // of everything there is.
-    for c in st.core.store.superseded_artifacts(TABLE_CAP + 1).await? {
-        let winner_id = c.superseded_by.clone().unwrap_or_default();
-        let winner_title = match st.core.store.get_artifact(&winner_id).await {
-            Ok(w) => title_of(&w),
-            Err(_) => "(deleted)".to_string(),
-        };
-        superseded.push(SupersededRow {
-            title: title_of(&c),
-            subtitle: row_subtitle(&c),
-            id: c.id,
-            winner_id,
-            winner_title,
-        });
-    }
-
-    let mut merged = Vec::new();
-    let merged_chunks = st.core.store.merged_artifacts(TABLE_CAP + 1).await?;
-    // One lineage call per page, not one per row: `roots_of` takes the batch.
-    let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
-    let roots = st
-        .core
-        .store
-        .roots_of(&merged_ids)
-        .await
-        .unwrap_or_default();
-    for c in merged_chunks {
-        let sources = source_rows(
-            &st.core.store,
-            &c.id,
-            roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
-        )
-        .await;
-        merged.push(MergedRow {
-            orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
-            title: title_of(&c),
-            subtitle: row_subtitle(&c),
-            id: c.id,
-            sources,
-        });
-    }
-
-    let more_merged = merged.len() > TABLE_CAP as usize;
-    merged.truncate(TABLE_CAP as usize);
-
-    let mut generated = Vec::new();
-    let gen_chunks = st.core.store.synthesized_artifacts(TABLE_CAP).await?;
-    let gen_ids: Vec<String> = gen_chunks.iter().map(|c| c.id.clone()).collect();
-    let gen_roots = st.core.store.roots_of(&gen_ids).await.unwrap_or_default();
-    for c in gen_chunks {
-        let sources = source_rows(
-            &st.core.store,
-            &c.id,
-            gen_roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
-        )
-        .await;
-        generated.push(GeneratedRow {
-            title: title_of(&c),
-            subtitle: row_subtitle(&c),
-            cues: c.cues.clone(),
-            id: c.id,
-            sources,
-        });
-    }
-    let pursuit_enabled = st.core.learn.enabled;
-    let recent = match pursuit_enabled {
-        true => st.core.store.recent_pursuits(50).await?,
-        false => Vec::new(),
-    };
-    let pursuit_recent = recent.len();
-    // The ones the sentence below can honestly point at. `unsatisfied` is how a
-    // run of searches *ended*, and a capture that answers one afterwards leaves
-    // that word alone deliberately — coverage never rewrites what happened — so
-    // counting the state sent the operator to a gap list that had already
-    // dropped half of them.
-    let on_the_gap_list = match pursuit_enabled {
-        true => st
-            .core
-            .store
-            .open_pursuit_gap_ids(st.core.embedder.model())
-            .await
-            .unwrap_or_default(),
-        false => Default::default(),
-    };
-    let pursuit_unsatisfied = recent
-        .iter()
-        .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
-        .count();
-    // What the memory did while nobody was looking. The last day as one
-    // sentence, and under it the runs themselves — which is the half a single
-    // overwritten summary could never give.
-    let day = st
-        .core
-        .store
-        .sweep_runs_since(crate::store::now() - 86_400, 500)
-        .await
-        .unwrap_or_default();
-    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
-    let mut totals: Vec<(String, i64)> = Vec::new();
-    for r in &day {
-        tally_sweep(&r.stage, &r.detail, &mut totals);
-    }
-    let last_day: Vec<SweepCount> = totals
-        .into_iter()
-        .map(|(what, n)| SweepCount { n, what })
-        .collect();
-    let sweep_history: Vec<SweepRunRow> = st
-        .core
-        .store
-        .sweep_history(TABLE_CAP)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| {
-            let mut counts = Vec::new();
-            tally_sweep(&r.stage, &r.detail, &mut counts);
-            SweepRunRow {
-                when: fmt_time(r.started_at),
-                error: match r.outcome == "failed" {
-                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
-                        .ok()
-                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
-                        .unwrap_or_else(|| "it failed".into()),
-                    false => String::new(),
-                },
-                took: fmt_elapsed(r.ended_at - r.started_at),
-                stage: sweep_label(&r.stage).to_string(),
-                stage_id: r.stage,
-                counts: counts
-                    .into_iter()
-                    .map(|(what, n)| SweepCount { n, what })
-                    .collect(),
-            }
-        })
-        .collect();
-
-    let more_superseded = superseded.len() > TABLE_CAP as usize;
-    superseded.truncate(TABLE_CAP as usize);
-
-    let deprecated = st
-        .core
-        .store
-        .artifacts_by_status(crate::store::artifacts::ArtifactStatus::Deprecated, 50)
-        .await?
-        .into_iter()
-        .map(|c| DeprecatedRow {
-            title: title_of(&c),
-            id: c.id,
-        })
-        .collect();
-
-    // Read-only candidates: nothing here has been changed, only listed.
-    let stale = st
-        .core
-        .stale_candidates(50)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "no stale candidates for ops");
-            vec![]
-        })
-        .into_iter()
-        .map(|r| StaleRow {
-            title: r.title.unwrap_or_else(|| markdown::snippet(&r.text, 60)),
-            id: r.artifact_id,
-            last_verified: r
-                .last_verified_at
-                .map(fmt_time)
-                .unwrap_or_else(|| "never".to_string()),
-        })
-        .collect();
-
-    Ok(HtmlTemplate(OpsTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        retrying,
-        parked,
-        superseded,
-        merged,
-        more_merged,
-        more_superseded,
-        table_cap: TABLE_CAP,
-        deprecated,
-        stale,
-        job_counts: st.core.store.job_counts().await?,
-        oldest_pending_secs: st.core.store.oldest_pending_age().await?,
-        artifact_count,
-        // Qdrant being briefly unreachable must not blank the ops page, which
-        // is exactly where you look when something is wrong.
-        vector_count: st.core.vectors.count().await.unwrap_or(0),
-        links: match st.core.associating() {
-            true => Some(st.core.store.link_counts().await?),
-            false => None,
-        },
-        generated,
-        pursuit_enabled,
-        pursuit_recent,
-        pursuit_unsatisfied,
-        last_day,
-        last_day_failures,
-        sweep_history,
-        // The last month rather than the last day: a weekly pattern needs
-        // weeks, so a hit rate measured over a day would be a number nobody
-        // could act on. Read like `vector_count` — a failure here must not
-        // blank the page you open when something is wrong.
-        offer_rates: match st.core.recommends() {
-            true => st
-                .core
-                .store
-                .offer_rates(crate::store::now() - 30 * 86_400)
-                .await
-                .unwrap_or_default(),
-            false => Vec::new(),
-        },
-    })
-    .into_response())
-}
-
 /// Take a merge back: what it replaced returns, the merge is retired, and the
 /// pairs behind it are dismissed so the sweep does not simply redo it.
 async fn undo_merge_ui(
@@ -2875,7 +2140,7 @@ async fn undo_merge_ui(
     Path(aid): Path<String>,
 ) -> Result<Response> {
     crate::jobs::merge::undo(&st.core, &aid).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to("/ui/insights").into_response())
 }
 
 /// Forget every captured search, every recorded question, and every situation.
@@ -2953,12 +2218,12 @@ async fn resolve_near_dupe_ui(
     Form(form): Form<ResolveForm>,
 ) -> Result<Response> {
     st.core.resolve_near_duplicate(&cid, form.action).await?;
-    Ok(Redirect::to("/ui/ops").into_response())
+    Ok(Redirect::to("/ui/insights").into_response())
 }
 
 /// Where a lifecycle button should land afterwards.
 ///
-/// The same four actions are offered from two places: the Ops review lists,
+/// The same four actions are offered from two places: the Insights review lists,
 /// where the queue is the thing being worked through, and an artifact's own
 /// page, where being thrown onto Ops for pressing "Confirm still accurate"
 /// loses the reader's place. The page that rendered the button says where it
@@ -2975,7 +2240,7 @@ impl ReturnTo {
     fn path(&self) -> &str {
         match self.to.as_deref() {
             Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => p,
-            _ => "/ui/ops",
+            _ => "/ui/insights",
         }
     }
 }
@@ -3137,240 +2402,6 @@ async fn verify_ui(
     artifact_changed(&st, &headers, &aid, &p.terms, &back).await
 }
 
-async fn ask_page(
-    State(st): State<AppState>,
-    id: Identity,
-    Query(p): Query<AskPrefill>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // A query typed on the rail and then retyped into ask is the cost of two
-    // pages with nothing carried between them. Only when the box is empty: a
-    // question the operator arrived with — a gap's "ask again" — is never
-    // overwritten by what they searched for a minute ago.
-    let q = match p.q.trim().is_empty() {
-        true => match &id.session {
-            Some(sess) => st
-                .core
-                .sittings
-                .read(sess, crate::store::now(), st.core.pursuit.idle_secs as i64)
-                .queries
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-            None => String::new(),
-        },
-        false => p.q,
-    };
-    Ok(HtmlTemplate(AskTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
-        q,
-        sitting: sitting_rail(&st, &id).await,
-    })
-    .into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct AskForm {
-    q: String,
-}
-
-/// Parks the question and hands back the id that streams it.
-///
-/// The model call belongs to the GET that follows, not here: `EventSource` is
-/// GET-only, so the alternative is a GET that runs inference and writes a row —
-/// exactly what history, prefetchers and link scanners replay. The id is the
-/// guard, and it is spent on first use.
-async fn ask_submit(
-    State(st): State<AppState>,
-    id: Identity,
-    Form(f): Form<AskForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // Refused before anything is parked, so an empty box costs no entry in the
-    // map and no second round trip to find out.
-    if f.q.trim().is_empty() {
-        return Err(Error::Validation("question is empty".into()));
-    }
-    let handoff = st.ask_handoff_park(
-        crate::core::ask::AskRequest {
-            q: f.q,
-            limit: None,
-            tags: vec![],
-            category: None,
-        },
-        &id.subject,
-    );
-    Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
-}
-
-/// One ask, as it happens.
-///
-/// Takes an `Identity` like every other `/ui` route: this one runs a model
-/// call, and an endpoint that runs inference for whoever guesses a URL is a
-/// free-inference hole rather than a page.
-///
-/// A reader who leaves before `Done` records nothing. That is not an oversight:
-/// the recorded id reaches the page only in `Done`, so an abandoned ask has no
-/// verdict bar, nothing to judge, and retention deletes an unjudged row anyway.
-async fn ask_stream(
-    State(st): State<AppState>,
-    id: Identity,
-    Path(handoff): Path<String>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    use tokio_stream::StreamExt as _;
-
-    // Unknown, already spent, expired, or somebody else's — all one answer.
-    // Never a fresh ask against an empty question, which would spend a model
-    // call on a replay; never another subject's question, which would be
-    // answered to the wrong person and recorded under their name.
-    let req = st
-        .ask_handoff_take(&handoff, &id.subject)
-        .ok_or(Error::NotFound)?;
-    let core = st.core.clone();
-    let origin = crate::store::feedback::Door::Ui.by(id.subject);
-    let events = async_stream::stream! {
-        let s = core.ask_events(&req, origin);
-        tokio::pin!(s);
-        while let Some(ev) = s.next().await {
-            yield match ev {
-                Ok(e) => sse_event(e),
-                // Terminal by construction: the producer is a `try_stream!` and
-                // ends at its first error, so the page sees one `error` event
-                // and nothing after it.
-                Err(e) => Ok(SseEvent::default().event("error").data(e.to_string())),
-            };
-        }
-    };
-    // Kept alive because a slow model thinks for longer than a proxy's idle
-    // timeout, and a connection closed mid-answer looks to the page exactly
-    // like an answer that ended.
-    Ok(Sse::new(events)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-/// One `AskEvent` as one named SSE event carrying JSON.
-///
-/// JSON rather than bare text for every payload, because SSE frames data by
-/// line: a token that ends in a newline, or an answer whose markdown carries
-/// blank lines, does not survive the wire as itself.
-fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
-    use crate::core::ask::stream::AskEvent::*;
-    let (name, data) = match ev {
-        Retrieved {
-            round,
-            retrieved,
-            shown,
-            dropped,
-            cliff_at,
-        } => (
-            "retrieved",
-            serde_json::json!({
-                "round": round,
-                "retrieved": retrieved,
-                "shown": shown,
-                "dropped": dropped,
-                "cliff_at": cliff_at,
-            }),
-        ),
-        // A list rather than a string: the page joins it, so the separator is
-        // one decision made where the sentence is written rather than here.
-        Needs(what) => ("needs", serde_json::json!({ "queries": what })),
-        Citations(hits) => (
-            "citations",
-            serde_json::json!({ "rail": rail_fragment(hits)? }),
-        ),
-        Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
-        Token(t) => ("token", serde_json::json!({ "text": t })),
-        Done(d) => (
-            "done",
-            serde_json::json!({
-                "event_id": d.event_id,
-                "html": answer_fragment(*d)?,
-            }),
-        ),
-    };
-    Ok(SseEvent::default().event(name).data(data.to_string()))
-}
-
-/// The rail, rendered here rather than in the browser.
-///
-/// One fragment rather than a list of fields, because the ids in it are the
-/// other end of the links `link_citations` writes into the answer, and both
-/// ends are then numbered by the same server-side pass. Rendering the rail in
-/// the browser would put the two halves of a citation in two languages, where
-/// only a person clicking could tell they still agree.
-///
-/// Each excerpt's markdown has already been through the sanitizing renderer, so
-/// the page inserts HTML it was handed and never renders markdown itself.
-fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String> {
-    AskRailTemplate {
-        citations: hits
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
-            .collect(),
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
-/// The finished answer, as the page swaps it in.
-///
-/// The same template the blocking render used, for the same reason it existed:
-/// one account of what an answer looks like. Only its delivery moved.
-fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
-    // The answer is model output too, so it goes through the same sanitizing
-    // renderer as chunk text. Marking comes after sanitizing: it works on the
-    // escaped text a reader sees, and nothing it inserts needs cleaning.
-    // Linking comes last, so a `[1]` that marking has just wrapped is still
-    // found and neither pass has to know about the other's markup.
-    let answer = link_citations(
-        &crate::core::ask::check::mark_unsupported(
-            &markdown::render(&out.answer),
-            &out.unsupported,
-        ),
-        out.citations.len(),
-    );
-    AnswerTemplate {
-        answer,
-        citations: out
-            .citations
-            .into_iter()
-            .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
-            .collect(),
-        dropped: out.dropped,
-        truncated: out.truncated,
-        abstained: out.abstained,
-        unsupported: out.unsupported,
-        verdict_bar: match &out.event_id {
-            Some(id) => AskVerdictTemplate {
-                event_id: id.clone(),
-                verdict: None,
-                oob: false,
-            }
-            .render()
-            .map_err(|e| Error::Internal(e.to_string()))?,
-            None => String::new(),
-        },
-        event_id: out.event_id,
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
 /// Turns each `[n]` the answer cites into a link to that excerpt's rail item.
 ///
 /// Bounded by `n`, the number of excerpts actually shown: a model writes `[7]`
@@ -3391,7 +2422,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
 /// on a base whose answers are full of code. Fabricated provenance is the one
 /// failure this codebase exists to prevent, and a wrong link is worse than no
 /// link.
-fn link_citations(html: &str, n: usize) -> String {
+pub(crate) fn link_citations(html: &str, n: usize) -> String {
     if n == 0 {
         return html.to_string();
     }
@@ -3427,130 +2458,6 @@ fn link_text(text: &str, n: usize) -> String {
     }
     out.push_str(rest);
     out
-}
-
-#[derive(serde::Deserialize)]
-struct VerdictForm {
-    verdict: String,
-}
-
-fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
-    use crate::store::asks::AskVerdict::*;
-    match v {
-        Right => "right",
-        Wrong => "wrong",
-        NothingHere => "nothing here",
-    }
-    .into()
-}
-
-async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
-    let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
-    AskVerdictTemplate {
-        event_id: ev.id,
-        verdict: ev.verdict.map(verdict_label),
-        oob,
-    }
-    .render()
-    .map_err(|e| Error::Internal(e.to_string()))
-}
-
-async fn ask_verdict(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-    Form(f): Form<VerdictForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    match f.verdict.as_str() {
-        "none" => st.core.store.unjudge_ask(&id).await?,
-        v => {
-            let verdict = crate::store::asks::AskVerdict::parse(v)
-                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            st.core.store.judge_ask(&id, verdict).await?;
-        }
-    }
-    Ok(axum::response::Html(ask_verdict_bar(&st, &id, false).await?).into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct CarriedForm {
-    n: i64,
-}
-
-async fn ask_carried(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-    Form(f): Form<CarriedForm>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    let carried = st.core.store.toggle_carried(&id, f.n).await?;
-    let bar = ask_verdict_bar(&st, &id, true).await?;
-    Ok(HtmlTemplate(AskCarriedTemplate {
-        event_id: id,
-        n: f.n,
-        carried,
-        bar: Some(bar),
-    })
-    .into_response())
-}
-
-/// Keep an answer: store it as a source, here, without a detour through the
-/// capture box.
-///
-/// The same pipeline as any paste — one corpus, segmented, embedded, searchable
-/// — and the same concession the capture door already made: `origin = "ask"`
-/// and the `ask` metadata, so what the base holds says a model wrote it, from
-/// which question, and from which artifacts. Nothing about it is special
-/// downstream, which is why this works whatever `synthesis` is set to: at
-/// `eager` the windows go to the synthesiser, at `off` and `earned` they are
-/// captured verbatim, and both end in artifacts with vectors.
-///
-/// The answer as the model wrote it, not as the operator retyped it: an
-/// operator who wants to edit first has `edit first` beside this, which is the
-/// old path unchanged.
-async fn ask_keep(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-) -> Result<Response> {
-    // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
-        return Err(Error::NotFound);
-    }
-    // Unlike the capture door, there is no text to fall back to here: the row
-    // is where the answer lives. A question that retention has already taken
-    // has nothing left to keep, and saying so is better than storing an empty
-    // source or an unprovenanced one.
-    let ev = st.core.store.ask_event(&id).await?.ok_or(Error::NotFound)?;
-    let out = st
-        .core
-        .ingest_capture(
-            crate::core::ingest::Capture::new(&ev.answer, ORIGIN_ASK).with_ask(
-                &ev.id,
-                &ev.question,
-                &ev.citations,
-            ),
-        )
-        .await?;
-    Ok(HtmlTemplate(AskKeptTemplate {
-        id: out.id,
-        duplicate: out.duplicate,
-        parked: out.near_duplicate.is_some(),
-        near_dupe_percent: out
-            .near_duplicate
-            .as_ref()
-            .map(|n| (n.similarity * 100.0).round() as i64)
-            .unwrap_or(0),
-    })
-    .into_response())
 }
 
 /// Neighbours shown beside an artifact. A short list, because this is a way
@@ -3808,7 +2715,6 @@ async fn artifact_detail(
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
         d,
     })
     .into_response())
@@ -3853,8 +2759,6 @@ async fn mark_artifact_reviewed(
 struct NotFoundTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ask_enabled: bool,
 }
 
 /// The app's own answer to a path it does not have.
@@ -3895,7 +2799,6 @@ pub async fn not_found(
     }
     let page = NotFoundTemplate {
         judge_pending: crate::web::state::judge_pending(&st).await,
-        ask_enabled: crate::web::state::ask_enabled(&st),
     };
     match askama::Template::render(&page) {
         Ok(html) => (
@@ -3914,11 +2817,6 @@ pub fn ui_router() -> Router<AppState> {
         // had no answer for `/`, and a browser typing the domain got a 404 —
         // signed in or not, because an unmatched path never reaches the
         // authentication that would have redirected it to a login.
-        .route("/", get(|| async { Redirect::to("/ui/search") }))
-        .route("/ui", get(|| async { Redirect::to("/ui/search") }))
-        .route("/ui/capture", get(capture_page).post(capture_submit))
-        .route("/ui/search", get(search_page))
-        .route("/ui/search/results", get(search_results))
         .route("/ui/context", post(context_offer))
         .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
@@ -3946,18 +2844,16 @@ pub fn ui_router() -> Router<AppState> {
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
-        .route("/ui/ask", get(ask_page).post(ask_submit))
-        .route("/ui/ask/{id}/stream", get(ask_stream))
-        .route("/ui/ask/{id}/verdict", post(ask_verdict))
-        .route("/ui/ask/{id}/carried", post(ask_carried))
-        .route("/ui/ask/{id}/keep", post(ask_keep))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
-        .route("/ui/ops", get(ops))
-        // One name for the page. The nav word is Housekeeping and the route is
-        // `/ui/ops`; a reader who types the word they were shown lands here.
+        // The page's spoken names. Housekeeping was the nav word for a while,
+        // and `/ui/ops` still answers as the old door — but this goes straight
+        // to the page rather than chaining through that shim, and it takes an
+        // `Identity` like every other `/ui` route: a redirect that answers
+        // before the session is checked tells an anonymous caller which paths
+        // exist.
         .route(
             "/ui/housekeeping",
-            get(|| async { Redirect::permanent("/ui/ops") }),
+            get(|_id: Identity| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
@@ -4098,34 +2994,9 @@ mod tests {
         }
     }
 
-    fn ask_page_fixture() -> String {
-        askama::Template::render(&AskTemplate {
-            judge_pending: None,
-            ask_enabled: true,
-            q: String::new(),
-            sitting: vec![],
-        })
-        .unwrap()
-    }
-
-    fn answer_fixture(dropped: usize) -> String {
-        askama::Template::render(&AnswerTemplate {
-            answer: "<p>An answer.</p>".into(),
-            citations: vec![],
-            dropped,
-            truncated: false,
-            abstained: false,
-            unsupported: vec![],
-            event_id: None,
-            verdict_bar: String::new(),
-        })
-        .unwrap()
-    }
-
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
         askama::Template::render(&SettingsTemplate {
             judge_pending: None,
-            ask_enabled: true,
             tokens,
             feedback: None,
             asks: None,
@@ -4149,13 +3020,13 @@ mod tests {
         }
         let html = askama::Template::render(&Gaps {
             gaps: vec![],
+            ask_enabled: true,
             loose: vec![GapMember {
                 kind: "ask".into(),
                 badge: "asked",
                 id: "g1".into(),
                 text: "wie werden bei chipkarten die private keys geschützt?".into(),
             }],
-            ask_enabled: true,
         })
         .unwrap();
         assert!(
@@ -4301,41 +3172,6 @@ mod tests {
         assert!(
             !page.contains("has-selection"),
             "a fresh search already claims something is open: {page}"
-        );
-    }
-
-    #[test]
-    fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
-        // "18 excerpt(s) omitted for context budget" is the accounting, and
-        // the "(s)" is the plural nobody wrote out.
-        let html = answer_fixture(18);
-        assert!(!html.contains("excerpt(s)"), "{html}");
-        assert!(!html.contains("context budget"), "{html}");
-        assert!(html.contains("18 more excerpts did not fit"), "{html}");
-        let one = answer_fixture(1);
-        assert!(one.contains("1 more excerpt did not fit"), "{one}");
-    }
-
-    #[test]
-    fn an_ask_in_flight_offers_a_way_to_stop_it() {
-        // Fifty seconds signalled by a small grey "thinking…" beside the
-        // button, and nothing on the page to end it with.
-        let html = ask_page_fixture();
-        assert!(html.contains(r#"id="ask-stop""#), "{html}");
-    }
-
-    #[test]
-    fn an_ask_page_does_not_open_with_the_models_reasoning_showing() {
-        // The deployment streamed the chain of thought into the page for fifty
-        // seconds, restating the prompt's own constraints verbatim — "Answer
-        // *only* using the provided knowledge-base excerpts" — above the empty
-        // space where the answer was going to be.
-        let html = ask_page_fixture();
-        assert!(html.contains("ask-reasoning-box"), "{html}");
-        assert!(
-            !html.contains("<details open")
-                && !html.contains("<details id=\"ask-reasoning-box\" open"),
-            "reasoning must start closed: {html}"
         );
     }
 
@@ -4949,6 +3785,336 @@ mod tests {
         app_with_cookie(core).await
     }
 
+    /// A core holding one pair waiting on a person, so "Needs you" has
+    /// something to say on whichever page is supposed to be carrying it.
+    async fn app_with_a_waiting_pair() -> (axum::Router, String) {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "The reindex job holds a file descriptor on the old mount.".into(),
+                        corpus_span: None,
+                        title: Some("reindex holds an fd".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "The reindex job holds an fd on the old mount.".into(),
+                        corpus_span: None,
+                        title: Some("reindex holds an fd (again)".into()),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_pair_with_detail(&made[0].id, &made[1].id, 0.94, "near duplicate")
+            .await
+            .unwrap();
+        app_for(core).await
+    }
+
+    /// The box form's `hx-trigger`, on its own. `html.contains("load")` is
+    /// not the same question: the context offer carries `hx-trigger="load"`
+    /// too, and so does the word inside half the prose on the page.
+    fn trigger_of(html: &str) -> String {
+        let form = html.split(r#"id="box-form""#).nth(1).expect("the box form");
+        let trigger = form.split(r#"hx-trigger=""#).nth(1).expect("its trigger");
+        trigger.split('"').next().unwrap().to_string()
+    }
+
+    /// The ask door, which is the workspace with the question already in the
+    /// box and Ask one press away. A gap's "ask again" links here.
+    ///
+    /// Filled and still. A filled box otherwise carries a `load` trigger that
+    /// searches it on arrival, and through this door that meant the question
+    /// was searched for rather than asked — the one thing the door is named
+    /// after was the one thing it did not do.
+    #[tokio::test]
+    async fn the_ask_door_fills_the_one_box_and_runs_nothing_on_arrival() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui/ask?q=why+did+the+reindex+fail", &cookie).await;
+        assert!(
+            html.contains(r#"data-open-with="ask""#),
+            "the page opens asking: {html}"
+        );
+        assert!(
+            html.contains("why did the reindex fail"),
+            "the box carries the question: {html}"
+        );
+        assert!(
+            !trigger_of(&html).contains("load"),
+            "and nothing is searched for on the way in: {html}"
+        );
+        // Every id the stream driver writes into has to survive the move; the
+        // browser suite targets each of these by name.
+        for id in [
+            "ask-live",
+            "ask-result",
+            "ask-status",
+            "ask-stop",
+            "ask-progress",
+        ] {
+            assert!(html.contains(id), "the driver's target {id} is on the page");
+        }
+    }
+
+    /// No ask model, no ask door: not a greyed-out button over a page that
+    /// explains itself, and not a route that 500s. The door is simply absent.
+    #[tokio::test]
+    async fn the_ask_door_is_absent_without_a_model() {
+        let core = crate::core::test_support::test_core_without_ask().await;
+        let (app, cookie) = app_for(core).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(
+            !html.contains(r#"data-verb="ask""#),
+            "no button where there is no model: {html}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ask")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "and the door is not there"
+        );
+    }
+
+    /// The capture door, which is the workspace with the box already filled.
+    /// The extension posts here and so does *keep this answer*, and neither
+    /// knows anything about the page having folded into one.
+    #[tokio::test]
+    async fn the_capture_door_fills_the_one_box_and_keeps_its_provenance() {
+        let (app, cookie, _core, _html, id) = ask_recorded().await;
+
+        let html = get(&app, &format!("/ui/capture?from_ask={id}"), &cookie).await;
+        assert!(
+            html.contains(r#"data-open-with="capture""#),
+            "the page opens capturing: {html}"
+        );
+        // The box holds a whole model answer. Searching for it on arrival was
+        // an embedding call, an activation bump on whatever it retrieved and,
+        // where searches are recorded, a Judge-queue row — for a paragraph the
+        // operator is about to store, not look for.
+        assert!(
+            !trigger_of(&html).contains("load"),
+            "and the answer in the box is not searched for: {html}"
+        );
+        assert!(html.contains("data-workspace"), "and it is the workspace");
+        assert!(
+            html.contains(&format!(r#"name="from_ask" value="{id}""#)),
+            "the ask rides the form as provenance: {html}"
+        );
+        assert!(
+            html.contains("Kept from"),
+            "the question it answered is named"
+        );
+
+        // The plain door is the same page with an empty box.
+        let plain = get(&app, "/ui/capture", &cookie).await;
+        assert!(plain.contains("data-workspace"), "still the workspace");
+        assert!(
+            !plain.contains("Kept from"),
+            "an ordinary visit claims no provenance: {plain}"
+        );
+    }
+
+    /// The file control offers what the installation can actually read. Off,
+    /// it offers text only rather than a picker that fails.
+    #[tokio::test]
+    async fn the_file_control_offers_images_only_when_vision_is_configured() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("image/*"), "the picker accepts images");
+        assert!(
+            html.contains(r#"name="note""#),
+            "the context field is there"
+        );
+
+        let (app, cookie) =
+            app_for(crate::core::test_support::test_core_without_vision().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(!html.contains("image/*"));
+        assert!(html.contains(r#"accept=".txt,text/plain,.pdf,application/pdf""#));
+    }
+
+    /// The one page. Capture, search and ask were three of them, and moving
+    /// between them meant retyping or carrying a prefill: the same words are a
+    /// query on one, a question on the second and a document on the third, and
+    /// the operator navigated to say which.
+    #[tokio::test]
+    async fn the_workspace_is_one_page_carrying_the_box_and_the_three_regions() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+
+        for uri in ["/ui", "/ui/search"] {
+            let html = get(&app, uri, &cookie).await;
+            assert!(
+                html.contains("regions-rail-focus-source"),
+                "{uri}: the grid"
+            );
+            assert!(html.contains("name=\"q\""), "{uri}: the box");
+            assert!(
+                html.contains("hx-get=\"/ui/search/results\""),
+                "{uri}: typing still asks the same endpoint"
+            );
+        }
+
+        // A deep link restores the box and asks for its results without a
+        // keystroke, because no keystroke is coming.
+        let html = get(&app, "/ui/search?q=volume+move", &cookie).await;
+        assert!(html.contains("volume move"), "the box comes back filled");
+        assert!(
+            trigger_of(&html).contains("load"),
+            "and the results are fetched on load: {html}"
+        );
+    }
+
+    /// The idle state is designed, not left over. With an empty box the rail
+    /// introduces the base instead of standing empty, and the file picker is
+    /// on the page from first paint: it once lived inside the staged box,
+    /// which is hidden until a file is staged — a state that rendered
+    /// correctly and a control nobody could reach.
+    #[tokio::test]
+    async fn the_idle_page_introduces_the_base_and_the_picker_is_reachable() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core.clone()).await;
+
+        // Empty base: the one instruction that matters.
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("Nothing here yet"), "the empty base says so");
+        assert!(
+            html.contains(r#"<label class="btn btn-ghost" id="drop""#),
+            "the picker is in the verb row, not inside the hidden staged box"
+        );
+        let staged = html.split(r#"id="staged""#).nth(1).unwrap();
+        assert!(
+            !staged[..staged.find("</div>").unwrap()].contains("type=\"file\""),
+            "and the staged box holds only the file, never the way to pick one"
+        );
+
+        // A base with something in it introduces itself.
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains("This memory"), "the rail names its idle act");
+        assert!(
+            html.contains("Last captured"),
+            "and shows what last went in"
+        );
+        assert!(
+            html.contains("LevelDB tombstones"),
+            "in the operator's words"
+        );
+
+        // Clearing the box returns to idle, not to "No matches." — which
+        // would be a claim about a base nobody searched.
+        let frag = get(&app, "/ui/search/results?q=", &cookie).await;
+        assert!(frag.contains("This memory"), "an empty query is idle again");
+        assert!(!frag.contains("No matches"), "not a verdict on the base");
+    }
+
+    /// The list is retired; the sitting behind it is not. Its own comment gave
+    /// the reason it existed — "the pages had nothing between them, so a hit
+    /// opened on search and wanted again on ask meant searching for it twice"
+    /// — and this is the commit that removes the pages.
+    #[tokio::test]
+    async fn the_read_just_now_list_is_gone_but_the_sitting_is_not() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(!html.contains("Read just now"), "the list is retired");
+
+        // The mechanism it read from stays: Ask's carried citations ride on
+        // it and `[sitting] prime` reads it. That half is covered
+        // behaviourally by `marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band`
+        // — an assertion on `citations[..].carried`, which is false unless
+        // `sittings.touched()` still runs on every artifact open.
+    }
+
+    /// The three surfaces that are maintenance rather than searching. Capture
+    /// is about to stop being a page at all, and none of these belonged on it
+    /// even while it was one: a merge decision, a hole in the base and a list
+    /// of what was just stored are all work *on* the base rather than work
+    /// with it.
+    #[tokio::test]
+    async fn the_three_maintenance_surfaces_are_on_insights_and_not_on_capture() {
+        let (app, cookie) = app_with_a_waiting_pair().await;
+
+        let insights = get(&app, "/ui/insights", &cookie).await;
+        assert!(insights.contains("Needs you"), "pairs are on Insights");
+        assert!(
+            insights.contains("Recent"),
+            "the capture queue is on Insights"
+        );
+        assert!(
+            insights.contains("/ui/queue"),
+            "and it loads the same fragment it always did"
+        );
+
+        let capture = get(&app, "/ui/capture", &cookie).await;
+        assert!(
+            !capture.contains("Needs you"),
+            "pairs left the capture page"
+        );
+        assert!(!capture.contains("/ui/queue"), "so did the queue");
+    }
+
+    /// Housekeeping is Insights now. The old door stays a door: it is in
+    /// bookmarks, in the quiet link at the bottom of the page, and in at least
+    /// one runbook — a 404 there is a broken promise, not a tidy-up.
+    #[tokio::test]
+    async fn housekeeping_moved_to_insights_and_the_old_door_still_opens() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+
+        let html = get(&app, "/ui/insights", &cookie).await;
+        assert!(
+            html.contains("Housekeeping"),
+            "the maintenance section is there"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ops")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers().get("location").unwrap(),
+            "/ui/insights",
+            "the old door points at the new one"
+        );
+    }
+
     #[tokio::test]
     async fn a_link_derived_pair_never_claims_a_similarity_once_the_judge_has_settled_it() {
         // The link judge files these with `detail = "link"` and a score of 0.0,
@@ -5078,21 +4244,31 @@ mod tests {
         let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/capture", &cookie).await;
         assert!(
-            html.contains("kept as you wrote it"),
-            "the standing line still prices a call: {html}"
-        );
-        assert!(html.contains("var EAGER = false"));
-        assert!(
-            !html.contains("one model call each"),
-            "the standing line still prices a call: {html}"
+            html.contains(r#"data-eager="0""#),
+            "the page tells the hint this mode makes no model call: {html}"
         );
 
         let mut core = crate::core::test_support::test_core().await;
         core.synthesis = crate::config::SynthesisMode::Eager;
         let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(html.contains("one model call each"));
-        assert!(html.contains("var EAGER = true"));
+        assert!(html.contains(r#"data-eager="1""#), "{html}");
+
+        // The standing sentence is gone with the page it stood on — on a
+        // workspace where capture is one verb of three, a permanent line about
+        // what pasting costs is furniture. What replaced it says the same
+        // thing only once it is true, and app.js must still price both modes
+        // rather than the one it was written against.
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("model calls before this is searchable"),
+            "the eager branch no longer prices the calls it will make"
+        );
+        assert!(
+            js.contains("searchable as written, once embedded"),
+            "the earned branch prices a call it will not make"
+        );
     }
 
     #[tokio::test]
@@ -5834,7 +5010,7 @@ mod tests {
         assert_eq!(forgotten.opened, 0, "nobody took that one");
 
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
-        let page = get(&app, "/ui/ops", &cookie).await;
+        let page = get(&app, "/ui/insights", &cookie).await;
         assert!(page.contains("What was offered"), "no heading");
         assert!(page.contains("pattern"), "no rung");
         assert!(page.contains("forgotten"));
@@ -5846,7 +5022,7 @@ mod tests {
         // when nothing is.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
-        let page = get(&app, "/ui/ops", &cookie).await;
+        let page = get(&app, "/ui/insights", &cookie).await;
         assert!(!page.contains("What was offered"));
     }
 
@@ -5900,7 +5076,7 @@ mod tests {
         // the page you open when something is wrong, which is the wrong place
         // for the screen that has to be visited often for the dataset to grow.
         let (app, cookie) = app_recording_searches(3).await;
-        for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/ops"] {
+        for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/insights"] {
             let html = flat(&get(&app, page, &cookie).await);
             assert!(
                 html.contains(r#"<a href="/ui/judge">Judge"#),
@@ -6440,7 +5616,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.headers().get("location").unwrap(), "/ui/ops");
+        assert_eq!(res.headers().get("location").unwrap(), "/ui/insights");
     }
 
     #[tokio::test]
@@ -6509,7 +5685,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 res.headers().get("location").unwrap(),
-                "/ui/ops",
+                "/ui/insights",
                 "followed {hostile}"
             );
         }
@@ -6905,9 +6081,9 @@ mod tests {
             detail.contains(r#"class="label pane-label""#),
             "the pane label does not compose .label"
         );
-        let search = include_str!("templates/search.html");
+        let workspace = include_str!("templates/workspace.html");
         assert!(
-            search.contains(r#"class="label facet-label""#),
+            workspace.contains(r#"class="label facet-label""#),
             "the facet label does not compose .label"
         );
     }
@@ -7146,7 +6322,7 @@ mod tests {
             "/ui/queue",
             "/ui/corpora/abc",
             "/ui/ask",
-            "/ui/ops",
+            "/ui/insights",
         ] {
             // A plain GET is a browser loading a page, so a missing session
             // sends it to sign in rather than showing it JSON it cannot act
@@ -7229,19 +6405,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capturing_text_stores_it_and_says_nothing() {
-        // The confirmation is the row that appears under "Recent" — same link,
-        // same progress badge. A card above the list saying it again was the
-        // one capture reported twice.
+    async fn capturing_text_stores_it_and_says_so() {
+        // One line of receipt, with the link to what was stored. The queue
+        // that used to repeat this fragment lives on Insights now, so an
+        // empty answer left the box clearing itself with no acknowledgment —
+        // indistinguishable from data loss.
         let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(html.contains("Captured"), "{html}");
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
         assert!(
-            body_of(res).await.trim().is_empty(),
-            "an ordinary capture repeats what the queue already shows"
+            html.contains(&format!("/ui/corpora/{}", stored.id)),
+            "the receipt links what it stored: {html}"
         );
         assert_eq!(
             core.store.list_corpora(10, 0).await.unwrap().len(),
@@ -7493,7 +6673,7 @@ mod tests {
             core.store.record_pair(&w[0], &w[1], 0.9).await.unwrap();
         }
 
-        let body = get_body(&app, &cookie, "/ui/capture").await;
+        let body = get_body(&app, &cookie, "/ui/insights").await;
         assert_eq!(
             body.matches("/supersede").count(),
             super::PAIR_LIMIT * 2,
@@ -7600,7 +6780,7 @@ mod tests {
             .await
             .unwrap();
 
-        let html = get(&app, "/ui/ops", &cookie).await;
+        let html = get(&app, "/ui/insights", &cookie).await;
         assert!(
             html.contains("412 links forgotten"),
             "the last day did not add the runs up: {html}"
@@ -7618,7 +6798,7 @@ mod tests {
         let res = app
             .oneshot(
                 Request::builder()
-                    .uri("/ui/ops")
+                    .uri("/ui/insights")
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -7646,7 +6826,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = get_body(&app, &cookie, "/ui/ops").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         // One `bump_link` call between one pair is one row in `artifact_links`
         // — see `the_counts_say_how_many_links_there_are_and_how_many_are_named`
         // in store::links, which needs two calls between two different pairs
@@ -7670,7 +6850,7 @@ mod tests {
         let res = app
             .oneshot(
                 Request::builder()
-                    .uri("/ui/ops")
+                    .uri("/ui/insights")
                     .header("cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -7726,7 +6906,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/ui/ops")
+                    .uri("/ui/insights")
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -7859,7 +7039,7 @@ mod tests {
 
         // On Capture, not on Housekeeping: this is the one part of Ops that
         // needs a person, so it belongs where the work arrives.
-        let html = get_body(&app, &cookie, "/ui/capture").await;
+        let html = get_body(&app, &cookie, "/ui/insights").await;
         assert!(html.contains("left one") && html.contains("right one"));
         assert!(
             html.contains("Keep “left one”"),
@@ -7886,7 +7066,7 @@ mod tests {
     #[tokio::test]
     async fn the_counts_say_what_they_count() {
         let (app, cookie) = app_with_session().await;
-        let page = get_body(&app, &cookie, "/ui/ops").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             page.contains("jobs") || page.contains("No jobs queued"),
             "a job count must not read as an artifact count: {page}"
@@ -7902,7 +7082,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = get_body(&app, &cookie, "/ui/ops").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(!page.contains("Put it back"), "{page}");
         assert!(!page.contains("Undo merge"), "{page}");
         assert!(page.contains(">Undo<"), "{page}");
@@ -7917,7 +7097,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = get_body(&app, &cookie, "/ui/ops").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             page.contains("body of Windows Update-Typen"),
             "a row has to say which artifact it is, and two can share a title: {page}"
@@ -7960,7 +7140,7 @@ mod tests {
         assert!(settings.contains("API tokens"), "{settings}");
         assert!(settings.contains("Browser extension"), "{settings}");
 
-        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             !ops.contains("API tokens"),
             "housekeeping is about the corpus: {ops}"
@@ -7969,11 +7149,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_pages_are_reachable_from_capture() {
+    async fn both_pages_are_reachable_once_capture_stops_being_one() {
         let (app, cookie) = app_with_session().await;
+
+        // Insights is a destination in the top row now, so it is reachable
+        // from every page rather than from one quiet paragraph at the bottom
+        // of a page that is about to stop existing.
         let page = get_body(&app, &cookie, "/ui/capture").await;
-        assert!(page.contains("/ui/ops"), "{page}");
-        assert!(page.contains("/ui/settings"), "{page}");
+        assert!(page.contains("/ui/insights"), "{page}");
+
+        // Settings had exactly one door, and it was that paragraph. It moved
+        // rather than went: an installation you cannot open the settings of
+        // is the regression this assertion exists to catch.
+        let insights = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(insights.contains("/ui/settings"), "{insights}");
     }
 
     #[tokio::test]
@@ -7998,8 +7187,19 @@ mod tests {
         );
         let frag = body_of(res).await;
         assert!(frag.contains("result-count"), "the count is stated: {frag}");
+        // Out of band into the rail's heading, which sits outside the swapped
+        // list: the fragment that fills the rail is also what names the act
+        // that filled it.
         assert!(
-            !frag.contains("embed ") && !frag.contains("hx-swap-oob"),
+            frag.contains(r#"hx-swap-oob="innerHTML:#rail-head""#),
+            "the count does not reach the rail heading: {frag}"
+        );
+        // The timing fragment this test was written against is what must stay
+        // gone. It used to ride the same response as an out-of-band swap, so
+        // the assertion names the timing rather than the mechanism — the
+        // mechanism is legitimately in use above.
+        assert!(
+            !frag.contains("embed ") && !frag.contains("server-timing"),
             "timing is not operator-facing: {frag}"
         );
     }
@@ -8376,7 +7576,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         let title = page
             .find("Speicherorte der MS Mail App")
             .expect("a title is on the card");
@@ -8758,13 +7958,13 @@ mod tests {
         let id = ids[0].clone();
 
         // Before the sweep: listed, not yet grouped.
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Knowledge gaps"), "{page}");
         assert!(page.contains("not yet grouped"), "{page}");
         assert!(page.contains("mount an E01"), "{page}");
 
         crate::jobs::gaps::sweep(&core).await.unwrap();
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Fake topic"), "{page}");
         assert!(
             page.contains(&format!("/ui/gaps/ask/{id}/dismiss")),
@@ -8780,7 +7980,7 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::OK);
         }
-        let page = get_body(&app, &cookie, "/ui/capture").await;
+        let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             !page.contains("Knowledge gaps"),
             "a covered gap must leave the page: {page}"
@@ -8856,26 +8056,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_query_typed_on_search_arrives_in_the_ask_box() {
-        // Two pages with nothing carried between them cost a retyped query
-        // every time. Nothing here changes an order.
-        let (app, cookie, core) = app_session_and_core().await;
-        get_body(
-            &app,
-            &cookie,
-            "/ui/search/results?q=how%20do%20I%20mount%20an%20E01",
-        )
-        .await;
-
-        let ask = get_body(&app, &cookie, "/ui/ask").await;
-        assert!(
-            ask.contains("how do I mount an E01"),
-            "the query was not carried: {ask}"
-        );
-        let _ = core;
-    }
-
-    #[tokio::test]
     async fn a_question_the_operator_arrived_with_is_never_overwritten() {
         // A gap's "ask again" is a question they chose. The sitting fills an
         // empty box and nothing else.
@@ -8893,59 +8073,6 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(!page.contains("Read just now"), "{page}");
-    }
-
-    #[tokio::test]
-    async fn what_this_sitting_opened_is_a_way_back_to_it() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let a = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
-                    text: "mounting an E01".into(),
-                    corpus_span: None,
-                    title: Some("Mounting an E01".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: Some(0),
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
-
-        get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
-
-        let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(page.contains("Read just now"), "{page}");
-        assert!(page.contains("Mounting an E01"), "{page}");
-
-        // And it is still there after a search. The filter form replaces what
-        // it targets wholesale, so a sitting inside that target was wiped by
-        // the first keystroke and never came back — visible only on a search
-        // page with no query, which is the one moment it has nothing to say.
-        let form = page
-            .split("<form id=\"filters\"")
-            .nth(1)
-            .expect("the search page has a filter form");
-        let target = form
-            .split("hx-target=\"")
-            .nth(1)
-            .and_then(|t| t.split('"').next())
-            .expect("the filter form names a target");
-        let swapped = page
-            .split(&format!("id=\"{}\"", target.trim_start_matches('#')))
-            .nth(1)
-            .expect("the target is on the page");
-        assert!(
-            !swapped.contains("Read just now"),
-            "a search replaces {target}, and the sitting is inside it: {swapped}"
-        );
     }
 
     #[tokio::test]
@@ -9134,7 +8261,7 @@ mod tests {
             .await
             .unwrap();
 
-        let html = get_body(&app, &cookie, "/ui/capture").await;
+        let html = get_body(&app, &cookie, "/ui/insights").await;
         for badge in ["judged", "nothing near", "pursued"] {
             assert!(
                 html.contains(badge),
@@ -9196,7 +8323,7 @@ mod tests {
             ids.push(p);
         }
 
-        let both = get_body(&app, &cookie, "/ui/ops").await;
+        let both = get_body(&app, &cookie, "/ui/insights").await;
         assert!(both.contains("2 went unanswered"), "{both}");
 
         // A later capture answers one of them.
@@ -9211,9 +8338,9 @@ mod tests {
             .await
             .unwrap();
 
-        let one = get_body(&app, &cookie, "/ui/ops").await;
+        let one = get_body(&app, &cookie, "/ui/insights").await;
         assert!(one.contains("1 went unanswered"), "{one}");
-        assert!(one.contains("is\n  <a href=\"/ui/capture#gaps\""), "{one}");
+        assert!(one.contains("is\n  <a href=\"#gaps\""), "{one}");
     }
 
     #[tokio::test]
@@ -9231,18 +8358,20 @@ mod tests {
         let note = page
             .find(r#"name="note""#)
             .expect("the note input is on the page");
-        // The button, not the nav link of the same name above it.
+        // The verb, not the nav link of the same name above it.
         let button = page
-            .find(r#"type="submit" form="capture""#)
-            .expect("the capture button is there");
+            .find(r#"data-verb="capture""#)
+            .expect("the capture verb is there");
         assert!(
             note < button,
-            "the note field must precede the button that sits under it: {page}"
+            "the note field must precede the button that sends it: {page}"
         );
 
-        // Outside the posted form still: that form posts urlencoded and the
-        // file this note describes goes multipart to a different endpoint.
-        assert!(page.contains(r#"form="capture""#), "{page}");
+        // The box's own form is a GET that searches on every keystroke. The
+        // staged file and its note sit inside it now, so the serialisation is
+        // pinned to the two fields the search actually takes — without this,
+        // every keystroke carries a filename and a note into the query string.
+        assert!(page.contains(r#"hx-params="q,category""#), "{page}");
 
         // The order the work happens in: the file arrives and is held, the note
         // says what it is, the button sends both. A photo taken on a phone used
@@ -9688,7 +8817,7 @@ mod tests {
     #[tokio::test]
     async fn the_nav_is_the_same_width_on_every_page() {
         let (app, cookie) = app_with_session().await;
-        for uri in ["/ui/capture", "/ui/search", "/ui/ops"] {
+        for uri in ["/ui/capture", "/ui/search", "/ui/insights"] {
             let page = get_body(&app, &cookie, uri).await;
             let bar = page.find(r#"class="topbar""#).expect("a top bar");
             let shell = page.find(r#"class="shell"#).expect("a shell");
@@ -9715,37 +8844,28 @@ mod tests {
             "search is a three-region page: {search}"
         );
 
-        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             ops.contains("regions-table"),
             "housekeeping is a table and has no reading measure: {ops}"
         );
 
-        // `regions-focus-aside`, not `regions-focus`: a substring check would
-        // pass on either, and the difference is the whole point — the prose
-        // keeps its measure and what used to be empty beside it holds the
-        // page's second thing.
+        // Capture is a door into the workspace now, not a page of its own, so
+        // it declares what the workspace declares.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
-            capture.contains(r#"regions regions-focus-aside"#),
-            "capture is prose beside its record: {capture}"
-        );
-        assert!(
-            capture.contains(r#"class="region-aside""#),
-            "capture's Recent has nothing to sit in: {capture}"
+            capture.contains("regions-rail-focus-source"),
+            "the capture door is the workspace: {capture}"
         );
 
+        // Ask is a door into the workspace now, not a page of its own. The
+        // excerpts land in the same rail the results were in, because the rail
+        // holds what the current act produced and an ask is a different act
+        // from the search before it.
         let ask = get_body(&app, &cookie, "/ui/ask").await;
         assert!(
-            ask.contains(r#"regions regions-focus-aside"#),
-            "ask is an answer beside what it was written from: {ask}"
-        );
-        // The excerpts must not be a rail region. `r` is gated on one, and
-        // reading mode rewrites the grid to a spine beside a single column —
-        // which would take this page apart on a key that means nothing here.
-        assert!(
-            !ask.contains("region-rail"),
-            "ask's excerpts would answer to reading mode: {ask}"
+            ask.contains("regions-rail-focus-source"),
+            "the ask door is the workspace: {ask}"
         );
 
         // No measure on the one page whose whole subject is an artifact and
@@ -9771,7 +8891,7 @@ mod tests {
         // No page says how wide it is any more.
         for (uri, body) in [
             ("/ui/search", &search),
-            ("/ui/ops", &ops),
+            ("/ui/insights", &ops),
             ("/ui/capture", &capture),
             ("/ui/ask", &ask),
         ] {
@@ -9783,7 +8903,10 @@ mod tests {
     async fn the_ask_page_prefills_a_question_from_the_query_string() {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
-        assert!(page.contains(r#"value="mount an E01""#), "{page}");
+        // A textarea carries its value as content rather than as an
+        // attribute, which is the one visible consequence of the box being a
+        // textarea from the first keystroke to the last.
+        assert!(page.contains(">mount an E01</textarea>"), "{page}");
     }
 
     #[tokio::test]
@@ -10034,43 +9157,6 @@ mod tests {
         );
     }
 
-    /// The driver listens for every frame the server sends.
-    ///
-    /// A frame nobody handles fails silently and only on the asks that send it:
-    /// the fan-out's frames fire only when a plan named something, so an ask
-    /// page that drops them would look perfect on every question the base
-    /// already covered. The names are pulled from `sse_event`'s own source
-    /// rather than listed here, so adding an event without a handler fails this
-    /// test instead of shipping.
-    #[tokio::test]
-    async fn the_stream_driver_handles_every_event_the_server_names() {
-        let ui = include_str!("ui.rs");
-        let body = &ui[ui.find("fn sse_event(").expect("sse_event is in this file")..];
-        let body = &body[..body.find("\n}\n").unwrap()];
-        // The first string of each arm's `(name, data)` tuple, whether the
-        // arm is one line or many.
-        let names: Vec<String> = body
-            .split('(')
-            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
-            .filter_map(|rest| rest.split('"').next())
-            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
-            .map(str::to_string)
-            .collect();
-        assert!(
-            names.len() >= 6,
-            "the event names could not be read out of sse_event: {names:?}"
-        );
-
-        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
-        let js = String::from_utf8(js.data.into_owned()).unwrap();
-        for name in names {
-            assert!(
-                js.contains(&format!("addEventListener('{name}'")),
-                "the server sends a `{name}` frame and the driver ignores it"
-            );
-        }
-    }
-
     /// Every `from:` in a template names one element, in one word.
     ///
     /// htmx reads a `from:` selector up to the first space or comma. A
@@ -10149,9 +9235,19 @@ mod tests {
         // The old path is gone rather than sitting beside the new one: two
         // submitters on one form would park the question twice and spend a
         // model call on the copy nobody reads.
+        //
+        // Scoped to the box's own form. The page has other `hx-post`s on it
+        // now — the context offer under the box is one — and asserting over
+        // the whole document would pass or fail on things that have nothing to
+        // do with how a question is parked.
+        let form = page
+            .split(r#"<form id="box-form""#)
+            .nth(1)
+            .and_then(|f| f.split("</form>").next())
+            .expect("the workspace has a box form");
         assert!(
-            !page.contains("hx-post"),
-            "the ask form still posts through htmx: {page}"
+            !form.contains("hx-post"),
+            "the box form still posts through htmx: {form}"
         );
     }
 
@@ -10548,10 +9644,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_an_ask_model_the_link_is_there() {
+    async fn with_an_ask_model_the_verb_is_there() {
         let (app, cookie) = app_with_session().await;
-        let page = get_body(&app, &cookie, "/ui/search").await;
-        assert!(page.contains("href=\"/ui/ask\""), "{page}");
+        let page = get_body(&app, &cookie, "/ui").await;
+        // A button on the box, not a link in the nav. Ask stopped being a
+        // place to go the moment the box learned to do it — but the rule the
+        // sibling test pins is unchanged: where there is no model there is no
+        // door, and this is the other half of it.
+        assert!(page.contains(r#"data-verb="ask""#), "{page}");
     }
 
     #[tokio::test]
@@ -10803,7 +9903,7 @@ mod tests {
         );
         assert!(detail.contains("why was this asked"), "{detail}");
 
-        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(ops.contains("Generated"), "{ops}");
         assert!(
             ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
@@ -10823,7 +9923,7 @@ mod tests {
     #[tokio::test]
     async fn the_pursuit_section_is_not_there_when_pursuits_are_off() {
         let (app, cookie) = app_with_session().await;
-        let ops = get_body(&app, &cookie, "/ui/ops").await;
+        let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(!ops.contains("<h3>Pursuits</h3>"), "{ops}");
     }
 

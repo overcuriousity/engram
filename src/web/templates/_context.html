@@ -38,6 +38,13 @@
 {%- if let Some(o) = offer %} data-rec-id="{{ o.id }}" data-rec-rung="{{ o.kind }}"{% if !o.slot.is_empty() %} data-rec-slot="{{ o.slot }}"{% endif %}{% endif %}>
 {% if let Some(o) = offer %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
+  {# What the thing says, under what it is called. The reason line below is
+     absent on the random card by design — it claims nothing because nothing
+     about the situation produced it — and a card that was a title alone asked
+     to be clicked on faith. This is not a reason; it is the content. #}
+  {% if !o.snippet.is_empty() %}
+  <p class="offer-snippet">{{ o.snippet }}</p>
+  {% endif %}
   {% if !o.rung.is_empty() %}
   <div class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
     {# `serde_json` over the raw bundle plus the contribution numbers, inside a

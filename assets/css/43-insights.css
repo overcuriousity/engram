@@ -1,3 +1,31 @@
+/* Insights: what is true about this installation, and what needs a person.
+
+   The queue, the decisions and the gaps used to be styled beside the search
+   page because they used to sit on Capture. They live here now, with the
+   page that holds them. */
+
+/* Housekeeping: the tables that report the state of the memory. */
+
+/* Columns sized to their content rather than spread across the window. At
+   110rem the "written because" column sat a third of a screen from the
+   artifact it explained, and Deprecate ended up alone at the far edge with
+   nothing near it to act on. */
+.regions-table table.grid td:first-child,
+.regions-table table.grid th:first-child { width: 26%; }
+
+/* The last column is a control, not data: it takes the width of its button and
+   stops. `1%` with `white-space: nowrap` is the way a table is told that — any
+   larger share and the browser spends the slack on it. */
+.regions-table table.grid td:last-child,
+.regions-table table.grid th:last-child { width: 1%; white-space: nowrap; }
+
+/* Wide content scrolls in its own box rather than dragging the page sideways.
+   `body { overflow-x: hidden }` is the backstop; this is what stops a table
+   needing it. */
+.regions-table table.grid { display: block; overflow-x: auto; }
+.regions-table table.grid > thead,
+.regions-table table.grid > tbody { display: table; width: 100%; }
+
 /* Capture: what is queued, and what is waiting on a person. */
 
 /* ── The capture queue ───────────────────────────────────────────────────── */
@@ -28,7 +56,7 @@
 .qname { flex: 1 1 12rem; min-width: 0; text-decoration: none; display: block; }
 .qtitle {
   display: block;
-  font-size: 0.9375rem; text-decoration: none; color: var(--color-fg-primary);
+  font-size: var(--text-md); text-decoration: none; color: var(--color-fg-primary);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* The label truncates; what tells this row from the one above it does not.
@@ -38,7 +66,7 @@
    smaller, because it is a qualifier on the name rather than part of it. */
 .qtitle-opening {
   display: block; white-space: normal; overflow: visible;
-  font-size: 0.8125rem; line-height: 1.35; color: var(--color-fg-muted);
+  font-size: var(--text-sm); line-height: 1.35; color: var(--color-fg-muted);
 }
 .qrow:hover .qtitle { color: var(--color-accent); }
 /* A capture on its way to being named reads as a placeholder, because it is. */
@@ -48,7 +76,7 @@
 .qmeta {
   margin-left: auto; display: grid; grid-template-columns: auto 9.5rem;
   gap: 0.75rem; align-items: baseline; flex: none;
-  font-size: 0.8125rem; color: var(--color-fg-muted); font-family: var(--font-mono);
+  font-size: var(--text-sm); color: var(--color-fg-muted); font-family: var(--font-mono);
 }
 .qtime { text-align: right; }
 /* What this capture answered, on its own line under the name. It carried
@@ -58,7 +86,7 @@
    a column. */
 .qanswers {
   flex: 1 0 100%; margin-top: 0.125rem;
-  font-size: 0.8125rem; color: var(--color-fg-muted);
+  font-size: var(--text-sm); color: var(--color-fg-muted);
 }
 /* The one thing that says a reading is low: colour, not a different layout. */
 .qcov-low {
@@ -91,42 +119,6 @@
 }
 
 
-/* ── A file, waiting to be sent ──────────────────────────────────────────── */
-
-/* The drop zone and the file it caught are the same box, which is why the
-   border is dashed while it is empty and solid once something is in it: dashed
-   is the page saying "put it here", and there is nothing left to invite once
-   the file has arrived. Above the note that describes it, because that is the
-   order the work happens in: it arrived, say what it is, send it. */
-.staged {
-  display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
-  margin-top: 0.6rem; padding: 0.6rem 0.625rem;
-  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated); font-size: 0.8125rem;
-}
-.staged:has(#drop:not([hidden])) {
-  border-style: dashed; background: none;
-}
-/* The whole box opens the picker — on a phone, the camera. */
-#drop { cursor: pointer; color: var(--color-fg-muted); flex: 1 1 auto; min-width: 0; }
-/* A file is somewhere over the window. Said on the box rather than under the
-   pointer, because the box is where it is going to land whatever it is
-   dropped on. */
-.staged.dropping {
-  border-color: var(--color-accent); border-style: dashed;
-  background: var(--color-bg-hover);
-}
-/* Small: it identifies the photo, it does not display it. Capped in both
-   directions so a portrait shot from a phone cannot become the page. */
-.staged img {
-  max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
-  object-fit: cover; flex: none;
-}
-#staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
-/* Away from the name, so a long filename does not push it under the thumb. */
-#staged-clear { margin-left: auto; }
-
-
 /* ── A decision, where the work arrives ──────────────────────────────────── */
 
 /* Shown on Capture rather than on a page you have to remember to visit, and
@@ -135,8 +127,8 @@
   border: 1px solid var(--color-warning); background: var(--color-warning-dim);
   border-radius: var(--radius-md); padding: 0.75rem 0.875rem; margin-bottom: 0.5rem;
 }
-.decide-head { font-size: 0.875rem; }
-.decide-finding { font-size: 0.875rem; margin: 0.375rem 0 0.625rem; }
+.decide-head { font-size: var(--text-base); }
+.decide-finding { font-size: var(--text-base); margin: 0.375rem 0 0.625rem; }
 .decide .row { flex-wrap: wrap; gap: 0.375rem; }
 /* Links keep the weight of the sentence around them rather than turning it
    into a row of blue. */
@@ -155,7 +147,7 @@
    the gap between them read as a stray indent under the first. */
 .quiet-links { display: flex; gap: 1rem; margin-top: 2rem; }
 .quiet-link {
-  display: inline-block; font-size: 0.8125rem;
+  display: inline-block; font-size: var(--text-sm);
   color: var(--color-fg-muted); text-decoration: none;
 }
 .quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
@@ -164,23 +156,59 @@
 /* Which "LevelDB: Funktionsweise und forensische Analyse" this one is. Shown
    only where the title is shared with another row on the page — see
    `disambiguate_pair_titles`. */
-.decide-opening { color: var(--color-fg-muted); font-size: 0.8125rem; }
+.decide-opening { color: var(--color-fg-muted); font-size: var(--text-sm); }
 
 /* What a run of cards is about, said once above them. A cluster of two needs
    no such line — the two titles on the card are the whole of it. */
 .decide-cluster {
-  margin: 0.9rem 0 0.2rem; font-size: 0.8125rem; color: var(--color-fg-muted);
+  margin: 0.9rem 0 0.2rem; font-size: var(--text-sm); color: var(--color-fg-muted);
 }
 
 /* Two sides side by side, because the decision is a comparison. Stacked where
    there is no room for two columns — one above the other still compares; two
    columns 12rem wide do not. */
 .decide-read { margin: 0.5rem 0; }
-.decide-read summary { cursor: pointer; font-size: 0.8125rem; color: var(--color-fg-muted); }
+.decide-read summary { cursor: pointer; font-size: var(--text-sm); color: var(--color-fg-muted); }
 .decide-sides {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;
 }
-.decide-sides p { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--color-fg-secondary); }
+.decide-sides p { margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary); }
 @container shell (max-width: 60rem) {
   .decide-sides { grid-template-columns: 1fr; }
 }
+/* The holes, grouped and named by the sweep. */
+.gaps details { margin: 0.25rem 0; }
+.gaps summary { cursor: pointer; }
+.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
+
+/* ── What this memory is like ─────────────────────────────────────────────── */
+
+/* Three panels that answer three different questions, so they sit beside each
+   other rather than stacking into a scroll: how much is held, how much of it
+   is still reachable, and how well it is found. `auto-fit` rather than a fixed
+   three, because at a narrow window two is better than three squeezed and one
+   is better than two. */
+.measures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem; margin-bottom: 2rem;
+}
+.measure {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.875rem 1rem;
+}
+/* The one number the panel is about, given the room to be read at a glance.
+   Mono, because a proportional face makes two measurements the same width by
+   accident and these are meant to be compared down the column. */
+.measure-figure {
+  font-family: var(--font-mono); font-size: var(--text-2xl);
+  line-height: 1.1; margin: 0 0 0.25rem; color: var(--color-fg-primary);
+}
+.measure-sub { font-size: var(--text-xs); color: var(--color-fg-muted); margin: 0.125rem 0 0; }
+/* A label and its figure, on one line, with the figure right-aligned so a
+   column of them reads as a column. */
+.measure-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 0.75rem; margin: 0.25rem 0; font-size: var(--text-sm);
+  color: var(--color-fg-secondary);
+}
+.measure-row .mono { color: var(--color-fg-primary); }

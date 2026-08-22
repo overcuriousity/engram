@@ -1,3 +1,10 @@
+/* The workspace: the box, its verbs, the rail, the reading pane and its
+   source. One stylesheet, because there is one page.
+
+   It was three — 40-search, 41-capture, 45-ask — and most of what they
+   disagreed about was width, which the region grid in 20-layout.css owns and
+   always did. What is left here is what the workspace actually holds. */
+
 /* Search: the ranked rail, the artifact beside it, and the source lines it
    claims — with the controls and the lineage that hang off an artifact. */
 
@@ -21,9 +28,26 @@
 body { overflow-x: hidden; }
 
 /* Composes `.label` for the type; keeps only the row it makes. */
-.pane-label {
-  display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 0.375rem;
+/* The label vocabulary is `.label` in 10-base.css — uppercase, letterspaced,
+   muted, one step. What this adds is the hairline that runs out from it to the
+   edge of its region, which is most of why a column of these reads as an
+   organised page rather than as three lists that happen to be adjacent.
+
+   `::after` on a flex row, so the rule takes whatever width the words leave
+   and needs no measuring. `min-width: 0` on the text, or a long label pushes
+   the rule out of the column instead of shortening it. */
+.pane-label, .rail-act {
+  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
 }
+.pane-label > * { min-width: 0; }
+.pane-label::after, .rail-act::after {
+  content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
+  background: var(--color-border-subtle);
+}
+/* Except where the label holds its own trailing control — a link back, a
+   count — which would be pushed off the end by a rule that takes what is
+   left. Those rows say where the rule goes themselves. */
+.pane-label:has(a)::after, .pane-label:has(button)::after { display: none; }
 
 /* Tall enough to stand beside the artifact rather than under a third of it,
    and still bounded: the source of a chapter is not a page to scroll here. */
@@ -31,7 +55,7 @@ body { overflow-x: hidden; }
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
   border-radius: var(--radius-md); overflow: auto; max-height: min(60vh, 45rem);
 }
-.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.8125rem; }
+.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Wrapped, with the continuation hanging under its own line rather than under
    the line-number column — which is what made `pre` the right answer before: a
    command broken across two flush rows read as two commands, in a pane whose
@@ -62,14 +86,72 @@ body { overflow-x: hidden; }
   display: flex; gap: 0.625rem; align-items: flex-start;
   border: 1px solid var(--color-warning); background: var(--color-warning-dim);
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
-  font-size: 0.8125rem; margin-bottom: 0.75rem;
+  font-size: var(--text-sm); margin-bottom: 0.75rem;
 }
 .flag b { color: var(--color-warning); }
 
-.crumb { font-size: 0.8125rem; color: var(--color-fg-muted); margin-bottom: 0.75rem; }
+.crumb { font-size: var(--text-sm); color: var(--color-fg-muted); margin-bottom: 0.75rem; }
 
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
+
+/* ── The box, and its two verbs ──────────────────────────────────────────── */
+
+/* The one text surface. A textarea from the first keystroke to the last, so it
+   inherits none of `.input`'s single-line assumptions and needs its own rule —
+   `.input` is 44px tall and centred, which is wrong for something a chapter
+   gets pasted into.
+
+   `width: 100%` is not cosmetic: a textarea's intrinsic width is its `cols`
+   attribute, about twenty characters, so without this the box that is supposed
+   to be the application sits in the top-left corner of a full-width bar.
+
+   `resize: none` because app.js sizes it: it grows to a ten-line cap on input,
+   and a drag handle fighting that is two mechanisms for one height.
+
+   `font: inherit` for the same reason a textarea needs saying: the UA default
+   is monospace, and what goes in here is prose. */
+.box {
+  display: block; width: 100%; box-sizing: border-box;
+  min-height: 2.75rem; padding: 0.625rem 0.75rem;
+  font: inherit; font-size: var(--text-md); line-height: 1.5;
+  color: var(--color-fg-primary); background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-md);
+  resize: none; overflow-y: auto;
+}
+.box::placeholder { color: var(--color-fg-muted); }
+.box:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-dim);
+}
+/* A box someone is waiting on is still a box someone is reading. The UA greys
+   disabled text towards the background, which says "broken" where this means
+   "busy" — the question you asked stays worth reading while you wait for it. */
+.box:disabled {
+  color: var(--color-fg-secondary); opacity: 1; cursor: wait;
+  background: var(--color-bg-surface);
+}
+
+/* The row under the box. Two verbs on the left, what narrows the typing on the
+   right, and the spinner between them. It wraps, because the chip row grows
+   with the vocabulary and a bar that scrolls sideways is a bar that hides one
+   of its verbs. */
+.verbs {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.verbs-spacer { flex: 1 1 auto; }
+/* Both verbs are disabled while the box is empty, and while an ask is in
+   flight. Dimmed rather than hidden: what the box can do does not change, only
+   whether it can do it now. */
+.verbs .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* `.btn` sets `display: inline-flex`, which beats the UA's `[hidden]` rule
+   whatever its specificity — the same trap `.keyhint` documents below. Without
+   this the Stop button is on screen from first paint, offering to stop an ask
+   nobody has started. */
+.btn[hidden] { display: none; }
+.facet-label { flex: 0 0 auto; }
 
 /* The grid itself lives in 20-layout.css now: the rail beside the artifact is
    the region model rather than a layout this one page invented, and the
@@ -78,8 +160,11 @@ body { overflow-x: hidden; }
 
 .rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
 /* The results are their own element inside the rail, so that a search replaces
-   them and not the sitting above them — and the rail's own column layout has to
-   carry through to it, or every card loses the gap between it and the next. */
+   them and not the heading above them — the heading names the act that filled
+   the rail, and a swap that took it with the list would leave the rail
+   unlabelled for as long as the next request takes. The rail's own column
+   layout has to carry through to it, or every card loses the gap between it
+   and the next. */
 #results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
 .rail-item {
   display: block; text-decoration: none; color: inherit;
@@ -96,13 +181,13 @@ body { overflow-x: hidden; }
    has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
-.rail-rank { font-size: 0.75rem; color: var(--color-fg-muted); }
-.rail-title { font-weight: 600; font-size: 0.875rem; }
+.rail-rank { font-size: var(--text-xs); color: var(--color-fg-muted); }
+.rail-title { font-weight: 600; font-size: var(--text-base); }
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */
 .rail-snippet {
-  font-size: 0.8125rem; color: var(--color-fg-secondary); margin-top: 0.25rem;
+  font-size: var(--text-sm); color: var(--color-fg-secondary); margin-top: 0.25rem;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.4em;
 }
@@ -121,25 +206,64 @@ body { overflow-x: hidden; }
    through and treating a recalled hit as the next-best answer. */
 .assoc-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border-subtle);
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
-.rail-why { font-size: 0.8125rem; color: var(--color-fg-muted); margin-top: 0.25rem; }
+.rail-why { font-size: var(--text-sm); color: var(--color-fg-muted); margin-top: 0.25rem; }
 /* Recalled by association, not ranked against the query — so it must not
    borrow the shape of something that was. The rule and the heading above said
    so already, and the identical card underneath them said otherwise. */
 .rail-assoc { border-style: dashed; background: transparent; }
-/* The count, above the list. */
+/* The rail's heading names the act that filled it: "3 results" while typing,
+   "Written from · 5" after an Ask. The row-and-hairline itself is shared with
+   `.pane-label` above, because it is the same kind of statement about the
+   same kind of region; what differs is below. */
+/* The heading slot carries this class permanently (see workspace.html), and
+   before anything has filled it — or after a failed swap empties it — a
+   visible row would be the hairline hanging alone over the rail. */
+.rail-act:empty { display: none; }
+/* The way back to results, after an Ask. Last on the row, past the rule, so
+   the heading still reads as a heading. */
+.rail-act .quiet-link { order: 3; flex: 0 0 auto; font-size: var(--text-xs); }
+.rail-act::after { order: 2; }
 .result-count {
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--color-fg-muted); margin-bottom: 0.5rem;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted); flex: 0 0 auto;
 }
+
+/* ── The rail before anything is asked ───────────────────────────────────
+   The idle state is designed, not left over: the base introduces itself under
+   the heading "This memory" — one measure line, then the last few captures.
+   Everything here is a step quieter than a result, because none of it is one:
+   the box above is what dominates the idle page, and this recedes the moment
+   a query exists. The figures are mono for the reason Insights' are — they
+   are measurements, and a proportional face makes two of them the same width
+   by accident. */
+.idle-held {
+  margin: 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
+}
+.idle-held .mono { color: var(--color-fg-primary); }
+.idle-recent { display: flex; flex-direction: column; gap: 0.125rem; margin-top: 0.5rem; }
+.idle-recent > .label { margin-bottom: 0.125rem; }
+/* Deliberately not `.rail-item`: the card is the shape of a ranked answer,
+   and a recent capture is not an answer to anything. A quiet row — title
+   left, when right — that lights up only under the pointer. */
+.idle-row {
+  display: flex; gap: 0.75rem; align-items: baseline; justify-content: space-between;
+  text-decoration: none; color: var(--color-fg-secondary);
+  padding: 0.25rem 0.375rem; margin: 0 -0.375rem; border-radius: var(--radius-sm);
+}
+.idle-row:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+.idle-row-title {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.idle-row-when { flex: none; font-size: var(--text-xs); color: var(--color-fg-muted); }
 
 /* Where the ranked list's relevance falls off. The rows past it are still
    ranked — they placed — but they no longer read as answers. */
 .cliff-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--color-border-subtle);
-  font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
 /* Demoted, not unreadable. At 0.55 over the dark base this was very likely
@@ -152,9 +276,6 @@ body { overflow-x: hidden; }
 .is-on { color: var(--color-accent); }
 
 /* The holes, on the capture page. */
-.gaps details { margin: 0.25rem 0; }
-.gaps summary { cursor: pointer; }
-.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
 
 /* Neighbours under the artifact. Narrower than the rail on purpose: this is a
@@ -193,14 +314,14 @@ body { overflow-x: hidden; }
 .lin-tick { color: var(--color-fg-muted); font-family: var(--font-mono); line-height: 1.4; }
 .lin-body { min-width: 0; }
 .lin-head { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
-.lin-title { font-size: 0.875rem; }
+.lin-title { font-size: var(--text-base); }
 /* What kind of artifact this is, and whether the one above replaced it. Quiet:
    the title is what is being read, these are what qualify it. */
 .lin-kind {
-  font-size: 0.6875rem; color: var(--color-fg-muted);
+  font-size: var(--text-xs); color: var(--color-fg-muted);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.lin-sub { font-size: 0.75rem; color: var(--color-fg-muted); }
+.lin-sub { font-size: var(--text-xs); color: var(--color-fg-muted); }
 /* A source deleted since. Struck through rather than dropped: the text above
    still carries what it said. */
 .lin-gone .lin-title { text-decoration: line-through; }
@@ -209,18 +330,18 @@ body { overflow-x: hidden; }
    and this line in the rest: the card carries element ids and cannot be
    repeated, but the claim is real and the band would otherwise read as if only
    the other artifact came out of it. */
-.band-echo { font-size: 0.8125rem; margin: 0 0 0.5rem; }
+.band-echo { font-size: var(--text-sm); margin: 0 0 0.5rem; }
 
 /* The fallback for a source there is nothing to band. */
 .raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
-            overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8125rem; }
+            overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-sm); }
 
 /* One column on a narrow screen: the source first, then what came of it. */
 @media (max-width: 60rem) { .band { grid-template-columns: 1fr; } }
 
 /* What tells two rows with one title apart: when it was written, and how it
    opens. Quiet, because it is a disambiguator and not a second title. */
-.row-sub { font-size: 0.75rem; }
+.row-sub { font-size: var(--text-xs); }
 /* Four underlined links in a row read as a wall. The artifact each row is
    about keeps its underline; what it was written from stays reachable and
    recedes until pointed at. */
@@ -293,7 +414,7 @@ body { overflow-x: hidden; }
    needed before you have typed anything. */
 .keyhint {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-  margin: 0 0 0.75rem; font-size: 0.75rem; color: var(--color-fg-muted);
+  margin: 0 0 0.75rem; font-size: var(--text-xs); color: var(--color-fg-muted);
 }
 /* The row ships `hidden` and app.js decides. An author `display` beats the
    UA's `[hidden]` rule whatever its specificity, so without this the hint was
@@ -301,7 +422,7 @@ body { overflow-x: hidden; }
    teach — and "Got it" set an attribute that changed nothing. */
 .keyhint[hidden] { display: none; }
 .keyhint kbd {
-  font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
+  font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6;
   padding: 0 5px; border: 1px solid var(--color-border);
   border-radius: var(--radius-sm); background: var(--color-bg-surface);
   color: var(--color-fg-secondary);
@@ -491,7 +612,8 @@ body { overflow-x: hidden; }
      for a pane to grow past the window instead of scrolling inside it. */
   .regions-rail-focus-source .rail { max-height: none; }
   .regions-rail-focus-source > .region-focus { display: flex; flex-direction: column; }
-  .regions-rail-focus-source .pane > [data-terms] {
+  .regions-rail-focus-source .pane > #pane-content,
+  .regions-rail-focus-source #pane-content > [data-terms] {
     display: flex; flex-direction: column; flex: 1; min-height: 0;
   }
   .regions-rail-focus-source .split { flex: 1; min-height: 0; align-items: stretch; }
@@ -520,7 +642,7 @@ body { overflow-x: hidden; }
 
 /* Said under the passage it belongs to, quietly: it is a way onward, not a
    warning that something is wrong. */
-.continues { margin: 0.5rem 0 0; font-size: 0.8125rem; }
+.continues { margin: 0.5rem 0 0; font-size: var(--text-sm); }
 
 /* The area under the search box. `min-height` is what keeps the answer landing
    from pushing the hint and the chips down a page that has already been read —
@@ -552,6 +674,14 @@ body { overflow-x: hidden; }
 .offer-title:hover, .offer-title:focus-visible {
   text-decoration: underline; text-decoration-color: var(--color-border-strong);
 }
+/* What the artifact says, under what it is called. The measure is the card's,
+   not the page's: two lines at most, because this is a card you decide about
+   rather than a thing you read here. */
+.offer-snippet {
+  margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .offer-why { font-size: var(--text-xs); margin: 0.125rem 0 0; }
 .offer-detail { display: inline; }
 .offer-detail summary { display: inline; cursor: pointer; color: var(--color-accent); }
@@ -559,3 +689,112 @@ body { overflow-x: hidden; }
   white-space: pre-wrap; word-break: break-all;
   margin: 0.375rem 0 0; font-size: var(--text-xs);
 }
+/* ── A file, waiting to be sent ──────────────────────────────────────────── */
+
+/* The box holds only a file that exists: thumbnail, name, note, Remove. The
+   invitation is the Attach control in the verb row — the old arrangement had
+   the picker *inside* this box, which is hidden until a file is staged, and
+   that circle meant staging was unreachable by anything but a drag. */
+/* Same trap as `.btn` above: `display: flex` beats the UA's `[hidden]`, and
+   the box that is supposed to appear only when a file is waiting was on screen
+   from first paint — a note field for a file nobody chose, and a Remove
+   button with nothing to remove. */
+.staged[hidden] { display: none; }
+.staged {
+  display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
+  margin-top: 0.6rem; padding: 0.6rem 0.625rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); font-size: var(--text-sm);
+}
+/* The verb-row picker. The input is the control — focusable, submitting
+   nothing (the form's `hx-params` names what rides a search), and Enter opens
+   the picker — hidden only from sight, which is the chips' pattern exactly.
+   The ring lands on the visible word, or a keyboard reaches a control it
+   cannot see. */
+#drop { cursor: pointer; }
+#drop input[type="file"] {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%);
+}
+#drop:has(input:focus-visible) {
+  outline: 1.5px solid var(--color-accent); outline-offset: 2px;
+}
+/* A file is somewhere over the window. Said on whichever of the two is on
+   screen: the staged box while a file is already waiting, and the Attach
+   control before one is — the box is `display: none` until then, so a class
+   on it alone left the first drop, the common one, with no visible target. */
+.staged.dropping {
+  border-color: var(--color-accent); border-style: dashed;
+  background: var(--color-bg-hover);
+}
+#drop.dropping {
+  border-color: var(--color-accent); border-style: dashed;
+  background: var(--color-bg-hover); color: var(--color-fg-primary);
+}
+/* Small: it identifies the photo, it does not display it. Capped in both
+   directions so a portrait shot from a phone cannot become the page. */
+.staged img {
+  max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
+  object-fit: cover; flex: none;
+}
+#staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
+/* Away from the name, so a long filename does not push it under the thumb. */
+#staged-clear { margin-left: auto; }
+
+
+/* Ask, as it streams. */
+
+/* ── Ask, as it streams ──────────────────────────────────────────────────── */
+
+/* Visible for as long as the stream is open. The htmx indicator class does not
+   apply here: this request is a fetch and an EventSource, neither of which htmx
+   knows about. */
+#box-form.asking .spinner { visibility: visible; }
+
+/* The answer while it is being written: plain text, wrapped, and deliberately
+   quieter than the rendered version that replaces it — what is on screen here
+   is not finished, has no citations yet, and nothing in it has been checked
+   against an excerpt. */
+.answer-live {
+  margin: 0 0 1rem; padding: 0.75rem;
+  font-family: var(--font-mono); font-size: var(--text-base); line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--color-fg-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
+}
+
+/* What the model said on the way. Dimmer and smaller again than the draft
+   answer, and capped: it is a long aside that no one has to read, and letting
+   it grow would push the answer it precedes off the screen. */
+.reasoning {
+  margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
+  font-size: var(--text-sm); line-height: 1.5; white-space: pre-wrap;
+  color: var(--color-fg-muted);
+  border-left: 2px solid var(--color-border-strong);
+  max-height: 12rem; overflow-y: auto;
+}
+
+/* A citation in the prose. Small and raised, so `[1]` reads as a mark on the
+   sentence rather than as a word in it. */
+.cite {
+  font-family: var(--font-mono); font-size: 0.75em;
+  vertical-align: super; line-height: 0;
+  text-decoration: none; padding: 0 0.1em;
+}
+.cite:hover { text-decoration: underline; }
+
+/* The excerpt a citation was just followed to. The same emphasis a selected
+   result carries, because it means the same thing — this is the row the page is
+   pointing at. */
+.rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+
+/* Bounded once it is open: the reasoning runs to several times the length of
+   the answer it precedes, and an unbounded box pushes that answer off screen
+   for as long as the model is thinking. */
+.reasoning-box { margin-bottom: 0.75rem; }
+.reasoning-box > summary {
+  cursor: pointer; font-size: var(--text-sm); color: var(--color-fg-muted);
+}
+.reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
+

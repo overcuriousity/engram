@@ -449,17 +449,17 @@ earns itself, or dismissal, with coverage stored in `gap_coverage` so nothing an
 automatic score decided overwrites what a person judged. And the offer's hit
 rate on Ops, shown against clicked, by rung, over thirty days.
 
-- **Ops as the state of the memory, not the housekeeping table.** It lists
-  merges, deprecations, hidden near-duplicates, retries, and now what the sweeps
-  did — the last day, with the history under it. What it does not say is what the
-  memory is *like*: how much is held and how densely, what is activated and what
-  is fading, recall@10 and MRR over months rather than as today's number on the
-  judge page.
-  **Worth:** four figures currently in four places, and the one page named for
-  the answer has none of them. It is also where a months-long series has to live
-  before **Learned block weights** is anything but a guess.
-  **Cost:** aggregates over tables that already exist, and a section on the Ops
-  page. **A branch.**
+Built: **Housekeeping is Insights**, and it says what the memory is like rather
+than only what needs sweeping. Three panels over tables that already existed —
+how much is held and how much of it a model wrote, what is still reachable under
+the decay a search would apply, and recall@10 and MRR read from
+`feedback_stats` rather than recomputed beside it. No new table, no sweep, and
+no model call, pinned by a test that counts embed calls across a page load.
+
+An unjudged base says so instead of reporting `0.00`: that figure is the one
+here whose absence must not look like a result. What is still missing is the
+*series* — these are today's numbers, and **Learned block weights** wants
+months of them.
 
 - **Where an artifact came from, end to end.** Corpus lines, passage, the window
   whose reading earned a synthesis, the merge, the pursuit, the answer it was
@@ -473,24 +473,26 @@ rate on Ops, shown against clicked, by rung, over thirty days.
 
 ## [Core Platform & Tooling]
 
-- **One text surface for the whole web UI, as the panel now has.** Capture,
-  search and ask are three pages, and moving between them means retyping or
-  carrying a prefill: the same words are a query on one, a question on the
-  second and a document on the third, and the operator navigates to say which.
-  The extension's panel does not. It is one box that never changes shape, with
-  the verb chosen by a button — typing searches, **Ask** spends the model call,
-  **Capture** stores what is in the box — and no state hidden between them. It
-  ships in the extension first because a side panel is 350 pixels of one column,
-  which is the cheapest possible place to find out whether one surface really
-  holds three verbs without any of them getting in the way.
-  **Worth:** the thesis at the top of this file made literal — the box is the
-  application, and the page you are on stops being a thing to decide. It is also
-  what makes the anticipated offer sit in the one place the operator always is.
-  **Cost:** the panel exists; folding the three pages into `/ui/search` and
-  making the others deep links is the rest. What has to be answered there and
-  not here: where the rail, the filter chips and the judged-verdict bar live
-  when the box is doing all three jobs. **A project** for the web UI, **a
-  branch** for the panel it starts in.
+Built: **one text surface for the whole web UI**, as the panel already had it
+(spec `2026-08-22-one-text-surface-design.md`). Capture, search and ask were
+three pages and are one route at `/ui`: one box that never changes shape, the
+verb chosen by a button, and no state hidden between them. The three old doors
+are deep links into it, so a bookmark, the extension's capture post and the
+*keep this answer* flow all still land where they always did.
+
+What this file left open there is answered. The rail belongs to the act — typing
+fills it with results, **Ask** replaces them with the excerpts the answer was
+written from, and one anchor goes back. The filter chips belong to the box,
+because they qualify what typing does and nothing else. The judged-verdict bar
+needed no decision at all: it was already under the answer, and it rode there
+with it.
+
+Two things the surface forced out of hiding and are worth keeping the reasons
+for: pressing **Ask** disables the box, which *is* how search-while-type is
+disabled — a disabled input fires no `keyup`, so there is no second mechanism to
+keep in step — and every one of the three exits re-enables through the one
+`stop()` the stream already funnelled them into, including the transport error
+that would otherwise have left the page disabled for good.
 
 - **One dial instead of eight gates.** Three are gone: `[learn]` is now the
   single switch over recording, association and pursuits, and the sections below
