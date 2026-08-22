@@ -720,6 +720,22 @@ mod tests {
         .unwrap()
     }
 
+    /// The command overlay was a second text surface for the problem the
+    /// first one now solves. `/` focuses the real box instead.
+    #[tokio::test]
+    async fn the_second_text_surface_is_gone() {
+        let html = workspace("/ui").await;
+        assert!(
+            !html.contains("cmdk"),
+            "the overlay is still in the layout: {html}"
+        );
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(!js.contains("commandBar"), "its driver went with it");
+        assert!(!js.contains("cmdk"), "and so did everything it looked up");
+    }
+
     /// One act in flight. Pressing Ask disables the box, and disabling the box
     /// is what disables search-while-type: a disabled input fires no `keyup`,
     /// so the form's `hx-trigger` goes quiet with no second mechanism and no
