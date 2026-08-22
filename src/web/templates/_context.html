@@ -23,12 +23,18 @@
 
    The id is kept on the answer as well as on the placeholder: app.js removes
    this area on the first keystroke, and it needs something to remove whichever
-   of the two is on screen when that happens. #}
+   of the two is on screen when that happens.
+
+   `offer-filled` is what carries the card. It is on the answer and not on the
+   placeholder, because the placeholder is an empty div holding a height open
+   for one round trip — bordered, it would be an empty box on screen every time
+   the page is opened, and a second empty box on every base that has nothing to
+   offer. A card is drawn around something or not at all. #}
 {# The impression is confirmed by the browser, not recorded when this was
    rendered: this fragment races the first keystroke and app.js drops it when
    it loses, so "computed" and "was on screen" are different facts. These
    attributes are what the confirmation carries back. #}
-<div id="context-offer" class="offer"
+<div id="context-offer" class="offer{% if offer.is_some() %} offer-filled{% endif %}"
 {%- if let Some(o) = offer %} data-rec-id="{{ o.id }}" data-rec-rung="{{ o.kind }}"{% if !o.slot.is_empty() %} data-rec-slot="{{ o.slot }}"{% endif %}{% endif %}>
 {% if let Some(o) = offer %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>

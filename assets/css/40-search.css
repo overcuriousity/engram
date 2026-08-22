@@ -526,13 +526,25 @@ body { overflow-x: hidden; }
    from pushing the hint and the chips down a page that has already been read —
    the fetch is one round trip after `load`, which is long enough to see. */
 .offer { min-height: 3.25rem; margin: 0.5rem 0 0.75rem; }
-/* A line, not a card — the area under the search box is a suggestion, and
-   giving it a result's border and background would have it competing with the
-   results it sits above. What it does need is to look chosen: the anchor was
-   inheriting the browser's underline and nothing else, which reads as an
-   unstyled link dropped under the chips rather than as an offer. Weight and no
-   rule by default; the underline comes back on hover, which is the idiom the
-   capture page's links already use. */
+/* The card, and only around an offer that exists: `.offer-filled` is on the
+   answer and never on the placeholder, which is an empty div holding a height
+   open for one round trip. Bordered, that placeholder would be an empty box on
+   screen every time the page opens.
+
+   Composed from `.rail-item`'s parts rather than sharing its rule, because the
+   two are not the same thing: a result is a link and the whole of it is the
+   click target, while this holds a link and a `<details>` beside it. So no
+   hover on the box — the card is a container, and lighting it up under the
+   cursor would promise a click that only the title answers. */
+.offer-filled {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+}
+
+/* The anchor was inheriting the browser's underline and nothing else, which
+   read as an unstyled link dropped under the chips. Weight and no rule by
+   default; the underline comes back on hover, which is the idiom the capture
+   page's links already use. */
 .offer-title {
   font-size: var(--text-base); color: var(--color-fg-primary);
   font-weight: 600; text-decoration: none;
