@@ -28,6 +28,19 @@ use crate::web::ui::{
     tally_sweep, title_of,
 };
 
+/// The retrieval measure, flattened for the template.
+///
+/// The two figures arrive as `f64` and are rendered to two places here rather
+/// than in the markup: every decision this page makes is made in Rust, so the
+/// template holds no logic and a change of precision touches one line.
+struct Retrieval {
+    recall_at_10: String,
+    mrr: String,
+    judged: i64,
+    pending: i64,
+    captured: i64,
+}
+
 /// The old door. It takes an `Identity` like every other `/ui` route: a
 /// redirect that answers before the session is checked is a route that tells
 /// an anonymous caller which paths exist.
@@ -130,6 +143,14 @@ struct InsightsTemplate {
     /// How many more are behind the ones shown. Said once under the list, so a
     /// short list does not read as an empty queue when it is a capped one.
     more_pairs: i64,
+    /// How much is held, and how densely.
+    held: crate::store::insights::Held,
+    /// What is falling out of reach, bucketed as a search would find it.
+    fading: Vec<crate::store::insights::Bucket>,
+    /// recall@10 and MRR, read from the ranks judged searches actually gave.
+    /// `None` where nothing is being recorded — an empty measure is worse than
+    /// no measure, because a zero reads as a score.
+    retrieval: Option<Retrieval>,
     /// Whether the ask door is open. See `state::ask_enabled`.
     ///
     /// The nav has no use for it any more — Ask is a verb on the box, not a
@@ -465,6 +486,31 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
+        held: st.core.store.held().await?,
+        fading: st
+            .core
+            .store
+            .fading(
+                (st.core.activation.half_life_days * 86_400.0) as i64,
+                crate::store::now(),
+            )
+            .await?,
+        // Read only where searches are being recorded at all. The measure is
+        // read off judged searches, and on an installation that records none
+        // the honest answer is that there is nothing to say — not 0.00.
+        retrieval: match st.core.learn.enabled {
+            true => {
+                let f = st.core.store.feedback_stats().await?;
+                Some(Retrieval {
+                    recall_at_10: format!("{:.2}", f.recall_at_10),
+                    mrr: format!("{:.2}", f.mrr),
+                    judged: f.judged,
+                    pending: f.pending,
+                    captured: f.captured,
+                })
+            }
+            false => None,
+        },
         ask_enabled: crate::web::state::ask_enabled(&st),
         pairs,
         more_pairs,
@@ -512,4 +558,78 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         },
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::web::test_support::{app_with_cookie, body_of};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn insights(core: crate::core::Core) -> String {
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/insights")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_of(res).await
+    }
+
+    /// The measures read what the base already recorded.
+    #[tokio::test]
+    async fn the_measures_read_what_the_base_already_recorded() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        assert!(html.contains("What this memory is like"), "{html}");
+        assert!(html.contains("Held"), "how much is held: {html}");
+        assert!(html.contains("Reach"), "what is fading: {html}");
+        assert!(
+            html.contains("out of reach"),
+            "the band that is the point: {html}"
+        );
+    }
+
+    /// Nothing judged is not a score of zero.
+    ///
+    /// `0.00` beside "recall@10" reads as a measurement, and a base nobody has
+    /// judged has not scored badly — it has not been measured. This is the one
+    /// figure on the page whose absence must not look like a result.
+    #[tokio::test]
+    async fn an_unjudged_base_says_so_rather_than_reporting_zero() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let html = insights(core).await;
+        assert!(html.contains("Nothing judged yet"), "{html}");
+        assert!(
+            !html.contains(">0.00<"),
+            "an unmeasured base reports a score: {html}"
+        );
+    }
+
+    /// Read, never computed at request time.
+    ///
+    /// The constraint at the top of `ROADMAP.md` holds here too: no embedding
+    /// and no model call on a page you open to look at numbers.
+    #[tokio::test]
+    async fn the_measures_embed_nothing() {
+        let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let before = embedder.calls();
+        let _ = insights(core).await;
+        assert_eq!(embedder.calls(), before, "the page embeds something");
+    }
 }

@@ -184,3 +184,35 @@
 .gaps details { margin: 0.25rem 0; }
 .gaps summary { cursor: pointer; }
 .gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
+
+/* ── What this memory is like ─────────────────────────────────────────────── */
+
+/* Three panels that answer three different questions, so they sit beside each
+   other rather than stacking into a scroll: how much is held, how much of it
+   is still reachable, and how well it is found. `auto-fit` rather than a fixed
+   three, because at a narrow window two is better than three squeezed and one
+   is better than two. */
+.measures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem; margin-bottom: 2rem;
+}
+.measure {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.875rem 1rem;
+}
+/* The one number the panel is about, given the room to be read at a glance.
+   Mono, because a proportional face makes two measurements the same width by
+   accident and these are meant to be compared down the column. */
+.measure-figure {
+  font-family: var(--font-mono); font-size: var(--text-2xl);
+  line-height: 1.1; margin: 0 0 0.25rem; color: var(--color-fg-primary);
+}
+.measure-sub { font-size: var(--text-xs); color: var(--color-fg-muted); margin: 0.125rem 0 0; }
+/* A label and its figure, on one line, with the figure right-aligned so a
+   column of them reads as a column. */
+.measure-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 0.75rem; margin: 0.25rem 0; font-size: var(--text-sm);
+  color: var(--color-fg-secondary);
+}
+.measure-row .mono { color: var(--color-fg-primary); }
