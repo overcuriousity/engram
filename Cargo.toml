@@ -52,9 +52,16 @@ rmcp = { version = "3.1.2", features = ["server", "transport-streamable-http-ser
 # article. Hand-rolling these heuristics would be worse code than importing an
 # implementation of them.
 dom_smoothie = "0.18.0"
-# HTML → markdown. Pre-1.0, and the fallback if that becomes unacceptable is
-# plain-text extraction, which costs the splitter its heading boundaries.
-html2md = "0.2.15"
+# HTML → markdown. A turndown.js port, and it replaced `html2md` for a measured
+# reason rather than a fashionable one: on identical readability output
+# `html2md` recovered no ATX headings at all from several ordinary sites — none
+# against this crate's 38 on a BBC front page, none against 7 on a GitHub
+# repository page — and `src/infer/split.rs` splits on headings before anything
+# else. It also serialised `<sup>`, `<sub>` and geometry-bearing `<img>` back
+# into the corpus verbatim, which came to 43% of the stored bytes of a
+# Wikipedia article. Also pre-1.0; the fallback if that becomes unacceptable is
+# still plain-text extraction, which costs the splitter its heading boundaries.
+htmd = "0.5.5"
 # Decoding fetched pages that are not UTF-8. Already in the tree by way of
 # the HTML crates; named here because this uses it directly.
 encoding_rs = "0.8.35"
