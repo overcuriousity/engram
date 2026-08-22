@@ -720,6 +720,52 @@ mod tests {
         .unwrap()
     }
 
+    /// A door that fails silently is worse than one that fails.
+    ///
+    /// htmx swaps nothing on an error of any kind, so before this the rail
+    /// stayed exactly as empty on a failed search as it was before the
+    /// keystroke — and the only reading left was that the base holds nothing.
+    /// 401 was handled because a dead session is the case that was noticed;
+    /// every other status was not.
+    #[test]
+    fn a_failed_swap_says_so_where_the_answer_was_going_to_be() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let h = js
+            .split_once("addEventListener('htmx:responseError'")
+            .expect("nothing handles a failed swap")
+            .1;
+        let h = &h[..h.find("\n    });").expect("the handler does not end")];
+        assert!(
+            h.contains("failedSwap("),
+            "only the 401 case is handled, so every other failure is silent: {h}"
+        );
+
+        // A transport error fires no responseError at all — there is no
+        // response — and it is the case a base behind a dropped connection
+        // produces.
+        assert!(
+            js.contains("addEventListener('htmx:sendError'"),
+            "a request that never arrived says nothing"
+        );
+
+        // The server's own reason, verbatim. A generic failure line would hide
+        // what actually goes wrong here.
+        let f = js
+            .split_once("function failedSwap(")
+            .expect("the driver has no failedSwap()")
+            .1;
+        assert!(
+            f.contains("JSON.parse(xhr.responseText).error"),
+            "the reason the server gave is thrown away"
+        );
+        assert!(
+            f.contains("textContent"),
+            "an error string is the one payload here that went through no renderer"
+        );
+    }
+
     /// The command overlay was a second text surface for the problem the
     /// first one now solves. `/` focuses the real box instead.
     #[tokio::test]

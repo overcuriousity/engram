@@ -720,6 +720,45 @@
     }, { once: true });
   }
 
+  // Say what went wrong where the answer was going to be.
+  //
+  // The server's own reason, verbatim, the same rule the upload path follows:
+  // a generic "something went wrong" would hide what actually goes wrong here
+  // — an embedder that is down, a vector store that cannot answer, a body over
+  // the limit. `textContent`, because an error string is the one payload on
+  // this page that went through no sanitizing renderer.
+  function failedSwap(target, xhr) {
+    if (!target || !target.id) return;
+    var reason = 'engram is unreachable.';
+    if (xhr) {
+      try {
+        reason = JSON.parse(xhr.responseText).error || ('engram answered ' + xhr.status + '.');
+      } catch (err) {
+        reason = 'engram answered ' + xhr.status + '.';
+      }
+    }
+    var box = document.createElement('div');
+    box.className = 'flag';
+    box.setAttribute('role', 'status');
+    // Not named `b`: `the_browser_sends_exactly_the_fields_this_struct_reads`
+    // reads the context bundle's fields off this file by looking for lines
+    // that start with `b.`, and a one-letter element handle here is
+    // indistinguishable from a bundle assignment.
+    var title = document.createElement('b');
+    title.textContent = 'That did not work';
+    var why = document.createElement('div');
+    why.textContent = reason;
+    var wrap = document.createElement('div');
+    wrap.appendChild(title);
+    wrap.appendChild(why);
+    box.appendChild(wrap);
+    target.textContent = '';
+    target.appendChild(box);
+    // The heading names the act that filled the rail, and nothing filled it.
+    var head = document.getElementById('rail-head');
+    if (head && target.id === 'results') head.textContent = '';
+  }
+
   // The way back to results after an Ask. Bound on the document because the
   // anchor is written into the rail by the stream driver, long after load.
   function railBack() {
@@ -1052,9 +1091,23 @@
     // must not be answered with a full-page redirect into a login. Handled
     // here instead, and it names the page so signing in comes back to it.
     document.body.addEventListener('htmx:responseError', function (e) {
-      if (!e.detail || !e.detail.xhr || e.detail.xhr.status !== 401) return;
-      var here = window.location.pathname + window.location.search;
-      window.location.assign('/auth/login?go=' + encodeURIComponent(here));
+      if (!e.detail || !e.detail.xhr) return;
+      if (e.detail.xhr.status === 401) {
+        var here = window.location.pathname + window.location.search;
+        window.location.assign('/auth/login?go=' + encodeURIComponent(here));
+        return;
+      }
+      failedSwap(e.detail.target, e.detail.xhr);
+    });
+    // The other half of the same problem. htmx swaps nothing on an error of
+    // any kind, and 401 was the only one this handler knew about — so a search
+    // against a base whose embedder is down did visibly nothing at all: you
+    // typed, and the rail stayed exactly as empty as it was before. A door
+    // that fails silently is worse than one that fails, because the only
+    // reading left is that the base has nothing.
+    document.body.addEventListener('htmx:sendError', function (e) {
+      if (!e.detail) return;
+      failedSwap(e.detail.target, null);
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       // The offer's own fetch can land after the first keystroke has already
