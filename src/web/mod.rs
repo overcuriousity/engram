@@ -3,6 +3,7 @@ pub mod assets;
 pub mod auth_routes;
 pub mod corpus_view;
 pub mod extension;
+pub mod insights;
 pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
@@ -76,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .merge(pair::pair_router())
         .merge(extension::extension_router())
         .merge(judge::judge_router())
+        .merge(insights::routes())
         .merge(crate::mcp::mcp_router(state.clone()))
         .nest(
             "/api/v1",
