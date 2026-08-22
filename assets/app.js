@@ -466,6 +466,18 @@
       live.hidden = true;
       reasoningBox.hidden = true;
       reasoningBox.open = false;
+      // The pane is now the act, and the layout has to be told: `has-selection`
+      // was set by a result swap and nothing else, so an ask claimed no room at
+      // all. Wide, the rail kept the 40rem it holds while nothing is open and
+      // the answer streamed into what was left; narrow, the rail comes first in
+      // the DOM and every excerpt sat above the answer.
+      //
+      // Its own class rather than `has-selection`, which narrow reads as
+      // "hide the rail": the excerpts are what this answer was written from and
+      // the `[n]` links point into them, so hiding them is the one thing that
+      // must not happen here. Narrow puts the rail after the answer instead.
+      var regions = document.querySelector('.regions');
+      if (regions) regions.classList.add('answering');
       form.classList.add('asking');
       setBusy(true);
       startTicking();
@@ -902,13 +914,28 @@
 
     // `restore` is the failed upload coming back: the same file, already
     // described, and no reason to reach for the note a second time.
+    // Where a capture answers. One press can be two captures — a staged file
+    // and the text above it — and both used to write this node whole: whichever
+    // request landed last wiped the other's line, an upload's error included.
+    // A line each, cleared once per press.
+    function receipt() {
+      var host = document.getElementById('capture-result');
+      var slot = document.createElement('p');
+      if (host) host.appendChild(slot);
+      return slot;
+    }
+    function clearReceipts() {
+      var host = document.getElementById('capture-result');
+      if (host) host.textContent = '';
+    }
+
     function stage(file, restore) {
       if (!file) return;
-      var result = document.getElementById('capture-result');
       // Said now rather than after the operator has written a note for a file
       // this server was never going to read.
       if (file.type.indexOf('image/') === 0 && !VISION) {
-        result.textContent = 'Image capture is not configured on this server.';
+        clearReceipts();
+        receipt().textContent = 'Image capture is not configured on this server.';
         unstage();
         return;
       }
@@ -945,7 +972,7 @@
       // By name as well as by type: a drop from some file managers carries no
       // type at all, and the door judges those by their name too.
       var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
-      var result = document.getElementById('capture-result');
+      var result = receipt();
       if (isImage && !VISION) {
         result.textContent = 'Image capture is not configured on this server.';
         return;
@@ -1062,9 +1089,11 @@
       htmx.trigger(form, 'submit');
     }
 
+    // Hands back its promise: the press that carries a file too runs the two
+    // one after the other, and this is how the second one knows to start.
     function postText() {
       var text = box.value.trim();
-      if (!text) return;
+      if (!text) return Promise.resolve();
       var fromAsk = document.querySelector('input[name="from_ask"]');
       // htmx settles this promise for every answer the server gives, a 500
       // among them — it rejects only for a request that never completed at
@@ -1082,9 +1111,12 @@
         stored = !!e.detail.successful;
       }
       document.body.addEventListener('htmx:afterRequest', verdict);
-      htmx.ajax('POST', '/ui/capture', {
+      return htmx.ajax('POST', '/ui/capture', {
         target: '#capture-result',
-        swap: 'innerHTML',
+        // Appended, not replaced: an upload sent by the same press has its own
+        // line in here, and a receipt that overwrites the other one is how the
+        // page came to report only whichever request was slower.
+        swap: 'beforeend',
         values: { text: text, from_ask: fromAsk ? fromAsk.value : '' }
       // A transport failure rejects, and nothing catching it was an unhandled
       // rejection on top of a capture that visibly did nothing.
@@ -1094,6 +1126,12 @@
         // that emptied the box would lose the text it failed to keep, and the
         // error fragment beside it is not where the text went.
         if (!stored) return;
+        // The provenance was about the text that just went in, and the box
+        // stays open. Left standing, the next thing pasted into it was stored
+        // as the same model answer — `origin = "ask"`, that question, those
+        // citations — for words the operator typed themselves.
+        var kept = document.getElementById('kept-from');
+        if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
         box.value = '';
         box.dispatchEvent(new Event('input', { bubbles: true }));
         refreshRail();
@@ -1101,12 +1139,13 @@
     }
     verb.addEventListener('click', function (e) {
       e.preventDefault();
-      if (staged) {
-        var file = staged;
-        unstage();
-        send(file);
-      }
-      postText();
+      clearReceipts();
+      var file = null;
+      if (staged) { file = staged; unstage(); }
+      // Never both in flight. They write the same node, and a failed swap
+      // empties it — so the upload's line is written last, or a text capture
+      // that fails takes the photo's receipt down with it.
+      postText().then(function () { if (file) send(file); });
     });
     // A pasted screenshot goes the same way as a dropped one — unless the
     // paste is on its way somewhere that takes text. A clipboard from Sheets,
@@ -1180,7 +1219,12 @@
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.regions');
-      if (ws && e.target.id === 'pane-content') ws.classList.add('has-selection');
+      if (ws && e.target.id === 'pane-content') {
+        // An artifact is the act now; the answer that had the pane is cleared
+        // just below.
+        ws.classList.remove('answering');
+        ws.classList.add('has-selection');
+      }
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
       // over results that have since changed underneath it.
@@ -1189,7 +1233,7 @@
       // rail now, so that what a search replaces is the results and not the
       // sitting beside them.
       if (e.target.id === 'results') {
-        if (ws) ws.classList.remove('has-selection');
+        if (ws) ws.classList.remove('has-selection', 'answering');
         // Back to the top of the answer. Nothing moved the scroll on a swap,
         // and the two layouts strand it in different places for the same
         // reason: whatever you had scrolled to in the last list is kept, and

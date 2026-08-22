@@ -5,6 +5,11 @@
 //! That constraint is the one at the top of `ROADMAP.md`, and it is what makes
 //! this page cheap enough to open whenever.
 //!
+//! With one exception, named where it lives: `fading` reads two columns of
+//! every active artifact, because the arithmetic it applies is not one SQLite
+//! can be relied on to have. It is streamed rather than collected, so the cost
+//! is a scan and not a `Vec` the size of the base.
+//!
 //! Retrieval is deliberately *not* computed here. `feedback_stats` already
 //! reads recall@10 and MRR off the ranks judged searches actually gave, and a
 //! second computation over the same rows is how two pages come to report two
@@ -81,25 +86,29 @@ impl Store {
     /// to assume, and whose absence is a 500 on a page rather than a wrong
     /// number.
     ///
-    /// Two columns over the active artifacts is a small read, and it is the
-    /// same arithmetic the query path applies, so this says what a search
-    /// would find rather than what was last written down.
+    /// The one figure on this page that is not an aggregate the database
+    /// computes. It reads two columns of every active artifact — a full scan,
+    /// growing with the base it is measuring — which is the price of applying
+    /// the same arithmetic the query path does, so this says what a search
+    /// would find rather than what was last written down. Streamed, so that
+    /// scan costs four counters rather than a row per artifact held in memory
+    /// at once.
     ///
     /// Four bands rather than a histogram: the question is "what is falling
     /// out of reach", which the bottom band answers. The shape of the curve is
     /// not a question anybody has.
     pub async fn fading(&self, half_life_days: f64, now: i64) -> Result<Vec<Bucket>> {
-        let rows: Vec<(f64, i64)> = sqlx::query_as(
+        let mut rows = sqlx::query_as::<_, (f64, i64)>(
             "SELECT activation, activated_at FROM artifacts WHERE status = 'active'",
         )
-        .fetch_all(&self.pool)
-        .await?;
+        .fetch(&self.pool);
         // `links::decayed` is the arithmetic the query path applies — the
         // same formula, the same "non-positive turns decay off" reading. A
         // copy of it here is a copy that can drift, and this page's whole
         // claim is "what a search would find now".
         let (mut reachable, mut settling, mut fading, mut gone) = (0i64, 0i64, 0i64, 0i64);
-        for (activation, at) in rows {
+        while let Some(row) = tokio_stream::StreamExt::next(&mut rows).await {
+            let (activation, at) = row?;
             let a = super::links::decayed(activation, at, now, half_life_days);
             match a {
                 _ if a >= 0.75 => reachable += 1,

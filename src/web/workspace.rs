@@ -110,13 +110,19 @@ struct WorkspaceTemplate {
     /// bump and a Judge-queue row for the capture door especially, whose box
     /// holds a whole model answer.
     ///
-    /// Also rendered into `data-open-with`, which is how the page says out
-    /// loud which door opened it.
+    /// It also decides `idle`: a door that runs no search on arrival has to
+    /// render the rail's idle state, or the rail is the column of nothing
+    /// that state exists to remove.
     open_with: &'static str,
-    /// The idle rail, pre-rendered: the base introducing itself when the page
-    /// opens with an empty box, and an empty string when it opens to a query
-    /// — the `load` trigger fills the rail with results then, and rendering
-    /// an introduction under them for one round trip would be flicker.
+    /// The idle rail, pre-rendered: the base introducing itself, and an empty
+    /// string only where the `load` trigger is about to fill the rail with
+    /// results — rendering an introduction under them for one round trip
+    /// would be flicker.
+    ///
+    /// Which is not the same as "the box is empty". The ask and capture doors
+    /// arrive with a filled box and run nothing, so for them there is no
+    /// round trip coming and no results to flicker under: without this they
+    /// rendered a rail with nothing in it at all.
     ///
     /// Rendered here rather than composed in the template because the same
     /// fragment is what the results endpoint returns when the box is emptied
@@ -129,7 +135,12 @@ struct WorkspaceTemplate {
 /// Split out because the three deep links differ only in what is in the box
 /// and what happens on first paint; a copy of this per door is how they come
 /// to disagree about the chips.
-async fn base_template(st: &AppState, q: String, category: String) -> Result<WorkspaceTemplate> {
+async fn base_template(
+    st: &AppState,
+    q: String,
+    category: String,
+    open_with: &'static str,
+) -> Result<WorkspaceTemplate> {
     // A vector store that cannot answer must not take the page down with it:
     // without chips the page is what it was yesterday, with them it is better,
     // and neither is worth a 500.
@@ -148,7 +159,10 @@ async fn base_template(st: &AppState, q: String, category: String) -> Result<Wor
     // while the results are not, and there is no chip to click to get back
     // out.
     ensure_facet(&mut facets.categories, &category);
-    let idle = match q.is_empty() {
+    // The same condition the template's `load` trigger is written from, and
+    // its complement: whatever will not be filled by a search on arrival is
+    // filled by the idle rail here.
+    let idle = match q.is_empty() || !open_with.is_empty() {
         true => crate::web::ui::rail_idle(st)
             .await?
             .render()
@@ -166,7 +180,7 @@ async fn base_template(st: &AppState, q: String, category: String) -> Result<Wor
         eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
-        open_with: "",
+        open_with,
         idle,
     })
 }
@@ -176,7 +190,7 @@ async fn page(
     _id: Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
-    let t = base_template(&st, p.q, p.category.unwrap_or_default()).await?;
+    let t = base_template(&st, p.q, p.category.unwrap_or_default(), "").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -285,8 +299,7 @@ async fn capture_door(
         Some(ev) => (ev.answer, ev.id, ev.question),
         None => (String::new(), String::new(), String::new()),
     };
-    let mut t = base_template(&st, q, String::new()).await?;
-    t.open_with = "capture";
+    let mut t = base_template(&st, q, String::new(), "capture").await?;
     t.prefill_ask = prefill_ask;
     t.prefill_question = prefill_question;
     Ok(HtmlTemplate(t).into_response())
@@ -685,8 +698,12 @@ struct CarriedForm {
     n: i64,
 }
 
-/// The ask door: the workspace with the question already in the box and an
-/// answer requested on first paint. A gap's "ask again" links here.
+/// The ask door: the workspace with the question already in the box, and
+/// still. A gap's "ask again" links here.
+///
+/// Nothing is asked on arrival. A GET that spends a model call is a bill any
+/// link, prefetch or reload can run up, and the question is one press from
+/// where the door leaves it.
 ///
 /// No ask model, no ask door: the route is not there. See `Core::asks`.
 ///
@@ -702,8 +719,7 @@ async fn ask_door(
     if !st.core.asks() {
         return Err(crate::error::Error::NotFound);
     }
-    let mut t = base_template(&st, p.q, String::new()).await?;
-    t.open_with = "ask";
+    let t = base_template(&st, p.q, String::new(), "ask").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -824,7 +840,6 @@ mod tests {
         );
     }
 
-    /// The command overlay was a second text surface for the problem the
     /// A result click must never swap away the ask and capture targets: they
     /// exist nowhere but the workspace's first paint, so a fragment that
     /// replaced the whole pane left Ask streaming into detached nodes and
@@ -849,7 +864,104 @@ mod tests {
         );
     }
 
-    /// first one now solves. `/` focuses the real box instead.
+    /// The provenance of a kept answer belongs to the text that was kept, and
+    /// the box does not close behind a capture. Left standing, the hidden
+    /// `from_ask` was read again by the next press: something the operator
+    /// typed themselves went into the base as `origin = "ask"`, carrying a
+    /// question and citations it had nothing to do with — a corpus asserting
+    /// model authorship for hand-written words.
+    #[test]
+    fn the_kept_from_provenance_is_retired_by_the_capture_it_belongs_to() {
+        let tpl = include_str!("templates/workspace.html");
+        let kept = tpl
+            .split_once(r#"<div id="kept-from">"#)
+            .expect("the provenance is one removable block")
+            .1;
+        assert!(
+            kept[..kept.find("</div>").expect("the block ends")].contains(r#"name="from_ask""#),
+            "the hidden input is inside it, so the two go away together"
+        );
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("getElementById('kept-from')") && js.contains("removeChild(kept)"),
+            "a stored capture leaves its provenance behind on the page"
+        );
+    }
+
+    /// One press can be two captures — a staged file and the text above it —
+    /// and both answer in `#capture-result`. They used to be started together
+    /// and write it whole, so whichever request landed last wiped the other's
+    /// line: with text over a photo the text's receipt vanished, and an upload
+    /// that failed had its reason overwritten by a success beside it.
+    #[test]
+    fn a_file_and_text_in_one_press_each_keep_their_receipt() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("postText().then(function () { if (file) send(file); })"),
+            "the two acts are sequenced, not raced"
+        );
+        assert!(
+            js.contains("swap: 'beforeend'"),
+            "the text capture appends its line rather than replacing the node"
+        );
+        assert!(
+            js.contains("function clearReceipts()"),
+            "and the node is cleared once per press instead"
+        );
+    }
+
+    /// An answer is not swapped into `#pane-content`, so it gained none of the
+    /// room a result click does: wide, the rail kept the 40rem it is allowed
+    /// while nothing is open and the answer streamed into the remainder;
+    /// narrow, the rail comes first in the DOM and every excerpt sat above the
+    /// answer.
+    ///
+    /// Its own class rather than `has-selection`, which narrow reads as "hide
+    /// the rail" — and the rail is where this answer's own `[n]` links point.
+    #[test]
+    fn an_ask_claims_the_pane_without_hiding_what_it_was_written_from() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("regions.classList.add('answering')"),
+            "pressing Ask says the pane is the act"
+        );
+        assert!(
+            js.contains("classList.remove('has-selection', 'answering')"),
+            "and a fresh result list takes it back"
+        );
+
+        let css = include_str!("../../assets/css/20-layout.css");
+        let idle = css
+            .split_once(":not(.has-selection):not(.answering)")
+            .expect("the idle 40rem rail is not held while an answer is being written")
+            .0;
+        // Bounded to the widths that have two columns. Three `:not()`s outrank
+        // the single class the one-up block sets its track list with, and
+        // specificity does not care that the two rules answer different widths
+        // — unbounded, this two-column rule won on a narrow screen too, and
+        // left the pane beside a 40rem rail twelve pixels wide.
+        assert!(
+            idle.rsplit_once("@container")
+                .is_some_and(|(_, open)| open.trim_start().starts_with("shell (width > 60rem)")),
+            "the idle rail's track list applies where there is only one column"
+        );
+        assert!(
+            css.contains(".regions.answering .region-rail { order: 1; }"),
+            "and narrow puts the excerpts under the answer rather than over it"
+        );
+        let phone = include_str!("../../assets/css/50-phone.css");
+        assert!(
+            phone.contains(".regions.answering .region-rail { order: 1; }"),
+            "including in the block that restates the narrow rules for a phone"
+        );
+    }
+
+    /// The command overlay was a second text surface for the problem the first
+    /// one now solves. `/` focuses the real box instead.
     #[tokio::test]
     async fn the_second_text_surface_is_gone() {
         let html = workspace("/ui").await;

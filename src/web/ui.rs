@@ -3847,16 +3847,20 @@ mod tests {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui/ask?q=why+did+the+reindex+fail", &cookie).await;
         assert!(
-            html.contains(r#"data-open-with="ask""#),
-            "the page opens asking: {html}"
-        );
-        assert!(
             html.contains("why did the reindex fail"),
             "the box carries the question: {html}"
         );
         assert!(
             !trigger_of(&html).contains("load"),
             "and nothing is searched for on the way in: {html}"
+        );
+        // Still is not blank. Nothing is coming to fill the rail through this
+        // door, so the rail renders the state it is actually in — the base
+        // introducing itself — rather than the column of nothing that state
+        // was written to remove.
+        assert!(
+            html.contains("This memory"),
+            "the rail says where the question is being asked: {html}"
         );
         // Every id the stream driver writes into has to survive the move; the
         // browser suite targets each of these by name.
@@ -3909,10 +3913,6 @@ mod tests {
         let (app, cookie, _core, _html, id) = ask_recorded().await;
 
         let html = get(&app, &format!("/ui/capture?from_ask={id}"), &cookie).await;
-        assert!(
-            html.contains(r#"data-open-with="capture""#),
-            "the page opens capturing: {html}"
-        );
         // The box holds a whole model answer. Searching for it on arrival was
         // an embedding call, an activation bump on whatever it retrieved and,
         // where searches are recorded, a Judge-queue row — for a paragraph the
@@ -3921,10 +3921,22 @@ mod tests {
             !trigger_of(&html).contains("load"),
             "and the answer in the box is not searched for: {html}"
         );
-        assert!(html.contains("data-workspace"), "and it is the workspace");
+        assert!(html.contains(r#"id="box-form""#), "and it is the workspace");
+        assert!(
+            html.contains("This memory"),
+            "whose rail is the idle one, not an empty column: {html}"
+        );
         assert!(
             html.contains(&format!(r#"name="from_ask" value="{id}""#)),
             "the ask rides the form as provenance: {html}"
+        );
+        // In one removable block with the line that explains it: the claim is
+        // about this text, and app.js takes the pair away when the capture
+        // lands, so the next thing pasted into the same box is not stored as
+        // the same model answer.
+        assert!(
+            html.contains(r#"<div id="kept-from">"#),
+            "and it is retirable in one piece: {html}"
         );
         assert!(
             html.contains("Kept from"),
@@ -3933,7 +3945,7 @@ mod tests {
 
         // The plain door is the same page with an empty box.
         let plain = get(&app, "/ui/capture", &cookie).await;
-        assert!(plain.contains("data-workspace"), "still the workspace");
+        assert!(plain.contains(r#"id="box-form""#), "still the workspace");
         assert!(
             !plain.contains("Kept from"),
             "an ordinary visit claims no provenance: {plain}"

@@ -2,7 +2,7 @@
 {% block title %}engram{% endblock %}
 {% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
-<div class="region-bar" data-workspace data-open-with="{{ open_with }}">
+<div class="region-bar">
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `keyup` only
    for the box: a radio does not need a debounce and the box does. `change` is
@@ -151,12 +151,19 @@
    written from — kept even if the operator rewrites every word above, because
    the claim it makes is about where the text came from, not what it says. #}
 {% if !prefill_ask.is_empty() %}
-<p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo; — an answer engram
-  wrote. Edit it as you like; saving is yours, and the capture records the
-  question it came from.</p>
-{# Outside every form on purpose: the box's own form is a GET that searches,
-   and app.js reads this by name when Capture posts. #}
-<input type="hidden" name="from_ask" value="{{ prefill_ask }}">
+{# Named so app.js can take the pair away together once the capture lands.
+   The claim is about *this* text, and the box does not close after a capture:
+   left standing, the next thing pasted into the same box was stored as the
+   same model answer, with a question and citations it has nothing to do
+   with. #}
+<div id="kept-from">
+  <p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo; — an answer engram
+    wrote. Edit it as you like; saving is yours, and the capture records the
+    question it came from.</p>
+  {# Outside every form on purpose: the box's own form is a GET that searches,
+     and app.js reads this by name when Capture posts. #}
+  <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
+</div>
 {% endif %}
 {# Rough stand-in for the tokeniser, filled by app.js: enough to warn, never to
    block. At `earned` and `off` capture makes no synthesis call, so the hint
@@ -203,8 +210,10 @@
   {# Idle is a state the rail renders, not an absence: with an empty box the
      base introduces itself here (see `_rail_idle.html`), and the same
      fragment comes back from the results endpoint when the box is emptied.
-     Pre-rendered server-side into `idle`, empty when the page opens to a
-     query — the `load` trigger is about to fill the rail with results. #}
+     Pre-rendered server-side into `idle`, and empty only where the `load`
+     trigger above is about to fill the rail with results. A door that arrives
+     with a filled box and runs nothing — ask, capture — renders it, because
+     for those nothing is coming. #}
   <div id="results" role="listbox" aria-label="Results">{{ idle|safe }}</div>
 </div>
 

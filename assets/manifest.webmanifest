@@ -16,7 +16,6 @@
     { "src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ],
   "shortcuts": [
-    { "name": "Capture", "url": "/ui/capture" },
     { "name": "Insights", "url": "/ui/insights" }
   ]
 }
