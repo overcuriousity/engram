@@ -71,6 +71,11 @@ pub enum PairState {
     /// time now, which removes the condition, and `reopen_oversized` puts the
     /// rows left behind back in the queue.
     Oversized,
+    /// The judge found that neither artifact states anything — two containers
+    /// rather than two claims. A recommendation to discard both, and nothing
+    /// more: like `Superseded`, an operator confirms it before anything is
+    /// hidden.
+    Vacuous,
 }
 
 impl PairState {
@@ -83,6 +88,7 @@ impl PairState {
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
+            PairState::Vacuous => "vacuous",
         }
     }
     pub fn parse(s: &str) -> PairState {
@@ -93,6 +99,7 @@ impl PairState {
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
+            "vacuous" => PairState::Vacuous,
             _ => PairState::Pending,
         }
     }

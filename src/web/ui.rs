@@ -260,6 +260,10 @@ pub struct PairRow {
     /// still resolvable, just with nothing recommended.
     pub keeps_a: bool,
     pub keeps_b: bool,
+    /// The judge found that neither side states anything. Accents "Discard
+    /// both" the way `keeps_a` accents a Keep — a recommendation about which
+    /// button to press, not a third thing to do.
+    pub vacuous: bool,
 }
 
 pub struct TokenRow {
@@ -1898,9 +1902,13 @@ pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
+    // A judged recommendation like `Superseded`, and listed for the same
+    // reason: the judge proposing something is not the judge doing it, so the
+    // pair still has to reach the person who presses the button.
+    crate::store::pairs::PairState::Vacuous,
     crate::store::pairs::PairState::Pending,
 ];
 
@@ -1995,6 +2003,7 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 obsolete_title,
                 keeps_a,
                 keeps_b,
+                vacuous: state == crate::store::pairs::PairState::Vacuous,
             });
             if pairs.len() == PAIR_LIMIT {
                 break 'fill;
@@ -2308,6 +2317,68 @@ async fn dismiss_pair_ui(
     st.core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .await?;
+    Ok(Redirect::to(back.path()).into_response())
+}
+
+/// Answer a pair by retiring both sides.
+///
+/// The queue's other two answers each assume something. Keeping one side
+/// assumes one of them is worth keeping; Dismiss assumes the pair is a
+/// question not worth asking and leaves both in results. Neither fits two
+/// artifacts that state nothing — a body that is its own file path, an outline
+/// with nothing under it — which are alike for a reason that has no keeper.
+///
+/// Deprecation, not deletion, and through `core.deprecate` like every other
+/// hide in the app: this is the one action here that retires *both* artifacts,
+/// so it is also the one that most needs the same undo as the rest.
+///
+/// The side effects first and the pair settled after, the ordering
+/// `jobs::dedupe::apply` documents: a failure part-way leaves the pair
+/// answerable rather than recorded as answered and never applied.
+async fn discard_pair_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> Result<Response> {
+    let pair = st.core.store.get_pair(pid).await?;
+    // Both sides read before either is retired. A side already hidden in
+    // favour of another artifact — an applied supersede from a neighbouring
+    // pair in the same cluster does this, and nothing filters those rows off
+    // the page — is one `core.deprecate` refuses. Deprecating in sequence
+    // therefore hid the first side and then failed on the second, leaving the
+    // pair answerable, half of it already gone, and unanswerable for good:
+    // every later press repeated the same 400.
+    //
+    // A superseded artifact is out of results already, which is all this
+    // button is asking for, so it is skipped rather than treated as an error.
+    let mut retire = Vec::new();
+    for id in [&pair.a_id, &pair.b_id] {
+        if st
+            .core
+            .store
+            .get_artifact(id)
+            .await?
+            .superseded_by
+            .is_none()
+        {
+            retire.push(id.clone());
+        }
+    }
+    for id in &retire {
+        st.core.deprecate(id).await?;
+    }
+    // The judge's line carried through rather than dropped: it is the only
+    // record of why both sides were retired, and `set_pair_state` writes
+    // `detail` unconditionally, so `None` would null it.
+    st.core
+        .store
+        .set_pair_state(
+            pid,
+            crate::store::pairs::PairState::Dismissed,
+            pair.detail.as_deref(),
+        )
         .await?;
     Ok(Redirect::to(back.path()).into_response())
 }
@@ -2881,6 +2952,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/merges/{id}/undo", post(undo_merge_ui))
         .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
+        .route("/ui/ops/pairs/{id}/discard", post(discard_pair_ui))
         .route(
             "/ui/ops/pairs/{id}/supersede",
             post(apply_pair_supersede_ui),
@@ -3004,6 +3076,7 @@ mod tests {
             via_link: false,
             contradiction: true,
             obsolete_title: None,
+            vacuous: false,
             keeps_a: false,
             keeps_b: false,
         }
@@ -7193,6 +7266,148 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// A verdict is a recommendation on the card, never an action taken. So
+    /// the pair has to reach the queue at all, and it has to say which of the
+    /// three buttons the judge would press.
+    #[tokio::test]
+    async fn a_pair_the_judge_found_empty_recommends_discarding_both() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Vacuous,
+                Some("each body is its own file path"),
+            )
+            .await
+            .unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            html.contains(&format!("/ui/ops/pairs/{}/discard", pair.id)),
+            "a pair filed vacuous never reached the queue: {html}"
+        );
+        assert!(
+            html.contains("neither of these says anything"),
+            "the card asks the wrong question about this pair: {html}"
+        );
+    }
+
+    /// Offered on every card, because the judge is not the only reader who can
+    /// tell. A pair it called a duplicate can still be two artifacts that say
+    /// nothing, and the person looking at it should not have to keep one to
+    /// clear it.
+    #[tokio::test]
+    async fn every_pair_can_be_discarded_whatever_the_judge_said() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(html.contains("Discard both"), "{html}");
+    }
+
+    /// The third answer a pair can have. Keeping one side is wrong when neither
+    /// side is worth keeping, and Dismiss leaves both in results — so a pair of
+    /// artifacts that say nothing had no way out of the queue that removed them.
+    #[tokio::test]
+    async fn discarding_a_pair_retires_both_sides() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/discard", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        for id in &ids {
+            assert!(
+                !core.store.get_artifact(id).await.unwrap().in_results(),
+                "discard left {id} in results"
+            );
+        }
+        assert_eq!(
+            core.store.get_pair(pair.id).await.unwrap().state,
+            crate::store::pairs::PairState::Dismissed,
+            "the pair is answered, so it must leave the queue"
+        );
+    }
+
+    /// A cluster is answered one card at a time, and the sides do not wait
+    /// their turn: applying a supersede on one row hides an artifact that
+    /// another row still names, and nothing filters that row off the page.
+    /// `core.deprecate` refuses an artifact already hidden that way, so the
+    /// press used to retire the first side, fail on the second, and leave the
+    /// pair open with half of it gone — and open is not answerable here, since
+    /// the next press fails at exactly the same place.
+    #[tokio::test]
+    async fn discarding_a_pair_whose_other_side_is_already_hidden_still_answers_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md", "notes/c.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.supersede(&ids[1], &ids[2]).await.unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/discard", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            res.status().is_success() || res.status().is_redirection(),
+            "the button reported a failure: {:?}",
+            res.status()
+        );
+        for id in &ids[..2] {
+            assert!(
+                !core.store.get_artifact(id).await.unwrap().in_results(),
+                "discard left {id} in results"
+            );
+        }
+        assert_eq!(
+            core.store.get_pair(pair.id).await.unwrap().state,
+            crate::store::pairs::PairState::Dismissed,
+            "the pair is answered, so it must leave the queue"
         );
     }
 

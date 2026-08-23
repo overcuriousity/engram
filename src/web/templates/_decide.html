@@ -32,7 +32,7 @@
     <span class="decide-opening">{{ p.a_opening }}</span>{% endif %} vs
     <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>{% if !p.b_opening.is_empty() %}
     <span class="decide-opening">{{ p.b_opening }}</span>{% endif %} —
-    <b>{% if p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
+    <b>{% if p.vacuous %}neither of these says anything{% elif p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
   {# Both sides, readable where the decision is made. Closed by default: the
@@ -70,6 +70,21 @@
           onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Housekeeping.')">
       <input type="hidden" name="keep" value="{{ p.b_id }}">
       <button class="btn btn-sm {% if p.keeps_b %}btn-accent{% endif %}" type="submit">Keep “{{ p.b_title }}”</button>
+    </form>
+    {# The third answer, and the only one that ends with both artifacts gone.
+       Offered on every card rather than only where the judge proposed it: it
+       is the judge that is the recommendation here, not the availability. A
+       pair called a duplicate can still be two artifacts that say nothing, and
+       without this the only way to clear it was to keep one of them.
+
+       Titles out of `data-*` for the reason the Keep buttons read theirs that
+       way: escaped into an attribute an apostrophe survives, escaped into a
+       string literal inside an attribute it does not — and a handler that is a
+       syntax error fails open and retires both without asking. #}
+    <form method="post" action="/ui/ops/pairs/{{ p.id }}/discard"
+          data-a="{{ p.a_title }}" data-b="{{ p.b_title }}"
+          onsubmit="return confirm('Retire “' + this.dataset.a + '” and “' + this.dataset.b + '” from results? You can undo this from Housekeeping.')">
+      <button class="btn btn-sm {% if p.vacuous %}btn-accent{% endif %}" type="submit">Discard both</button>
     </form>
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">
       <button class="btn btn-sm btn-ghost" type="submit">Dismiss</button>

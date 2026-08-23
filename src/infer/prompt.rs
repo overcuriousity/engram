@@ -143,6 +143,15 @@ pub enum Relation {
     Replaced,
     /// The same claim, each side carrying detail the other lacks. Merged.
     Duplicate,
+    /// Neither side states anything a person could act on or be wrong about, so
+    /// there is nothing to keep and nothing to merge. Two artifacts can be
+    /// alike because they say the same thing or alike because neither says
+    /// anything, and the second is not answered by keeping one of them.
+    ///
+    /// Filed for a person like `Conflict` is, never applied here: this is the
+    /// one verdict that would retire *both* sides, which is the least a model
+    /// should be trusted to do unaided.
+    Vacuous,
 }
 
 /// The artifact a `Duplicate` verdict asks to be written.
@@ -169,7 +178,11 @@ pub struct Dedupe {
 
 pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
-First decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
+First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.
+
+Real content merely not summarised is NOT vacuous, however raw or unstructured. A day of notes covering six subjects still states six things. Those are "distinct".
+
+Then decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
 
 If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then they are neither duplicates nor in conflict, no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer "distinct" and stop.
 
@@ -193,7 +206,7 @@ Reply with JSON only, no commentary, in exactly this shape:
 
 {"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
 
-- relation: one of "duplicate", "replaced", "conflict", "distinct".
+- relation: one of "duplicate", "replaced", "conflict", "distinct", "vacuous".
 - detail: one short sentence saying why. Always.
 - supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
 - merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
@@ -855,6 +868,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         "replaced" if side.is_some() => Relation::Replaced,
         "replaced" | "conflict" => Relation::Conflict,
         "distinct" => Relation::Distinct,
+        "vacuous" => Relation::Vacuous,
         other => {
             return Err(Error::MalformedLlmOutput(format!(
                 "dedupe reply named an unknown relation {other:?}"
@@ -1100,7 +1114,13 @@ pub fn dedupe_schema() -> serde_json::Value {
                     {
                         "type": "object",
                         "properties": {
-                            "relation": {"type": "string", "enum": ["distinct", "conflict"]},
+                            // The three verdicts that write nothing and name
+                            // no side: they are one variant because they carry
+                            // one shape, not because they mean anything alike.
+                            "relation": {
+                                "type": "string",
+                                "enum": ["distinct", "conflict", "vacuous"]
+                            },
                             "detail": {"type": "string"}
                         },
                         "required": ["relation", "detail"],
@@ -1589,6 +1609,22 @@ mod tests {
         assert_eq!(out[0].caveats, vec!["only on linux".to_string()]);
     }
 
+    /// The fifth verdict. Two artifacts can be alike because they say the same
+    /// thing, or alike because neither of them says anything — and only the
+    /// second is answered by discarding both rather than by keeping one.
+    #[test]
+    fn a_pair_where_neither_side_carries_a_claim_parses_as_vacuous() {
+        let v = parse_dedupe(
+            r#"{"relation":"vacuous","detail":"both bodies are their own file paths"}"#,
+        )
+        .unwrap();
+        assert_eq!(v.relation, Relation::Vacuous);
+        assert!(
+            v.merged.is_none(),
+            "there is nothing to write from two artifacts that say nothing"
+        );
+    }
+
     #[test]
     fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
         let schema = dedupe_schema();
@@ -1651,7 +1687,7 @@ mod tests {
         seen.sort();
         assert_eq!(
             seen,
-            ["conflict", "distinct", "duplicate", "replaced"],
+            ["conflict", "distinct", "duplicate", "replaced", "vacuous"],
             "the union must still cover every relation, exactly once"
         );
     }
@@ -1934,6 +1970,23 @@ mod tests {
         // A first ask stays exactly what it was, so the cache still earns its
         // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
+    }
+
+    #[test]
+    fn the_dedupe_pass_is_told_what_makes_a_pair_worth_discarding_and_what_does_not() {
+        // The failure mode of this verdict is that it eats real notes. What
+        // brought it about was a whole-file capture — a day of study notes
+        // stored verbatim, never distilled — pairing with another at 99%: the
+        // two are alike because neither is *about* anything in particular, not
+        // because either is empty. That pair is content awaiting extraction and
+        // must come back "distinct", so the guard is named as explicitly as the
+        // verdict itself.
+        assert!(DEDUPE_SYSTEM.contains(r#""vacuous""#));
+        assert!(DEDUPE_SYSTEM.contains("neither"));
+        assert!(
+            DEDUPE_SYSTEM.contains("not summarised"),
+            "the one thing that is not vacuous is unsaid"
+        );
     }
 
     #[test]
