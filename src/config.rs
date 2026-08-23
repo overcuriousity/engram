@@ -33,6 +33,8 @@ pub struct Config {
     pub sitting: SittingConfig,
     #[serde(default)]
     pub recommend: RecommendConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -129,6 +131,47 @@ pub struct LearnConfig {
 impl Default for LearnConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// The one UI concern with settings of its own: the vector background.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct UiConfig {
+    pub background: BackgroundConfig,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            background: BackgroundConfig::default(),
+        }
+    }
+}
+
+/// The rotating point cloud behind the pages, sampled from the vector store.
+///
+/// Decorative, and it costs a background fetch every `refresh_secs` plus one
+/// scroll of the collection. On by default: it is the machine showing its own
+/// shape, and off is one line for the operator who wants the pages plain.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    pub enabled: bool,
+    /// Vectors sampled per snapshot. 2000 points read as a cloud; far fewer
+    /// read as noise, far more cost the phone drawing them.
+    pub sample_size: usize,
+    /// How long the client keeps a snapshot before fetching another.
+    pub refresh_secs: u64,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sample_size: 2000,
+            refresh_secs: 6 * 3600,
+        }
     }
 }
 
@@ -2079,6 +2122,23 @@ mod tests {
         // The floor below which extraction is reported as a failure rather
         // than stored as a corpus.
         assert_eq!(c.min_extracted_chars, 200);
+    }
+
+    #[test]
+    fn the_background_ships_on_with_a_six_hour_snapshot() {
+        let b = UiConfig::default().background;
+        assert!(b.enabled);
+        assert_eq!(b.sample_size, 2000);
+        assert_eq!(b.refresh_secs, 6 * 3600);
+    }
+
+    #[test]
+    fn the_example_config_carries_the_background_block() {
+        // Read as text first, then parsed — a load-and-compare test alone would
+        // pass with the block deleted, because `#[serde(default)]` fills in the
+        // same numbers. See `the_example_config_carries_the_recommend_block`.
+        let raw = std::fs::read_to_string("config.example.toml").unwrap();
+        assert!(raw.contains("\n[ui.background]\n"), "the block is documented");
     }
 
     #[test]

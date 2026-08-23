@@ -512,6 +512,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         counter: Arc::new(engram::infer::budget::TokenCounter),
         background: Arc::new(engram::core::background::Background::default()),
         recommend: Default::default(),
+        ui: Default::default(),
         clock: engram::core::context::Clock::System,
         query_cache: Arc::new(std::sync::Mutex::new(engram::core::QueryCache::new(
             engram::core::QUERY_CACHE_CAPACITY,
