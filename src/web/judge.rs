@@ -60,6 +60,11 @@ pub struct Pulse {
     pub target: i64,
     /// How far along the stretch between the two, not how far along the count.
     pub pct: i64,
+    /// Where the bar stood before this verdict. A swapped element is a new
+    /// element with no previous width to transition away from, so the previous
+    /// width is sent and the fill is animated between the two. Equal to `pct`
+    /// wherever nothing moved, which is what makes the animation a no-op there.
+    pub pct_prev: i64,
     /// What that target buys, in the words for a first sweep or a later one.
     pub label: &'static str,
     pub recall: String,
@@ -85,11 +90,9 @@ struct JudgeTemplate {
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
     judge_pending: Option<i64>,
-    /// Always `Some` here. `Option` because the partial is shared with the
-    /// card fragment, where a plain fetch carries none.
+    /// Always `Some` here. `Option` because the partial is shared with the card
+    /// fragment, which draws nothing where there is no card to hang it under.
     pulse: Option<Pulse>,
-    /// False on the page itself: it is drawing the header, not replacing one.
-    pulse_oob: bool,
     /// What the sweeps have to say. Always `Some` here; `Option` because the
     /// partial is shared with the card fragment and the apply answer.
     tune: Option<TuneView>,
@@ -112,12 +115,11 @@ struct CardTemplate {
     /// What the judgement just before this one revealed. `None` on a plain
     /// fetch of the next card.
     flash: Option<Flash>,
-    /// The header, shipped beside the card so it moves with the work. `None`
-    /// where nothing was judged: an animation on a plain fetch would be the
-    /// page congratulating itself for a page load.
+    /// The figures, drawn inside the card so they move with the work. Always
+    /// `Some` from every route: they are part of what a verdict replaces now,
+    /// not a second region kept in step with it. What tells a verdict from a
+    /// plain fetch is `Pulse::delta`, which every animation on them keys on.
     pulse: Option<Pulse>,
-    /// True here: the header this replaces is already on the page.
-    pulse_oob: bool,
     /// A sweep runs off the request path, so the page that paid for it was
     /// already sent. The next verdict is the first chance to report one.
     tune: Option<TuneView>,
@@ -126,6 +128,8 @@ struct CardTemplate {
 
 pub struct Flash {
     pub line: String,
+    /// How loudly to say it, as a class suffix. See `tier`.
+    pub tier: &'static str,
     /// `MRR 0.54 → 0.57`, so the figure the work is measured by visibly moves
     /// as the work is done.
     pub delta: String,
@@ -150,6 +154,28 @@ pub fn diagnosis(rank: Option<i64>, verdict: Verdict) -> &'static str {
         }
         (Verdict::Hit, Some(r)) if r > 0 => "there, but far down. These are what move the MRR.",
         (Verdict::Hit, _) => "found as expected.",
+    }
+}
+
+/// How much weight the flash line is given, as a class suffix.
+///
+/// The same split `diagnosis` makes, spent on emphasis rather than wording, and
+/// running the same way: quietest where the ranking did best. A rank-one
+/// confirmation is greyed towards invisible and a hit the ranking buried gets
+/// the only accent on the page. It has to run this way round — an interface
+/// that lit up for confirmations would be teaching its operator that agreeing
+/// with the top result is the good outcome, and the top result is the thing
+/// under examination.
+pub fn tier(rank: Option<i64>, verdict: Verdict) -> &'static str {
+    match (verdict, rank) {
+        (Verdict::Gap, _) => "gap",
+        (Verdict::Discard, _) => "quiet",
+        // A find, and a hit below what the search actually showed: the two
+        // cases the wider pool exists to make recordable at all.
+        (Verdict::Hit, None) => "rare",
+        (Verdict::Hit, Some(r)) if r >= 10 => "rare",
+        (Verdict::Hit, Some(r)) if r > 0 => "plain",
+        (Verdict::Hit, _) => "common",
     }
 }
 
@@ -252,7 +278,7 @@ async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
 /// judgement buys is a measurement, and after the first one the distance is to
 /// the next re-sweep. Read from the last run rather than counted, so the two
 /// always agree about when it is due.
-async fn pulse_of(st: &AppState, stats: &Stats, delta: String) -> Result<Pulse> {
+async fn pulse_of(st: &AppState, stats: &Stats, delta: String, prev: i64) -> Result<Pulse> {
     let tune = &st.core.feedback.tune;
     let (floor, label) = match st.core.store.latest_eval_run().await? {
         None => (0, "until the first sweep"),
@@ -271,9 +297,11 @@ async fn pulse_of(st: &AppState, stats: &Stats, delta: String) -> Result<Pulse> 
     // 95% and then 96%, and the one visual the header is built around stopped
     // saying anything.
     let span = (target - floor).max(1);
+    let along = |n: i64| ((n - floor).max(0) * 100 / span).min(100);
     Ok(Pulse {
         judged: stats.judged,
-        pct: ((stats.judged - floor).max(0) * 100 / span).min(100),
+        pct: along(stats.judged),
+        pct_prev: along(prev),
         floor,
         target,
         label,
@@ -304,8 +332,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.learn.enabled.then_some(stats.pending),
-        pulse: Some(pulse_of(&st, &stats, String::new()).await?),
-        pulse_oob: false,
+        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
         tune: Some(tune_view(&st, "").await?),
         tune_oob: false,
         misses,
@@ -316,13 +343,18 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     .into_response())
 }
 
+/// The next card, with nothing to say about the last one.
+///
+/// The figures ride inside the card, so they are always rendered — leaving them
+/// out would blank the bar rather than leave it alone. What is left out is the
+/// movement: `delta` is empty, and every animation on this fragment keys on it.
 async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use axum::response::IntoResponse;
+    let stats = st.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&st).await?,
         flash: None,
-        pulse: None,
-        pulse_oob: true,
+        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -335,8 +367,9 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
 /// this judgement actually caused rather than a figure recomputed later.
 async fn card_after(
     st: &AppState,
-    before: f64,
-    line: &'static str,
+    before: Stats,
+    rank: Option<i64>,
+    verdict: Verdict,
     judged: &str,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
@@ -346,10 +379,15 @@ async fn card_after(
     // operator must not wait on a grid of searches, and a sweep that fails
     // must not fail the verdict that paid for it.
     crate::eval::sweep::maybe_spawn(&st.core);
-    let moved = after - before;
-    // Under half a point the figure on screen does not change, and a tick
-    // pointing at an unchanged number is an animation about nothing.
-    let delta = if moved.abs() < 0.005 {
+    let moved = after - before.mrr;
+    // Three places rather than two, and no floor under it. Half a point was the
+    // threshold, on the reasoning that a smaller move leaves the figure on
+    // screen unchanged. But one verdict can shift the MRR by at most 1/n, so
+    // the tick fell silent in exact proportion to how much work had been done:
+    // the one number this page is worked towards stopped acknowledging the work
+    // precisely where the work started to add up. Shown at the precision the
+    // movement actually has instead, and shown whenever there was one.
+    let delta = if moved == 0.0 {
         String::new()
     } else if moved > 0.0 {
         format!("▲ +{moved:.2}")
@@ -359,12 +397,12 @@ async fn card_after(
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(st).await?,
         flash: Some(Flash {
-            line: line.to_string(),
-            delta: format!("MRR {before:.2} → {after:.2}"),
+            line: diagnosis(rank, verdict).to_string(),
+            tier: tier(rank, verdict),
+            delta: format!("MRR {:.2} → {after:.2}", before.mrr),
             undo: Some(judged.to_string()),
         }),
-        pulse: Some(pulse_of(st, &stats, delta).await?),
-        pulse_oob: true,
+        pulse: Some(pulse_of(st, &stats, delta, before.judged).await?),
         tune: Some(tune_view(st, "").await?),
         tune_oob: true,
     })
@@ -383,16 +421,20 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
         Some(event) => Some(card_for(st, event).await?),
         None => next_pending_card(st).await?,
     };
+    let stats = st.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: Some(Flash {
             line: line.to_string(),
+            // A correction, not a verdict: said plainly, with none of the
+            // weight a judgement carries.
+            tier: "quiet",
             delta: String::new(),
             undo: None,
         }),
-        // Nothing was recorded, so no figure moved.
-        pulse: None,
-        pulse_oob: true,
+        // Nothing was recorded, so the figures are rendered where they stand and
+        // `delta` is empty, which is what every animation on them keys on.
+        pulse: Some(pulse_of(st, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -444,13 +486,15 @@ async fn undo(
         // is a better answer than an error page.
         None => next_pending_card(&st).await?,
     };
+    let stats = st.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: None,
-        // An undo moves the figures back, and the operator is looking at the
-        // header while it happens.
-        pulse: Some(pulse_of(&st, &st.core.store.feedback_stats().await?, String::new()).await?),
-        pulse_oob: true,
+        // An undo moves the figures back, and the operator is looking straight
+        // at them while it happens. No delta, though: the tick and the bar's
+        // travel are how the page acknowledges work, and taking a judgement
+        // back is not some of it.
+        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -502,9 +546,9 @@ async fn hit(
         .store
         .rank_in_event(&event_id, &f.artifact_id)
         .await?;
-    let before = st.core.store.feedback_stats().await?.mrr;
+    let before = st.core.store.feedback_stats().await?;
     st.core.store.judge_hit(&event_id, &f.artifact_id).await?;
-    card_after(&st, before, diagnosis(rank, Verdict::Hit), &event_id).await
+    card_after(&st, before, rank, Verdict::Hit, &event_id).await
 }
 
 async fn gap(
@@ -512,9 +556,9 @@ async fn gap(
     _id: Identity,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
-    let before = st.core.store.feedback_stats().await?.mrr;
+    let before = st.core.store.feedback_stats().await?;
     st.core.store.judge(&event_id, Verdict::Gap).await?;
-    card_after(&st, before, diagnosis(None, Verdict::Gap), &event_id).await
+    card_after(&st, before, None, Verdict::Gap, &event_id).await
 }
 
 async fn discard(
@@ -522,9 +566,9 @@ async fn discard(
     _id: Identity,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
-    let before = st.core.store.feedback_stats().await?.mrr;
+    let before = st.core.store.feedback_stats().await?;
     st.core.store.judge(&event_id, Verdict::Discard).await?;
-    card_after(&st, before, diagnosis(None, Verdict::Discard), &event_id).await
+    card_after(&st, before, None, Verdict::Discard, &event_id).await
 }
 
 async fn skip(
@@ -1077,13 +1121,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_way_out_of_the_question_is_never_inside_the_scrolling_part() {
+        // The pool is the only thing on the card with a scrollbar, and the three
+        // answers are outside it. That is the whole of why they stay put — it
+        // used to be `position: sticky` fighting a page twenty-three cards tall.
+        let (app, cookie, _core, _) = judge_app(20, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        let pool_ends = body.find("</ol>").expect("no pool");
+        let outs = body.find("judge-outs").expect("no way out of the question");
+        assert!(
+            outs > pool_ends,
+            "the answers are inside the box that scrolls: {body}"
+        );
+        assert_eq!(
+            body.matches("judge-pool").count(),
+            1,
+            "more than one thing on the card scrolls: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_a_candidate_costs_no_line_of_its_own() {
+        // Twenty candidates meant twenty lines that said "Read it in full" and
+        // nothing else — a whole row each, to repeat the same six words. The
+        // handle is in the row now, and what it opens lands in the sibling
+        // beneath so it can span the row without moving the handle out of its
+        // column.
+        let (app, cookie, _core, _) = judge_app(20, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(
+            !body.contains(">Read it in full<"),
+            "the handle is still a line of prose per candidate: {body}"
+        );
+        assert!(
+            body.contains(r#"hx-target="next .judge-full""#),
+            "the full text is not fetched into the row it belongs to: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bar_carries_where_it_moved_from_as_well_as_where_it_is() {
+        // A swapped element is a new element: it has no previous width to
+        // transition away from, so a bar rendered by the server can only be
+        // animated between two values it was told. Without the first one it
+        // jumps, which is the thing it exists not to do.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let card = {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/ui/judge/{}/hit", event.id))
+                        .method("POST")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("artifact_id={}", ids[0])))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            body_of(res).await
+        };
+        assert!(card.contains("--from:"), "no starting position: {card}");
+        assert!(card.contains("--to:"), "no finishing position: {card}");
+        assert!(
+            card.contains("judge-xp-moved"),
+            "a verdict left the bar still: {card}"
+        );
+
+        // And a plain fetch does not: an animation there is the page
+        // acknowledging its own load.
+        let plain = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(
+            !plain.contains("judge-xp-moved"),
+            "the bar animates on a fetch that judged nothing: {plain}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_card_shows_no_ranks_and_no_scores() {
         // Both are the ranker's opinion, which is exactly what must not be
         // heard while judging.
+        //
+        // Read off the pool rather than the whole fragment. The figures ride in
+        // the card now, and one of them is the mean reciprocal *rank* — an
+        // aggregate over judgements already given, which says nothing about the
+        // candidates on this card and is the number the work is aimed at. What
+        // must stay clean is the list itself.
         let (app, cookie, _core, _) = judge_app(3, &[]).await;
         let body = get(&app, "/ui/judge/next", &cookie).await;
-        assert!(!body.contains("rank"), "a rank leaked into the card");
-        assert!(!body.contains("score"), "a score leaked into the card");
+        let pool = body
+            .split_once(r#"<div class="judge-pool">"#)
+            .and_then(|(_, rest)| rest.split_once("</ol>"))
+            .map(|(pool, _)| pool)
+            .unwrap_or_else(|| panic!("no pool on the card: {body}"));
+        assert!(
+            !pool.contains("rank"),
+            "a rank leaked into the pool: {pool}"
+        );
+        assert!(
+            !pool.contains("score"),
+            "a score leaked into the pool: {pool}"
+        );
     }
 
     #[tokio::test]
@@ -1354,12 +1494,23 @@ mod tests {
         // Inverted on purpose. A first-position hit is the least informative
         // card of the day; making it the most celebrated would breed agreement
         // with whatever the ranker already thought.
-        use super::diagnosis;
+        use super::{diagnosis, tier};
         use crate::store::feedback::Verdict;
         assert_eq!(diagnosis(Some(0), Verdict::Hit), "found as expected.");
         assert!(diagnosis(Some(13), Verdict::Hit).contains("wrong"));
         assert!(diagnosis(None, Verdict::Hit).contains("find"));
         assert!(diagnosis(None, Verdict::Gap).contains("hole"));
+
+        // The same split, said again in weight rather than in words: a
+        // confirmation of what was already on top is greyed towards invisible,
+        // and the two cases the wider pool exists for get the only accent on
+        // the page. Held here rather than left to the stylesheet — which
+        // verdict is the quiet one is a claim about what judging is for.
+        assert_eq!(tier(Some(0), Verdict::Hit), "common");
+        assert_eq!(tier(Some(13), Verdict::Hit), "rare");
+        assert_eq!(tier(None, Verdict::Hit), "rare");
+        assert_eq!(tier(None, Verdict::Gap), "gap");
+        assert_eq!(tier(None, Verdict::Discard), "quiet");
     }
 
     #[tokio::test]
@@ -1780,7 +1931,7 @@ mod tests {
 
         let body = get(&app, "/ui/judge", &cookie).await;
         assert!(
-            body.contains("width:0%"),
+            body.contains("--to:0%"),
             "the stretch to the next sweep has not started: {body}"
         );
         assert!(
@@ -1809,7 +1960,7 @@ mod tests {
         core.store.judge_hit(&id, &ids[0]).await.unwrap();
 
         let body = get(&app, "/ui/judge", &cookie).await;
-        assert!(body.contains("width:10%"), "{body}");
+        assert!(body.contains("--to:10%"), "{body}");
     }
 
     /// A sweep in the store, recorded as having run at `judged`.

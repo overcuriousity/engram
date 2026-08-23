@@ -1,27 +1,27 @@
 {% extends "layout.html" %}
 {% block title %}Judge — engram{% endblock %}
+{% block regions %}regions-judge{% endblock %}
 {% block content %}
-{# The header is the real measurement, not a score standing in for one: both
-   figures are read from the ranks the searches actually gave, so every verdict
-   moves the number it is measured by. #}
-<div class="judge-header">
-  {% include "_judge_pulse.html" %}
-  {% if asks.asked > 0 %}
-  <p class="muted mono">
-    {{ asks.judged }} of {{ asks.asked }} questions judged ·
-    {{ asks.right }} right · {{ asks.wrong }} wrong · {{ asks.nothing_here }} nothing here
-  </p>
-  {% endif %}
-</div>
-
-{# Directly under the figures it would move: it is the one thing on this page
-   that can be acted on, and it is what the progress bar is counting towards. #}
+{# Directly above the card: it is the one thing on this page that can be acted
+   on, and it is what the bar inside the card is counting towards. #}
 {% include "_judge_tune.html" %}
 
+{# The whole working surface. The figures used to stand above this in a block of
+   their own — a third of the screen of readout before the first candidate — and
+   they are inside the card now, under the query, where the bar they belong to
+   can be seen moving as the queue is worked down. #}
 <div id="card">{% include "_judge_card.html" %}</div>
 
-{# Below the card, folded. It is a reference to fall back on between
-   judgements, not something to read before starting one. #}
+{# Below the card. Both of these are references to fall back on between
+   judgements rather than things to read before starting one, and the questions
+   are a different queue from the searches — it is the ask page that moves them,
+   not this one. #}
+{% if asks.asked > 0 %}
+<p class="judge-asks muted mono">
+  {{ asks.judged }} of {{ asks.asked }} questions judged ·
+  {{ asks.right }} right · {{ asks.wrong }} wrong · {{ asks.nothing_here }} nothing here
+</p>
+{% endif %}
 {% if !misses.is_empty() %}
 <details class="misses">
   <summary class="muted">{{ misses.len() }} queries the ranking got wrong</summary>
