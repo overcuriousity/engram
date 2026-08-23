@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod auth;
 pub mod context;
 pub mod corpora;
+pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;
 pub mod insights;
