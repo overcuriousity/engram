@@ -1270,41 +1270,6 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
 /// distinct artifacts carried that one name. Each side keeps its opening words
 /// only where its title is shared, for the reason the queue keeps them — a
 /// suffix on a name that needs no suffix is noise.
-/// Drop the leading path segments a row's two titles share.
-///
-/// Both sides of a card are usually the same kind of thing filed in the same
-/// place, and for captures named by path that means the two titles differ in a
-/// few characters at the very end. Whole and side by side they read as one
-/// string printed twice — in the head line, and again on the two Keep buttons
-/// that name what they keep.
-///
-/// Segments, never characters: "FAT16 Specifications" against "FAT32
-/// Specifications" shares a prefix too, and cutting it hides the subject and
-/// keeps the word that was never in question. And never the last segment, or
-/// two artifacts captured under one path leave both buttons reading "Keep …/".
-///
-/// Per row, not across the page — the elision has to be reversible by eye
-/// against the other title on the same card, which is the only place the
-/// dropped part is still visible.
-fn elide_shared_prefixes(rows: &mut [PairRow]) {
-    for r in rows.iter_mut() {
-        let a: Vec<&str> = r.a_title.split('/').collect();
-        let b: Vec<&str> = r.b_title.split('/').collect();
-        let keep_one = a.len().min(b.len()).saturating_sub(1);
-        let shared = a
-            .iter()
-            .zip(&b)
-            .take(keep_one)
-            .take_while(|(x, y)| x == y)
-            .count();
-        if shared == 0 {
-            continue;
-        }
-        r.a_title = format!("…/{}", a[shared..].join("/"));
-        r.b_title = format!("…/{}", b[shared..].join("/"));
-    }
-}
-
 fn disambiguate_pair_titles(rows: &mut [PairRow]) {
     // By distinct artifact, never by how often a title appears. One artifact
     // against three others — which is what a cluster looks like from here —
@@ -2050,10 +2015,6 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     // artifacts have since gone missing — skipped above — is not announced as
     // something waiting that never appears.
     let more = (waiting - pairs.len() as i64).max(0);
-    // Before the openings are worked out, not after: two paths cut to their
-    // last segment can collide where the full ones did not, and it is the
-    // shortened title a reader is being asked to tell apart.
-    elide_shared_prefixes(&mut pairs);
     disambiguate_pair_titles(&mut pairs);
     Ok((pairs, more))
 }
@@ -2382,8 +2343,32 @@ async fn discard_pair_ui(
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     let pair = st.core.store.get_pair(pid).await?;
-    st.core.deprecate(&pair.a_id).await?;
-    st.core.deprecate(&pair.b_id).await?;
+    // Both sides read before either is retired. A side already hidden in
+    // favour of another artifact — an applied supersede from a neighbouring
+    // pair in the same cluster does this, and nothing filters those rows off
+    // the page — is one `core.deprecate` refuses. Deprecating in sequence
+    // therefore hid the first side and then failed on the second, leaving the
+    // pair answerable, half of it already gone, and unanswerable for good:
+    // every later press repeated the same 400.
+    //
+    // A superseded artifact is out of results already, which is all this
+    // button is asking for, so it is skipped rather than treated as an error.
+    let mut retire = Vec::new();
+    for id in [&pair.a_id, &pair.b_id] {
+        if st
+            .core
+            .store
+            .get_artifact(id)
+            .await?
+            .superseded_by
+            .is_none()
+        {
+            retire.push(id.clone());
+        }
+    }
+    for id in &retire {
+        st.core.deprecate(id).await?;
+    }
     // The judge's line carried through rather than dropped: it is the only
     // record of why both sides were retired, and `set_pair_state` writes
     // `detail` unconditionally, so `None` would null it.
@@ -3095,53 +3080,6 @@ mod tests {
             keeps_a: false,
             keeps_b: false,
         }
-    }
-
-    fn pair_titled(a: &str, b: &str) -> PairRow {
-        let mut r = pair_row_fixture("a", a, "");
-        r.b_title = b.into();
-        r
-    }
-
-    /// Two Logseq journals differ in four characters, and those four sat at the
-    /// far end of a long sentence — so the head line read as one string
-    /// repeated, and the two Keep buttons became a row of near-identical
-    /// labels. The buttons still name what they keep; they stop naming the part
-    /// that is the same on both.
-    #[test]
-    fn two_paths_that_differ_only_at_the_end_lead_with_the_difference() {
-        let mut rows = vec![pair_titled(
-            "Logseq/studium/journals/2025_02_01.md",
-            "Logseq/studium/journals/2025_02_02.md",
-        )];
-        elide_shared_prefixes(&mut rows);
-        assert_eq!(rows[0].a_title, "…/2025_02_01.md");
-        assert_eq!(rows[0].b_title, "…/2025_02_02.md");
-    }
-
-    /// Whole segments or nothing. Elided by characters, "FAT16" and "FAT32"
-    /// become "…6 Specifications" and "…2 Specifications" — which hides the
-    /// subject and keeps the word that was never in question.
-    #[test]
-    fn titles_that_are_not_paths_are_left_whole() {
-        let mut rows = vec![pair_titled("FAT16 Specifications", "FAT32 Specifications")];
-        elide_shared_prefixes(&mut rows);
-        assert_eq!(rows[0].a_title, "FAT16 Specifications");
-        assert_eq!(rows[0].b_title, "FAT32 Specifications");
-    }
-
-    /// Two artifacts genuinely captured under one path. Eliding everything they
-    /// share would leave both buttons reading "Keep …/", which is the failure
-    /// this exists to prevent rather than an extreme case of fixing it.
-    #[test]
-    fn eliding_never_takes_the_last_segment() {
-        let mut rows = vec![pair_titled(
-            "Logseq/journals/day.md",
-            "Logseq/journals/day.md",
-        )];
-        elide_shared_prefixes(&mut rows);
-        assert_eq!(rows[0].a_title, "…/day.md");
-        assert_eq!(rows[0].b_title, "…/day.md");
     }
 
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
@@ -7331,33 +7269,6 @@ mod tests {
         );
     }
 
-    /// End to end, because the elision has to happen before the openings are
-    /// worked out: two paths cut to their last segment can collide where the
-    /// full ones did not, and it is the shortened title a reader needs telling
-    /// apart.
-    #[tokio::test]
-    async fn the_queue_names_two_journals_by_the_part_that_differs() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let ids = artifacts(
-            &core,
-            &[
-                "Logseq/studium/journals/2025_02_01.md",
-                "Logseq/studium/journals/2025_02_02.md",
-            ],
-        )
-        .await;
-        core.store
-            .record_pair(&ids[0], &ids[1], 0.99)
-            .await
-            .unwrap();
-
-        let html = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(
-            html.contains("Keep “…/2025_02_01.md”"),
-            "the button still names the half of the path that is the same on both: {html}"
-        );
-    }
-
     /// A verdict is a recommendation on the card, never an action taken. So
     /// the pair has to reach the queue at all, and it has to say which of the
     /// three buttons the judge would press.
@@ -7437,6 +7348,57 @@ mod tests {
             .unwrap();
 
         for id in &ids {
+            assert!(
+                !core.store.get_artifact(id).await.unwrap().in_results(),
+                "discard left {id} in results"
+            );
+        }
+        assert_eq!(
+            core.store.get_pair(pair.id).await.unwrap().state,
+            crate::store::pairs::PairState::Dismissed,
+            "the pair is answered, so it must leave the queue"
+        );
+    }
+
+    /// A cluster is answered one card at a time, and the sides do not wait
+    /// their turn: applying a supersede on one row hides an artifact that
+    /// another row still names, and nothing filters that row off the page.
+    /// `core.deprecate` refuses an artifact already hidden that way, so the
+    /// press used to retire the first side, fail on the second, and leave the
+    /// pair open with half of it gone — and open is not answerable here, since
+    /// the next press fails at exactly the same place.
+    #[tokio::test]
+    async fn discarding_a_pair_whose_other_side_is_already_hidden_still_answers_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md", "notes/c.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.supersede(&ids[1], &ids[2]).await.unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/discard", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            res.status().is_success() || res.status().is_redirection(),
+            "the button reported a failure: {:?}",
+            res.status()
+        );
+        for id in &ids[..2] {
             assert!(
                 !core.store.get_artifact(id).await.unwrap().in_results(),
                 "discard left {id} in results"

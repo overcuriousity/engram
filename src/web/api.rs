@@ -663,6 +663,14 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Superseded, 100)
             .await?,
+        // Judge-proposed discards awaiting the same confirmation, listed for
+        // the same reason: a pair the judge found vacuous is a recommendation
+        // it left behind, and without this key it is in no list here at all.
+        "discard_proposals": st
+            .core
+            .store
+            .pairs_by_state(PairState::Vacuous, 100)
+            .await?,
         // Retired, and permanently empty: `would_merge` was a verdict a person
         // confirmed, every verdict is acted on now, and the migration rewrites
         // the rows that carried it. Emitted anyway — a client indexing this key
