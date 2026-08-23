@@ -1908,9 +1908,11 @@ const PAIR_LIMIT: usize = 5;
 const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
-    // A judged recommendation like `Superseded`, and listed for the same
-    // reason: the judge proposing something is not the judge doing it, so the
-    // pair still has to reach the person who presses the button.
+    // Only ever rows an older base filed: a vacuous verdict is now carried
+    // out where it is found (`jobs::dedupe::discard_both`) and its pair
+    // settles `Dismissed`. Still listed, because those rows are a
+    // recommendation nobody has pressed yet, and without this key they are on
+    // no queue at all.
     crate::store::pairs::PairState::Vacuous,
     crate::store::pairs::PairState::Pending,
 ];
@@ -2326,19 +2328,18 @@ async fn dismiss_pair_ui(
 
 /// Answer a pair by retiring both sides.
 ///
-/// The queue's other two answers each assume something. Keeping one side
-/// assumes one of them is worth keeping; Dismiss assumes the pair is a
-/// question not worth asking and leaves both in results. Neither fits two
-/// artifacts that state nothing — a body that is its own file path, an outline
-/// with nothing under it — which are alike for a reason that has no keeper.
+/// Offered on every card, because the judge is not the only reader who can
+/// tell: a pair it called a duplicate can still be two artifacts that say
+/// nothing. Where the judge *did* say so, `jobs::dedupe` has already carried
+/// this out and the pair never reaches the queue — so what this button answers
+/// is the pairs it ruled on differently, and the ones it was never asked
+/// about.
 ///
-/// Deprecation, not deletion, and through `core.deprecate` like every other
-/// hide in the app: this is the one action here that retires *both* artifacts,
-/// so it is also the one that most needs the same undo as the rest.
-///
-/// The side effects first and the pair settled after, the ordering
-/// `jobs::dedupe::apply` documents: a failure part-way leaves the pair
-/// answerable rather than recorded as answered and never applied.
+/// The retiring itself is `jobs::dedupe::discard_both`, shared with that path
+/// rather than restated here: the two orderings it documents — both sides read
+/// before either is retired, side effects before the pair is settled — are the
+/// whole of what makes the action safe, and a second copy of them is a second
+/// place for one of them to be dropped.
 async fn discard_pair_ui(
     State(st): State<AppState>,
     _id: Identity,
@@ -2346,43 +2347,8 @@ async fn discard_pair_ui(
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     let pair = st.core.store.get_pair(pid).await?;
-    // Both sides read before either is retired. A side already hidden in
-    // favour of another artifact — an applied supersede from a neighbouring
-    // pair in the same cluster does this, and nothing filters those rows off
-    // the page — is one `core.deprecate` refuses. Deprecating in sequence
-    // therefore hid the first side and then failed on the second, leaving the
-    // pair answerable, half of it already gone, and unanswerable for good:
-    // every later press repeated the same 400.
-    //
-    // A superseded artifact is out of results already, which is all this
-    // button is asking for, so it is skipped rather than treated as an error.
-    let mut retire = Vec::new();
-    for id in [&pair.a_id, &pair.b_id] {
-        if st
-            .core
-            .store
-            .get_artifact(id)
-            .await?
-            .superseded_by
-            .is_none()
-        {
-            retire.push(id.clone());
-        }
-    }
-    for id in &retire {
-        st.core.deprecate(id).await?;
-    }
-    // The judge's line carried through rather than dropped: it is the only
-    // record of why both sides were retired, and `set_pair_state` writes
-    // `detail` unconditionally, so `None` would null it.
-    st.core
-        .store
-        .set_pair_state(
-            pid,
-            crate::store::pairs::PairState::Dismissed,
-            pair.detail.as_deref(),
-        )
-        .await?;
+    let detail = pair.detail.clone();
+    crate::jobs::dedupe::discard_both(&st.core, &pair, detail.as_deref()).await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 

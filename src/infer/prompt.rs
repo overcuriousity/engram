@@ -180,6 +180,8 @@ pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be a
 
 First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.
 
+Answering "vacuous" retires both artifacts where it is found; nobody confirms it first. It is the only verdict here that takes two things away and puts nothing in their place, so it asks for certainty rather than suspicion: if you can name one thing either body states, the answer is not "vacuous". When you are unsure, answer "distinct" — two artifacts left in results cost a reader nothing.
+
 Real content merely not summarised is NOT vacuous, however raw or unstructured. A day of notes covering six subjects still states six things. Those are "distinct".
 
 Then decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
@@ -1114,9 +1116,12 @@ pub fn dedupe_schema() -> serde_json::Value {
                     {
                         "type": "object",
                         "properties": {
-                            // The three verdicts that write nothing and name
-                            // no side: they are one variant because they carry
-                            // one shape, not because they mean anything alike.
+                            // The three verdicts that name no side: they are
+                            // one variant because they carry one shape, not
+                            // because they mean anything alike. "distinct" and
+                            // "conflict" write nothing; "vacuous" retires both
+                            // artifacts where it is found, so this branch is
+                            // not the shape of the verdicts that touch nothing.
                             "relation": {
                                 "type": "string",
                                 "enum": ["distinct", "conflict", "vacuous"]

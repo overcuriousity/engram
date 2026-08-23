@@ -56,6 +56,16 @@ async fn moved(_id: Identity) -> Response {
 /// page through.
 const TABLE_CAP: i64 = 25;
 
+/// The same, for the one table that is also an undo.
+///
+/// Deeper than the rest on purpose. A vacuous verdict retires two artifacts
+/// where it is found (`jobs::dedupe::discard_both`), and this list is where an
+/// operator finds them again — every search path in the UI passes
+/// `include_deprecated: false`, so a row that falls off the end is reachable
+/// only by a link someone would have to already have. The first sweep over a
+/// backlog can put hundreds here at once.
+const DEPRECATED_CAP: i64 = 50;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui/insights", get(page))
@@ -178,10 +188,14 @@ struct InsightsTemplate {
     /// everything there is.
     more_merged: bool,
     more_superseded: bool,
+    more_deprecated: bool,
     /// `TABLE_CAP`, so the line that says how many rows are showing says the
     /// number the code actually truncated to. Written out twice in the
     /// template, it drifted from the constant the first time either moved.
     table_cap: i64,
+    /// `DEPRECATED_CAP`, for the same reason and for the one table that does
+    /// not share `TABLE_CAP`.
+    deprecated_cap: i64,
     deprecated: Vec<DeprecatedRow>,
     stale: Vec<StaleRow>,
     /// `None` when nothing is being learned, which renders nothing at all: a
@@ -453,10 +467,16 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
 
-    let deprecated = st
+    // One past the cap, as the two tables above do it: this is the undo for
+    // every artifact the judge retires unattended, so a list that stops
+    // without saying so reads as "these are all of them".
+    let mut deprecated: Vec<DeprecatedRow> = st
         .core
         .store
-        .artifacts_by_status(crate::store::artifacts::ArtifactStatus::Deprecated, 50)
+        .artifacts_by_status(
+            crate::store::artifacts::ArtifactStatus::Deprecated,
+            DEPRECATED_CAP + 1,
+        )
         .await?
         .into_iter()
         .map(|c| DeprecatedRow {
@@ -464,6 +484,8 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             id: c.id,
         })
         .collect();
+    let more_deprecated = deprecated.len() > DEPRECATED_CAP as usize;
+    deprecated.truncate(DEPRECATED_CAP as usize);
 
     // Read-only candidates: nothing here has been changed, only listed.
     let stale = st
@@ -520,7 +542,9 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         merged,
         more_merged,
         more_superseded,
+        more_deprecated,
         table_cap: TABLE_CAP,
+        deprecated_cap: DEPRECATED_CAP,
         deprecated,
         stale,
         job_counts: st.core.store.job_counts().await?,
