@@ -152,6 +152,15 @@ pub struct OidcClient {
     cfg: OidcConfig,
 }
 
+/// The host this deployment is publicly reachable under, taken from the
+/// redirect URL — the one place the configuration already states its own
+/// public address. The MCP door's Host guard names it explicitly.
+pub(crate) fn host_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+}
+
 impl OidcClient {
     pub async fn discover(cfg: &OidcConfig) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
@@ -204,6 +213,11 @@ impl OidcClient {
             http,
             cfg: cfg.clone(),
         })
+    }
+
+    /// The public host of this deployment, parsed from the redirect URL.
+    pub fn public_host(&self) -> Option<String> {
+        host_of(&self.cfg.redirect_url)
     }
 
     pub fn authorize_url(&self) -> Result<(String, PendingAuth)> {
@@ -371,6 +385,21 @@ mod tests {
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),
             allowed_groups: groups.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn the_public_host_is_parsed_out_of_the_redirect_url() {
+        assert_eq!(
+            host_of("https://engram.example/auth/callback").as_deref(),
+            Some("engram.example")
+        );
+        // An explicit port is the proxy's business, not the Host guard's: the
+        // entry matches with or without one.
+        assert_eq!(
+            host_of("https://engram.example:8443/auth/callback").as_deref(),
+            Some("engram.example")
+        );
+        assert_eq!(host_of("not a url"), None);
     }
 
     #[test]

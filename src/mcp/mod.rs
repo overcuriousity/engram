@@ -254,16 +254,34 @@ async fn mcp_guard(
     next.run(req).await
 }
 
+/// rmcp's DNS-rebinding guard accepts loopback hosts only, which is right for
+/// a laptop and wrong behind a reverse proxy: there the Host header is the
+/// deployment's public name, and a guard that does not know it answers 403 to
+/// every remote client. The public host comes from the OIDC redirect URL, the
+/// one place the configuration already states its own address.
+fn service_config(
+    public_host: Option<String>,
+) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
+    use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
+
+    let mut hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    if let Some(host) = public_host {
+        hosts.push(host);
+    }
+    StreamableHttpServerConfig::default().with_allowed_hosts(hosts)
+}
+
 pub fn mcp_router(state: AppState) -> Router<AppState> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let core = state.core.clone();
+    let public_host = state.auth.oidc.as_ref().and_then(|o| o.public_host());
     let service = StreamableHttpService::new(
         move || Ok(PkdbTools { core: core.clone() }),
         std::sync::Arc::new(LocalSessionManager::default()),
-        Default::default(),
+        service_config(public_host),
     );
 
     Router::new()
@@ -467,6 +485,72 @@ mod tests {
         assert!(out.contains("### 1. ranked"), "{out}");
         assert!(out.contains("### recalled"), "{out}");
         assert!(!out.contains("### 2"), "{out}");
+    }
+
+    #[test]
+    fn the_mcp_door_trusts_the_deployments_own_host() {
+        // rmcp's DNS-rebinding guard accepts loopback hosts only; behind the
+        // reverse proxy the Host header is the public name, and without this
+        // the door answers 403 to every remote client.
+        let config = service_config(Some("engram.example".to_string()));
+        assert!(
+            config.allowed_hosts.iter().any(|h| h == "engram.example"),
+            "{:?}",
+            config.allowed_hosts
+        );
+        // Loopback stays: local development talks to the same door directly.
+        assert!(
+            config.allowed_hosts.iter().any(|h| h == "127.0.0.1"),
+            "{:?}",
+            config.allowed_hosts
+        );
+    }
+
+    #[test]
+    fn the_mcp_door_keeps_loopback_only_without_a_public_host() {
+        let config = service_config(None);
+        assert_eq!(config.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_service_answers_under_the_deployments_public_host() {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        };
+
+        let call = |config: StreamableHttpServerConfig| async {
+            let core = crate::core::test_support::test_core().await;
+            let service = StreamableHttpService::new(
+                move || Ok(PkdbTools { core: core.clone() }),
+                std::sync::Arc::new(LocalSessionManager::default()),
+                config,
+            );
+            service
+                .oneshot(
+                    Request::builder()
+                        .uri("/mcp")
+                        .method("POST")
+                        .header("host", "engram.example")
+                        .header("content-type", "application/json")
+                        .header("accept", "application/json, text/event-stream")
+                        .body(Body::from(
+                            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+
+        // What production answered before the fix: a loopback-only guard
+        // rejects the public name before any tool can run.
+        let rejected = call(StreamableHttpServerConfig::default()).await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        // With the deployment's host named, the same request gets through to
+        // the protocol layer — which complains about the missing session, not
+        // the host.
+        let accepted = call(service_config(Some("engram.example".to_string()))).await;
+        assert_ne!(accepted.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
