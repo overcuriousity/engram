@@ -16,6 +16,7 @@
 pub mod claims;
 pub mod export;
 pub mod metrics;
+pub mod sweep;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
