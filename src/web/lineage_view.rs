@@ -300,6 +300,7 @@ impl Walk<'_> {
                 crate::store::artifacts::Provenance::Synthesized => "synthesized",
                 crate::store::artifacts::Provenance::Passage => "passage",
                 crate::store::artifacts::Provenance::Captured => "captured",
+                crate::store::artifacts::Provenance::Note => "note",
             },
             when: crate::web::ui::fmt_time(c.created_at),
             created_at: c.created_at,

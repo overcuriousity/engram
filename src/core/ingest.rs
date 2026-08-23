@@ -259,6 +259,9 @@ impl Core {
             None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
         }
 
+        self.attach_note_artifact(&src.id, c.metadata["note"].as_str())
+            .await?;
+
         Ok(IngestOutcome {
             id: src.id,
             status: src.status,
@@ -293,6 +296,56 @@ impl Core {
                 "looks like an existing corpus; parked for review"
             );
         }
+        Ok(())
+    }
+
+    /// The operator's sentence about a file, written where it can be found.
+    ///
+    /// Embedding runs over artifact chunks and never over metadata, so a note
+    /// left in `metadata["note"]` is invisible to search — on a PDF or a text
+    /// upload absolutely, and on a photograph only as whatever the vision
+    /// model happened to echo back.
+    ///
+    /// `corpus_span: None` is the point: the note is *about* the file and is no
+    /// line *of* it, so it claims no span and nothing tries to read it beside
+    /// lines it did not come from. `segment_idx: None` puts it ahead of every
+    /// window in `renumber_artifacts`, which orders by
+    /// `COALESCE(segment_idx, 0), ordinal, rowid` — so it settles at ordinal 0
+    /// with no help from either artifact writer.
+    ///
+    /// `Provenance::Note` is what keeps that survivable. A window-less row
+    /// otherwise reads as debris from an older segmentation, and the two
+    /// queries that sweep such rows would have deleted the note — or, with a
+    /// sentinel index instead, counted it as a window this corpus already owns
+    /// and refused to segment the document at all.
+    ///
+    /// The embed is armed here rather than left to `settle`. A scan with no
+    /// text layer parks as `failed` and never reaches settling, and that is
+    /// exactly the capture whose note is the only text anyone will ever have.
+    async fn attach_note_artifact(&self, corpus_id: &str, note: Option<&str>) -> Result<()> {
+        let Some(text) = note.map(str::trim).filter(|n| !n.is_empty()) else {
+            return Ok(());
+        };
+        self.store
+            .insert_artifacts_with_provenance(
+                corpus_id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    // A heading is something a document gave. This had none.
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+                crate::store::artifacts::Provenance::Note,
+            )
+            .await?;
+        self.store
+            .rearm_idle_seq(Stage::Embed, "corpus", corpus_id, 0)
+            .await?;
         Ok(())
     }
 
@@ -331,7 +384,8 @@ impl Core {
             file["name"] = serde_json::Value::String(n.to_string());
         }
         let mut metadata = serde_json::json!({ "file": file });
-        if let Some(n) = clean_note(note) {
+        let note = clean_note(note);
+        if let Some(n) = &note {
             metadata["note"] = serde_json::json!(n);
         }
 
@@ -355,13 +409,19 @@ impl Core {
             )
             .await?;
         Ok(match inserted {
+            // A file already in the base keeps the note it was captured with.
+            // Stacking a second one per re-upload is how a corpus grows a pile
+            // of near-identical captions nobody wrote twice on purpose.
             Insertion::Existing(c) => IngestOutcome::existing(&c),
-            Insertion::Created(c) => IngestOutcome {
-                id: c.id,
-                status: c.status,
-                duplicate: false,
-                near_duplicate: None,
-            },
+            Insertion::Created(c) => {
+                self.attach_note_artifact(&c.id, note.as_deref()).await?;
+                IngestOutcome {
+                    id: c.id,
+                    status: c.status,
+                    duplicate: false,
+                    near_duplicate: None,
+                }
+            }
         })
     }
 
@@ -414,8 +474,9 @@ impl Core {
         if prepared.exif.as_object().is_some_and(|o| !o.is_empty()) {
             metadata["exif"] = prepared.exif.clone();
         }
-        if let Some(n) = clean_note(note) {
-            metadata["note"] = serde_json::Value::String(n);
+        let note = clean_note(note);
+        if let Some(n) = &note {
+            metadata["note"] = serde_json::Value::String(n.clone());
         }
         // A filename is a file fact, not a name: `photo.jpg` and `image.png`
         // are what a camera and a clipboard call everything. Seeding the title
@@ -453,6 +514,7 @@ impl Core {
             mime = prepared.mime,
             "image captured; queued for reading"
         );
+        self.attach_note_artifact(&src.id, note.as_deref()).await?;
         Ok(IngestOutcome {
             id: src.id,
             status: CorpusStatus::Describing,
@@ -2406,6 +2468,159 @@ mod tests {
         assert_eq!(
             core.store.segment_state(&src.id, 0).await.unwrap(),
             Some(crate::store::segments::SegmentState::Verbatim)
+        );
+    }
+
+    /// The sentence most worth searching on must be an artifact, not a
+    /// caption. Embedding runs over artifact chunks and never over metadata,
+    /// so a note that stays in `metadata["note"]` cannot be found at all.
+    #[tokio::test]
+    async fn a_note_on_a_pdf_becomes_a_span_less_artifact_on_its_corpus() {
+        let core = test_core().await;
+        let out = core
+            .ingest_pdf(PdfCapture {
+                bytes: a_pdf_fixture(),
+                filename: Some("lease.pdf".into()),
+                title_hint: None,
+                note: Some("  scan of the Reinhardt lease, break clause is p.3  ".into()),
+            })
+            .await
+            .unwrap();
+
+        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert_eq!(all.len(), 1, "the note, and nothing extracted yet");
+        let n = &all[0];
+        assert_eq!(n.text, "scan of the Reinhardt lease, break clause is p.3");
+        assert_eq!(
+            n.corpus_span, None,
+            "the note is about the file, not a line of it"
+        );
+        assert_eq!(n.segment_idx, None, "it belongs to no window");
+        assert_eq!(n.ordinal, 0);
+        assert_eq!(n.provenance, crate::store::artifacts::Provenance::Note);
+        assert_eq!(n.title, None);
+    }
+
+    /// One helper, three doors, so a fourth cannot forget it.
+    #[tokio::test]
+    async fn every_door_that_takes_a_note_writes_it_as_an_artifact() {
+        let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
+        let core = crate::core::test_support::test_core_with_describer(describer).await;
+
+        let img = core
+            .ingest_image(ImageCapture {
+                bytes: a_seeded_png(11),
+                filename: Some("IMG_9.png".into()),
+                title_hint: None,
+                note: Some("front of the router".into()),
+            })
+            .await
+            .unwrap();
+        let a = core.store.artifacts_for_corpus(&img.id).await.unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].text, "front of the router");
+
+        let txt = core
+            .ingest_capture(
+                Capture::new("the file's own text", "upload")
+                    .with_note(Some("from the printer".into())),
+            )
+            .await
+            .unwrap();
+        let a = core.store.artifacts_for_corpus(&txt.id).await.unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].text, "from the printer");
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_no_usable_note_writes_no_artifact() {
+        let core = test_core().await;
+        let none = core
+            .ingest_capture(Capture::new("text one", "upload"))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .artifacts_for_corpus(&none.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let blank = core
+            .ingest_capture(Capture::new("text two", "upload").with_note(Some("   ".into())))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .artifacts_for_corpus(&blank.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "whitespace is not an annotation"
+        );
+    }
+
+    /// A scan with no text layer parks as `failed` and never reaches `settle`,
+    /// which is what normally arms the embed. Without arming it here, the one
+    /// thing a person typed about an unreadable document waits forever.
+    #[tokio::test]
+    async fn a_note_arms_the_embed_so_a_parked_capture_still_becomes_findable() {
+        let core = test_core().await;
+        let out = core
+            .ingest_pdf(PdfCapture {
+                bytes: a_pdf_fixture(),
+                filename: Some("scan.pdf".into()),
+                title_hint: None,
+                note: Some("the survey nobody can OCR".into()),
+            })
+            .await
+            .unwrap();
+
+        let pending = core
+            .store
+            .pending_artifacts_for_corpus(&out.id)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1, "the note is waiting for a vector");
+        assert!(
+            core.store.live_job(Stage::Embed, &out.id).await.unwrap(),
+            "a corpus embed job must be armed by the capture itself"
+        );
+    }
+
+    /// Re-uploading the same file must not stack a second note on it.
+    #[tokio::test]
+    async fn a_duplicate_upload_writes_no_second_note() {
+        let core = test_core().await;
+        let bytes = a_pdf_fixture();
+        let first = core
+            .ingest_pdf(PdfCapture {
+                bytes: bytes.clone(),
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: Some("the quarterly plan".into()),
+            })
+            .await
+            .unwrap();
+        let again = core
+            .ingest_pdf(PdfCapture {
+                bytes,
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: Some("a second thought about it".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.id, again.id);
+        assert!(again.duplicate);
+        assert_eq!(
+            core.store
+                .artifacts_for_corpus(&first.id)
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

@@ -939,11 +939,13 @@ mod tests {
             .split_once(":not(.has-selection):not(.answering)")
             .expect("the idle 40rem rail is not held while an answer is being written")
             .0;
-        // Bounded to the widths that have two columns. Three `:not()`s outrank
-        // the single class the one-up block sets its track list with, and
-        // specificity does not care that the two rules answer different widths
-        // — unbounded, this two-column rule won on a narrow screen too, and
-        // left the pane beside a 40rem rail twelve pixels wide.
+        // Bounded to the widths that have two columns. The two chained
+        // `:not()`s outrank the single class the one-up block sets its track
+        // list with — chained rather than `:not(.has-selection, .answering)`,
+        // which would count one class and not two — and specificity does not
+        // care that the two rules answer different widths: unbounded, this
+        // two-column rule won on a narrow screen too, and left the pane beside
+        // a 40rem rail twelve pixels wide.
         assert!(
             idle.rsplit_once("@container")
                 .is_some_and(|(_, open)| open.trim_start().starts_with("shell (width > 60rem)")),

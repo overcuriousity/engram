@@ -13,14 +13,18 @@
 /* The source column takes the larger share: it holds the source's own lines,
    while the artifact beside it is prose that reads better narrow. */
 .split { display: grid; grid-template-columns: 1fr 1.2fr; gap: 0.75rem; align-items: start; }
-@media (max-width: 60rem) { .split { grid-template-columns: 1fr; } }
+/* 62rem rather than 60rem: this has to be a media query — `.shell` stops being
+   a container under 40rem — and 62rem of viewport is the 60rem of container
+   that every `@container shell` block beside it asks about. At 60rem the split
+   stayed two columns for the two rem in which the regions had already gone
+   one-up. */
+@media (width <= 62rem) { .split { grid-template-columns: 1fr; } }
 
 /* A grid child defaults to `min-width: auto`, which resolves to min-content:
    one unwrappable line of source then widens the column instead of scrolling
    inside `.raw`, and takes the document's width with it. `.pane` had this; its
    siblings did not, so the source pane escaped to the right at every width. */
 .split > *, .rail-head { min-width: 0; }
-.raw { max-width: 100%; }
 /* Titles and snippets are prose, not source: they break rather than push. */
 .rail-title, .rail-snippet, .card-title { overflow-wrap: anywhere; }
 /* A backstop. If something new overflows, it scrolls in its own box rather
@@ -54,6 +58,9 @@ body { overflow-x: hidden; }
 .raw {
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
   border-radius: var(--radius-md); overflow: auto; max-height: min(60vh, 45rem);
+  /* Part of the overflow backstop above: without it one unwrappable line of
+     source widens the column rather than scrolling inside this box. */
+  max-width: 100%;
 }
 .raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Wrapped, with the continuation hanging under its own line rather than under
@@ -71,16 +78,22 @@ body { overflow-x: hidden; }
 }
 /* The line numbers stay put while the code scrolls under them; a line number
    that scrolls out of view makes the column useless for finding a line. */
-.raw td.ln { position: sticky; left: 0; background: var(--color-bg-elevated); z-index: 1; }
-.raw tr.in td.ln { background: var(--color-accent-dim); }
 .raw td.ln {
+  position: sticky; left: 0; background: var(--color-bg-elevated); z-index: 1;
   width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
   border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
   /* The hanging indent belongs to the source lines, not to their numbers. */
   padding: 1px 0.5rem; text-indent: 0;
 }
+/* The lines the artifact was written from, and their numbers with them. The
+   tint says these are the ones; a bar down their edge says where the run starts
+   and stops, which a background shared with the row above it does not — and it
+   survives a glance from across the pane. */
 .raw tr.in td { background: var(--color-accent-dim); }
-.raw tr.in td.ln { color: var(--color-accent); }
+.raw tr.in td.ln {
+  background: var(--color-accent-dim); color: var(--color-accent);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
 
 .flag {
   display: flex; gap: 0.625rem; align-items: flex-start;
@@ -127,8 +140,14 @@ body { overflow-x: hidden; }
 }
 /* A box someone is waiting on is still a box someone is reading. The UA greys
    disabled text towards the background, which says "broken" where this means
-   "busy" — the question you asked stays worth reading while you wait for it. */
-.box:disabled {
+   "busy" — the question you asked stays worth reading while you wait for it.
+
+   `[readonly]` rather than `:disabled`, and app.js now sets that attribute
+   instead: `disabled` was undoing this rule's whole point one level below the
+   colour, because disabled text cannot be selected and cannot be copied. The
+   question was legible and untouchable, in the one box on the page it could
+   have been edited back out of. */
+.box[readonly] {
   color: var(--color-fg-secondary); opacity: 1; cursor: wait;
   background: var(--color-bg-surface);
 }
@@ -151,7 +170,6 @@ body { overflow-x: hidden; }
    this the Stop button is on screen from first paint, offering to stop an ask
    nobody has started. */
 .btn[hidden] { display: none; }
-.facet-label { flex: 0 0 auto; }
 
 /* The grid itself lives in 20-layout.css now: the rail beside the artifact is
    the region model rather than a layout this one page invented, and the
@@ -209,7 +227,6 @@ body { overflow-x: hidden; }
   font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
-.rail-why { font-size: var(--text-sm); color: var(--color-fg-muted); margin-top: 0.25rem; }
 /* Recalled by association, not ranked against the query — so it must not
    borrow the shape of something that was. The rule and the heading above said
    so already, and the identical card underneath them said otherwise. */
@@ -307,7 +324,7 @@ body { overflow-x: hidden; }
 .lineage { list-style: none; margin: 0 0 0.75rem; padding: 0; }
 .lin {
   display: flex; gap: 0.4rem; padding: 0.4rem 0;
-  padding-left: calc(var(--d) * 1.25rem);
+  padding-left: calc(var(--d, 0) * 1.25rem);
   border-bottom: 1px solid var(--color-border-subtle);
 }
 .lin:last-child { border-bottom: 0; }
@@ -335,9 +352,6 @@ body { overflow-x: hidden; }
 /* The fallback for a source there is nothing to band. */
 .raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
             overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-sm); }
-
-/* One column on a narrow screen: the source first, then what came of it. */
-@media (max-width: 60rem) { .band { grid-template-columns: 1fr; } }
 
 /* What tells two rows with one title apart: when it was written, and how it
    opens. Quiet, because it is a disambiguator and not a second title. */
@@ -468,7 +482,7 @@ body { overflow-x: hidden; }
    the width the narrowed rail had just given up. What `r` frees goes to focus
    entire, which is what "gives the width to the artifact and its source"
    means. */
-@container shell (min-width: 90rem) {
+@container shell (width >= 90rem) {
   .regions.reading {
     grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr);
   }
@@ -508,11 +522,6 @@ body { overflow-x: hidden; }
 
 /* ── The source pane ─────────────────────────────────────────────────────── */
 
-/* The tint says these lines are the ones. A bar down their edge says where the
-   run starts and stops, which a background shared with the row above it does
-   not — and it survives a glance from across the pane. */
-.raw tr.in td.ln { box-shadow: inset 2px 0 0 var(--color-accent); }
-
 /* A fold is a rule with a count, not a gap. "Something was left out here" is
    what empty space fails to say. Indented past the gutter, so the line-number
    column stays a column. */
@@ -540,7 +549,7 @@ body { overflow-x: hidden; }
 
    The floor is what stops a long neighbour list from squeezing the artifact to
    a sliver; past it the column scrolls as a whole. */
-@container shell (min-width: 60rem) {
+@container shell (width >= 60rem) {
   .split > :first-child {
     display: flex; flex-direction: column; overflow-y: auto;
     max-height: min(60vh, 45rem);
@@ -598,7 +607,7 @@ body { overflow-x: hidden; }
    Only where all three regions are on screen. One-up is a page you scroll, and
    pinning the single visible region to the viewport there would put the
    results list in a box the size of the window it already fills. */
-@container shell (min-width: 60rem) {
+@container shell (width >= 60rem) {
   .regions-rail-focus-source { grid-template-rows: auto minmax(0, 1fr); }
   .regions-rail-focus-source > .region-rail,
   .regions-rail-focus-source > .region-focus { align-self: stretch; min-height: 0; }

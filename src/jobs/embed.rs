@@ -905,12 +905,27 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
 /// Advance the parent source once no chunk is still pending: `ready` if every
 /// chunk embedded, `partial` if any gave up.
 pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
+    // "Nothing left to embed" only means "finished" for a source whose windows
+    // have already been written: `finish` sets `embedding` — or `partial` —
+    // before it arms the job, so those two are the states this reads. Every
+    // other one means the document has not been read yet, and an empty pending
+    // count says nothing about it.
+    //
+    // A capture's note is armed for embedding at the door, long before any of
+    // that. Without this guard the note embedding on its own would find
+    // nothing else pending and report a PDF `ready` that had not been
+    // extracted, or walk a parked `failed` scan forward to `ready` on the way
+    // past.
+    let was = core.store.get_corpus(corpus_id).await?.status;
+    if !matches!(was, CorpusStatus::Embedding | CorpusStatus::Partial) {
+        return Ok(());
+    }
     if core.store.pending_embed_count(corpus_id).await? > 0 {
         return Ok(());
     }
     let status = if core.store.failed_embed_count(corpus_id).await? > 0 {
         CorpusStatus::Partial
-    } else if core.store.get_corpus(corpus_id).await?.status == CorpusStatus::Partial {
+    } else if was == CorpusStatus::Partial {
         // A source with a window the model refused is already partial. Its
         // chunks embedding cleanly does not fill the hole those lines left,
         // and reporting `ready` would hide it.

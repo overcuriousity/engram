@@ -137,7 +137,8 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
 
 -- ── Lineage ──────────────────────────────────────────────────────────────────
 -- What a merged artifact is made of, as resolved captured roots rather than as
--- parent edges. `root_id` always names a `provenance = 'captured'` artifact, so
+-- parent edges. `root_id` always names source text — `captured` or `note`, the
+-- test in `roots_of` being `!is_model_written()` rather than one literal — so
 -- a re-merge reads the leaves in one query and is never written from text a
 -- model produced — which is what keeps information loss one generation deep
 -- however many times a group is merged. That sentence is about *merging*: a

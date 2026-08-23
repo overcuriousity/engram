@@ -112,8 +112,12 @@ impl Store {
         // the split move out from under it. A window that produced no chunks is
         // why the state is still consulted: it owns nothing and has still
         // finished.
+        // A `note` is excluded for the same reason the sweep excludes it: it
+        // owns no window, so counting it here would refuse to segment every
+        // document that arrived with an annotation.
         let owned: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM artifacts WHERE corpus_id = ? AND segment_idx IS NOT NULL",
+            "SELECT count(*) FROM artifacts
+              WHERE corpus_id = ? AND provenance != 'note' AND segment_idx IS NOT NULL",
         )
         .bind(corpus_id)
         .fetch_one(&mut *tx)
