@@ -260,6 +260,10 @@ pub struct PairRow {
     /// still resolvable, just with nothing recommended.
     pub keeps_a: bool,
     pub keeps_b: bool,
+    /// The judge found that neither side states anything. Accents "Discard
+    /// both" the way `keeps_a` accents a Keep — a recommendation about which
+    /// button to press, not a third thing to do.
+    pub vacuous: bool,
 }
 
 pub struct TokenRow {
@@ -1266,6 +1270,41 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
 /// distinct artifacts carried that one name. Each side keeps its opening words
 /// only where its title is shared, for the reason the queue keeps them — a
 /// suffix on a name that needs no suffix is noise.
+/// Drop the leading path segments a row's two titles share.
+///
+/// Both sides of a card are usually the same kind of thing filed in the same
+/// place, and for captures named by path that means the two titles differ in a
+/// few characters at the very end. Whole and side by side they read as one
+/// string printed twice — in the head line, and again on the two Keep buttons
+/// that name what they keep.
+///
+/// Segments, never characters: "FAT16 Specifications" against "FAT32
+/// Specifications" shares a prefix too, and cutting it hides the subject and
+/// keeps the word that was never in question. And never the last segment, or
+/// two artifacts captured under one path leave both buttons reading "Keep …/".
+///
+/// Per row, not across the page — the elision has to be reversible by eye
+/// against the other title on the same card, which is the only place the
+/// dropped part is still visible.
+fn elide_shared_prefixes(rows: &mut [PairRow]) {
+    for r in rows.iter_mut() {
+        let a: Vec<&str> = r.a_title.split('/').collect();
+        let b: Vec<&str> = r.b_title.split('/').collect();
+        let keep_one = a.len().min(b.len()).saturating_sub(1);
+        let shared = a
+            .iter()
+            .zip(&b)
+            .take(keep_one)
+            .take_while(|(x, y)| x == y)
+            .count();
+        if shared == 0 {
+            continue;
+        }
+        r.a_title = format!("…/{}", a[shared..].join("/"));
+        r.b_title = format!("…/{}", b[shared..].join("/"));
+    }
+}
+
 fn disambiguate_pair_titles(rows: &mut [PairRow]) {
     // By distinct artifact, never by how often a title appears. One artifact
     // against three others — which is what a cluster looks like from here —
@@ -1898,9 +1937,13 @@ pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 3] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
+    // A judged recommendation like `Superseded`, and listed for the same
+    // reason: the judge proposing something is not the judge doing it, so the
+    // pair still has to reach the person who presses the button.
+    crate::store::pairs::PairState::Vacuous,
     crate::store::pairs::PairState::Pending,
 ];
 
@@ -1995,6 +2038,7 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
                 obsolete_title,
                 keeps_a,
                 keeps_b,
+                vacuous: state == crate::store::pairs::PairState::Vacuous,
             });
             if pairs.len() == PAIR_LIMIT {
                 break 'fill;
@@ -2006,6 +2050,10 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     // artifacts have since gone missing — skipped above — is not announced as
     // something waiting that never appears.
     let more = (waiting - pairs.len() as i64).max(0);
+    // Before the openings are worked out, not after: two paths cut to their
+    // last segment can collide where the full ones did not, and it is the
+    // shortened title a reader is being asked to tell apart.
+    elide_shared_prefixes(&mut pairs);
     disambiguate_pair_titles(&mut pairs);
     Ok((pairs, more))
 }
@@ -2308,6 +2356,44 @@ async fn dismiss_pair_ui(
     st.core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .await?;
+    Ok(Redirect::to(back.path()).into_response())
+}
+
+/// Answer a pair by retiring both sides.
+///
+/// The queue's other two answers each assume something. Keeping one side
+/// assumes one of them is worth keeping; Dismiss assumes the pair is a
+/// question not worth asking and leaves both in results. Neither fits two
+/// artifacts that state nothing — a body that is its own file path, an outline
+/// with nothing under it — which are alike for a reason that has no keeper.
+///
+/// Deprecation, not deletion, and through `core.deprecate` like every other
+/// hide in the app: this is the one action here that retires *both* artifacts,
+/// so it is also the one that most needs the same undo as the rest.
+///
+/// The side effects first and the pair settled after, the ordering
+/// `jobs::dedupe::apply` documents: a failure part-way leaves the pair
+/// answerable rather than recorded as answered and never applied.
+async fn discard_pair_ui(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> Result<Response> {
+    let pair = st.core.store.get_pair(pid).await?;
+    st.core.deprecate(&pair.a_id).await?;
+    st.core.deprecate(&pair.b_id).await?;
+    // The judge's line carried through rather than dropped: it is the only
+    // record of why both sides were retired, and `set_pair_state` writes
+    // `detail` unconditionally, so `None` would null it.
+    st.core
+        .store
+        .set_pair_state(
+            pid,
+            crate::store::pairs::PairState::Dismissed,
+            pair.detail.as_deref(),
+        )
         .await?;
     Ok(Redirect::to(back.path()).into_response())
 }
@@ -2881,6 +2967,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/merges/{id}/undo", post(undo_merge_ui))
         .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
+        .route("/ui/ops/pairs/{id}/discard", post(discard_pair_ui))
         .route(
             "/ui/ops/pairs/{id}/supersede",
             post(apply_pair_supersede_ui),
@@ -3004,9 +3091,57 @@ mod tests {
             via_link: false,
             contradiction: true,
             obsolete_title: None,
+            vacuous: false,
             keeps_a: false,
             keeps_b: false,
         }
+    }
+
+    fn pair_titled(a: &str, b: &str) -> PairRow {
+        let mut r = pair_row_fixture("a", a, "");
+        r.b_title = b.into();
+        r
+    }
+
+    /// Two Logseq journals differ in four characters, and those four sat at the
+    /// far end of a long sentence — so the head line read as one string
+    /// repeated, and the two Keep buttons became a row of near-identical
+    /// labels. The buttons still name what they keep; they stop naming the part
+    /// that is the same on both.
+    #[test]
+    fn two_paths_that_differ_only_at_the_end_lead_with_the_difference() {
+        let mut rows = vec![pair_titled(
+            "Logseq/studium/journals/2025_02_01.md",
+            "Logseq/studium/journals/2025_02_02.md",
+        )];
+        elide_shared_prefixes(&mut rows);
+        assert_eq!(rows[0].a_title, "…/2025_02_01.md");
+        assert_eq!(rows[0].b_title, "…/2025_02_02.md");
+    }
+
+    /// Whole segments or nothing. Elided by characters, "FAT16" and "FAT32"
+    /// become "…6 Specifications" and "…2 Specifications" — which hides the
+    /// subject and keeps the word that was never in question.
+    #[test]
+    fn titles_that_are_not_paths_are_left_whole() {
+        let mut rows = vec![pair_titled("FAT16 Specifications", "FAT32 Specifications")];
+        elide_shared_prefixes(&mut rows);
+        assert_eq!(rows[0].a_title, "FAT16 Specifications");
+        assert_eq!(rows[0].b_title, "FAT32 Specifications");
+    }
+
+    /// Two artifacts genuinely captured under one path. Eliding everything they
+    /// share would leave both buttons reading "Keep …/", which is the failure
+    /// this exists to prevent rather than an extreme case of fixing it.
+    #[test]
+    fn eliding_never_takes_the_last_segment() {
+        let mut rows = vec![pair_titled(
+            "Logseq/journals/day.md",
+            "Logseq/journals/day.md",
+        )];
+        elide_shared_prefixes(&mut rows);
+        assert_eq!(rows[0].a_title, "…/day.md");
+        assert_eq!(rows[0].b_title, "…/day.md");
     }
 
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
@@ -7193,6 +7328,124 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// End to end, because the elision has to happen before the openings are
+    /// worked out: two paths cut to their last segment can collide where the
+    /// full ones did not, and it is the shortened title a reader needs telling
+    /// apart.
+    #[tokio::test]
+    async fn the_queue_names_two_journals_by_the_part_that_differs() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &[
+                "Logseq/studium/journals/2025_02_01.md",
+                "Logseq/studium/journals/2025_02_02.md",
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            html.contains("Keep “…/2025_02_01.md”"),
+            "the button still names the half of the path that is the same on both: {html}"
+        );
+    }
+
+    /// A verdict is a recommendation on the card, never an action taken. So
+    /// the pair has to reach the queue at all, and it has to say which of the
+    /// three buttons the judge would press.
+    #[tokio::test]
+    async fn a_pair_the_judge_found_empty_recommends_discarding_both() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Vacuous,
+                Some("each body is its own file path"),
+            )
+            .await
+            .unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            html.contains(&format!("/ui/ops/pairs/{}/discard", pair.id)),
+            "a pair filed vacuous never reached the queue: {html}"
+        );
+        assert!(
+            html.contains("neither of these says anything"),
+            "the card asks the wrong question about this pair: {html}"
+        );
+    }
+
+    /// Offered on every card, because the judge is not the only reader who can
+    /// tell. A pair it called a duplicate can still be two artifacts that say
+    /// nothing, and the person looking at it should not have to keep one to
+    /// clear it.
+    #[tokio::test]
+    async fn every_pair_can_be_discarded_whatever_the_judge_said() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["left one", "right one"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(html.contains("Discard both"), "{html}");
+    }
+
+    /// The third answer a pair can have. Keeping one side is wrong when neither
+    /// side is worth keeping, and Dismiss leaves both in results — so a pair of
+    /// artifacts that say nothing had no way out of the queue that removed them.
+    #[tokio::test]
+    async fn discarding_a_pair_retires_both_sides() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["notes/a.md", "notes/b.md"]).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/discard", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        for id in &ids {
+            assert!(
+                !core.store.get_artifact(id).await.unwrap().in_results(),
+                "discard left {id} in results"
+            );
+        }
+        assert_eq!(
+            core.store.get_pair(pair.id).await.unwrap().state,
+            crate::store::pairs::PairState::Dismissed,
+            "the pair is answered, so it must leave the queue"
         );
     }
 

@@ -369,6 +369,10 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             tracing::info!("artifacts disagree; escalating rather than merging");
             settle(core, &s.pair, PairState::Contradiction, s.detail.as_deref()).await
         }
+        // Filed, not acted on. The card offers "Discard both" with this verdict
+        // as the accented recommendation, and the deprecation happens when a
+        // person presses it.
+        Relation::Vacuous => settle(core, &s.pair, PairState::Vacuous, s.detail.as_deref()).await,
         Relation::Replaced => {
             let obsolete = s
                 .obsolete
@@ -484,6 +488,37 @@ mod tests {
 
         assert_eq!(judge.calls(), 1, "the judge endpoint was not the one asked");
         assert_eq!(asker.calls(), 0, "the sweep called the ask model");
+    }
+
+    /// Nothing a model says hides an artifact on its own. `PairState::Superseded`
+    /// already takes that stance about a proposed replacement, and a verdict
+    /// that would retire *both* sides has less claim to act unaided, not more.
+    #[tokio::test]
+    async fn a_vacuous_verdict_files_the_pair_and_hides_neither_side() {
+        let mut core = test_core().await;
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"vacuous","detail":"each body is its own file path"}"#.into(),
+        ])));
+        let ids = seed(
+            &core,
+            &[("notes/a.md", [1.0, 0.0]), ("notes/b.md", [0.99, 0.01])],
+        )
+        .await;
+        let pid = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pid.to_string()).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(pid).await.unwrap().state,
+            PairState::Vacuous,
+            "the verdict was not filed as one a person can act on"
+        );
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "a vacuous verdict hid an artifact without anyone pressing anything"
+            );
+        }
     }
 
     async fn disagreeing(core: &Core) -> Vec<String> {

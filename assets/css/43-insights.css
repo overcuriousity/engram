@@ -123,8 +123,15 @@
 
 /* Shown on Capture rather than on a page you have to remember to visit, and
    rendered not at all when there is nothing to decide. */
+/* A question, not a warning.
+
+   Amber on every card made five routine decisions read as five alarms, and a
+   page where everything is emphasised has nothing left to emphasise with — the
+   judge's recommendation, the one thing on a card actually worth pointing at,
+   was an accent button inside a block already shouting. The surface is neutral
+   now and the accent does that job alone. */
 .decide {
-  border: 1px solid var(--color-warning); background: var(--color-warning-dim);
+  border: 1px solid var(--color-border); background: var(--color-bg-surface);
   border-radius: var(--radius-md); padding: 0.75rem 0.875rem; margin-bottom: 0.5rem;
 }
 .decide-head { font-size: var(--text-base); }
@@ -172,7 +179,16 @@
 .decide-sides {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;
 }
-.decide-sides p { margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary); }
+/* Kept as it was written. Captures named by path are outlines as often as
+   prose, and collapsed to a paragraph an outline loses the one thing that says
+   what it is about — six subjects at one indent read as one run-on sentence.
+   Scrolls in its own box rather than widening the card, so a long line cannot
+   push the buttons off the page. */
+.decide-sides p {
+  margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
+  font-family: var(--font-mono); white-space: pre-wrap;
+  overflow-x: auto; overflow-wrap: anywhere;
+}
 @container shell (width <= 60rem) {
   .decide-sides { grid-template-columns: 1fr; }
 }
