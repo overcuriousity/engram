@@ -12,6 +12,7 @@ pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
+pub mod vbg;
 pub mod workspace;
 
 use axum::Router;
