@@ -547,6 +547,15 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             engram::core::QUERY_CACHE_CAPACITY,
         ))),
         consolidate: engram::config::ConsolidateConfig::default(),
+        // The harness measures the shipped cap; recency is off because the
+        // fake embedder's ordering is the only thing this asserts against.
+        ranking: Arc::new(std::sync::RwLock::new(
+            engram::core::ranking::RankingParams {
+                recency_weight: 0.0,
+                per_source_cap: Some(engram::core::search::MAX_PER_CORPUS),
+            },
+        )),
+        tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         weak_below: 0.0,
         learn: engram::config::LearnConfig { enabled: false },
         feedback: engram::config::FeedbackConfig::default(),

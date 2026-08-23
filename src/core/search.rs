@@ -819,10 +819,8 @@ impl Core {
         query: &SearchQuery,
         origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
-        Ok(self
-            .search_with(query, Some(MAX_PER_CORPUS), origin.into())
-            .await?
-            .0)
+        let cap = self.ranking.read().expect("ranking lock").per_source_cap;
+        Ok(self.search_with(query, cap, origin.into()).await?.0)
     }
 
     /// The embedding of `q`, if a search just made it. `search_with` caches the
@@ -846,7 +844,38 @@ impl Core {
         cap: Option<usize>,
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
-        let origin = origin.into();
+        let weight = self.ranking.read().expect("ranking lock").recency_weight;
+        self.search_inner(query, cap, weight, origin.into()).await
+    }
+
+    /// `search_with`, with every runtime-tunable knob chosen by the caller.
+    ///
+    /// What the tuning sweep ranks its candidates through, so measurement and
+    /// the live path are one pipeline rather than two that can drift: a sweep
+    /// scoring a subtly different search would recommend settings for a program
+    /// nobody runs.
+    pub async fn search_with_ranking(
+        &self,
+        query: &SearchQuery,
+        params: crate::core::ranking::RankingParams,
+        origin: impl Into<Origin>,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+        self.search_inner(
+            query,
+            params.per_source_cap,
+            params.recency_weight,
+            origin.into(),
+        )
+        .await
+    }
+
+    async fn search_inner(
+        &self,
+        query: &SearchQuery,
+        cap: Option<usize>,
+        recency_weight: f32,
+        origin: Origin,
+    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         let door = origin.door;
         if query.q.trim().is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -922,7 +951,7 @@ impl Core {
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
         let hits = self
             .vectors
-            .search(&vector, &sparse, candidates, &filter)
+            .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
             .await?;
 
         // Cap before reranking, in vector order, so what leads per source is
@@ -2439,6 +2468,61 @@ mod tests {
         assert_eq!(
             pool, 12,
             "the configured pool was cut back to the over-fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_cap_is_read_per_search_rather_than_compiled_in() {
+        // What makes applying a tuning recommendation mean anything: the cap
+        // was a constant, so a recommendation to change it could only ever
+        // have been advice. Every ordinary search reads it here now.
+        //
+        // The cap is visible in the order rather than the length: it displaces
+        // a document's later chunks behind other sources instead of dropping
+        // them. Two sources, one matching the query verbatim, is the smallest
+        // arrangement where that is observable.
+        let core = test_core().await;
+        // Untitled and identical within a source, so the three chunks of one
+        // document embed identically and tie: which source leads is then hash
+        // noise, and what the assertions read is only whether a source may
+        // hold two places at once.
+        for (raw, text) in [
+            ("raw one", "the image will not mount"),
+            ("raw two", "unrelated words"),
+        ] {
+            let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+            let new: Vec<NewArtifact> = (0..3)
+                .map(|i| NewArtifact {
+                    ordinal: i,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                })
+                .collect();
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            }
+        }
+
+        let mut query = q("the image will not mount");
+        query.limit = 6;
+
+        core.ranking.write().unwrap().per_source_cap = None;
+        let uncapped = core.search(&query, Door::Judge).await.unwrap();
+        assert_eq!(
+            uncapped[0].text, uncapped[1].text,
+            "uncapped, one document supplies the head of the list"
+        );
+
+        core.ranking.write().unwrap().per_source_cap = Some(1);
+        let capped = core.search(&query, Door::Judge).await.unwrap();
+        assert_ne!(
+            capped[0].text, capped[1].text,
+            "a cap of one must let the other source take the second place"
         );
     }
 
