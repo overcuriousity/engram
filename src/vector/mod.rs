@@ -374,6 +374,13 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<SearchHit>>;
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()>;
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()>;
+    /// Up to `limit` points' dense vectors, for the background visualization.
+    ///
+    /// A decorative read, which is why nothing is filtered: deprecated and
+    /// superseded points are still part of the store's shape, and a lifecycle
+    /// filter would cost a payload parse for a picture. No ordering is
+    /// promised beyond determinism between identical calls.
+    async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>>;
     async fn count(&self) -> Result<u64>;
 }
 
