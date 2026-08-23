@@ -79,18 +79,29 @@ impl Default for CaptureConfig {
     }
 }
 
-/// Pacing for every inference call, not just synthesis.
+/// Pacing for every generating inference call, not just synthesis.
 ///
 /// The roles share one GPU, so a per-role gap could not bound total load: three
 /// roles each honouring their own cooldown still interleave into unbroken work.
 /// One gap in front of all of them is the only version of this setting that
 /// means what it says.
+///
+/// Generating is the word that carries the exception. Embedding takes its turn
+/// like everything else — one call at a time is what bounds the GPU — but it
+/// neither serves the gap nor starts one, because the gap is measured against
+/// a generation and an encoder is not one. Pacing a batch that answers in a
+/// second behind thirty seconds of silence spends almost the whole budget on
+/// the one role that needs no protecting; at `synthesis = "earned"`, where
+/// capture generates nothing, that was most of what the setting did.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct PacingConfig {
-    /// Minimum seconds between the end of one background call and the start of
-    /// the next. Zero disables pacing. `ask` ignores it: a person is waiting,
-    /// and the pacer exists to protect the GPU from batch work, not from them.
+    /// Minimum seconds between the end of one background generation and the
+    /// start of the next. Zero disables pacing. `ask` ignores it: a person is
+    /// waiting, and the pacer exists to protect the GPU from batch work, not
+    /// from them. Embedding ignores it too, for the opposite reason — it is
+    /// batch work the gap was never sized against. See `InferenceGate::
+    /// background_light`.
     pub cooldown_secs: u64,
 }
 

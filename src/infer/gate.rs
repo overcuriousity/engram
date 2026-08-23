@@ -60,6 +60,37 @@ impl InferenceGate {
     /// Returns the right to make one background inference call, once one may
     /// start. Hold the permit for the duration of the call.
     pub async fn background(&self) -> BackgroundPermit<'_> {
+        self.acquire(true).await
+    }
+
+    /// The same turn, without the cooldown on either side of it.
+    ///
+    /// For a call whose cost is not what the gap was configured against.
+    /// Embedding is the case it exists for: a 300M encoder answering a batch
+    /// in about a second, against the seconds-to-minutes of a generation on
+    /// the tier beside it. Serving thirty seconds in front of that call is the
+    /// pacer spending almost all of its budget on the one role that needs no
+    /// protecting — and at `synthesis = "earned"`, where nothing generates at
+    /// capture, that is most of what the pacer does.
+    ///
+    /// It still takes the turn, so a batch never runs alongside a generation:
+    /// they share a GPU, and one at a time is the part of the gate that bounds
+    /// load rather than merely spaces it. It still yields to an interactive
+    /// lease, because a person waiting on `ask` outranks a batch either way.
+    /// And it does not stamp `last_finished` on the way out: a call that never
+    /// earned the gap must not impose it on the next one.
+    pub async fn background_light(&self) -> BackgroundPermit<'_> {
+        self.acquire(false).await
+    }
+
+    /// The turn, then the wait, then the permit.
+    ///
+    /// `paced` is whether this call serves the cooldown before it and starts
+    /// one after it. The two travel together on purpose: a call exempt from
+    /// the gap it would otherwise wait out has not occupied the GPU in the way
+    /// the gap is measured against, so it has nothing to make the next caller
+    /// wait for.
+    async fn acquire(&self, paced: bool) -> BackgroundPermit<'_> {
         // The turn is taken before the wait rather than after it, so whoever
         // holds it re-reads the cooldown once the call ahead has finished.
         // Checking first and taking the turn afterwards would let every waiter
@@ -87,6 +118,11 @@ impl InferenceGate {
                 if st.interactive > 0 {
                     resumed.as_mut().enable();
                     None
+                } else if !paced {
+                    // Nothing to serve. The turn is already held, and yielding
+                    // to the lease above is the whole of what a light call waits
+                    // for.
+                    break;
                 } else {
                     let now = Instant::now();
                     match st.last_finished.map(|t| t + self.cooldown) {
@@ -105,6 +141,7 @@ impl InferenceGate {
         BackgroundPermit {
             gate: self,
             _turn: turn,
+            paced,
         }
     }
 
@@ -129,6 +166,9 @@ impl InferenceGate {
 pub struct BackgroundPermit<'a> {
     gate: &'a InferenceGate,
     _turn: SemaphorePermit<'a>,
+    /// Whether this call starts a cooldown when it ends. False for a light
+    /// call, which served none going in.
+    paced: bool,
 }
 
 impl BackgroundPermit<'_> {
@@ -136,7 +176,9 @@ impl BackgroundPermit<'_> {
     /// passes on at the moment the call ended rather than whenever the caller
     /// got around to saying so.
     pub fn finished(self) {
-        self.gate.call_finished();
+        if self.paced {
+            self.gate.call_finished();
+        }
     }
 }
 
@@ -278,6 +320,70 @@ mod tests {
         let released = tokio::time::Instant::now();
         let acquired = second.await.unwrap();
         assert_eq!(acquired - released, Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_light_call_does_not_serve_the_cooldown() {
+        // Embedding is a 300M encoder next to a 9B generation. It takes its
+        // turn, but the gap in front of the heavy calls is not its to serve.
+        let g = gate(600);
+        g.call_finished();
+        let started = tokio::time::Instant::now();
+        g.background_light().await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_light_call_does_not_start_a_cooldown_behind_it() {
+        // A call that never earned the gap must not impose it either: an embed
+        // batch between two generations would otherwise push the next one out.
+        let g = gate(600);
+        let permit = g.background_light().await;
+        permit.finished();
+        let started = tokio::time::Instant::now();
+        g.background().await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_light_call_still_takes_its_turn() {
+        // Exempt from the gap, not from the one-at-a-time. The batch and the
+        // generation share a GPU, and that is the half of the gate that bounds
+        // load rather than spacing it.
+        let g = gate(0);
+        let heavy = g.background().await;
+
+        let g2 = Arc::clone(&g);
+        let light = tokio::spawn(async move {
+            g2.background_light().await;
+        });
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(
+            !light.is_finished(),
+            "an embed batch ran alongside a generation"
+        );
+
+        heavy.finished();
+        light.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_light_call_still_yields_to_someone_waiting_on_ask() {
+        let g = gate(0);
+        let lease = g.interactive();
+        let g2 = Arc::clone(&g);
+        let light = tokio::spawn(async move {
+            g2.background_light().await;
+        });
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(
+            !light.is_finished(),
+            "an embed batch ran while an ask was in flight"
+        );
+
+        drop(lease);
+        light.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

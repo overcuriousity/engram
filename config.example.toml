@@ -614,11 +614,19 @@ prime = false
 # One gap in front of every inference call, whatever its role. The roles share
 # one GPU, so a per-role cooldown could not bound total load.
 [pacing]
-# Minimum seconds between the end of one background call and the start of the
-# next, and only one background call runs at a time however many workers are
+# Minimum seconds between the end of one background generation and the start of
+# the next, and only one background call runs at a time however many workers are
 # configured, so this is the gap between calls rather than per worker. Zero
 # disables pacing. A question asked through `ask` ignores it: someone is
 # waiting, and the pacer is there to protect the GPU from batch work.
+#
+# Embedding ignores it as well, for the opposite reason. It still takes its
+# turn — a batch never runs alongside a generation, which is what actually
+# bounds a shared GPU — but it serves no gap and starts none. The gap is sized
+# against a generation; an encoder answering a batch of 32 in about a second is
+# not one, and pacing it spends nearly the whole budget on the one role that
+# needs no protecting. At `synthesis = "earned"`, where capture generates
+# nothing at all, that was most of what this setting did.
 cooldown_secs = 0
 
 [capture]
