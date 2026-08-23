@@ -1,7 +1,7 @@
 # The box is the file's annotation, and an annotation is findable — Design
 
 Date: 2026-08-23
-Status: draft
+Status: implemented (2026-08-23) — §3 corrected during implementation; see “What changed” at the end
 Touches `src/core/ingest.rs`, `src/infer/prompt.rs`, `assets/app.js`,
 `src/web/templates/workspace.html`.
 No new endpoint, no new table, no new model call, no change to any of the three
@@ -59,7 +59,7 @@ One artifact, written at capture time, on the file's own corpus:
 | Field | Value | Why |
 |---|---|---|
 | `corpus_id` | the file's | The note points at the file; deleting the file takes it |
-| `provenance` | `Captured` | A person typed it. Not `Passage`: it is no slice of the document |
+| `provenance` | `Note` | A new variant. See “What changed” — `Captured` did not survive implementation |
 | `corpus_span` | `None` | **The load-bearing choice.** See below |
 | `segment_idx` | `None` | It belongs to no window |
 | `ordinal` | `0` | Renumbered to 0 anyway; see below |
@@ -77,7 +77,7 @@ invariant — every artifact reads beside the lines it came from — only ever
 covered artifacts that *claim* a span. A span-less artifact claims none, and is
 honest: it is about the file, not from it.
 
-**Ordinals need no change at all.** `renumber_artifacts` orders by
+**Ordinals need no change at all.** (This held.) `renumber_artifacts` orders by
 `COALESCE(segment_idx, 0), ordinal, rowid` (`artifacts.rs:918`). The note has
 `segment_idx = None` → sorts as segment 0; `ordinal = 0`; and it was inserted
 before any passage, so its `rowid` is lowest. It lands at ordinal 0, first in
@@ -255,3 +255,47 @@ Front end: exercised by hand — the automated suite does not drive `app.js`.
   goes with it.
 - **A photo still waits for Capture.** The camera handing back a file stages it;
   it does not upload.
+
+
+---
+
+## 10. What changed during implementation
+
+Two things this spec asserted did not survive contact. Both were found by the
+tests it asked for, and both are now in the code.
+
+**`segment_idx: None` was not a free marker.** The column already means
+something for a window-less row: *debris from an older segmentation*.
+`artifact_ids_for_segment` (`src/store/artifacts.rs:884`) matches
+`segment_idx = ? OR segment_idx IS NULL` deliberately, so the sweep before a
+window rewrite would have deleted the note — and, worse, `passages.rs:159`
+read window 0 as already written and **skipped every passage**. A file
+captured with an annotation was never chunked at all. A sentinel index instead
+of `NULL` fails the other way: `upsert_segments`
+(`src/store/segments.rs:115-121`) refuses to segment a corpus any artifact owns
+a window in. Provenance could not distinguish it either —
+`write_segment_artifacts` writes through `insert_artifacts`, whose default is
+`Captured`.
+
+So there is a fourth `Provenance`: `Note`. The distinction lives in the field
+that means *what kind of row is this*, and the two queries above exclude it.
+`renumber_artifacts` needed no change — that half of §3 held exactly as
+written.
+
+**`settle_corpus` read "nothing left to embed" as "finished".** That is only
+true for a source whose windows have been written: `synthesize::finish` sets
+`embedding` *before* arming the job. §3 arms the note's embed at the door
+instead, so the note embedding alone would have found nothing else pending and
+reported a PDF `ready` before it was extracted — and walked a parked `failed`
+scan forward to `ready` on the way past. It now returns early unless the corpus
+is `embedding` or `partial`. The bug was latent before this work: nothing could
+arm an embed outside that window, so nothing could reach it.
+
+**Two effects accepted rather than fixed.** A note is `in_results()`, so it is
+eligible for dedupe and merge like any other captured text — two identical
+notes on two files can consolidate. And `Provenance::parse` maps an unknown
+string to `Captured`, so a `note` row read by an older binary is swept as
+debris: this is forward-safe, not rollback-safe.
+
+**One §7 sketch was wrong about the DOM.** The staged file sits *below* the
+box, not above it. Nothing was moved; the mockup drew it the other way round.

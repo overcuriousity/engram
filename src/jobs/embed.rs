@@ -102,9 +102,12 @@ pub async fn run_with_limit(core: &Core, artifact_id: &str, limit: usize) -> Res
         return split_oversize(core, &chunk, limit, false).await;
     }
 
-    // Paced like every other inference call. `split_into_artifact_jobs` can
-    // leave hundreds of these behind for one document.
-    let permit = core.gate.background().await;
+    // Takes its turn like every other inference call, and serves no cooldown:
+    // `background_light` is what an encoder gets. `split_into_artifact_jobs`
+    // can leave hundreds of these behind for one document, and at thirty
+    // seconds apiece that was hours of gap in front of a call that answers in
+    // about a second.
+    let permit = core.gate.background_light().await;
     let outcome = embed_batch(core, std::slice::from_ref(&chunk)).await;
     permit.finished();
     match outcome {
@@ -184,7 +187,7 @@ pub async fn run_corpus_with_limit(core: &Core, corpus_id: &str, limit: usize) -
         return settle_corpus(core, corpus_id).await;
     }
 
-    let permit = core.gate.background().await;
+    let permit = core.gate.background_light().await;
     let outcome = embed_batch(core, &batch[..take]).await;
     permit.finished();
     match outcome {
@@ -431,7 +434,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
         splittable,
         "oversize chunk has no split available; embedding as-is"
     );
-    let permit = core.gate.background().await;
+    let permit = core.gate.background_light().await;
     let embedded = core
         .embedder
         .embed_documents(std::slice::from_ref(&doc_of(chunk)))
@@ -534,7 +537,7 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
         title: chunk.title.clone(),
         text: head,
     };
-    let permit = core.gate.background().await;
+    let permit = core.gate.background_light().await;
     let embedded = core
         .embedder
         .embed_documents(std::slice::from_ref(&input))
@@ -905,12 +908,27 @@ async fn upsert_with_current_lifecycle(core: &Core, mut points: Vec<VectorPoint>
 /// Advance the parent source once no chunk is still pending: `ready` if every
 /// chunk embedded, `partial` if any gave up.
 pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
+    // "Nothing left to embed" only means "finished" for a source whose windows
+    // have already been written: `finish` sets `embedding` — or `partial` —
+    // before it arms the job, so those two are the states this reads. Every
+    // other one means the document has not been read yet, and an empty pending
+    // count says nothing about it.
+    //
+    // A capture's note is armed for embedding at the door, long before any of
+    // that. Without this guard the note embedding on its own would find
+    // nothing else pending and report a PDF `ready` that had not been
+    // extracted, or walk a parked `failed` scan forward to `ready` on the way
+    // past.
+    let was = core.store.get_corpus(corpus_id).await?.status;
+    if !matches!(was, CorpusStatus::Embedding | CorpusStatus::Partial) {
+        return Ok(());
+    }
     if core.store.pending_embed_count(corpus_id).await? > 0 {
         return Ok(());
     }
     let status = if core.store.failed_embed_count(corpus_id).await? > 0 {
         CorpusStatus::Partial
-    } else if core.store.get_corpus(corpus_id).await?.status == CorpusStatus::Partial {
+    } else if was == CorpusStatus::Partial {
         // A source with a window the model refused is already partial. Its
         // chunks embedding cleanly does not fill the hole those lines left,
         // and reporting `ready` would hide it.
@@ -1795,6 +1813,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(seq, 1, "the re-armed batch stayed at the front");
+    }
+
+    #[tokio::test]
+    async fn an_embed_batch_does_not_serve_the_generation_cooldown() {
+        // The gap is configured against a generation. Serving it in front of a
+        // 300M encoder spends the pacer's whole budget on the one role that
+        // needs no protecting — and at `synthesis = "earned"` that is most of
+        // what it does.
+        //
+        // Real time rather than a paused clock: the measured section is a job
+        // that talks to the store, and an auto-advancing clock times sqlx's
+        // pool acquire out instead of measuring anything. Thirty seconds of
+        // cooldown against a sub-second budget is a wide enough margin that no
+        // scheduling noise can blur the two answers.
+        let mut core = crate::core::test_support::test_core().await;
+        core.gate = std::sync::Arc::new(crate::infer::gate::InferenceGate::new(
+            std::time::Duration::from_secs(30),
+        ));
+        let (src, _ids) = seed(&core, &["one", "two"]).await;
+        // A generation has just ended, so a paced call would serve the gap.
+        core.gate.call_finished();
+
+        let started = std::time::Instant::now();
+        run_corpus(&core, &src).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the embed job served a generation's cooldown: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_embed_batch_does_not_hold_the_next_generation_off() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.gate = std::sync::Arc::new(crate::infer::gate::InferenceGate::new(
+            std::time::Duration::from_secs(600),
+        ));
+        let (src, _ids) = seed(&core, &["one", "two"]).await;
+        run_corpus(&core, &src).await.unwrap();
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        core.gate.background().await;
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
     }
 
     async fn seed(core: &crate::core::Core, texts: &[&str]) -> (String, Vec<String>) {

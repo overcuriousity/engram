@@ -2,6 +2,7 @@ use crate::core::Core;
 use crate::error::Result;
 use crate::infer::budget::segment_tokens;
 use crate::infer::split::split_into_segments;
+use crate::store::artifacts::Provenance;
 use crate::store::corpora::CorpusStatus;
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
@@ -120,13 +121,17 @@ pub async fn recompute_coverage(core: &Core, corpus_id: &str) -> Result<f64> {
         .collect();
 
     // A corpus segmented before per-segment windows existed has no ranges to
-    // group by; measure it as one.
+    // group by; measure it as one. The note is left out here as the per-window
+    // branch above leaves it out: it was not made from the source, so a note
+    // that quotes the document would report its lines as covered by an artifact
+    // that does not exist.
     let made = if made.is_empty() {
         vec![(
             1,
             src.raw_text.lines().count() as i64,
             chunks
                 .iter()
+                .filter(|c| c.provenance != Provenance::Note)
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -150,7 +155,12 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
         .iter()
         .any(|w| !matches!(w.state, SegmentState::Done | SegmentState::Verbatim));
     let chunks = core.store.artifacts_for_corpus(corpus_id).await?;
-    if chunks.is_empty() {
+    // The note does not count towards having read anything: it is the
+    // operator's own sentence, attached at the door before a word of the
+    // document was looked at. Counting it leaves a scan that yielded nothing
+    // measuring near-zero coverage and settling `ready` — a document reported
+    // as read when none of it was.
+    if chunks.iter().all(|c| c.provenance == Provenance::Note) {
         core.store
             .set_corpus_status(corpus_id, CorpusStatus::Failed)
             .await?;
@@ -1355,6 +1365,86 @@ Then run sync.";
         assert_eq!(
             rows[0].provenance,
             crate::store::artifacts::Provenance::Passage
+        );
+    }
+
+    /// A note is the operator's own sentence, not something read out of the
+    /// document. Counting it as a chunk tells a person a scan was read when
+    /// nothing of it was.
+    #[tokio::test]
+    async fn a_document_that_produced_only_its_note_still_parks_as_failed() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(
+                crate::core::ingest::Capture::new("a page nothing could be made of", "upload")
+                    .with_note(Some("the survey nobody can OCR".into())),
+            )
+            .await
+            .unwrap();
+        plan(&core, &out.id).await.unwrap();
+        sqlx::query("UPDATE segments SET state = 'done' WHERE corpus_id = ?")
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        finish(&core, &out.id).await.unwrap();
+
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::Failed,
+            "a corpus holding nothing but its note was reported as read"
+        );
+    }
+
+    /// A corpus segmented before per-window segments existed is measured as one
+    /// window over all its chunks. The note is not one of them: it was not made
+    /// from the source, and one that quotes the document reports lines as
+    /// covered that no artifact holds.
+    #[tokio::test]
+    async fn the_windowless_coverage_fallback_does_not_count_the_note() {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus(
+                "quarterly revenue projections attached\nthe Reinhardt lease expires November",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        let new = |text: &str| crate::store::artifacts::NewArtifact {
+            ordinal: 0,
+            text: text.to_string(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        };
+        core.store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[new("quarterly revenue projections attached")],
+                crate::store::artifacts::Provenance::Captured,
+            )
+            .await
+            .unwrap();
+        core.store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[new("the Reinhardt lease expires November")],
+                crate::store::artifacts::Provenance::Note,
+            )
+            .await
+            .unwrap();
+
+        let cov = recompute_coverage(&core, &src.id).await.unwrap();
+
+        assert_eq!(
+            cov, 0.5,
+            "the note was measured as if it had been read out of the document"
         );
     }
 }

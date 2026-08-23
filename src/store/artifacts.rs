@@ -81,6 +81,11 @@ pub enum Provenance {
     Captured,
     Merged,
     Synthesized,
+    /// What a person typed about a file when they captured it. Source text
+    /// like `Captured`, but owned by no window: it is *about* the document and
+    /// is no line *of* it, so the two queries that treat a window-less row as
+    /// debris from an older segmentation must leave it alone.
+    Note,
 }
 
 impl Provenance {
@@ -90,6 +95,7 @@ impl Provenance {
             Provenance::Captured => "captured",
             Provenance::Merged => "merged",
             Provenance::Synthesized => "synthesized",
+            Provenance::Note => "note",
         }
     }
     pub fn parse(s: &str) -> Provenance {
@@ -97,6 +103,7 @@ impl Provenance {
             "passage" => Provenance::Passage,
             "merged" => Provenance::Merged,
             "synthesized" => Provenance::Synthesized,
+            "note" => Provenance::Note,
             _ => Provenance::Captured,
         }
     }
@@ -876,13 +883,19 @@ impl Store {
     /// the new segmentation beside the old one instead of replacing it. They
     /// are swept by whichever window writes first, and there are none left by
     /// the second.
+    ///
+    /// Except a `note`, which is window-less because it belongs to no window
+    /// and not because it is left over from an older split. Sweeping it made
+    /// the first window see the corpus as already written and skip every
+    /// passage, so a captured file with an annotation was never chunked at
+    /// all.
     pub async fn artifact_ids_for_segment(
         &self,
         corpus_id: &str,
         segment_idx: i64,
     ) -> Result<Vec<String>> {
         let rows = sqlx::query(
-            "SELECT id FROM artifacts WHERE corpus_id = ?
+            "SELECT id FROM artifacts WHERE corpus_id = ? AND provenance != 'note'
                AND (segment_idx = ? OR segment_idx IS NULL)
              ORDER BY ordinal",
         )

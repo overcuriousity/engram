@@ -3974,10 +3974,6 @@ mod tests {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui", &cookie).await;
         assert!(html.contains("image/*"), "the picker accepts images");
-        assert!(
-            html.contains(r#"name="note""#),
-            "the context field is there"
-        );
 
         let (app, cookie) =
             app_for(crate::core::test_support::test_core_without_vision().await).await;
@@ -4014,6 +4010,73 @@ mod tests {
         assert!(
             trigger_of(&html).contains("load"),
             "and the results are fetched on load: {html}"
+        );
+    }
+
+    /// Typing is the third verb, and `input` is what it fires. It was `keyup`,
+    /// which a paste made with the mouse — the context menu, the middle button,
+    /// the phone's own bubble — does not fire at all; and the box's `change` is
+    /// scoped away to the chip row on purpose, because it also fires on the
+    /// blur of the very click that opens a result. So nothing was left to
+    /// notice a pasted paragraph: the box grew, the verbs lit up, and the rail
+    /// under it did not move. On a page whose placeholder ends "paste anything
+    /// worth keeping", that is the hole this test exists to keep shut.
+    ///
+    /// The filter is the other half. `input` fires for every keystroke inside
+    /// an IME composition, so without it a Japanese or Chinese query embedded
+    /// each half-formed romaji fragment on the way to the word.
+    #[tokio::test]
+    async fn a_paste_searches_because_typing_is_an_input_event() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core.clone()).await;
+        let html = get(&app, "/ui/search", &cookie).await;
+        let trigger = trigger_of(&html);
+
+        assert!(
+            trigger.contains("input[!event.isComposing] changed delay:120ms from:textarea[name=q]"),
+            "the box does not search on `input`: {trigger}"
+        );
+        assert!(
+            !trigger.contains("keyup"),
+            "`keyup` is back, and a mouse paste searches for nothing: {trigger}"
+        );
+    }
+
+    /// What the box says it is, to something that is not looking at it.
+    ///
+    /// A placeholder is not a name — a screen reader may ignore it as one, and
+    /// it is gone by the second keystroke — so the one control the page is
+    /// built around announced itself as an unlabelled text field. And the rail
+    /// is replaced under a box that keeps its focus, so twelve results, or
+    /// none, arrived in silence; `#rail-head` is the only part of it that
+    /// survives every swap, and what it already holds is the announcement.
+    #[tokio::test]
+    async fn the_box_has_a_name_and_the_rail_says_what_it_found() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core.clone()).await;
+        let html = get(&app, "/ui/search", &cookie).await;
+
+        assert!(
+            html.contains(r#"aria-label="Search, ask, or capture""#),
+            "the box has no accessible name: {html}"
+        );
+        // The long sentence names all three verbs and the phone has no room
+        // for it: one row at that width clips it, and the hint that would have
+        // carried the rest is `display: none` there.
+        assert!(
+            html.contains("data-placeholder-narrow="),
+            "nothing says what the box is for on a phone: {html}"
+        );
+        let head = html
+            .split(r#"id="rail-head""#)
+            .nth(1)
+            .expect("the rail's heading");
+        assert!(
+            head.split('>')
+                .next()
+                .unwrap()
+                .contains(r#"aria-live="polite""#),
+            "a search announces nothing: {head}"
         );
     }
 
@@ -4214,7 +4277,6 @@ mod tests {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui/capture", &cookie).await;
         assert!(html.contains("image/*"), "picker accepts images");
-        assert!(html.contains("name=\"note\""), "the context field is there");
 
         let (app, cookie) =
             app_for(crate::core::test_support::test_core_without_vision().await).await;
@@ -8426,35 +8488,33 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/capture").await;
 
-        let note = page
-            .find(r#"name="note""#)
-            .expect("the note input is on the page");
+        // There is one field now. A staged file makes the box that file's
+        // note, which is what took the second one away: two boxes on screen
+        // and no rule saying which one the words in front of you belong to.
+        assert!(
+            !page.contains(r#"name="note""#),
+            "the note is the box, not a field of its own: {page}"
+        );
+        let box_at = page
+            .find(r#"name="q""#)
+            .expect("the one box is on the page");
+        let staged = page
+            .find(r#"id="staged""#)
+            .expect("a file waits to be sent rather than going on arrival");
         // The verb, not the nav link of the same name above it.
         let button = page
             .find(r#"data-verb="capture""#)
             .expect("the capture verb is there");
         assert!(
-            note < button,
-            "the note field must precede the button that sends it: {page}"
+            box_at < button && staged < button,
+            "the button must come after everything it sends: {page}"
         );
 
         // The box's own form is a GET that searches on every keystroke. The
-        // staged file and its note sit inside it now, so the serialisation is
-        // pinned to the two fields the search actually takes — without this,
-        // every keystroke carries a filename and a note into the query string.
+        // staged file sits inside it, so the serialisation is pinned to the two
+        // fields the search actually takes — without this, every keystroke
+        // carries a filename into the query string.
         assert!(page.contains(r#"hx-params="q,category""#), "{page}");
-
-        // The order the work happens in: the file arrives and is held, the note
-        // says what it is, the button sends both. A photo taken on a phone used
-        // to upload the instant the camera handed it back, which put the note
-        // after the send and made it unfillable.
-        let staged = page
-            .find(r#"id="staged""#)
-            .expect("a file waits to be sent rather than going on arrival");
-        assert!(
-            staged < note,
-            "what is waiting must sit above the note describing it: {page}"
-        );
     }
 
     #[tokio::test]

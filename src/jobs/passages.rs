@@ -452,4 +452,36 @@ mod tests {
                 .unwrap()
         );
     }
+
+    /// The note is written at capture and the passages arrive later, each
+    /// numbered from 0 within its own window. Renumbering has to put the note
+    /// first and push the document down by one — with no change to this
+    /// writer, which is the whole reason the note carries no `segment_idx`.
+    #[tokio::test]
+    async fn a_note_sorts_ahead_of_the_document_it_annotates() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(
+                crate::core::ingest::Capture::new(
+                    "# Heading\n\nThe body of the uploaded document.",
+                    "upload",
+                )
+                .with_note(Some("printout from the hallway scanner".into())),
+            )
+            .await
+            .unwrap();
+
+        capture_verbatim(&core, &out.id).await.unwrap();
+
+        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(all.len() >= 2, "the note and at least one passage");
+        assert_eq!(all[0].text, "printout from the hallway scanner");
+        assert_eq!(all[0].ordinal, 0);
+        assert_eq!(all[0].corpus_span, None);
+        assert_eq!(all[1].ordinal, 1, "ordinals stay continuous");
+        assert!(
+            all[1].corpus_span.is_some(),
+            "a passage still anchors to its lines"
+        );
+    }
 }

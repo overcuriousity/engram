@@ -890,26 +890,32 @@ mod tests {
         );
     }
 
-    /// One press can be two captures — a staged file and the text above it —
-    /// and both answer in `#capture-result`. They used to be started together
-    /// and write it whole, so whichever request landed last wiped the other's
-    /// line: with text over a photo the text's receipt vanished, and an upload
-    /// that failed had its reason overwritten by a success beside it.
+    /// A press was once two captures — a staged file and the text above it —
+    /// and both answered in `#capture-result`, so whichever request landed
+    /// last wiped the other's line. The text above a file is that file's note
+    /// now, so one press is one capture and writes one receipt. What is
+    /// guarded here is that it stayed one: a second sender reaching this node
+    /// is the bug the appending swap was added for.
     #[test]
-    fn a_file_and_text_in_one_press_each_keep_their_receipt() {
+    fn a_press_with_a_file_is_one_capture_carrying_the_box_as_its_note() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
         assert!(
-            js.contains("postText().then(function () { if (file) send(file); })"),
-            "the two acts are sequenced, not raced"
+            js.contains("send(file, note);"),
+            "the file goes with the box's text as its note"
         );
         assert!(
-            js.contains("swap: 'beforeend'"),
-            "the text capture appends its line rather than replacing the node"
+            !js.contains("if (file) send(file)"),
+            "and not beside a second capture of those same words"
+        );
+        assert!(
+            js.contains("var note = box.value.trim();"),
+            "read at press time, so the order the file and the words arrived \
+             in does not matter"
         );
         assert!(
             js.contains("function clearReceipts()"),
-            "and the node is cleared once per press instead"
+            "the node is cleared once per press"
         );
     }
 
@@ -939,11 +945,13 @@ mod tests {
             .split_once(":not(.has-selection):not(.answering)")
             .expect("the idle 40rem rail is not held while an answer is being written")
             .0;
-        // Bounded to the widths that have two columns. Three `:not()`s outrank
-        // the single class the one-up block sets its track list with, and
-        // specificity does not care that the two rules answer different widths
-        // — unbounded, this two-column rule won on a narrow screen too, and
-        // left the pane beside a 40rem rail twelve pixels wide.
+        // Bounded to the widths that have two columns. The two chained
+        // `:not()`s outrank the single class the one-up block sets its track
+        // list with — chained rather than `:not(.has-selection, .answering)`,
+        // which would count one class and not two — and specificity does not
+        // care that the two rules answer different widths: unbounded, this
+        // two-column rule won on a narrow screen too, and left the pane beside
+        // a 40rem rail twelve pixels wide.
         assert!(
             idle.rsplit_once("@container")
                 .is_some_and(|(_, open)| open.trim_start().starts_with("shell (width > 60rem)")),
@@ -976,15 +984,22 @@ mod tests {
         assert!(!js.contains("cmdk"), "and so did everything it looked up");
     }
 
-    /// One act in flight. Pressing Ask disables the box, and disabling the box
-    /// is what disables search-while-type: a disabled input fires no `keyup`,
-    /// so the form's `hx-trigger` goes quiet with no second mechanism and no
-    /// flag to keep in sync.
+    /// One act in flight. Pressing Ask makes the box read-only, and that is
+    /// what disables search-while-type: nothing can be typed or pasted into a
+    /// read-only box, so it fires no `input` and the form's `hx-trigger` goes
+    /// quiet with no second mechanism and no flag to keep in sync.
+    ///
+    /// Read-only and not `disabled`, which is what it was. `disabled` also
+    /// makes text unselectable and hands focus back to the body, so the
+    /// question being answered could not be copied out of the box holding it —
+    /// while `.box[readonly]` in the CSS goes to the trouble of keeping that
+    /// text legible, on the grounds that a box someone is waiting on is still
+    /// a box someone is reading.
     ///
     /// The re-enable belongs in `stop()` and nowhere else. Every exit already
     /// runs through it — the answer completing, the Stop button, and the
     /// transport error that `fail()` funnels into it. Put it on the `done`
-    /// handler instead and a dropped connection leaves the box disabled
+    /// handler instead and a dropped connection leaves the box read-only
     /// forever, with no way back but a reload.
     #[test]
     fn the_ask_disables_the_surface_and_only_stop_gives_it_back() {
@@ -1007,8 +1022,13 @@ mod tests {
             .1;
         let busy = &busy[..busy.find("\n    }").expect("setBusy() does not end")];
         assert!(
-            busy.contains("box.disabled"),
-            "setBusy does not disable the box, so typing still searches: {busy}"
+            busy.contains("box.readOnly"),
+            "setBusy does not silence the box, so typing still searches: {busy}"
+        );
+        assert!(
+            !busy.contains("box.disabled"),
+            "the box is disabled again, and the question cannot be selected \
+             out of it while it is being answered: {busy}"
         );
 
         // The other half: nothing else may re-enable it. A second caller is a
@@ -1017,6 +1037,78 @@ mod tests {
             js.matches("setBusy(false)").count(),
             1,
             "setBusy(false) is called from more than one place"
+        );
+    }
+
+    /// Both verbs, without a pointer. `/` reaches the box and nothing reached
+    /// back out of it: a hand that never left the keys had to find the mouse
+    /// to press the button it had just finished typing into.
+    ///
+    /// This is not the box inferring a verb from a newline, which is the rule
+    /// it is built on — Enter puts in a line break here and always will. The
+    /// chord is a second deliberate gesture, the same act as the button.
+    ///
+    /// Routed through the button and not the handler behind it, so everything
+    /// the button already knows stays true: an empty box or an ask in flight
+    /// leaves it disabled, and a disabled verb does nothing here either. Where
+    /// the install has no Ask there is no button, and the unshifted chord is
+    /// simply not a key.
+    #[test]
+    fn the_two_verbs_are_reachable_from_the_keys() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let chord = js
+            .split_once("if (e.key !== 'Enter'")
+            .expect("nothing commits the box from the keyboard")
+            .1;
+        let chord = &chord[..chord.find("\n    });").expect("the handler does not end")];
+        assert!(
+            chord.contains("e.shiftKey ? 'capture' : 'ask'"),
+            "the chord does not pick a verb: {chord}"
+        );
+        assert!(
+            chord.contains("verb.disabled") && chord.contains("verb.click()"),
+            "the chord goes around the button instead of pressing it: {chord}"
+        );
+    }
+
+    /// The box is `border-box` and `scrollHeight` is not: it measures the
+    /// content and the padding, never the 1px border on each edge. Set the
+    /// height straight from it and the box ends two pixels shorter than the
+    /// text it was measured from, every time — which with `overflow-y: auto`
+    /// is a live scrollbar on a box that has nothing to scroll. The cap is the
+    /// same mistake: ten lines of text *plus* the padding they sit in, or the
+    /// tenth line is the one the padding eats.
+    ///
+    /// And the height is a measurement of wrapped text, so it is wrong the
+    /// moment the box changes width. Bound to `input` alone it was only ever
+    /// correct at the width the last keystroke was typed at.
+    #[test]
+    fn the_box_measures_its_own_padding_and_remeasures_on_a_resize() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let grow = js
+            .split_once("function grow() {")
+            .expect("the box does not size itself")
+            .1;
+        let grow = &grow[..grow.find("\n    }").expect("grow() does not end")];
+        assert!(
+            grow.contains("box.offsetHeight - box.clientHeight"),
+            "grow() does not add the border back: {grow}"
+        );
+        assert!(
+            grow.contains("+ pad + border"),
+            "grow() sets a height that is not the box's own outside: {grow}"
+        );
+        assert!(
+            js.contains("window.addEventListener('resize', grow)"),
+            "a re-wrap at a new width leaves the height where the last keystroke put it"
+        );
+        assert!(
+            js.contains("document.fonts.ready.then(grow)"),
+            "the first measurement is of the fallback face, and nothing recomputes it"
         );
     }
 

@@ -135,6 +135,16 @@ mod tests {
             d.last_context()
         );
         assert!(d.last_context().contains("p.png"));
+        // The note captured with the photo is armed for embedding at the door,
+        // so it sits ahead of the synthesis in the queue. Both are queued; the
+        // hand-off this test is about is the second one.
+        let embed = core
+            .store
+            .claim_job()
+            .await
+            .unwrap()
+            .expect("the note's embed");
+        assert_eq!(embed.stage, Stage::Embed);
         let next = core
             .store
             .claim_job()

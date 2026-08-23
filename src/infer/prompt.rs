@@ -1310,9 +1310,14 @@ Rules:
 pub fn describe_context(metadata: &serde_json::Value) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(note) = metadata["note"].as_str().filter(|n| !n.trim().is_empty()) {
+        // The stored note is whole; this is the copy that costs tokens, and it
+        // leads the prompt — so it is the one place a long one does damage.
         lines.push(format!(
             "Context from the person who captured this: {}",
             note.trim()
+                .chars()
+                .take(crate::core::ingest::MAX_NOTE_CHARS)
+                .collect::<String>()
         ));
     }
     let mut facts: Vec<String> = Vec::new();
@@ -2255,6 +2260,22 @@ mod tests {
         let p = repair_prompt("{bad", "expected value at line 1");
         assert!(p.contains("expected value at line 1"));
         assert!(p.contains("{bad"));
+    }
+
+    /// The note leads the vision prompt, so an unbounded one would swamp the
+    /// description or overrun the call. This is now the only place the cap
+    /// still earns its keep — nothing stored is truncated any more.
+    #[test]
+    fn describe_context_bounds_the_note_it_spends_on_a_model_call() {
+        let long = "x".repeat(crate::core::ingest::MAX_NOTE_CHARS + 500);
+        let m = serde_json::json!({ "note": long });
+        let ctx = describe_context(&m);
+        let kept = ctx
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches("Context from the person who captured this: ");
+        assert_eq!(kept.chars().count(), crate::core::ingest::MAX_NOTE_CHARS);
     }
 
     #[test]

@@ -22,6 +22,22 @@
   padding: 0 1rem 4rem;
 }
 
+.regions {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+  grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
+}
+
+/* A grid child defaults to `min-width: auto`, which resolves to min-content:
+   one unwrappable line of source widens its column instead of scrolling inside
+   it, and takes the document's width with it. */
+.regions > * { min-width: 0; }
+
+.region-bar { grid-column: 1 / -1; }
+.region-rail { grid-column: rail; }
+.region-focus { grid-column: focus; }
+
 /* The three-up workspace fills the window instead of ending wherever its
    tallest pane happens to stop. `.shell` takes the space under the top row and
    hands it to the region grid, which is what lets one height reach all three
@@ -51,32 +67,16 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    content and the window's bottom meant nothing. This is the pin, and it needs
    a definite height to divide.
 
-   62rem is `@container shell (max-width: 60rem)` written as a media query, and
+   62rem is `@container shell (width <= 60rem)` written as a media query, and
    the arithmetic is exact rather than approximate: `.shell` is `min(110rem,
    100vw)` wide less its own `1rem` of padding on each side, so a 60rem
    container is a 62rem viewport. It has to be a media query — `body` is
    outside the container it would have to ask about. */
-@media (min-width: 62rem) {
+@media (width >= 62rem) {
   body:has(.regions-rail-focus-source) { height: 100dvh; overflow: hidden; }
   /* The foot under a page that ends. This one ends at the window. */
   body:has(.regions-rail-focus-source) > .shell { padding-bottom: 1rem; }
 }
-
-.regions {
-  display: grid;
-  gap: 1rem;
-  align-items: start;
-  grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
-}
-
-/* A grid child defaults to `min-width: auto`, which resolves to min-content:
-   one unwrappable line of source widens its column instead of scrolling inside
-   it, and takes the document's width with it. */
-.regions > * { min-width: 0; }
-
-.region-bar { grid-column: 1 / -1; }
-.region-rail { grid-column: rail; }
-.region-focus { grid-column: focus; }
 
 /* One region. Two of them, and the difference is what the region holds rather
    than how wide the page fancies being — which is the distinction the three
@@ -98,27 +98,6 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
 .regions-center > * { grid-column: 1 / -1; }
 .regions-table > * { grid-column: 1 / -1; }
 
-/* Two regions: what the page is for, and what it has already done with it.
-   Prose keeps its measure on the left — a paste box and an answer are both
-   prose — and the aside takes what is left of the window.
-
-   This exists because the prose pages were leaving that remainder empty. At
-   1690px a 68rem column anchored left is six hundred pixels of nothing beside
-   it, and every one of those pages had a second thing already on it, stacked
-   underneath or folded into a scroller: Capture's Recent, Ask's excerpts. The
-   width was never the problem. Not using it was.
-
-   The aside has a floor rather than `minmax(0, 1fr)`, because an `fr` track
-   takes what is left after a 68rem column and what is left can be nothing. At
-   an 81rem shell — a maximised laptop window — that left a 3rem gutter holding
-   the Recent list: every title truncated to one letter, the timestamp column
-   wider than the name beside it. Under the floor the reading column gives way
-   instead, which is the one that has room to. */
-.regions-focus-aside {
-  grid-template-columns: [focus] minmax(0, 68rem) [aside] minmax(24rem, 1fr);
-}
-.region-aside { grid-column: aside; }
-
 /* An artifact and where it came from, as one `.split` in a single full-width
    region. Not prose and not a table: the split decides its own two columns,
    and this is the same pair the search pane renders — so it gets the same
@@ -133,7 +112,7 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    that split having room to be two columns instead of two stacked halves.
 
    So the rail gives some back rather than the grid growing a column. */
-@container shell (min-width: 90rem) {
+@container shell (width >= 90rem) {
   .regions-rail-focus-source { grid-template-columns: [rail] 19rem [focus] minmax(0, 1fr); }
 }
 
@@ -151,9 +130,12 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    written into the column beside it.
 
    Inside a container query because of what it is: a claim about how to divide
-   two columns, which is nonsense where there is only one. Three `:not()`s
-   outrank the single class the one-up block below sets `grid-template-columns`
-   with, and specificity does not care that the two rules answer different
+   two columns, which is nonsense where there is only one. Chained rather than
+   `:not(.has-selection, .answering)`: the chain counts both classes and the
+   list counts one, and the three classes are what outrank the `.regions.reading`
+   track list in 40-workspace.css, which is a later file at equal weight. The
+   chain also outranks the single class the one-up block below sets
+   `grid-template-columns` with, and specificity does not care that the two rules answer different
    widths — so an idle narrow screen kept this two-column track list, and the
    pane it left beside a 40rem rail was twelve pixels wide. Bounded here rather
    than fought there: the one-up block says what one column is, and this says
@@ -167,7 +149,7 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
 /* One-up: one region, the rest a navigation away. This is the phone, and it is
    equally a half-width desktop window — which is the whole reason it is a
    container query and not a device breakpoint. */
-@container shell (max-width: 60rem) {
+@container shell (width <= 60rem) {
   .regions { grid-template-columns: minmax(0, 1fr); }
   .regions > * { grid-column: 1 / -1; }
   .regions.has-selection .region-rail { display: none; }

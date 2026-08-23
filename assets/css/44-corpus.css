@@ -9,6 +9,13 @@
    source. */
 .bands { display: flex; flex-direction: column; gap: 0.75rem; }
 .band { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+/* One column on a narrow screen: the source first, then what came of it. Here
+   rather than in 40-workspace.css, where it used to be and never applied: both
+   selectors are a single class, a media query adds no specificity of its own,
+   and this file concatenates after that one — so the two-column rule above won
+   at every width, including a phone. 62rem is the media-query spelling of the
+   60rem container the rest of the layout asks about. */
+@media (width <= 62rem) { .band { grid-template-columns: 1fr; } }
 .band > * { min-width: 0; }
 .band-src {
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
