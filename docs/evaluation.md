@@ -135,10 +135,10 @@ anything.** Keep the whole line when you write a result down.
 
 | Knob | Variable | What it moves | Watch |
 |---|---|---|---|
-| Recency weight | `ENGRAM__VECTOR__RECENCY_WEIGHT` | How much age counts against a hit. `0.0` turns it off. Fused ranks sit between ~0.1 and 1.0, so the default breaks near-ties without overturning a clear match. | MRR |
+| Recency weight *(swept at runtime — see 4½)* | `ENGRAM__VECTOR__RECENCY_WEIGHT` | How much age counts against a hit. `0.0` turns it off. Fused ranks sit between ~0.1 and 1.0, so the default breaks near-ties without overturning a clear match. | MRR |
 | Recency half-life | `ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS` | Age at which a hit has lost half that boost. | MRR |
 | Pinned boost | `ENGRAM__VECTOR__PINNED_BOOST` | Extra score for a `pinned` tag, so a decision you made beats the decay curve. | MRR |
-| Per-source cap | `ENGRAM_EVAL_CAP` (a number, or `none`) | Chunks one document may contribute. Default 3; `none` lets one document fill the list. Raising it usually lifts recall and costs diversity. | recall@10 |
+| Per-source cap *(swept at runtime — see 4½)* | `ENGRAM_EVAL_CAP` here, `[vector] per_source_cap` in the server | Chunks one document may contribute. Default 3; `none` (`0` in the file) lets one document fill the list. Raising it usually lifts recall and costs diversity. | recall@10 |
 | Reranker | `[infer.rerank]` present or absent in `config.toml` | A cross-encoder over the candidate pool. The settings line reports `rerank on/off`. | MRR first, recall second |
 | Embedding model | `ENGRAM__INFER__EMBED__MODEL` (+ `DIM`) | The whole retrieval geometry. Needs `--reindex` against a real base; the harness reindexes its own collection anyway. | both |
 | Embed templates | `ENGRAM__INFER__EMBED__QUERY_TEMPLATE`, `..._DOCUMENT_TEMPLATE` | The envelope each side is embedded in. Asymmetric models care a great deal. | both |
@@ -163,6 +163,37 @@ excerpts, and `dropped` on the answer says how many).
 5. Write the numbers into the commit message that moves the default. That is
    what the rule at the top asks for, and a commit that changes ranking without
    them is the thing this whole apparatus exists to prevent.
+
+---
+
+## 4½. Tuning at runtime
+
+The two cheap knobs tune themselves. Once fifty judgements exist
+(`feedback.tune.min_judgements`), every tenth further verdict
+(`feedback.tune.resweep_after`) re-runs a background sweep of recency weight ×
+per-source cap over every judged pair, against the live index. It needs no
+export, no frozen corpus and no re-embedding: both knobs only reorder what
+retrieval already returned, so a whole grid is seconds of vector reads. Like
+the assign search, it reads and never records — `Door::Judge`, `mark: false`.
+
+A candidate is offered only when **at least two pairs are net better and
+neither aggregate is worse**. That floor is the whole safety of running it
+automatically: on fifty pairs a single flipped pair is two points of recall,
+and an aggregate delta alone cannot tell one from a real improvement. Ties keep
+the current values.
+
+The recommendation appears on `/ui/judge` with the pairs that moved, and
+applying it rewrites `config.toml` in place — comments intact — and swaps the
+running parameters in one step. Every sweep is recorded in `eval_runs` with the
+settings that produced it, recommended or not, which is section 4's rule about
+never writing a number without its configuration, made structural rather than
+asked for.
+
+What this does **not** replace: the harness below stays the instrument for
+everything a runtime sweep cannot reach — the embedding model and its
+templates (they change the vector geometry, not the order over it), priming,
+pinning, the ask side, and any number that has to be comparable across months
+rather than against today's other candidates.
 
 ---
 
@@ -199,4 +230,6 @@ to run *something* and call the question answered.
 | `src/eval/metrics.rs` | `recall_at`, `mrr`, and the ask metrics. |
 | `src/eval/export.rs` | `--export-eval`. |
 | `src/eval/claims.rs` | Literal extraction and claim support. |
-| `/ui/judge` | Where pairs come from. Its counter is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. |
+| `src/eval/sweep.rs` | The runtime sweep: the grid, the gate, and the job a verdict starts. See 4½. |
+| `src/store/eval_runs.rs` | Every sweep, with the settings that produced it and whether it was applied. |
+| `/ui/judge` | Where pairs come from, and where a sweep reports. Its counter is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. |

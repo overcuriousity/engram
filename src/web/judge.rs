@@ -20,13 +20,6 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 
-/// Judgements before the first parameter sweep can say anything.
-///
-/// Below this a proposal is noise: half a dozen queries cannot separate a real
-/// improvement from the quirks of half a dozen queries. The tuning plan replaces
-/// this constant with `feedback.tune.min_judgements`.
-pub const FIRST_SWEEP_AT: i64 = 50;
-
 /// Judgements before the miss list is worth opening.
 const MISS_LIST_AT: i64 = 10;
 
@@ -1437,14 +1430,14 @@ mod tests {
         // under the same grid give the same answer, at the cost of a grid of
         // searches per verdict.
         let (app, cookie, core, ids) = judge_app_tuned(3, &[], Some(1)).await;
-        for i in 0..2 {
+        for id in ids.iter().take(2) {
             let event = core.store.next_pending().await.unwrap();
             let Some(event) = event else { break };
             post(
                 &app,
                 &format!("/ui/judge/{}/hit", event.id),
                 &cookie,
-                &format!("artifact_id={}", ids[i]),
+                &format!("artifact_id={id}"),
             )
             .await;
             core.background.wait_idle().await;
