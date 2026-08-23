@@ -118,13 +118,23 @@
      the camera staged invisibly — no thumbnail to check, no note to write, no
      Remove, and a Capture that sent it blind. It is tall, and that is the
      price of seeing the one thing that says which photo this is; it appears
-     only while a file waits, which is a state the operator just chose. */
+     only while a file waits, which is a state the operator just chose.
+
+     The offer left this list for a related reason. It is rendered only when
+     the box is empty, which on a phone is the one moment the screen above the
+     bar has nothing on it at all — so the card costs no result its place, and
+     hidden it was worse than absent: the fragment still fetched on `load`, the
+     swap still fired, and `confirmOffer` still posted `/ui/context/seen`. Every
+     phone view wrote an impression for a card that structurally could not be
+     clicked, which is exactly the denominator the rung weights are meant to be
+     fitted against. Shown, it either earns the click or honestly does not. It
+     goes on the first keystroke, like everywhere else, and the bar shrinks back
+     to the box and the verbs. */
   .regions-rail-focus-source .region-bar .hint,
   .regions-rail-focus-source .region-bar .facets,
   .regions-rail-focus-source .region-bar .chips,
   .regions-rail-focus-source .region-bar .facet-label,
   .regions-rail-focus-source .region-bar .keyhint,
-  .regions-rail-focus-source .region-bar .offer,
   .regions-rail-focus-source .region-bar .row { display: none; }
 
   /* One line for the box, one for the verbs, and nothing else. The box starts

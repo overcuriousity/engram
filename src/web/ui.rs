@@ -4679,6 +4679,33 @@ mod tests {
         assert!(page.contains(r#"class="offer""#));
     }
 
+    /// A phone hid the whole card and kept the instrument that counts it.
+    ///
+    /// The offer sits inside `.region-bar`, which under 40rem is the fixed bar
+    /// at the thumb, and the rule that sheds the bar's page furniture — the
+    /// hint, the chips, the key teaching — took the offer with it. Hidden did
+    /// not mean absent: `hx-trigger="load"` still fetched, the swap still
+    /// fired, and `confirmOffer` still posted `/ui/context/seen`. Every phone
+    /// view wrote an impression for a card no thumb could reach, into the
+    /// denominator of the one hit rate the rung weights are to be fitted
+    /// against. If it is not shown it must not be counted, and the card is
+    /// rendered only while the box is empty — which on a phone is the one
+    /// moment the screen above the bar is empty too.
+    #[test]
+    fn the_phone_does_not_hide_a_card_it_still_counts_as_seen() {
+        let phone = include_str!("../../assets/css/50-phone.css");
+        assert!(
+            !phone.contains(".regions-rail-focus-source .region-bar .offer"),
+            "the phone bar hides the offer while app.js still confirms it seen"
+        );
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("/ui/context/seen"),
+            "the confirmation this rule must not outrun is gone"
+        );
+    }
+
     #[tokio::test]
     async fn the_offer_is_absent_from_a_page_that_already_carries_a_query() {
         // The area is for the state "no intent expressed yet". A deep link, a
