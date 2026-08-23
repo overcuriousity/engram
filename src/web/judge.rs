@@ -1554,6 +1554,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_assign_row_reads_like_the_card_row() {
+        // The assign screen is where reading the candidate matters most — the
+        // operator is choosing from results they have never seen ranked, on a
+        // query written from memory. Its rows are the card's rows: a chevron
+        // handle in the row, and the full text in the sibling beneath it, where
+        // the stylesheet's `:has(> .judge-peek[open]) > .judge-full` rule can
+        // reach it. Inside the disclosure it stayed `display: none` for ever,
+        // and the handle was six words of prose wrapping down a two-rem column.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        // Embedded by hand, as `search::tests::reembed_all` does: the assign
+        // screen searches, and a store with no vectors answers nothing.
+        for id in &ids {
+            crate::jobs::embed::run(&core, id).await.unwrap();
+        }
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let body = get(
+            &app,
+            &format!("/ui/judge/{}/assign/results?q=mounting", event.id),
+            &cookie,
+        )
+        .await;
+        assert!(
+            body.contains("judge-option"),
+            "the search found nothing to read: {body}"
+        );
+        assert!(
+            !body.contains(">Read it in full<"),
+            "the handle is a line of prose per row: {body}"
+        );
+        assert!(
+            body.contains(r#"hx-target="next .judge-full""#),
+            "the full text is not fetched into the row it belongs to: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn confirming_from_outside_the_pool_is_reported_as_a_find() {
         let (app, cookie, core, ids) = judge_app(1, &[]).await;
         let event = core.store.next_pending().await.unwrap().unwrap();

@@ -31,13 +31,19 @@
       </button>
       {# Same reason as on the card, and more so: here the operator is choosing
          from search results they have never seen ranked, on a query they wrote
-         from memory. #}
+         from memory.
+
+         And the same shape as on the card: the handle is the chevron in the
+         row, and the text lands in the sibling below rather than inside the
+         disclosure. The stylesheet only ever shows `.judge-full` as a direct
+         child of the row (`li:has(> .judge-peek[open]) > .judge-full`), so
+         nested here it fetched fine and displayed never. #}
       <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
-               hx-trigger="toggle once" hx-target="find .judge-full"
+               hx-trigger="toggle once" hx-target="next .judge-full"
                hx-swap="innerHTML">
-        <summary>Read it in full</summary>
-        <div class="judge-full"><span class="muted">loading…</span></div>
+        <summary title="Read it in full" aria-label="Read it in full"></summary>
       </details>
+      <div class="judge-full"><span class="muted">loading…</span></div>
     </li>
     {% endfor %}
   </ol>
