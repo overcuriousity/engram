@@ -267,7 +267,7 @@ impl Core {
         }
 
         self.attach_note_artifact(&src.id, c.metadata["note"].as_str())
-            .await?;
+            .await;
 
         Ok(IngestOutcome {
             id: src.id,
@@ -329,7 +329,19 @@ impl Core {
     /// The embed is armed here rather than left to `settle`. A scan with no
     /// text layer parks as `failed` and never reaches settling, and that is
     /// exactly the capture whose note is the only text anyone will ever have.
-    async fn attach_note_artifact(&self, corpus_id: &str, note: Option<&str>) -> Result<()> {
+    /// By the time this runs the corpus row is committed and its stages are
+    /// queued, so a store failure here is not a failed capture and must not be
+    /// reported as one: the browser would put the file back for a retry, the
+    /// retry would find the hash already stored and answer `duplicate` — which
+    /// correctly writes no note — and the operator would end up with the file
+    /// in the base and the note nowhere.
+    async fn attach_note_artifact(&self, corpus_id: &str, note: Option<&str>) {
+        if let Err(e) = self.write_note_artifact(corpus_id, note).await {
+            tracing::error!(corpus_id, error = %e, "capture stored, but its note was not");
+        }
+    }
+
+    async fn write_note_artifact(&self, corpus_id: &str, note: Option<&str>) -> Result<()> {
         let Some(text) = note.map(str::trim).filter(|n| !n.is_empty()) else {
             return Ok(());
         };
@@ -421,7 +433,7 @@ impl Core {
             // of near-identical captions nobody wrote twice on purpose.
             Insertion::Existing(c) => IngestOutcome::existing(&c),
             Insertion::Created(c) => {
-                self.attach_note_artifact(&c.id, note.as_deref()).await?;
+                self.attach_note_artifact(&c.id, note.as_deref()).await;
                 IngestOutcome {
                     id: c.id,
                     status: c.status,
@@ -521,7 +533,7 @@ impl Core {
             mime = prepared.mime,
             "image captured; queued for reading"
         );
-        self.attach_note_artifact(&src.id, note.as_deref()).await?;
+        self.attach_note_artifact(&src.id, note.as_deref()).await;
         Ok(IngestOutcome {
             id: src.id,
             status: CorpusStatus::Describing,
@@ -1024,10 +1036,25 @@ impl Core {
     async fn forget_derived_work(&self, id: &str) -> Result<()> {
         // Re-segmenting replaces every chunk, so the old vectors and rows go
         // first.
+        //
+        // Except the note, which is not derived work: nothing a rerun does can
+        // produce the sentence a person typed about the document, so deleting
+        // it here would make it unsearchable for good while the caption on the
+        // page went on claiming otherwise. Its vector went with the corpus, so
+        // it is put back in line for a new one — armed here rather than left to
+        // `settle`, for the same reason the door arms it: a re-read that parks
+        // as `failed` never reaches settling.
         self.vectors.delete_by_corpus(id).await?;
         for c in self.store.artifacts_for_corpus(id).await? {
+            if c.provenance == crate::store::artifacts::Provenance::Note {
+                continue;
+            }
             self.store.delete_artifact(&c.id).await?;
         }
+        self.store.reset_embed_state(id).await?;
+        self.store
+            .rearm_idle_seq(Stage::Embed, "corpus", id, 0)
+            .await?;
         // The window rows are the segment job's memory of what it has already
         // done. Leaving them behind means the rerun finds every window `done`,
         // segments nothing, and lands on a source with no chunks at all.
@@ -2634,6 +2661,46 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    /// A note is not derived work. A reprocess replaces everything the pipeline
+    /// made from the document; the sentence a person typed about it is the one
+    /// thing in the corpus no rerun can produce again.
+    #[tokio::test]
+    async fn a_reprocess_keeps_the_note_and_queues_it_for_a_fresh_vector() {
+        let core = test_core().await;
+        let out = core
+            .ingest_pdf(PdfCapture {
+                bytes: a_pdf_fixture(),
+                filename: Some("lease.pdf".into()),
+                title_hint: None,
+                note: Some("break clause is p.3".into()),
+            })
+            .await
+            .unwrap();
+        let before = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        let note = &before[0];
+        assert!(
+            core.store
+                .mark_embedded(&note.id, "bge-m3", note.embed_rev)
+                .await
+                .unwrap()
+        );
+
+        core.reprocess(&out.id, Stage::Extract).await.unwrap();
+
+        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert_eq!(all.len(), 1, "the reprocess deleted the operator's own note");
+        assert_eq!(all[0].text, "break clause is p.3");
+        assert_eq!(
+            core.store
+                .pending_artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "its vector went with the corpus; the note has to be embedded again"
         );
     }
 }
