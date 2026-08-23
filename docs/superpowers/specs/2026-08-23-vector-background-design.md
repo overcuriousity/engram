@@ -36,11 +36,10 @@ and a CSS placement layer.
 
 - New trait method on `VectorStore` (`src/vector/mod.rs:216`):
   `sample(limit: usize) -> Vec<(String /* artifact_id */, Vec<f32> /* dense */)>`.
-  - Qdrant impl (`src/vector/qdrant.rs`): paged scroll with `with_vector: true`,
-    reusing the `ScrolledPoint`/`dense_of()` helpers (`qdrant.rs:327,449`) and the
-    paging pattern from `all_artifact_ids` (`qdrant.rs:1395`). Scroll offset chosen
-    so the sample is not always the first page (random start page or spread across
-    pages).
+  - Qdrant impl (`src/vector/qdrant.rs`): a single paged-scroll call with
+    `with_vector: true`, reusing the `ScrolledPoint`/`dense_of()` helpers
+    (`qdrant.rs:327,449`). Qdrant scroll has no random start, and a slowly
+    changing first page is fine for a decorative sample — no spread logic.
   - Memory impl (`src/vector/memory.rs`): trivial, for tests.
 - New route `GET /api/v1/vectors/sample` in `src/web/api.rs` (registered in
   `api_router()`, `api.rs:1090`). Session/token-authed like the other API routes;
@@ -83,9 +82,9 @@ sparks, traversers, and dual colored clouds.
   configured `refresh_secs` so the client TTL always matches server config
   (`{ "points": [...], "count": n, "refresh_secs": 21600 }`). All failures
   (offline, 401, empty) → render nothing, no console spam beyond one debug line.
-- **Auth-only pages**: the module exits early unless
-  `document.body.dataset.vbg === "1"`. `layout.html` emits `data-vbg="1"` on
-  `<body>` only for authenticated pages (login and other public pages omit it).
+- **Auth-only pages**: the module exits early when there is no `.topbar` in the
+  DOM. `login.html` empties the `nav` block, so the login page has no topbar and
+  gets no canvas — no template changes needed.
 - **Rendering** (from reference viz.js):
   - Perspective projection, camera orbiting origin on sphere (theta/phi), unit
     scaled to `min(W,H)`.
