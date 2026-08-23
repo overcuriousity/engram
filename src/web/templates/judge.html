@@ -5,21 +5,7 @@
    figures are read from the ranks the searches actually gave, so every verdict
    moves the number it is measured by. #}
 <div class="judge-header">
-  <div class="row">
-    <span class="mono">{{ stats.judged }} judged</span>
-    <span class="spacer"></span>
-    <span class="mono">recall@10 {{ recall }}</span>
-    <span class="mono">MRR {{ mrr }}</span>
-  </div>
-  <div class="progress" role="progressbar" aria-valuenow="{{ stats.judged }}"
-       aria-valuemin="0" aria-valuemax="{{ target }}">
-    <span style="width:{{ progress_pct }}%"></span>
-  </div>
-  <p class="muted hint">{{ stats.judged }} / {{ target }} until the first sweep</p>
-  <p class="muted mono">
-    {{ stats.hits }} hits · {{ stats.finds }} finds · {{ stats.gaps }} gaps ·
-    {{ stats.discards }} discarded
-  </p>
+  {% include "_judge_pulse.html" %}
   {% if asks.asked > 0 %}
   <p class="muted mono">
     {{ asks.judged }} of {{ asks.asked }} questions judged ·

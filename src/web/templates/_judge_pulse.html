@@ -1,0 +1,40 @@
+{# The header's live half, rendered twice: once by the page, once beside the
+   card a verdict returns. Out of band the second time, because the header sits
+   outside the swapped region and would otherwise stand at whatever it read on
+   arrival while the queue was worked down.
+
+   Nothing here reacts to *which* verdict was given. What animates is progress
+   towards the next sweep — the work — never agreement with the ranker. The
+   flash line above the card is where a judgement is spoken about, and its
+   loudness runs the other way on purpose. #}
+{% if let Some(p) = pulse %}
+<div id="judge-live" class="judge-live"{% if pulse_oob %} hx-swap-oob="true"{% endif %}>
+  <div class="row">
+    <span class="mono">{{ p.judged }} judged</span>
+    <span class="spacer"></span>
+    {# The two figures carried no explanation at all: an operator who had not
+       read docs/evaluation.md was working towards numbers nobody had named. #}
+    <span class="mono" title="Of the answers you have confirmed, the share the ranking put in its top ten.">recall@10 {{ p.recall }}</span>
+    <span class="mono{% if !p.delta.is_empty() %} judge-tick{% endif %}"
+          title="Mean reciprocal rank: 1.00 means every confirmed answer came first. An answer search never returned counts as zero.">MRR {{ p.mrr }}</span>
+    {% if !p.delta.is_empty() %}<span class="mono judge-delta">{{ p.delta }}</span>{% endif %}
+    <span class="spacer"></span>
+    <span class="mono muted">{{ p.recent }} in the last 24h · {{ p.pending }} waiting</span>
+  </div>
+  <div class="progress" role="progressbar" aria-valuenow="{{ p.judged }}"
+       aria-valuemin="0" aria-valuemax="{{ p.target }}">
+    <span style="width:{{ p.pct }}%"{% if pulse_oob %} class="judge-grow"{% endif %}></span>
+  </div>
+  {# What the bar is progress *towards*. It counted to fifty and promised
+     nothing, so reaching it looked like nothing happening. #}
+  <p class="muted hint">{{ p.judged }} / {{ p.target }} {{ p.label }} — a sweep
+    tries other ranking settings over everything you have judged, and offers
+    the ones that score better.</p>
+  <p class="muted mono">
+    <span title="A confirmed answer that search had returned.">{{ p.hits }} hits</span> ·
+    <span title="A confirmed answer search never returned. The only evidence that ranking, rather than the base, was at fault.">{{ p.finds }} finds</span> ·
+    <span title="Nothing in the base could have answered it.">{{ p.gaps }} gaps</span> ·
+    <span title="Not a real search.">{{ p.discards }} discarded</span>
+  </p>
+</div>
+{% endif %}

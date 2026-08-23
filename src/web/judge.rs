@@ -53,6 +53,33 @@ pub struct Card {
     pub choices: Vec<Choice>,
 }
 
+/// The header's live half: what is true right now, and what just moved.
+///
+/// One struct rather than a dozen template fields because it is rendered
+/// twice — once in the page, once out of band beside the next card — and two
+/// copies of the same dozen fields would drift.
+pub struct Pulse {
+    pub judged: i64,
+    /// The judgement count the next sweep runs at.
+    pub target: i64,
+    pub pct: i64,
+    /// What that target buys, in the words for a first sweep or a later one.
+    pub label: &'static str,
+    pub recall: String,
+    pub mrr: String,
+    /// `▲ +0.01`, or empty where nothing was judged. What the tick renders on.
+    pub delta: String,
+    /// Verdicts in the last 24 hours. Not "today": the zone that would define
+    /// a midnight belongs to the client, never to the server — see
+    /// `core::context::local_time` — and a window needs no zone at all.
+    pub recent: i64,
+    pub pending: i64,
+    pub hits: i64,
+    pub finds: i64,
+    pub gaps: i64,
+    pub discards: i64,
+}
+
 #[derive(Template)]
 #[template(path = "judge.html")]
 struct JudgeTemplate {
@@ -61,11 +88,11 @@ struct JudgeTemplate {
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
     judge_pending: Option<i64>,
-    stats: Stats,
-    recall: String,
-    mrr: String,
-    target: i64,
-    progress_pct: i64,
+    /// Always `Some` here. `Option` because the partial is shared with the
+    /// card fragment, where a plain fetch carries none.
+    pulse: Option<Pulse>,
+    /// False on the page itself: it is drawing the header, not replacing one.
+    pulse_oob: bool,
     misses: Vec<crate::store::feedback::Miss>,
     /// Questions asked and judged, beside the searches. Read from the same
     /// database and moved by every verdict on the ask page.
@@ -84,6 +111,12 @@ struct CardTemplate {
     /// What the judgement just before this one revealed. `None` on a plain
     /// fetch of the next card.
     flash: Option<Flash>,
+    /// The header, shipped beside the card so it moves with the work. `None`
+    /// where nothing was judged: an animation on a plain fetch would be the
+    /// page congratulating itself for a page load.
+    pulse: Option<Pulse>,
+    /// True here: the header this replaces is already on the page.
+    pulse_oob: bool,
 }
 
 pub struct Flash {
@@ -208,6 +241,45 @@ async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
     }
 }
 
+/// What the header shows, and what — if anything — just moved.
+///
+/// The target is the next sweep rather than a fixed milestone: what a
+/// judgement buys is a measurement, and after the first one the distance is to
+/// the next re-sweep. Read from the last run rather than counted, so the two
+/// always agree about when it is due.
+async fn pulse_of(st: &AppState, stats: &Stats, delta: String) -> Result<Pulse> {
+    let tune = &st.core.feedback.tune;
+    let (target, label) = match st.core.store.latest_eval_run().await? {
+        None => (tune.min_judgements, "until the first sweep"),
+        Some(last) => (
+            last.judged_count + tune.resweep_after,
+            "until the next sweep",
+        ),
+    };
+    // A target already passed would draw a bar over 100% and a hint counting
+    // backwards; it happens whenever a sweep is queued but has not run yet.
+    let target = target.max(stats.judged).max(1);
+    Ok(Pulse {
+        judged: stats.judged,
+        pct: (stats.judged * 100 / target).min(100),
+        target,
+        label,
+        recall: format!("{:.2}", stats.recall_at_10),
+        mrr: format!("{:.2}", stats.mrr),
+        delta,
+        recent: st
+            .core
+            .store
+            .judged_since(crate::store::now() - 86_400)
+            .await?,
+        pending: stats.pending,
+        hits: stats.hits,
+        finds: stats.finds,
+        gaps: stats.gaps,
+        discards: stats.discards,
+    })
+}
+
 async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use axum::response::IntoResponse;
     let stats = st.core.store.feedback_stats().await?;
@@ -216,15 +288,11 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     } else {
         vec![]
     };
-    let progress_pct = (stats.judged * 100 / FIRST_SWEEP_AT.max(1)).min(100);
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.learn.enabled.then_some(stats.pending),
-        recall: format!("{:.2}", stats.recall_at_10),
-        mrr: format!("{:.2}", stats.mrr),
-        target: FIRST_SWEEP_AT,
-        progress_pct,
-        stats,
+        pulse: Some(pulse_of(&st, &stats, String::new()).await?),
+        pulse_oob: false,
         misses,
         asks: st.core.store.ask_stats().await?,
         card: next_pending_card(&st).await?,
@@ -238,6 +306,8 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&st).await?,
         flash: None,
+        pulse: None,
+        pulse_oob: true,
     })
     .into_response())
 }
@@ -253,11 +323,22 @@ async fn card_after(
     judged: &str,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let after = st.core.store.feedback_stats().await?.mrr;
+    let stats = st.core.store.feedback_stats().await?;
+    let after = stats.mrr;
     // A verdict is what buys the next measurement. Off the request path: the
     // operator must not wait on a grid of searches, and a sweep that fails
     // must not fail the verdict that paid for it.
     crate::eval::sweep::maybe_spawn(&st.core);
+    let moved = after - before;
+    // Under half a point the figure on screen does not change, and a tick
+    // pointing at an unchanged number is an animation about nothing.
+    let delta = if moved.abs() < 0.005 {
+        String::new()
+    } else if moved > 0.0 {
+        format!("▲ +{moved:.2}")
+    } else {
+        format!("▼ −{:.2}", moved.abs())
+    };
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(st).await?,
         flash: Some(Flash {
@@ -265,6 +346,8 @@ async fn card_after(
             delta: format!("MRR {before:.2} → {after:.2}"),
             undo: Some(judged.to_string()),
         }),
+        pulse: Some(pulse_of(st, &stats, delta).await?),
+        pulse_oob: true,
     })
     .into_response())
 }
@@ -288,6 +371,9 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
             delta: String::new(),
             undo: None,
         }),
+        // Nothing was recorded, so no figure moved.
+        pulse: None,
+        pulse_oob: true,
     })
     .into_response())
 }
@@ -337,7 +423,15 @@ async fn undo(
         // is a better answer than an error page.
         None => next_pending_card(&st).await?,
     };
-    Ok(HtmlTemplate(CardTemplate { card, flash: None }).into_response())
+    Ok(HtmlTemplate(CardTemplate {
+        card,
+        flash: None,
+        // An undo moves the figures back, and the operator is looking at the
+        // header while it happens.
+        pulse: Some(pulse_of(&st, &st.core.store.feedback_stats().await?, String::new()).await?),
+        pulse_oob: true,
+    })
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1381,6 +1475,63 @@ mod tests {
             "stamped a change that was never made"
         );
         assert!(core.store.open_recommendation().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_header_explains_the_numbers_it_shows() {
+        // They were shown bare: an operator who had not read docs/evaluation.md
+        // was asked to work towards two figures nobody had told them the
+        // meaning of, and towards a target that named no reward.
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("Mean reciprocal rank"), "MRR unexplained");
+        assert!(body.contains("top ten"), "recall@10 unexplained");
+        assert!(
+            body.contains("tries other ranking settings"),
+            "the progress bar must say what it is progress towards"
+        );
+        assert!(body.contains("until the first sweep"));
+        assert!(body.contains("last 24h"), "the day's work is not counted");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_ships_the_header_beside_the_next_card() {
+        // The header lives outside the swapped region, so without this it
+        // stood at whatever it read on arrival while the queue was worked
+        // down — the one figure the work is measured by, frozen.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/{}/hit", event.id))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("artifact_id={}", ids[0])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+
+        assert!(body.contains(r#"id="judge-live""#), "no header shipped");
+        assert!(body.contains("hx-swap-oob"), "the header would not land");
+        assert!(
+            body.contains("judge-tick"),
+            "the figure that moved must show that it moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_card_fetched_without_a_verdict_animates_nothing() {
+        // Nothing was judged, so nothing moved. An animation here would be the
+        // page congratulating itself for a page load.
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(!body.contains("hx-swap-oob"), "{body}");
+        assert!(!body.contains("judge-tick"), "{body}");
     }
 
     #[tokio::test]
