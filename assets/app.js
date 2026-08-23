@@ -990,6 +990,12 @@
     // moment it is taken, and uploading on arrival meant the operator never
     // got a say.
     var staged = null, stagedUrl = null;
+    // Set from the press until the upload answers. `staged` is cleared before
+    // the file is sent, and a debounce armed by the last word of the note
+    // fires after that — a search for the annotation, which is the one thing
+    // the guard below exists to prevent. The box is not cleared early instead:
+    // a capture that fails keeps its note for the second press.
+    var sending = false;
     var stagedBox = document.getElementById('staged');
 
     // The box is that file's note while one is staged, and typing an
@@ -1000,7 +1006,7 @@
     // whatever it says. Capture does not go through the form, and Ask is
     // disabled in `boxVerbs` while a file waits.
     form.addEventListener('htmx:beforeRequest', function (e) {
-      if (staged) e.preventDefault();
+      if (staged || sending) e.preventDefault();
     });
     var stagedName = document.getElementById('staged-name');
     var stagedThumb = document.getElementById('staged-thumb');
@@ -1118,6 +1124,12 @@
         })
         .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
         .then(function (pair) {
+          // Lifted before the branches: `refreshRail` below submits the form,
+          // and a guard still standing would cancel the very refresh the
+          // capture was made for. Any debounce armed while the note was being
+          // typed has long since tried to fire and been cancelled — it was
+          // 120ms behind the press, and this is a round trip later.
+          sending = false;
           // The server's reason, verbatim. A generic "upload failed" would
           // hide what actually goes wrong here: wrong type, wrong encoding,
           // an image door that is closed.
@@ -1270,6 +1282,7 @@
       if (staged) {
         var file = staged;
         var note = box.value.trim();
+        sending = true;
         unstage();
         send(file, note);
         return;
